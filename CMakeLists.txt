@@ -17,6 +17,7 @@ add_library(asicen_core STATIC
   userland/src/frontend_facts.cpp
   userland/src/ipc.cpp
   userland/src/loader_firmware.cpp
+  userland/src/mock_backend.cpp
   userland/src/protocol.cpp
   userland/src/receiver_service.cpp
   userland/src/stream_queue.cpp
