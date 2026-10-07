@@ -44,6 +44,23 @@ int main() {
           firmware_stages[3].final_request == 0xac,
           "loader stage 4");
 
+    const auto loader_plan = asicen::build_loader_transfer_plan();
+    check(loader_plan.size() == 20, "loader transfer count");
+    if (loader_plan.size() == 20) {
+        check(loader_plan.front().request == 0xab &&
+              loader_plan.front().value == 0x0000 &&
+              loader_plan.front().index == 0x5399 &&
+              loader_plan.front().length == 0x0200,
+              "loader first transfer");
+        check(loader_plan[5].value == 0x0a00 &&
+              loader_plan[6].value == 0x2000,
+              "loader stage gap");
+        check(loader_plan.back().request == 0xac &&
+              loader_plan.back().value == 0x3e00 &&
+              loader_plan.back().length == 0x0200,
+              "loader final transfer");
+    }
+
     check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Bs, 1) == 11727480U,
           "BS01 RF");
     check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Bs, 23) == 12149440U,
