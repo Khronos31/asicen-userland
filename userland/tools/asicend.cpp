@@ -1,3 +1,4 @@
+#include "asicen/backend.h"
 #include "asicen/ipc.h"
 #include "asicen/receiver_service.h"
 
@@ -8,11 +9,14 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -58,17 +62,19 @@ bool write_all(int fd, const std::uint8_t* data, std::size_t size) {
     return true;
 }
 
-std::array<std::uint8_t, 188> make_null_packet(std::uint8_t continuity) {
-    std::array<std::uint8_t, 188> packet{};
-    packet.fill(0xff);
-    packet[0] = 0x47;
-    packet[1] = 0x1f;
-    packet[2] = 0xff;
-    packet[3] = static_cast<std::uint8_t>(0x10U | (continuity & 0x0fU));
-    return packet;
+void send_status(int fd,
+                 asicen::IpcStatus status,
+                 std::uint64_t lease_id,
+                 std::size_t receiver_count) {
+    const auto response = asicen::encode_response(
+        asicen::IpcResponse{status, lease_id,
+                            static_cast<std::uint32_t>(receiver_count)});
+    write_all(fd, response.data(), response.size());
 }
 
-void handle_client(int fd, asicen::ReceiverLeaseTable* leases) {
+void handle_client(int fd,
+                   asicen::ReceiverLeaseTable* leases,
+                   asicen::DeviceBackend* backend) {
     std::array<std::uint8_t, asicen::kIpcMessageSize> raw{};
     if (!read_exact(fd, raw.data(), raw.size())) {
         ::close(fd);
@@ -77,39 +83,35 @@ void handle_client(int fd, asicen::ReceiverLeaseTable* leases) {
 
     asicen::IpcRequest request{};
     if (!asicen::decode_request(raw.data(), raw.size(), &request)) {
-        const auto response = asicen::encode_response(
-            asicen::IpcResponse{asicen::IpcStatus::Invalid, 0,
-                                static_cast<std::uint32_t>(leases->size())});
-        write_all(fd, response.data(), response.size());
+        send_status(fd, asicen::IpcStatus::Invalid, 0, leases->size());
         ::close(fd);
         return;
     }
 
     if (request.command == asicen::IpcCommand::Status) {
-        const auto response = asicen::encode_response(
-            asicen::IpcResponse{asicen::IpcStatus::Ok, 0,
-                                static_cast<std::uint32_t>(leases->size())});
-        write_all(fd, response.data(), response.size());
+        send_status(fd, asicen::IpcStatus::Ok, 0, leases->size());
         ::close(fd);
         return;
     }
 
     if (request.receiver >= leases->size() || request.packet_count == 0 ||
         request.packet_count > 1000000U) {
-        const auto response = asicen::encode_response(
-            asicen::IpcResponse{asicen::IpcStatus::Invalid, 0,
-                                static_cast<std::uint32_t>(leases->size())});
-        write_all(fd, response.data(), response.size());
+        send_status(fd, asicen::IpcStatus::Invalid, 0, leases->size());
         ::close(fd);
         return;
     }
 
     const auto lease = leases->acquire(request.receiver);
     if (!lease.has_value()) {
-        const auto response = asicen::encode_response(
-            asicen::IpcResponse{asicen::IpcStatus::Busy, 0,
-                                static_cast<std::uint32_t>(leases->size())});
-        write_all(fd, response.data(), response.size());
+        send_status(fd, asicen::IpcStatus::Busy, 0, leases->size());
+        ::close(fd);
+        return;
+    }
+
+    auto stream = backend->open_stream(request.receiver);
+    if (!stream) {
+        send_status(fd, asicen::IpcStatus::Internal, *lease, leases->size());
+        leases->release(request.receiver, *lease);
         ::close(fd);
         return;
     }
@@ -124,15 +126,31 @@ void handle_client(int fd, asicen::ReceiverLeaseTable* leases) {
     }
 
     leases->set_streaming(request.receiver, *lease, true);
-    std::uint8_t cc = 0;
+
+    constexpr std::size_t kPacketBytes = 188;
+    constexpr std::size_t kChunkPackets = 256;
+    std::array<std::uint8_t, kPacketBytes * kChunkPackets> buffer{};
+    std::uint64_t remaining =
+        static_cast<std::uint64_t>(request.packet_count) * kPacketBytes;
     bool ok = true;
-    for (std::uint32_t i = 0; i < request.packet_count; ++i) {
-        const auto packet = make_null_packet(cc++);
-        if (!write_all(fd, packet.data(), packet.size())) {
+
+    while (remaining != 0) {
+        const std::size_t capacity =
+            std::min<std::uint64_t>(remaining, buffer.size());
+        std::size_t bytes_read = 0;
+        if (!stream->read(buffer.data(), capacity, &bytes_read) ||
+            bytes_read == 0 || bytes_read > capacity ||
+            (bytes_read % kPacketBytes) != 0) {
             ok = false;
             break;
         }
+        if (!write_all(fd, buffer.data(), bytes_read)) {
+            ok = false;
+            break;
+        }
+        remaining -= bytes_read;
     }
+
     if (!ok) {
         leases->set_error(request.receiver, *lease);
     }
@@ -171,6 +189,13 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    auto backend = asicen::make_mock_backend(4);
+    if (!backend) {
+        std::cerr << "backend creation failed\n";
+        return 1;
+    }
+    asicen::ReceiverLeaseTable leases(backend->receiver_count());
+
     ::signal(SIGPIPE, SIG_IGN);
     ::signal(SIGINT, on_signal);
     ::signal(SIGTERM, on_signal);
@@ -199,8 +224,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    asicen::ReceiverLeaseTable leases(4);
-    std::cerr << "asicend mock ready socket=" << socket_path << " receivers=4\n";
+    std::cerr << "asicend mock ready socket=" << socket_path
+              << " receivers=" << backend->receiver_count() << '\n';
 
     while (!g_stop) {
         pollfd pfd{listener, POLLIN, 0};
@@ -222,7 +247,7 @@ int main(int argc, char** argv) {
             }
             break;
         }
-        std::thread(handle_client, client, &leases).detach();
+        std::thread(handle_client, client, &leases, backend.get()).detach();
     }
 
     ::close(listener);
