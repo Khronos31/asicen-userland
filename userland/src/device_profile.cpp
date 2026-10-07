@@ -4,11 +4,12 @@ namespace asicen {
 namespace {
 
 constexpr DeviceProfile kProfiles[] = {
-    {0x0b06, 0x0001, "PX-S3U", 1, true},
-    {0x0b06, 0x0003, "PX-S3U2", 2, false},
-    {0x0b06, 0x0004, "PX-W3U2", 4, false},
-    {0x0b06, 0x0005, "PX-W3U3", 4, false},
-    {0x0b06, 0x0006, "PX-W3U3 V2", 4, false},
+    // vid, pid, model, enclosure receivers, runtime USB functions, local lanes/function, combined T/S
+    {0x0b06, 0x0001, "PX-S3U",     1, 1, 2, true},
+    {0x0b06, 0x0003, "PX-S3U2",    2, 1, 2, false},
+    {0x0b06, 0x0004, "PX-W3U2",    4, 2, 2, false},
+    {0x0b06, 0x0005, "PX-W3U3",    4, 2, 2, false},
+    {0x0b06, 0x0006, "PX-W3U3 V2", 4, 2, 2, false},
 };
 
 }  // namespace
