@@ -1,5 +1,7 @@
 #include "asicen/libusb_transport.h"
 
+#include <algorithm>
+
 namespace asicen {
 
 LibusbDevice::~LibusbDevice() {
@@ -33,8 +35,15 @@ int LibusbDevice::open(libusb_context* context, UsbLocation location) {
 
 void LibusbDevice::close() {
     if (handle_ != nullptr) {
+        for (auto it = claimed_interfaces_.rbegin();
+             it != claimed_interfaces_.rend(); ++it) {
+            libusb_release_interface(handle_, *it);
+        }
+        claimed_interfaces_.clear();
         libusb_close(handle_);
         handle_ = nullptr;
+    } else {
+        claimed_interfaces_.clear();
     }
 }
 
@@ -64,6 +73,81 @@ int LibusbDevice::control(const ControlTransfer& transfer, unsigned char* data) 
         data,
         transfer.length,
         transfer.timeout_ms);
+}
+
+bool LibusbDevice::interface_claimed(int interface_number) const {
+    return std::find(claimed_interfaces_.begin(), claimed_interfaces_.end(),
+                     interface_number) != claimed_interfaces_.end();
+}
+
+int LibusbDevice::claim_endpoint(std::uint8_t endpoint_address) {
+    if (handle_ == nullptr) {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+
+    libusb_config_descriptor* config = nullptr;
+    const int config_rc =
+        libusb_get_active_config_descriptor(device(), &config);
+    if (config_rc != 0 || config == nullptr) {
+        return config_rc != 0 ? config_rc : LIBUSB_ERROR_NOT_FOUND;
+    }
+
+    int interface_number = -1;
+    int alternate_setting = 0;
+    for (int i = 0; i < config->bNumInterfaces && interface_number < 0; ++i) {
+        const libusb_interface& iface = config->interface[i];
+        for (int a = 0; a < iface.num_altsetting && interface_number < 0; ++a) {
+            const libusb_interface_descriptor& alt = iface.altsetting[a];
+            for (std::uint8_t e = 0; e < alt.bNumEndpoints; ++e) {
+                if (alt.endpoint[e].bEndpointAddress == endpoint_address) {
+                    interface_number = alt.bInterfaceNumber;
+                    alternate_setting = alt.bAlternateSetting;
+                    break;
+                }
+            }
+        }
+    }
+    libusb_free_config_descriptor(config);
+
+    if (interface_number < 0) {
+        return LIBUSB_ERROR_NOT_FOUND;
+    }
+    if (interface_claimed(interface_number)) {
+        return interface_number;
+    }
+
+    const int claim_rc = libusb_claim_interface(handle_, interface_number);
+    if (claim_rc != 0) {
+        return claim_rc;
+    }
+
+    if (alternate_setting != 0) {
+        const int alt_rc = libusb_set_interface_alt_setting(
+            handle_, interface_number, alternate_setting);
+        if (alt_rc != 0) {
+            libusb_release_interface(handle_, interface_number);
+            return alt_rc;
+        }
+    }
+
+    claimed_interfaces_.push_back(interface_number);
+    return interface_number;
+}
+
+int LibusbDevice::bulk_read(std::uint8_t endpoint_address,
+                            unsigned char* data,
+                            int length,
+                            int* transferred,
+                            unsigned int timeout_ms) {
+    if (handle_ == nullptr) {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+    if (data == nullptr || transferred == nullptr || length <= 0 ||
+        (endpoint_address & LIBUSB_ENDPOINT_DIR_MASK) != LIBUSB_ENDPOINT_IN) {
+        return LIBUSB_ERROR_INVALID_PARAM;
+    }
+    return libusb_bulk_transfer(handle_, endpoint_address, data, length,
+                                transferred, timeout_ms);
 }
 
 }  // namespace asicen
