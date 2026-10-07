@@ -14,6 +14,7 @@ add_library(asicen_core STATIC
   userland/src/channel_plan.cpp
   userland/src/device_profile.cpp
   userland/src/enclosure.cpp
+  userland/src/enclosure_grouping.cpp
   userland/src/frontend_facts.cpp
   userland/src/ipc.cpp
   userland/src/loader_firmware.cpp
@@ -75,6 +76,11 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-ipc-tests PRIVATE asicen_core)
   target_compile_options(asicen-ipc-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-ipc-tests COMMAND asicen-ipc-tests)
+
+  add_executable(asicen-enclosure-grouping-tests userland/tests/enclosure_grouping_tests.cpp)
+  target_link_libraries(asicen-enclosure-grouping-tests PRIVATE asicen_core)
+  target_compile_options(asicen-enclosure-grouping-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-enclosure-grouping-tests COMMAND asicen-enclosure-grouping-tests)
 
   if(UNIX)
     add_test(
