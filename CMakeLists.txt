@@ -10,6 +10,7 @@ option(ASICEN_BUILD_TESTS "Build offline protocol tests" ON)
 
 add_library(asicen_core STATIC
   userland/src/device_profile.cpp
+  userland/src/frontend_facts.cpp
   userland/src/protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include)
