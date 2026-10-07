@@ -1,3 +1,4 @@
+#include "asicen/channel_plan.h"
 #include "asicen/device_profile.h"
 #include "asicen/frontend_facts.h"
 #include "asicen/protocol.h"
@@ -28,6 +29,19 @@ int main() {
     check(asicen::bulk_endpoint_for_lane(1) == 0x82, "stream 1 endpoint");
     check(asicen::bulk_endpoint_for_lane(2) == 0, "invalid endpoint");
     check(asicen::kMaxUserspaceStreamRead == 188U * 1024U, "stream read cap");
+
+    check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Bs, 1) == 11727480U,
+          "BS01 RF");
+    check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Bs, 23) == 12149440U,
+          "BS23 RF");
+    check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Cs, 2) == 12291000U,
+          "CS2 RF");
+    check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Cs, 24) == 12731000U,
+          "CS24 RF");
+    check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Bs, 2) == 0,
+          "reject even BS");
+    check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Cs, 3) == 0,
+          "reject odd CS");
 
     check(asicen::w3u3_system_for_local_lane(0) == asicen::BroadcastSystem::IsdbS,
           "W3U3 local lane 0 is satellite");
