@@ -22,6 +22,7 @@ add_library(asicen_core STATIC
   userland/src/protocol.cpp
   userland/src/receiver_service.cpp
   userland/src/stream_queue.cpp
+  userland/src/ts_framer.cpp
   userland/src/write_protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include)
@@ -81,6 +82,11 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-enclosure-grouping-tests PRIVATE asicen_core)
   target_compile_options(asicen-enclosure-grouping-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-enclosure-grouping-tests COMMAND asicen-enclosure-grouping-tests)
+
+  add_executable(asicen-ts-framer-tests userland/tests/ts_framer_tests.cpp)
+  target_link_libraries(asicen-ts-framer-tests PRIVATE asicen_core)
+  target_compile_options(asicen-ts-framer-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-ts-framer-tests COMMAND asicen-ts-framer-tests)
 
   if(UNIX)
     add_test(
