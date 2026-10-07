@@ -16,7 +16,7 @@ bool parse_customer_info(const std::uint8_t* data, std::size_t size, CustomerInf
     std::size_t offset = 0;
     out->use_customer_info = data[offset++];
 
-    const auto copy = [&](auto& dst) mutable {
+    const auto copy = [&](auto& dst) {
         std::copy_n(data + offset, dst.size(), dst.begin());
         offset += dst.size();
     };
