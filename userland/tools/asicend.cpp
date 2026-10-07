@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
         std::cerr << "usage: asicend --mock --socket PATH\n";
         return 2;
     }
-    if (socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
+    if (socket_path.size() >= sizeof(sockaddr_un{}.sun_path)) {
         std::cerr << "socket path too long\n";
         return 2;
     }
