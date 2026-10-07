@@ -3,6 +3,7 @@
 #include <libusb.h>
 
 #include <cstdint>
+#include <vector>
 
 #include "asicen/protocol.h"
 
@@ -30,8 +31,22 @@ public:
 
     int control(const ControlTransfer& transfer, unsigned char* data);
 
+    // Finds the active alternate setting that owns endpoint_address, claims
+    // its interface, and selects the alternate setting when needed.
+    // Kernel drivers are never detached implicitly.
+    int claim_endpoint(std::uint8_t endpoint_address);
+
+    int bulk_read(std::uint8_t endpoint_address,
+                  unsigned char* data,
+                  int length,
+                  int* transferred,
+                  unsigned int timeout_ms);
+
 private:
+    bool interface_claimed(int interface_number) const;
+
     libusb_device_handle* handle_ = nullptr;
+    std::vector<int> claimed_interfaces_;
 };
 
 }  // namespace asicen
