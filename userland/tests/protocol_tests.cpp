@@ -1,6 +1,7 @@
 #include "asicen/channel_plan.h"
 #include "asicen/device_profile.h"
 #include "asicen/frontend_facts.h"
+#include "asicen/loader_firmware.h"
 #include "asicen/protocol.h"
 
 #include <array>
@@ -29,6 +30,19 @@ int main() {
     check(asicen::bulk_endpoint_for_lane(1) == 0x82, "stream 1 endpoint");
     check(asicen::bulk_endpoint_for_lane(2) == 0, "invalid endpoint");
     check(asicen::kMaxUserspaceStreamRead == 188U * 1024U, "stream read cap");
+
+    const auto& firmware_stages = asicen::loader_firmware_stages();
+    check(firmware_stages.size() == 4, "loader stage count");
+    check(asicen::kLoaderFirmwareStartAddress == 0x5399, "loader start address");
+    check(asicen::kLoaderFirmwareChunkSize == 0x200, "loader chunk size");
+    check(firmware_stages[0].blob_offset == 0x0000 &&
+          firmware_stages[0].length == 0x0c00 &&
+          firmware_stages[0].final_request == 0xab,
+          "loader stage 1");
+    check(firmware_stages[3].blob_offset == 0x3800 &&
+          firmware_stages[3].length == 0x0800 &&
+          firmware_stages[3].final_request == 0xac,
+          "loader stage 4");
 
     check(asicen::w3u3_satellite_rf_khz(asicen::SatelliteBand::Bs, 1) == 11727480U,
           "BS01 RF");
