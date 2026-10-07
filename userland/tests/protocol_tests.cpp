@@ -51,6 +51,10 @@ int main() {
           "W3U3 satellite demod address");
     check(asicen::w3u3_demod_i2c_for_local_lane(1) == 0x30,
           "W3U3 terrestrial demod address");
+    check(asicen::W3u3FrontendFacts::kSystemDispatchBoundaryKHz == 999999U,
+          "W3U3 system dispatch boundary");
+    check(asicen::W3u3FrontendFacts::kFc0012BandBoundaryKHz == 260999U,
+          "W3U3 FC0012 band boundary");
 
     const asicen::DeviceProfile* w3u3 = asicen::find_profile(0x0b06, 0x0005);
     check(w3u3 != nullptr, "W3U3 profile");
