@@ -12,6 +12,7 @@ add_library(asicen_core STATIC
   userland/src/channel_plan.cpp
   userland/src/device_profile.cpp
   userland/src/frontend_facts.cpp
+  userland/src/loader_firmware.cpp
   userland/src/protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include)
