@@ -11,9 +11,12 @@ option(ASICEN_BUILD_TESTS "Build offline protocol tests" ON)
 add_library(asicen_core STATIC
   userland/src/channel_plan.cpp
   userland/src/device_profile.cpp
+  userland/src/enclosure.cpp
   userland/src/frontend_facts.cpp
   userland/src/loader_firmware.cpp
   userland/src/protocol.cpp
+  userland/src/receiver_service.cpp
+  userland/src/stream_queue.cpp
   userland/src/write_protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include)
@@ -47,4 +50,9 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-write-protocol-tests PRIVATE asicen_core)
   target_compile_options(asicen-write-protocol-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-write-protocol-tests COMMAND asicen-write-protocol-tests)
+
+  add_executable(asicen-service-tests userland/tests/service_tests.cpp)
+  target_link_libraries(asicen-service-tests PRIVATE asicen_core)
+  target_compile_options(asicen-service-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-service-tests COMMAND asicen-service-tests)
 endif()
