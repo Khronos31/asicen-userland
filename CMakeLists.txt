@@ -14,6 +14,7 @@ add_library(asicen_core STATIC
   userland/src/frontend_facts.cpp
   userland/src/loader_firmware.cpp
   userland/src/protocol.cpp
+  userland/src/write_protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include)
 target_compile_options(asicen_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -36,8 +37,14 @@ endif()
 
 if(ASICEN_BUILD_TESTS)
   enable_testing()
+
   add_executable(asicen-protocol-tests userland/tests/protocol_tests.cpp)
   target_link_libraries(asicen-protocol-tests PRIVATE asicen_core)
   target_compile_options(asicen-protocol-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-protocol-tests COMMAND asicen-protocol-tests)
+
+  add_executable(asicen-write-protocol-tests userland/tests/write_protocol_tests.cpp)
+  target_link_libraries(asicen-write-protocol-tests PRIVATE asicen_core)
+  target_compile_options(asicen-write-protocol-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-write-protocol-tests COMMAND asicen-write-protocol-tests)
 endif()
