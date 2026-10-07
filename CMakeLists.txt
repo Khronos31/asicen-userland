@@ -17,7 +17,15 @@ target_compile_options(asicen_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
 if(ASICEN_ENABLE_LIBUSB)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+
+  add_library(asicen_libusb STATIC
+    userland/src/libusb_transport.cpp
+  )
+  target_include_directories(asicen_libusb PUBLIC userland/include)
+  target_link_libraries(asicen_libusb PUBLIC asicen_core PkgConfig::LIBUSB)
+  target_compile_options(asicen_libusb PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
   add_executable(asicen-probe userland/tools/asicen_probe.cpp)
-  target_link_libraries(asicen-probe PRIVATE asicen_core PkgConfig::LIBUSB)
+  target_link_libraries(asicen-probe PRIVATE asicen_libusb)
   target_compile_options(asicen-probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
