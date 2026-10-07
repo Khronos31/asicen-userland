@@ -1,3 +1,5 @@
+#include "asicen/device_profile.h"
+#include "asicen/frontend_facts.h"
 #include "asicen/protocol.h"
 
 #include <array>
@@ -26,6 +28,23 @@ int main() {
     check(asicen::bulk_endpoint_for_lane(1) == 0x82, "stream 1 endpoint");
     check(asicen::bulk_endpoint_for_lane(2) == 0, "invalid endpoint");
     check(asicen::kMaxUserspaceStreamRead == 188U * 1024U, "stream read cap");
+
+    check(asicen::w3u3_system_for_local_lane(0) == asicen::BroadcastSystem::IsdbS,
+          "W3U3 local lane 0 is satellite");
+    check(asicen::w3u3_system_for_local_lane(1) == asicen::BroadcastSystem::IsdbT,
+          "W3U3 local lane 1 is terrestrial");
+    check(asicen::w3u3_demod_i2c_for_local_lane(0) == 0x32,
+          "W3U3 satellite demod address");
+    check(asicen::w3u3_demod_i2c_for_local_lane(1) == 0x30,
+          "W3U3 terrestrial demod address");
+
+    const asicen::DeviceProfile* w3u3 = asicen::find_profile(0x0b06, 0x0005);
+    check(w3u3 != nullptr, "W3U3 profile");
+    if (w3u3 != nullptr) {
+        check(w3u3->enclosure_receiver_count == 4, "W3U3 enclosure receiver count");
+        check(w3u3->expected_runtime_functions == 2, "W3U3 runtime function count");
+        check(w3u3->local_lane_count == 2, "W3U3 local lane count");
+    }
 
     const asicen::ControlTransfer read =
         asicen::make_i2c_read(0x60, 0x12, 4, 3, 250);
