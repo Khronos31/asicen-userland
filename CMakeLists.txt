@@ -11,6 +11,7 @@ option(ASICEN_BUILD_TESTS "Build offline protocol tests" ON)
 find_package(Threads REQUIRED)
 
 add_library(asicen_core STATIC
+  userland/src/card_mailbox.cpp
   userland/src/channel_plan.cpp
   userland/src/device_profile.cpp
   userland/src/enclosure.cpp
@@ -87,6 +88,11 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-ts-framer-tests PRIVATE asicen_core)
   target_compile_options(asicen-ts-framer-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-ts-framer-tests COMMAND asicen-ts-framer-tests)
+
+  add_executable(asicen-card-mailbox-tests userland/tests/card_mailbox_tests.cpp)
+  target_link_libraries(asicen-card-mailbox-tests PRIVATE asicen_core)
+  target_compile_options(asicen-card-mailbox-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-card-mailbox-tests COMMAND asicen-card-mailbox-tests)
 
   if(UNIX)
     add_test(
