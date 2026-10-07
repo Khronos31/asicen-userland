@@ -127,7 +127,9 @@ int list_devices(libusb_context* context) {
 
         if (profile != nullptr) {
             std::cout << " model=\"" << profile->model << "\""
-                      << " receivers=" << static_cast<unsigned>(profile->receiver_count)
+                      << " enclosure_receivers=" << static_cast<unsigned>(profile->enclosure_receiver_count)
+                      << " expected_functions=" << static_cast<unsigned>(profile->expected_runtime_functions)
+                      << " local_lanes=" << static_cast<unsigned>(profile->local_lane_count)
                       << " status=runtime";
         } else {
             std::cout << " model=\"ASICEN firmware loader\" status=loader";
