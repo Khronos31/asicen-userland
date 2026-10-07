@@ -54,8 +54,18 @@ constexpr std::uint8_t kVendorIn = 0xc0;
 constexpr unsigned long kIoctlControl = 0x100;
 constexpr unsigned long kIoctlBulkControl = 0x101;
 constexpr unsigned long kIoctlStreamLength = 0x102;
-constexpr unsigned long kIoctlStreamAux = 0x103;
+constexpr unsigned long kIoctlStreamClean = 0x103;
 constexpr unsigned long kIoctlStreamRead = 0x104;
+
+// Recovered stream geometry. One ASICEN runtime USB function exposes two lanes.
+constexpr std::uint8_t kStreamLaneCount = 2;
+constexpr std::uint8_t kBulkEndpointLane0 = 0x81;
+constexpr std::uint8_t kBulkEndpointLane1 = 0x82;
+constexpr std::size_t kStreamUnitBytes = 512;
+constexpr std::size_t kTsPacketBytes = 188;
+constexpr std::size_t kMaxUserspaceStreamRead = kTsPacketBytes * 1024;
+constexpr std::uint64_t kDefaultStreamRingUnits = 0x24b8;  // 9400 * 512 bytes
+constexpr std::uint64_t kDefaultBulkTransferCount = 4;
 
 constexpr std::size_t kCustomerInfoSize = 58;
 
@@ -73,6 +83,24 @@ struct CustomerInfo {
 };
 
 std::uint8_t bm_request_type(Direction direction);
+std::uint8_t bulk_endpoint_for_lane(std::uint8_t lane);
+std::uint16_t setup_word(std::uint8_t low, std::uint8_t high);
+
+ControlTransfer make_i2c_read(std::uint8_t slave,
+                              std::uint8_t reg,
+                              std::uint16_t data_length,
+                              std::uint8_t mode,
+                              std::uint16_t timeout_ms = 1000);
+
+ControlTransfer make_i2c_read_no_wait(std::uint8_t slave,
+                                      std::uint16_t data_length,
+                                      std::uint16_t timeout_ms = 1000);
+
+bool parse_status_response(const std::uint8_t* response,
+                           std::size_t response_size,
+                           std::uint8_t* output,
+                           std::size_t output_size);
+
 bool parse_customer_info(const std::uint8_t* data, std::size_t size, CustomerInfo* out);
 
 }  // namespace asicen
