@@ -23,7 +23,7 @@ The official userspace library uses five raw ioctl numbers:
 | `0x100` | generic USB vendor control transfer |
 | `0x101` | bulk stream start/stop control |
 | `0x102` | query buffered stream length |
-| `0x103` | clean/reset a tuner stream buffer |
+| `0x103` | historical clean-stream ioctl; recovered x86_64 kernel case is a no-op |
 | `0x104` | copy buffered stream data to userspace |
 
 ## Vendor control transfer
@@ -151,3 +151,63 @@ Write/I2C/power/tuner commands remain disabled in the probe until hardware obser
 ## Provenance
 
 Primary binary evidence: PLEX `PX-SERIES_ver.1.0_Linux_Driver.zip`, recovered from the vendor URL on 2026-10-08. The x86_64 kernel module contains DWARF debug information and is not stripped.
+
+
+## Bulk stream transport
+
+The recovered kernel implementation hard-codes two bulk-IN lanes per ASICEN runtime USB function:
+
+| local stream lane | USB endpoint |
+|---:|---:|
+| 0 | `0x81` |
+| 1 | `0x82` |
+
+The endpoint number is built in `AUSBDTV_StartTransfer`: lane 0 selects endpoint 1 with the IN bit, lane 1 selects endpoint 2 with the IN bit.
+
+The start ioctl structure recovered from DWARF is 32 bytes on x86_64:
+
+| offset | member | size/role |
+|---:|---|---|
+| 0 | `StartStop` | byte; 1 starts, other values stop |
+| 1 | `TunerNum` | byte/local stream lane |
+| 8 | `TransferObjBufSize` | unsigned long, in 512-byte units |
+| 16 | `StreamBufSize` | unsigned long, in 512-byte units |
+| 24 | `TransferObjBufNumber` | unsigned long; userspace passes 4 |
+
+The historical userspace path always passes `TransferObjBufNumber = 4`.
+
+Observed production call sites use:
+- `TransferObjBufSize = 8`, `StreamBufSize = 0x24b8` (9400), i.e. 4096-byte URB buffers and a 4,812,800-byte kernel ring.
+- an alternate/high-throughput path uses `TransferObjBufSize = 0x80` (128), same `StreamBufSize = 0x24b8`, i.e. 65,536-byte URB buffers.
+
+The kernel validates the unit sizes and falls back to 188 / 18800 units if they are outside its accepted range. Those fallback values are not the normal userspace settings.
+
+The historical userspace stream-read API caps one read at `0x2f000` bytes, exactly `188 * 1024` MPEG-TS bytes.
+
+For a direct libusb implementation there is no requirement to reproduce the old kernel ring-buffer sizes exactly. The protocol facts that matter are the bulk-IN endpoints, the two local lanes, and preserving sufficient asynchronous transfer depth/backpressure handling.
+
+### Historical stream-clean ioctl
+
+The userspace library exposes `bCleanStreamBufData`/ioctl `0x103`, but the recovered x86_64 `usbmgr_ioctl` case only reports success and does not mutate stream state. Treat it as a compatibility no-op unless another driver revision proves otherwise.
+
+## I2C read setup encoding
+
+The normal I2C read path is proven end-to-end from `USB_I2C_Read` -> `FUSBDTV_Cmd_I2CRead` -> `bReadI2CData`:
+
+- request: `0x02`
+- `wValue.low = slave`
+- `wValue.high = register`
+- `wIndex.low = mode`
+- `wIndex.high = 0`
+- USB direction: vendor IN (`0xc0`)
+- response length: requested data length + 1
+- response byte 0 must equal `1`
+- actual I2C bytes start at response byte 1
+- high-level reads are chunked to at most 0x20 bytes per request
+
+The no-wait/read-after-write path uses request `0x19`:
+- `wValue.low = slave`
+- remaining setup bytes zero
+- response is likewise status byte + payload.
+
+`USB_I2C_WriteAndRead` first performs a mode-3 write and then a mode-2 read; the latter maps to request `0x19`.
