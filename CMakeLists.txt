@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ASICEN_ENABLE_LIBUSB "Build libusb transport/probe" ON)
+option(ASICEN_BUILD_TESTS "Build offline protocol tests" ON)
 
 add_library(asicen_core STATIC
   userland/src/device_profile.cpp
@@ -28,4 +29,12 @@ if(ASICEN_ENABLE_LIBUSB)
   add_executable(asicen-probe userland/tools/asicen_probe.cpp)
   target_link_libraries(asicen-probe PRIVATE asicen_libusb)
   target_compile_options(asicen-probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+
+if(ASICEN_BUILD_TESTS)
+  enable_testing()
+  add_executable(asicen-protocol-tests userland/tests/protocol_tests.cpp)
+  target_link_libraries(asicen-protocol-tests PRIVATE asicen_core)
+  target_compile_options(asicen-protocol-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-protocol-tests COMMAND asicen-protocol-tests)
 endif()
