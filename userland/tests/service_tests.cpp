@@ -1,3 +1,4 @@
+#include "asicen/backend.h"
 #include "asicen/enclosure.h"
 #include "asicen/receiver_service.h"
 #include "asicen/stream_queue.h"
@@ -53,6 +54,18 @@ int main(){
     queue.close();
     check(queue.closed(),"queue closed");
     check(!queue.push(a.data(),a.size()),"reject push closed");
+
+    auto backend=asicen::make_mock_backend(4);
+    check(backend!=nullptr && backend->receiver_count()==4,"mock backend create");
+    auto stream=backend->open_stream(2);
+    check(stream!=nullptr,"mock stream open");
+    std::array<std::uint8_t,188*2> ts{};
+    std::size_t ts_bytes=0;
+    check(stream->read(ts.data(),ts.size(),&ts_bytes),"mock stream read");
+    check(ts_bytes==ts.size(),"mock stream bytes");
+    check(ts[0]==0x47 && ts[188]==0x47,"mock stream sync");
+    check((ts[3]&0x0f)==0 && (ts[191]&0x0f)==1,"mock continuity");
+    check(backend->open_stream(4)==nullptr,"mock invalid receiver");
 
     return failures==0?0:1;
 }
