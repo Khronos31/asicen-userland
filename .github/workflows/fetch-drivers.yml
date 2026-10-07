@@ -1,8 +1,6 @@
 name: Fetch and inspect ASICEN drivers
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
