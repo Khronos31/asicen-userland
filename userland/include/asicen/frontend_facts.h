@@ -18,8 +18,11 @@ struct W3u3FrontendFacts {
     static constexpr std::uint8_t kSatelliteDemodI2c = 0x32;
     static constexpr std::uint8_t kTerrestrialDemodI2c = 0x30;
 
-    // TC_SetFrequency's recovered dispatch boundary.
-    static constexpr std::uint64_t kSystemFrequencyBoundary = 999999;
+    // Frequencies passed to the recovered frontend API are in kHz.
+    static constexpr std::uint32_t kSystemDispatchBoundaryKHz = 999999;
+
+    // One FC0012 terrestrial tuning branch changes behavior at 260999 kHz.
+    static constexpr std::uint32_t kFc0012BandBoundaryKHz = 260999;
 };
 
 BroadcastSystem w3u3_system_for_local_lane(std::uint8_t lane);
