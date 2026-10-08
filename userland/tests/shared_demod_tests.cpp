@@ -43,11 +43,16 @@ constexpr std::array<std::uint8_t, 42> kExpectedRegs{
     0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x17, 0x1a, 0x1b, 0x1c,
     0x1d, 0x1e, 0x1f, 0x20, 0x38, 0x39, 0x3b, 0x51, 0x52, 0x53, 0x5a,
     0x5b, 0x85, 0x87, 0x8d, 0x8e, 0xa3, 0xa4, 0xa5, 0xa6};
-constexpr std::array<std::uint8_t, 42> kExpectedValues{
+// Literal bytes read from the independently verified TunerControl.o
+// .rodata 0x240..0x269 region (exactly 42 bytes; SHA-256
+// 26956331982fce11b4f1b9abbfe5439fcd46f82dca1b2a1499c75f429d83e84f).
+constexpr std::uint8_t kRawSatelliteValues[]{
     0x90, 0x00, 0x02, 0x00, 0x41, 0x00, 0x00, 0xff, 0x59, 0xf2, 0xf0,
     0x50, 0xb2, 0x00, 0x30, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x40, 0x10, 0x90, 0xb0, 0x89, 0xb3, 0x2d, 0xd3, 0x69, 0x04, 0x00,
-    0x00, 0x11, 0x00, 0x40, 0x04, 0x00, 0x00, 0x00, 0x00};
+    0x00, 0x00, 0x00, 0x00, 0x40, 0x10, 0x90, 0xb0, 0x89, 0xb3, 0x2d,
+    0xd3, 0x69, 0x04, 0x00, 0x00, 0x11, 0x00, 0x40, 0x04};
+static_assert(sizeof(kRawSatelliteValues) / sizeof(kRawSatelliteValues[0]) == 42,
+              "the bounded .rodata value slice contains exactly 42 bytes");
 
 bool same_transfer(const asicen::ControlTransfer& a,
                    const asicen::ControlTransfer& b) {
@@ -63,8 +68,8 @@ void source_table_and_i2c_encoding() {
     for (std::size_t i = 0; i < plan.size(); ++i) {
         check(asicen::satellite_demod_init_reg(i) == kExpectedRegs[i],
               "register ordering matches InitDemod SIG_SOURCE=1");
-        check(asicen::satellite_demod_init_value(i) == kExpectedValues[i],
-              "register values match InitDemod SIG_SOURCE=1");
+        check(asicen::satellite_demod_init_value(i) == kRawSatelliteValues[i],
+              "register value matches literal .rodata 0x240..0x269 byte");
         const auto& op = plan[i];
         check(op.kind == asicen::FrontendOpKind::Control && op.require_status,
               "each satellite write requires success status");
@@ -74,7 +79,7 @@ void source_table_and_i2c_encoding() {
               "source I2C mode0 one-byte write encoding");
         check((op.transfer.value & 0xffU) == 0x32 &&
                   (op.transfer.value >> 8U) == kExpectedRegs[i] &&
-                  (op.transfer.index & 0xffU) == kExpectedValues[i],
+                  (op.transfer.index & 0xffU) == kRawSatelliteValues[i],
               "slave32/register/value encoding");
     }
 }

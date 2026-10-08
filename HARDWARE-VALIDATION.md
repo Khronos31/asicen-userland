@@ -387,6 +387,13 @@ Parent restored controller05=00, GPIO76 and the five CF bytes; restored all
 snapshot. A final terrestrial lock read remainedA9. This establishes neither
 satellite tuning nor TS output. No LNB enablement or card APDU occurred.
 
+Correction: the prior shared-demod trial used an incorrect satellite value
+table. The source table is now matched to the exact 42-byte values slice
+`.rodata 0x240..0x269` from TunerControl.o SHA-256
+`26956331982fce11b4f1b9abbfe5439fcd46f82dca1b2a1499c75f429d83e84f`.
+Therefore the earlier zero-byte result is not evidence about the corrected
+table; it also does not establish that satellite initialization enables TS.
+
 ### Raw-read prerequisites and DSC state observation
 
 Static inspection of the original open/init/stream path found no call to
@@ -551,3 +558,52 @@ startup prerequisites or establish that the conditional official polling
 path has been fully reproduced. Local build and17 CTests passed, including
 A/B order, common lock checks, fresh-bit preservation, transfer-length and
 full-block restoration cases. Existing test expectations were unchanged.
+
+### Corrected shared satellite-demod table comparison
+
+Parent independently extracted exactly42 bytes at .rodata240..269 and
+42 register bytes at280..2a9 from TunerControl.o. Its SHA-256 matches
+`26956331982fce11b4f1b9abbfe5439fcd46f82dca1b2a1499c75f429d83e84f`.
+The implementation's42 register/value pairs now match those slices exactly;
+19 previously misaligned values were corrected. The test fixture now uses
+source literal bytes with inferred initializer length asserted42, rather
+than retaining the incorrect expected list. Other frontend/tune operations
+and retry RMW behavior were not changed.
+
+Parent first saved all42 satellite-demod registers, then compared ordinary
+terrestrial initialization/T27 tune with the corrected shared-demod
+initialization/T27 tune. Neither condition replays the incorrect table.
+Both completed initialization and lockedA9. After each lock, controller05
+was set/read20, followed by identical5-second capture: reset1, local1,
+four4096-byte reads, corrected DSC06/07, filter-start and queue diagnostics.
+Filter-repeat was disabled for both conditions. Both returned zero file
+bytes/exit1, zero normal handoffs, pending4/ready0 before stop, and four
+CancelDrain callbacks with status3/CANCELLED and actual_length0. No new
+GPIO sequence, initial773143kHz tune, gain polling or SlowdownIC write was
+added. This comparison concerns the shared initialization set, not the
+causal effect of one satellite register.
+
+Post-shared readback status succeeded for all42 registers. Values matched
+the corrected table for41; reg01 was written90 and read10. That readback
+difference is recorded without assuming the register's electrical semantics.
+The following hex strings list42 bytes in the same register order:
+
+```text
+registers: 010304060708090a0c0d0e0f101112131415171a1b1c1d1e1f2038393b5152535a5b85878d8ea3a4a5a6
+baseline:  10000000410000ff59f2f050b200300000000000000000000000401090c08a132e235900000077000004
+shared:    10000200410000ff59f2f050b200308000000000000000000000401090b089b32dd36904000011004004
+```
+
+Logs: `evidence/raw/terrestrial-T27-terrestrial-only.txt`,
+`evidence/raw/terrestrial-T27-corrected-shared.txt`,
+`evidence/raw/capture-primary-T27-terrestrial-only.txt`, and
+`evidence/raw/capture-primary-T27-corrected-shared.txt`. The two raw captures
+are empty;42-register snapshots/readbacks are retained as local JSON.
+
+Parent stopped with request07, restored all42 satellite registers and
+verified exact equality to the saved values; restored all69 CF bytes and
+verified exact equality. Final controller05=00, GPIO76 and terrestrial
+b0=A9. The corrected shared table did not yield observable bulk data in
+this tested state; it remains a required implementation correction and
+does not establish whether shared initialization is unnecessary. Local
+build and17 CTests passed. No satellite tuning or card APDU occurred.
