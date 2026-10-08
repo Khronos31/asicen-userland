@@ -103,6 +103,8 @@ cmake -S "$work/src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     "-DASICEN_LIBUSB_EXTRA_LINK_OPTIONS=$extra_link_options"
 cmake --build "$build" --parallel "$(sysctl -n hw.logicalcpu 2>/dev/null || printf '2')"
 (cd "$build" && ctest --output-on-failure --no-tests=error)
+(cd "$build" && ctest --repeat until-fail:20 --output-on-failure \
+    -R '^asicen-libusb-capture-lifecycle-tests$')
 
 nm_output=$(nm "$build/asicend")
 for symbol in libusb_init libusb_open libusb_close; do

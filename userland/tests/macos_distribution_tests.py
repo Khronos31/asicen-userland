@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -24,6 +27,32 @@ audit = load("asicen_macos_audit", ROOT / "scripts/audit-macos-candidate.py")
 
 
 class MacDistributionTests(unittest.TestCase):
+    def test_audit_cli_accepts_exactly_one_directory_or_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate"
+            candidate.mkdir()
+            archive = Path(temporary) / "candidate.tar.gz"
+            archive.write_bytes(b"fixture")
+
+            with mock.patch.object(sys, "argv", ["audit-macos-candidate.py", str(candidate)]), \
+                    mock.patch.object(audit, "audit_candidate", return_value=None) as audit_dir, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(audit.main(), 0)
+            audit_dir.assert_called_once_with(candidate.resolve(), final=False)
+
+            with mock.patch.object(sys, "argv", ["audit-macos-candidate.py", "--archive", str(archive)]), \
+                    mock.patch.object(audit, "audit_candidate_archive", return_value=None) as audit_archive, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(audit.main(), 0)
+            audit_archive.assert_called_once_with(archive.resolve(), final=False)
+
+            for arguments in ([], [str(candidate), "--archive", str(archive)]):
+                with mock.patch.object(sys, "argv", ["audit-macos-candidate.py", *arguments]), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as error:
+                        audit.main()
+                self.assertEqual(error.exception.code, 2)
+
     def test_candidate_normalization_preserves_only_expected_executable_modes(self):
         with tempfile.TemporaryDirectory() as temporary:
             stage = Path(temporary) / "stage"

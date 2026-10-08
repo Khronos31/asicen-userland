@@ -258,13 +258,15 @@ def audit_candidate_archive(path: Path, final: bool = False) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("candidate", type=Path)
+    parser.add_argument("candidate", nargs="?", type=Path)
     parser.add_argument("--final", action="store_true")
     parser.add_argument("--archive", type=Path,
                         help="audit an extracted candidate archive instead of a directory")
     args = parser.parse_args()
+    if (args.candidate is None) == (args.archive is None):
+        parser.error("provide exactly one candidate directory or --archive")
     try:
-        if args.archive:
+        if args.archive is not None:
             audit_candidate_archive(args.archive.resolve(strict=True), final=args.final)
         else:
             audit_candidate(args.candidate.resolve(strict=True), final=args.final)

@@ -657,7 +657,7 @@ bool test_satellite_slot_wait_uses_deadline_including_gate_wait() {
         if (event.request == Request::I2cRead)
             max_read_timeout = std::max(max_read_timeout, event.timeout_ms);
     }
-    if (max_read_timeout == 0U) {
+    if (max_read_timeout == 0U || max_read_timeout > 40U) {
         std::fprintf(stderr, "deadline diag result=%d call-signal-to-release-ms=%lld release-to-return-ms=%lld controls=%zu first-control-timeout-ms=%u first-control-after-release-ms=%lld\n",
                      result.load(),
                      static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(release_at - invoke_at).count()),
