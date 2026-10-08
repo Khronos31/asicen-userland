@@ -44,6 +44,18 @@ int main(){
     check(t.request==asicen::Request::GpioExGet && t.length==1,"gpioex get");
     check(asicen::make_dsc_control(1,false).request==asicen::Request::DscStart,"dsc start");
     check(asicen::make_dsc_control(1,true).request==asicen::Request::DscStop,"dsc stop");
+    for (std::uint8_t local : std::array<std::uint8_t, 2>{0, 1}) {
+      const auto start = asicen::make_dsc_control(local, false);
+      check(static_cast<std::uint8_t>(start.request) == 0x06 &&
+                asicen::bm_request_type(start.direction) == 0xc0 &&
+                start.value == local && start.index == 0 && start.length == 1,
+            "literal DSC start request06 mapping for each local");
+      const auto stop = asicen::make_dsc_control(local, true);
+      check(static_cast<std::uint8_t>(stop.request) == 0x07 &&
+                asicen::bm_request_type(stop.direction) == 0xc0 &&
+                stop.value == local && stop.index == 0 && stop.length == 1,
+            "literal DSC stop request07 mapping for each local");
+    }
     check(asicen::make_reset_channel(2,7).value==0x0702,"reset packing");
 
     const auto normal=asicen::build_i2c_write_sequence(0x60,0x20,data.data(),5,0);

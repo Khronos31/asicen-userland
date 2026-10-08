@@ -9,6 +9,21 @@ is `Khronos31/asicen-userland`. The GitHub repository was created private on
 2026-10-08; public visibility is deferred to the 0.1.0 release per user
 instruction. No release has been made.
 
+## Superseding DSC request mapping correction
+
+Static caller tracing on 2026-10-08 corrected the request mapping: DSC start is
+vendor-IN request `0x06`; DSC stop is request `0x07`. Earlier capture attempts
+in this report used a reversed mapping: their API-labeled start sent `0x07`
+(actual stop), and their API-labeled stop sent `0x06` (actual start). Therefore
+all pre-correction zero-byte capture results below are **not valid evidence
+against capture with DSC actually started**. Their `01` replies only establish
+that the reversed control requests completed. Re-run conclusions require the
+corrected sequence and restoration checks. In queued captures, terminal
+`cancel_and_drain()` preserves callback ownership but discards queued completion
+payloads: the current callback path sees `actual_length`, while the drain clears
+ready completions without writing or counting their bytes. A zero-byte output
+therefore does not establish that no bytes arrived during terminal drain.
+
 ## Acceptance criteria and increments
 
 1. Configure/build with libusb enabled; all existing CTest tests pass.
@@ -258,9 +273,11 @@ increment2 (one real terrestrial lane tuned/locked) is PASS. Logs:
 `evidence/raw/terrestrial-tune-primary-T27.txt`.
 
 A 5-second lane1/endpoint82 raw capture then returned zero bytes, exit1.
-DSC start replied1 and DSC stop succeeded. No USB/output errors were reported;
-zero data was correctly treated as failure. Device filter/output start remains
-unimplemented and is the next gate. No MPEG-TS or B-CAS success is claimed.
+The API-labeled DSC start/stop calls replied1, but emitted request07 then
+request06 respectively (actual stop then start under the corrected mapping).
+No USB/output errors were reported; zero data was treated as failure. This is
+not a valid corrected-DSC capture result. No MPEG-TS or B-CAS success is
+claimed.
 Log: `evidence/raw/capture-primary-T27.txt`; sample is an empty local binary.
 
 ### CF experiment and controller revision
@@ -269,8 +286,9 @@ Primary lane1 CF control read (`c0:04 value00c0 length2`) returned `01 04`.
 Parent set PID boundaries41/43 to `1fff`, read both back, sent channel reset
 `c0:09 value0001 length1`, and wrote CF40=`0b` (lane1 subcommandc0). Control
 readback was `01 0b`. A subsequent 5-second capture still returned zero bytes
-and exit1, with DSC stop successful. CF40 was restored to04 and read back as
-`01 04`; this restores that register only, not the entire device state.
+and exit1 under the reversed DSC mapping described above. CF40 was restored to04
+and read back as `01 04`; this restores that register only, not the entire
+device state.
 Log: `evidence/raw/capture-primary-T27-after-CF.txt`.
 
 Passive controller I2C register09 reads returned `00 04` at slave5a (failed,
@@ -376,12 +394,13 @@ Static inspection of the original open/init/stream path found no call to
 transform follows that read. This does not establish the ASIC's internal
 requirements or prove that returned bytes will already be ordinary TS.
 
-Parent compared primary lane1 CF40..44 before DSC start, while started, and
-after DSC stop. All three reads returned `01 04 00 20 1f ff` (first byte is
-the wrapper reply). Start request07 and stop request06 each returned01;
-cleanup issued stop again before releasing interface0. The final terrestrial
-lock read returned `01 a9`. This measurement shows no change in those five CF
-bytes during DSC; their relationship to stream production remains unverified.
+Parent compared primary lane1 CF40..44 before and after the API-labeled DSC
+start/stop sequence. All three reads returned `01 04 00 20 1f ff` (first byte
+is the wrapper reply). That sequence emitted request07 then request06, which
+the corrected mapping identifies as stop then start; cleanup's repeated
+API-labeled stop also emitted actual start request06. The final terrestrial
+lock read returned `01 a9`. This does not show CF behavior with DSC correctly
+started and stopped.
 
 ### Optional CF40 filter-start capture diagnostic
 
@@ -392,16 +411,37 @@ and sets the source-observed filter-start bit after DSC succeeds. It restores
 the original CF40 byte after stopping DSC and draining queued transfers on all
 capture outcomes. The option is disabled by default.
 
-Parent's5-second primary T27 trial returned zero bytes/exit1. A second trial
-combined the same post-start filter operation with controller05 candidate20;
-it also returned zero bytes/exit1. Logs:
+Parent's5-second primary T27 trial used the then-reversed DSC mapping and
+returned zero bytes/exit1; it is not valid corrected-DSC counterevidence. A
+second trial combined the same post-start filter operation with controller05
+candidate20, also under the reversed mapping; it is likewise not valid
+corrected-DSC counterevidence. Logs:
 `evidence/raw/capture-primary-T27-post-start-filter.txt` and
 `evidence/raw/capture-primary-T27-post-start-filter-controller20.txt`.
 After the first trial CF40 read back04, confirming the diagnostic restored
 that byte; PID boundaries still reflected ordinary stream setup. Parent
 restored all five saved CF bytes after each trial. Final readbacks were
 CF40..44=`04 00 20 1f ff`, controller05=00, GPIO76 and terrestrial b0=A9.
-The source-observed filter-start order alone or combined with candidate20
-does not resolve zero-byte acquisition. Local build and17 CTests passed,
-including new ordering, restoration-failure and CF-response semantics cases.
+Because both trials used the reversed DSC mapping, they do not resolve
+zero-byte acquisition with DSC correctly started. Local build and17 CTests
+passed, including new ordering, restoration-failure and CF-response semantics cases.
 No satellite tuning, LNB enablement or card APDU occurred.
+
+### First corrected-DSC capture trial
+
+After correcting start to06 and stop to07, parent repeated the previous
+5-second primary T27 trial with reset1, local1, queue-depth4 and filter-start.
+No GPIO, controller, crypto or transfer-size setting was changed for this
+comparison. Stream setup completed; capture reported zero-bytes, bytes0,
+exit1 and close_ok=yes. Log:
+`evidence/raw/capture-primary-T27-corrected-DSC.txt`; the raw output is empty.
+This establishes no received sample under that corrected configuration;
+it does not establish zero USB payload across terminal callback drain.
+
+CF40 read back04 after capture. Parent issued the corrected stop07 again,
+restored the saved five CF bytes and verified CF40..44=`04 00 20 1f ff`,
+controller05=00, GPIO76 and terrestrial b0=A9. DSC correction is necessary
+for matching the original API but did not yield data in this first bounded
+trial. Other earlier register-combination trials have not been repeated with
+the corrected DSC requests. Local build and17 CTests passed, with independent
+literal USB setup checks for start/stop on both local lanes.

@@ -64,8 +64,8 @@ The following request numbers are directly observed in `WDM_cmd.o`. Parameters m
 | `0x03` | I2C write | write bytes encoded into setup; response status byte |
 | `0x04` | channel-filter read | operation selected by wrapper |
 | `0x05` | channel-filter write | operation selected by wrapper |
-| `0x06` | DSC stop | tuner number encoded in setup |
-| `0x07` | DSC start | tuner number encoded in setup |
+| `0x06` | DSC start | tuner number encoded in setup |
+| `0x07` | DSC stop | tuner number encoded in setup |
 | `0x08` | GPIO operation | legacy GPIO path; Linux wrapper only emits the set form |
 | `0x09` | channel reset | tuner/channel parameters in setup |
 | `0x0a` | query USB high-speed state | 1-byte response |
@@ -81,6 +81,15 @@ The following request numbers are directly observed in `WDM_cmd.o`. Parameters m
 | `0x18` | system-control write | data embedded after request byte |
 | `0x19` | I2C read without preceding write | response is status byte + requested data |
 | `0x1a` | device random-key read | 16-byte response |
+
+The DSC direction is cross-checked through the callers: `FUSBDTV_Cmd_StopDSC`
+(`FUSBDTV.o` `.text+0x770`) passes flag 0 and `FUSBDTV_Cmd_StartDSC`
+(`.text+0x7a0`) passes flag 1 to `bStart_Stop_DSC` (`WDM_cmd.o`
+`.text+0x380`), which forwards it to `UsbDSC` (`.text+0x310`). `UsbDSC`
+emits request `0x06` for flag 1 and `0x07` for flag 0. The kernel control
+encoder writes `cmd[0]` as `bRequest` and sends the setup length from `len`
+(`as11usbdtv.ko` `AUSBDTV_SendUSBControlTransfer`, `.text+0x1d75..0x1db0`).
+This caller chain establishes start=`0x06`, stop=`0x07`.
 
 Request values `0x0b`, `0x0f`, `0x15`, and `0x16` are not assigned here because no active Linux W3U3 path in the recovered `WDM_cmd.o` proves their semantics.
 
