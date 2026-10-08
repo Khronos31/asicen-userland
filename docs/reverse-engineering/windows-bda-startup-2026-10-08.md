@@ -1,5 +1,14 @@
 # Original W3U3 Windows BDA static review
 
+Follow-up (23:07 JST): the Linux prerequisite left unresolved by this review
+has now been identified and tested. Calling the public TF_bGetCusInfo before
+Init populated the identity cache through a successful58-byte USB0c read;
+both lanes returned Init=1. The guarded T27 trial still did not lock or
+receive nonzero bulk data. See [the hardware record](../../HARDWARE-VALIDATION.md#customer_info-prerequisite-trial-2026-10-08-2307-jst)
+and [the dedicated API audit](https://github.com/Khronos31/asicen-userland/blob/40343327409e38ba499032c5a54e044ac542bb0e/docs/reverse-engineering/official-init-customer-info-2026-10-08.md).
+No GenEncSeed call was needed for that initialization result. The sections
+below preserve the narrower findings of the preceding Windows review.
+
 ## Scope and provenance
 
 This is a read-only static review of the original PX-W3U3 64-bit Vista/Win7/Win8 BDA driver, not V2 or PBDA. The examined SYS is `HDTV_PX_W3U3_BDA.sys`, SHA-256 `a032a28b28e5d239aa32b9c41e7d9f61c810ada4b120dcc214c58be770ea5b88`, size 185,728 bytes. It is PE32+ x86-64, image base `0x10000`; the image has no export symbols. RVA/file offsets match for the reviewed sections. Analysis used PE metadata, the exception function table, imports, and disassembly; the image was not executed.

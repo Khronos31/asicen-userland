@@ -3,19 +3,43 @@
 // HARDWARE-VALIDATION.md. All diagnostics go to stderr.
 
 #include <errno.h>
+#include <stddef.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
-typedef unsigned char BYTE;
-typedef unsigned char BOOL;
-typedef void *PVOID;
-typedef unsigned long ULONG;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include "Data_define.h"
+#pragma GCC diagnostic pop
+
+// Data_define.h ships this public SDK type under #if 0, so it is not an active
+// declaration. Reproduce the SDK's documented 58-byte layout here; keep the
+// field order and names from that disabled declaration.
+struct Customer_Info {
+  UCHAR bUseCustomerInfo;
+  UCHAR InfoID[2];
+  UCHAR VID[2];
+  UCHAR PID[2];
+  UCHAR Manufact_Str[10];
+  UCHAR Product_Str[16];
+  UCHAR HID_Str[15];
+  UCHAR Remote_Ctrl_Num;
+  UCHAR Customer_Def_Data[8];
+  UCHAR Support_Feature;
+};
+typedef Customer_Info *PCustomerInfo;
+
+static_assert(sizeof(Customer_Info) == 58, "SDK Customer_Info ABI size changed");
+static_assert(offsetof(Customer_Info, VID) == 3, "SDK Customer_Info VID offset changed");
+static_assert(offsetof(Customer_Info, PID) == 5, "SDK Customer_Info PID offset changed");
 
 extern "C" BOOL TF_DTV_DevCreate(PVOID *, char *) asm("_Z16TF_DTV_DevCreatePPvPc");
 extern "C" BOOL TF_AssignDevExt_0(PVOID) asm("_Z17TF_AssignDevExt_0Pv");
+extern "C" BOOL TF_bGetCusInfo(PVOID, PCustomerInfo)
+    asm("_Z14TF_bGetCusInfoPvP13Customer_Info");
 extern "C" int TF_DTV_Init(PVOID, BYTE, BOOL, BYTE) asm("_Z11TF_DTV_InitPvhhh");
 extern "C" int TF_DTV_UnInit(PVOID, BYTE) asm("_Z13TF_DTV_UnInitPvh");
 extern "C" int TF_DTV_SetTunerFreq(PVOID, BYTE, ULONG, BYTE) asm("_Z19TF_DTV_SetTunerFreqPvhmh");
@@ -111,8 +135,11 @@ static bool cleanup(RunState &state) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 3 || argv[1][0] != '/' || strlen(argv[2]) != 2) {
-    fprintf(stderr, "usage: %s /dev/as11usbdtv0 initial_gpio_hex\n", argv[0]);
+  const bool customer_only = argc == 4 && strcmp(argv[3], "--customer-only") == 0;
+  if ((argc != 3 && !customer_only) || argv[1][0] != '/' || strlen(argv[2]) != 2) {
+    fprintf(stderr,
+            "usage: %s /dev/as11usbdtv0 initial_gpio_hex [--customer-only]\n",
+            argv[0]);
     return 2;
   }
   auto hex_nibble = [](char c) -> int {
@@ -148,6 +175,37 @@ int main(int argc, char **argv) {
   if (!assign_rc) {
     cleanup(state);
     return 1;
+  }
+
+  Customer_Info customer_info = {};
+  BOOL customer_rc = TF_bGetCusInfo(state.extension, &customer_info);
+  const unsigned int customer_vid =
+      (static_cast<unsigned int>(customer_info.VID[0]) << 8) | customer_info.VID[1];
+  const unsigned int customer_pid =
+      (static_cast<unsigned int>(customer_info.PID[0]) << 8) | customer_info.PID[1];
+  const BYTE *extension_bytes = static_cast<const BYTE *>(state.extension);
+  const unsigned int cached_vid =
+      (static_cast<unsigned int>(extension_bytes[0x476b]) << 8) |
+      extension_bytes[0x476c];
+  const unsigned int cached_pid =
+      (static_cast<unsigned int>(extension_bytes[0x476d]) << 8) |
+      extension_bytes[0x476e];
+  fprintf(stderr,
+          "CustomerInfo rc=%u vid=%04x pid=%04x cached_vid=%04x cached_pid=%04x\n",
+          static_cast<unsigned>(customer_rc), customer_vid, customer_pid,
+          cached_vid, cached_pid);
+  const bool customer_id_valid =
+      customer_rc == 1 && customer_vid == 0x0b06 &&
+      (customer_pid == 0x0004 || customer_pid == 0x0005) &&
+      cached_vid == customer_vid && cached_pid == customer_pid;
+  if (!customer_id_valid) {
+    fprintf(stderr, "CustomerInfo validation failed; skipping Init\n");
+    cleanup(state);
+    return 1;
+  }
+  if (customer_only) {
+    fprintf(stderr, "CustomerInfo-only phase complete; skipping Init/tune/lock\n");
+    return cleanup(state) ? 0 : 1;
   }
 
   // TF_DTV_Init's second argument selects the lane object; its third bool

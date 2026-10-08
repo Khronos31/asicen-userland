@@ -814,10 +814,16 @@ Static inspection identifies an early DTV_Init -2 branch at
 DTV_Lib.o .text7250..72f5: it checks extension bytes476b..476e for VID0b06
 and PID0004/0005. The observed USB descriptor matches, but the harness did
 not read those internal bytes; the precise failed check is therefore not
-confirmed dynamically. The GenEncSeed path has references that prepare
-these fields, while DevCreate/Init alone have no identified assignments.
-That is a candidate missing prerequisite, not authorization to supply
-guessed seed inputs or bypass validation. No such change was made.
+confirmed dynamically. The earlier suggestion that GenEncSeed prepares
+these fields was incorrect: the identified CalculateFinalKey path reads
+identity inputs; it does not establish that preparation. Subsequent audit
+identified the public TF_bGetCusInfo API as the missing preparation call:
+Transform.o .text420..4b3 reads Customer_Info into extension+4768, including
+the four identity bytes. The harness used for this recorded trial omitted
+that API. No seed inputs or identity-cache patch was made.
+
+The follow-up customer-info trial below supersedes this missing-prerequisite
+hypothesis with an observed successful initialization.
 
 After DevClose, parent sent DSC07 to both lanes, restored only non-LNB GPIO
 bits with valueDF/maskDF, then read GPIOff and GPIOEx02. All234 guest trace
@@ -835,3 +841,77 @@ machines. Capture readers were stopped. GPIO was restored; frontend/CF
 register snapshots were not taken for this startup trial, so their full
 restoration is not claimed. This run did not establish a usable frontend
 initialization or a successful official reception reference.
+
+### Customer_Info prerequisite trial (2026-10-08, 23:07 JST)
+
+Following [the dedicated static audit](https://github.com/Khronos31/asicen-userland/blob/40343327409e38ba499032c5a54e044ac542bb0e/docs/reverse-engineering/official-init-customer-info-2026-10-08.md),
+the only SDK preparation change was to call TF_bGetCusInfo after DevCreate /
+AssignDevExt_0 and before Init. Existing Init arguments, LNB bit20 masking,
+GPIOEx suppression, T27 frequency, and the five-second lock window stayed
+unchanged. The API uses the SDK's documented 58-byte Customer_Info layout;
+its header declaration is disabled under #if0, so the harness reproduces
+the layout with size/VID/PID offset assertions. Only returned and cached
+VID/PID are logged. There are no seed calls or identity-cache writes.
+
+First, --customer-only performed the API call and DevClose without Init.
+Both the guest usbmon and the host pcap show request c0/0c, value0, index0,
+requested58, completion status0 and actual_length58. API return was1;
+returned VID/PID and the read-only extension cache were both0b06/0005.
+Parent then stopped both DSC lanes and restored GPIO with maskDF before
+the full trial. The full trial repeated the same successful58-byte read.
+
+| Full-trial call/result | Observation |
+| --- | --- |
+| DevCreate / AssignDevExt_0 | 1 / 1 |
+| Customer_Info | 1; returned and cached VID/PID0b06/0005 |
+| Init local0 / local1 | 1 / 1 |
+| T27 local1, 557142kHz, bandwidth6 | 1 |
+| Lock checks during the five-second window | All0; no lock observed |
+| UnInit local1 / local0 / DevClose | 1 / 1 / 1 |
+| Harness exit | 1, because no lock was observed; watchdog not reached |
+
+This resolves the observed harness Init=-2 with the normal public API.
+It does not resolve the earlier userland zero-byte result after lock:
+this trial did not lock. Init now emits its own SysCtrl reads and frontend
+configuration, unlike the previous failed trial. Guest trace records four
+65536-byte submissions each to endpoint81 and82; all eight completions
+are cleanup cancellations, status-2 and actual_length0. The host capture
+shows one pending bulk transfer per endpoint; its two bulk completions
+also have status-2 and length0. StreamDataRead remains omitted because its
+ioctl has no proven bounded timeout. No valid TS was obtained.
+
+The combined two-phase guest trace contains1450 events. Every GPIO write
+mask excludes bit20; no GPIOEx request10 occurred. Full-trial guard totals
+were40 GPIO calls,17 bit20 masks removed,16 entirely skipped calls, and2
+GPIOEx calls suppressed. After DevClose, parent sent DSC07 to both lanes,
+restored only non-LNB GPIO bits using valueDF/maskDF, and read GPIOFF /
+GPIOEx02, matching the initial snapshot. Voltage was not measured. Full
+frontend/CF restoration was not performed or claimed. Final guest devices
+were primary address4 and secondary address10.
+
+The host pcap contains1430 events, with zero dropped packets. Captures were
+started before DevCreate and stopped after restoration; no capture reader
+or harness process remains. The sanitized combined trace is
+docs/hardware-traces/2026-10-08-customer-info-init.usbmon.txt; firmware,
+EEPROM identity and Customer_Info payloads are omitted. Full raw text,
+pcap and stderr remain under
+/config/.tools/asicen-work/official-trace-20261008/ and on the SSH machines.
+
+Build the updated harness object on the modern host, using the extracted
+SDK header directory, then link that object on the isolated CentOS guest:
+
+```sh
+g++ -std=c++11 -Wall -Wextra -Wpedantic -Werror -fno-stack-protector \
+  -I out/linux64/ReleaseToCustomer_64bit_130109_2 \
+  -c docs/hardware-traces/official-trace-harness.cpp \
+  -o official-trace-harness.o
+gcc official-trace-harness.o libPlexLib_W3U3.a /usr/lib64/libstdc++.so.6 \
+  -Wl,--wrap=_Z9ucSetGPIOhhi -Wl,--wrap=_Z11ucSetGPIOExhhi \
+  -lpthread -lm -lrt -o official-trace-harness
+sudo timeout -s KILL 45s ./official-trace-harness /dev/as11usbdtv0 ff --customer-only
+# Check USB completion status0/length58 before running the full trial.
+sudo timeout -s KILL 45s ./official-trace-harness /dev/as11usbdtv0 ff
+```
+
+Run restoration after DevClose (also after watchdog termination), rather
+than interpreting --customer-only or the watchdog as device restoration.
