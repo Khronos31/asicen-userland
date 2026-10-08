@@ -7,8 +7,9 @@ Follow-up: the [Linux static validation](linux-static-validation-2026-10-09.md)
 establishes two private x86_64 package variants, exact-source rebuilding and
 modified-libusb relinking. The dependency observations below describe the
 original development build; they are not the dependency state of those new
-candidates. The remaining seven platform archives and target-runtime checks
-are still outstanding.
+candidates. The [ARM64 follow-up](linux-arm64-static-validation-2026-10-09.md)
+adds both Linux ARM64 variants under QEMU. Five platform archives and further
+target-runtime checks remain outstanding; macOS native CI is being added.
 
 Inspected ASICEN main `3a06b336f233a0f9e28716678f9b6dc237b857c7` and local
 px4-userland `3de7d512cef11756e6f033557ee49917cad2f11c`. The latter's SPEC
@@ -38,10 +39,10 @@ px4's explicit libusb archive override/static production build path.
 The IFD is expected to remain a shared plugin, but no matching musl variant
 or verified glibc 2.31 floor exists in this build evidence.
 
-The current CI only installs Ubuntu development packages, builds/tests and
-runs a probe. It has no multi-platform release-candidate packaging or final
-archive dependency audits. There is no basis for claiming any of the nine
-required ASICEN binary archives has passed the release gate.
+At the initial audit, CI only installed Ubuntu development packages,
+built/tested and ran a probe. The new Linux local candidates and macOS CI
+path are recorded above. They do not yet establish that all nine required
+ASICEN binary archives have passed the release gate.
 
 ## Required package parity
 
@@ -54,9 +55,9 @@ tools do not count toward this parity.
 | --- | --- | --- |
 | linux-glibc-x86_64 | fully static musl commands + glibc 2.31 IFD | private candidate build/package/mock/load checks passed; live static reception not yet checked |
 | linux-musl-x86_64 | same commands + musl IFD | private candidate build/package/mock/load checks passed; live static reception not yet checked |
-| linux-glibc-aarch64 | fully static musl commands + glibc 2.31 IFD | unmet |
-| linux-musl-aarch64 | same commands + musl IFD | unmet |
-| darwin-arm64 | system dependencies only, static libusb, PC/SC bundle | unimplemented/unverified |
+| linux-glibc-aarch64 | fully static musl commands + glibc 2.31 IFD | local candidate, dependency/mock/load checks passed under QEMU; ARM hardware unverified |
+| linux-musl-aarch64 | same commands + musl IFD | local candidate, dependency/mock/load checks passed under QEMU; ARM hardware unverified |
+| darwin-arm64 | system dependencies only, static libusb, PC/SC bundle | build/package path added in 8dec3f2; native CI verification pending |
 | android-aarch64 | API24+, static libusb, Termux launcher | unimplemented/unverified |
 | android-armv7a | API24+, static libusb, Termux launcher | unimplemented/unverified |
 | android-x86_64 | API24+, static libusb, Termux launcher | unimplemented/unverified |

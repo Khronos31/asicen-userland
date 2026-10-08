@@ -41,11 +41,13 @@ xcrun clang -I"$work/libusb-prefix/include/libusb-1.0" \
     -o "$work/libusb-version-smoke"
 "$work/libusb-version-smoke"
 
+pcsc_include="$(brew --prefix pcsc-lite)/include/PCSC"
+test -f "$pcsc_include/ifdhandler.h"
 cmake -S "$work/project" -B "$work/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_SKIP_RPATH=ON \
     -DASICEN_ENABLE_LIBUSB=ON -DASICEN_ENABLE_IFD=ON -DASICEN_REQUIRE_IFD=ON \
-    -DASICEN_BUILD_TESTS=OFF \
+    -DASICEN_BUILD_TESTS=OFF -DASICEN_PCSC_IFD_INCLUDE_DIR="$pcsc_include" \
     -DASICEN_LIBUSB_INCLUDE_DIR="$work/libusb-prefix/include/libusb-1.0" \
     -DASICEN_LIBUSB_LIBRARY="$work/libusb-prefix/lib/libusb-1.0.a" \
     '-DASICEN_LIBUSB_EXTRA_LINK_OPTIONS=SHELL:-framework IOKit;SHELL:-framework CoreFoundation;SHELL:-framework Security;-lobjc'

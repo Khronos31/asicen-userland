@@ -31,7 +31,7 @@ BASE_FILES = {
     "source/asicen-userland-source.tar.gz", "source/libusb-1.0.30.tar.bz2",
     "source/asicen-macos-corresponding-source.tar.gz",
     "licenses/COPYING.gpl2", "licenses/px4-userland-GPL-2.0-only.txt",
-    "licenses/libusb-COPYING", "licenses/NOTICES.md",
+    "licenses/libusb-COPYING", "licenses/pcsc-lite-build-input.txt", "licenses/NOTICES.md",
     "BUILD-METADATA.txt", "SOURCE-MANIFEST.txt", "REBUILD.md", "SHA256SUMS",
 }
 FINAL_FILES = {"firmware/asicen-loader.bin", "licenses/VENDOR-FIRMWARE-NOTICE.txt"}
@@ -149,7 +149,7 @@ def verify_source_archives(root: Path, source_sha: str) -> None:
             "source/asicen-userland-source.tar.gz", "source/libusb-1.0.30.tar.bz2",
             "SOURCE-MANIFEST.txt", "REBUILD.md", "licenses/COPYING.gpl2",
             "licenses/px4-userland-GPL-2.0-only.txt", "licenses/libusb-COPYING",
-            "licenses/NOTICES.md",
+            "licenses/pcsc-lite-build-input.txt", "licenses/NOTICES.md",
         }
         if set(members) != expected:
             fail("corresponding-source bundle inventory mismatch")
@@ -182,6 +182,10 @@ def audit_candidate(root: Path, final: bool = False, run_smoke: bool = True) -> 
         fail("candidate class metadata mismatch")
     if "macOS deployment target: 14.0" not in metadata:
         fail("candidate deployment target metadata mismatch")
+    if not re.search(r"^PC/SC IFD headers: Homebrew pcsc-lite \S+$", metadata, re.MULTILINE):
+        fail("Homebrew pcsc-lite header provenance is missing")
+    if not re.search(r"^Homebrew pcsc-lite formula license expression: .+$", metadata, re.MULTILINE):
+        fail("PC/SC build-header license metadata is missing")
     source_match = re.search(r"^Source archive SHA-256: ([0-9a-f]{64})$", metadata, re.MULTILINE)
     if not source_match:
         fail("source archive hash missing from metadata")

@@ -13,6 +13,7 @@ set(ASICEN_LIBUSB_INCLUDE_DIR "" CACHE PATH "libusb include directory (overrides
 set(ASICEN_LIBUSB_LIBRARY "" CACHE FILEPATH "libusb library/archive (overrides pkg-config)")
 set(ASICEN_LIBUSB_EXTRA_LIBRARIES "" CACHE STRING "Additional private libraries required by the selected libusb archive")
 set(ASICEN_LIBUSB_EXTRA_LINK_OPTIONS "" CACHE STRING "Additional linker options required by the selected libusb archive")
+set(ASICEN_PCSC_IFD_INCLUDE_DIR "" CACHE PATH "Build-only PC/SC IFD headers directory")
 
 find_package(Threads REQUIRED)
 
@@ -156,11 +157,19 @@ if(UNIX)
       endif()
     endif()
     if(APPLE)
-      find_path(ASICEN_PCSC_IFD_INCLUDE_DIR
-        NAMES ifdhandler.h
-        HINTS "${CMAKE_OSX_SYSROOT}/System/Library/Frameworks/PCSC.framework/Headers"
-        PATH_SUFFIXES PCSC PCSC.framework/Headers)
-      set(ASICEN_PCSC_AVAILABLE ${ASICEN_PCSC_IFD_INCLUDE_DIR})
+      if(NOT ASICEN_PCSC_IFD_INCLUDE_DIR)
+        find_path(ASICEN_PCSC_IFD_DISCOVERED_INCLUDE_DIR
+          NAMES ifdhandler.h
+          HINTS "${CMAKE_OSX_SYSROOT}/System/Library/Frameworks/PCSC.framework/Headers"
+          PATH_SUFFIXES PCSC PCSC.framework/Headers)
+        set(ASICEN_PCSC_IFD_INCLUDE_DIR "${ASICEN_PCSC_IFD_DISCOVERED_INCLUDE_DIR}")
+      endif()
+      if(ASICEN_PCSC_IFD_INCLUDE_DIR AND
+         EXISTS "${ASICEN_PCSC_IFD_INCLUDE_DIR}/ifdhandler.h")
+        set(ASICEN_PCSC_AVAILABLE TRUE)
+      else()
+        set(ASICEN_PCSC_AVAILABLE FALSE)
+      endif()
     else()
       set(ASICEN_PCSC_AVAILABLE ${PCSCLITE_FOUND})
       set(ASICEN_PCSC_IFD_INCLUDE_DIR ${PCSCLITE_INCLUDE_DIRS})

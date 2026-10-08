@@ -105,17 +105,28 @@ def main() -> int:
     parser.add_argument("--libusb-source-dir", required=True, type=Path)
     parser.add_argument("--source-snapshot", required=True, type=Path)
     parser.add_argument("--libusb-archive", required=True, type=Path)
+    parser.add_argument("--pcsc-include-dir", required=True, type=Path)
+    parser.add_argument("--pcsc-version", required=True)
+    parser.add_argument("--pcsc-license-expression", required=True)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
         for path in (args.source_snapshot, args.libusb_archive, args.build_dir,
-                     args.libusb_source_dir):
+                     args.libusb_source_dir, args.pcsc_include_dir):
             if path.is_symlink():
                 fail(f"build input must not be a symlink: {path}")
         source = args.source_snapshot.resolve(strict=True)
         libusb_archive = args.libusb_archive.resolve(strict=True)
         libusb_source = args.libusb_source_dir.resolve(strict=True)
         build_dir = args.build_dir.resolve(strict=True)
+        pcsc_include = args.pcsc_include_dir.resolve(strict=True)
+        if not (pcsc_include / "ifdhandler.h").is_file():
+            fail("pcsc-lite include directory lacks ifdhandler.h")
+        if not args.pcsc_version.strip() or any(ch in args.pcsc_version for ch in "\r\n"):
+            fail("invalid pcsc-lite version metadata")
+        if not args.pcsc_license_expression.strip() or any(
+                ch in args.pcsc_license_expression for ch in "\r\n"):
+            fail("invalid Homebrew pcsc-lite license metadata")
         if source.is_relative_to(ROOT.resolve()) or libusb_archive.is_relative_to(ROOT.resolve()):
             fail("source snapshot and libusb archive must be outside the mutable checkout")
         if digest(libusb_archive) != LIBUSB_SHA256:
@@ -158,6 +169,13 @@ def main() -> int:
             copy_regular(ROOT / "third_party/px4-userland/LICENSE",
                          stage / "licenses/px4-userland-GPL-2.0-only.txt")
             copy_regular(ROOT / "NOTICES.md", stage / "licenses/NOTICES.md")
+            (stage / "licenses/pcsc-lite-build-input.txt").write_text(
+                "Build-only dependency: Homebrew pcsc-lite IFD headers.\n"
+                f"Version: {args.pcsc_version}\n"
+                f"Homebrew formula license expression: {args.pcsc_license_expression}\n"
+                "No pcsc-lite library or source is linked, bundled, or redistributed.\n"
+                "Formula provenance: https://formulae.brew.sh/formula/pcsc-lite\n",
+                encoding="utf-8")
             (stage / "SOURCE-MANIFEST.txt").write_text(
                 "\n".join(source_names(source)) + "\n", encoding="utf-8")
             rebuild = (
@@ -165,15 +183,18 @@ def main() -> int:
                 f"Project source archive SHA-256: {source_sha}\n"
                 f"Pinned libusb 1.0.30 archive SHA-256: {LIBUSB_SHA256}\n\n"
                 "Requires macOS 14 or newer on Apple silicon, Xcode Command Line Tools, "
-                "CMake, Ninja, GNU make, Python 3.12, and the macOS PC/SC SDK headers.\n\n"
+                "CMake, Ninja, GNU make, Python 3.12, Homebrew pcsc-lite headers, and Homebrew pkgconf.\n"
+                "Install headers with `brew install pcsc-lite pkgconf`; use `$(brew --prefix pcsc-lite)/include/PCSC`, record `pkg-config --modversion libpcsclite`, and retain the Homebrew formula license expression. "
+                "Only IFD headers are used; no Homebrew PC/SC library is linked or required at runtime.\n\n"
                 "    mkdir project-src libusb-src libusb-prefix\n"
                 "    tar -xzf source/asicen-userland-source.tar.gz -C project-src\n"
                 "    tar -xjf source/libusb-1.0.30.tar.bz2 -C libusb-src --strip-components=1\n"
                 "    cd libusb-src\n"
+                "    export MACOSX_DEPLOYMENT_TARGET=14.0\n"
                 "    ./configure --prefix=\"$PWD/../libusb-prefix\" --disable-shared --enable-static --disable-examples-build --disable-tests-build --disable-dependency-tracking\n"
                 "    make && make install\n"
                 "    cd ../project-src\n"
-                "    MACOSX_DEPLOYMENT_TARGET=14.0 cmake -S . -B ../build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DASICEN_ENABLE_LIBUSB=ON -DASICEN_ENABLE_IFD=ON -DASICEN_REQUIRE_IFD=ON -DASICEN_BUILD_TESTS=OFF -DASICEN_LIBUSB_INCLUDE_DIR=\"$PWD/../libusb-prefix/include/libusb-1.0\" -DASICEN_LIBUSB_LIBRARY=\"$PWD/../libusb-prefix/lib/libusb-1.0.a\" '-DASICEN_LIBUSB_EXTRA_LINK_OPTIONS=SHELL:-framework IOKit;SHELL:-framework CoreFoundation;SHELL:-framework Security;-lobjc'\n"
+                "    MACOSX_DEPLOYMENT_TARGET=14.0 cmake -S . -B ../build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DASICEN_ENABLE_LIBUSB=ON -DASICEN_ENABLE_IFD=ON -DASICEN_REQUIRE_IFD=ON -DASICEN_BUILD_TESTS=OFF -DASICEN_PCSC_IFD_INCLUDE_DIR=\"$(brew --prefix pcsc-lite)/include/PCSC\" -DASICEN_LIBUSB_INCLUDE_DIR=\"$PWD/../libusb-prefix/include/libusb-1.0\" -DASICEN_LIBUSB_LIBRARY=\"$PWD/../libusb-prefix/lib/libusb-1.0.a\" '-DASICEN_LIBUSB_EXTRA_LINK_OPTIONS=SHELL:-framework IOKit;SHELL:-framework CoreFoundation;SHELL:-framework Security;-lobjc'\n"
                 "    cmake --build ../build --target asicend asicen-ts asicenctl asicen-ifd-bundle\n\n"
                 "Modify the extracted libusb source, rebuild it, then relink all three commands with the modified include directory and static archive. This manual LGPL relink path does not require the proprietary firmware. The candidate is an intermediate firmware-free artifact; use the separate external-input assembler for a final package.\n"
             )
@@ -185,6 +206,9 @@ def main() -> int:
                 f"Compiler: {subprocess.run(['clang++', '--version'], check=True, text=True, capture_output=True).stdout.splitlines()[0]}\n"
                 f"Xcode: {subprocess.run(['xcodebuild', '-version'], check=True, text=True, capture_output=True).stdout.splitlines()[0]}\n"
                 "macOS deployment target: 14.0\n"
+                f"PC/SC IFD headers: Homebrew pcsc-lite {args.pcsc_version}\n"
+                f"Homebrew pcsc-lite formula license expression: {args.pcsc_license_expression}\n"
+                "PC/SC IFD headers are build-only; no Homebrew runtime linkage\n"
                 f"Source archive SHA-256: {source_sha}\n"
                 f"libusb 1.0.30 archive SHA-256: {LIBUSB_SHA256}\n"
                 "libusb linkage: static; libusb_init/libusb_open/libusb_close symbols verified before stripping\n"
