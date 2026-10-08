@@ -56,7 +56,9 @@ which is reported separately from invalid/truncated complete sections.
 
 The improvement supports using the single-block-compatible transform. It does
 not establish lossless reception or isolate every remaining startup defect.
-B25 scrambling remains present, and no card descrambling was performed.
+B25 scrambling remains present in the startup portion. No explicit card API
+or recisdb trial was performed by the harness; subsequent analysis below
+shows that the official library also processes B-CAS automatically.
 
 Guest usbmon and Latitude host usbmon began before the harness initialized
 the device. Host tcpdump reported 16,022 records and zero kernel drops;
@@ -85,3 +87,31 @@ be treated as a continuous capture. The check validates portable processing
 of actual device bytes using the observed seed; it still does not prove that
 the device accepts an independently chosen seed or that direct libusb startup
 is complete. Seed values and raw transformed fragments were not committed.
+
+## Automatic B-CAS processing in the reference path
+
+`DTV_DecrypMultiTS` calls `TS_Process` after the device-link transform
+(`DTV_Lib.o`, relocation at `.text+0x46aa`), with card-existence setup on the
+same path. The successful trace also contains controller mailbox operations.
+Thus the public stream-read API is not necessarily raw B25-scrambled output.
+
+For video PID0100, the first quarter of the captured file has 15,584 scrambled
+and 28,262 clear-marked packets. The remaining three quarters have 131,660
+clear-marked packets and zero scrambled packets. Conversely, PID0100 in the
+portable USB-fragment sample remains scrambled throughout: portable code
+only removes the device-link transform.
+
+An offline FFmpeg check, seeking five seconds into the reference recording,
+decoded another five seconds of program1024 video to the null sink:
+
+```sh
+ffmpeg -hide_banner -v error -ss 5 -i seed-single-des.ts \
+  -map 0:p:1024:v:0 -t 5 -an -progress pipe:1 -nostats -f null -
+```
+
+It returned 0 with `frame=146`, `out_time=00:00:05.005000`, and zero reported
+dropped frames. Initial probe warnings about incomplete H.264 parameter sets
+and MPEG-2 dimensions remain in the private stderr log. This is positive
+evidence of usable reference-library descrambling after startup, not a
+lossless whole-file claim. It does not validate the ASICEN card backend,
+PC/SC interface or recisdb integration, which remain future work.
