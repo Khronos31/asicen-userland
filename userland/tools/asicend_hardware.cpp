@@ -195,7 +195,7 @@ int run_asicend_hardware(int argc, char** argv) {
     stop_requested = 0;
     struct sigaction action{};
     action.sa_handler = signal_handler;
-    ::sigemptyset(&action.sa_mask);
+    sigemptyset(&action.sa_mask);
     ::sigaction(SIGINT, &action, nullptr);
     ::sigaction(SIGTERM, &action, nullptr);
     ::signal(SIGPIPE, SIG_IGN);

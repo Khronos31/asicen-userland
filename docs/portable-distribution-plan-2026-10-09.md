@@ -17,14 +17,18 @@ reads, EINTR and errors, close resources, and never fall back to predictable
 values. Preserve the sixteen-byte seed and current cleanup-on-failure flow.
 Do not tie hardware entropy to IPC identities or change device protocols.
 
-Use the Apple SDK PCSC headers/framework and the required bundle manifest.
-Keep Linux IFD detection and ON/OFF behavior intact. No daemon installation,
+Use the native PC/SC IFD ABI and the required bundle manifest. The macos-14
+runner did not provide discoverable IFD headers, so use explicit Homebrew
+pcsc-lite headers as a build-only input and record their version/license.
+Do not link its Homebrew PC/SC library. Keep Linux IFD detection and ON/OFF
+behavior intact. No daemon installation,
 system PC/SC configuration, attached device access or LNB action is permitted
 in the build/runtime tests.
 
 Acceptance:
 
-1. Native arm64 build and offline tests on a standard macos-14 Actions runner.
+1. Native arm64 build and offline tests on a standard macos-14 Actions runner,
+   with macOS 14.0 as the deployment target for both libusb and project code.
 2. All three command binaries contain no dynamic libusb or Homebrew runtime
    path; Mach-O dependencies are limited to the required system libraries and
    frameworks. Record static libusb symbols before stripping.
