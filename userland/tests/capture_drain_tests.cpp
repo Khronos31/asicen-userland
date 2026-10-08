@@ -152,6 +152,17 @@ void ordinary_stop_failure_still_attempts_independent_gpio_restore() {
               fake.events[1] == "gpio-restore",
           "GPIO restoration follows safe stop attempt and preserves its failure result");
 }
+
+void cleanup_failure_quarantines_new_frontend_work_but_not_shutdown() {
+    check(asicen::frontend_io_allowed_after_cleanup(false),
+          "frontend is usable before cleanup failure");
+    check(!asicen::frontend_io_allowed_after_cleanup(true),
+          "cleanup failure blocks future open/tune/lock/capture operations");
+    FakeShutdown fake;
+    check(asicen::attempt_hardware_shutdown_cleanup(fake, false, true) &&
+              fake.gpio_restore_calls == 1U,
+          "shutdown cleanup remains callable while frontend operations are quarantined");
+}
 }  // namespace
 
 int main() {
@@ -161,6 +172,7 @@ int main() {
     successful_dsc_stop_clears_seed_then_restores_cf();
     withheld_callbacks_escalate_without_free_or_cleanup();
     ordinary_stop_failure_still_attempts_independent_gpio_restore();
+    cleanup_failure_quarantines_new_frontend_work_but_not_shutdown();
     std::cout << "capture drain tests passed\n";
     return 0;
 }

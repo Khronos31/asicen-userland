@@ -71,6 +71,14 @@ public:
     px4::userland::Result<void> stop() noexcept override;
 
 private:
+    enum class PoweredControllerCheck : std::uint8_t {
+        ready,
+        type_read_failed,
+        unsupported_type,
+        output_state_read_failed,
+        output_busy,
+    };
+
     int control(const ControlTransfer&, unsigned char*) override;
     void delay_ms(unsigned) override;
     bool cancelled() const override;
@@ -84,7 +92,8 @@ private:
     bool write_cf_block(std::uint8_t, const std::uint8_t*, std::size_t) override;
     bool terrestrial_locked(std::uint8_t, bool*, std::chrono::steady_clock::time_point) override;
     bool snapshot_link_diagnostic() override;
-    bool verify_link_identity() noexcept;
+    bool verify_device_revision() noexcept;
+    PoweredControllerCheck verify_powered_controller() noexcept;
     bool apply_link_seed() override;
     bool clear_link_seed_and_verify_controller() override;
     bool read_controller05(std::uint8_t*) override;

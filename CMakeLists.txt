@@ -232,6 +232,21 @@ if(ASICEN_BUILD_TESTS)
     -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-hardware-gpio-guard-tests COMMAND asicen-hardware-gpio-guard-tests)
 
+  add_executable(asicen-gpio-snapshot-tests
+    userland/tests/gpio_snapshot_tests.cpp)
+  target_include_directories(asicen-gpio-snapshot-tests PRIVATE userland/include)
+  target_compile_options(asicen-gpio-snapshot-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-gpio-snapshot-tests COMMAND asicen-gpio-snapshot-tests)
+
+  add_executable(asicen-powered-init-sequence-tests
+    userland/tests/powered_init_sequence_tests.cpp)
+  target_include_directories(asicen-powered-init-sequence-tests PRIVATE userland/include)
+  target_compile_options(asicen-powered-init-sequence-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-powered-init-sequence-tests
+           COMMAND asicen-powered-init-sequence-tests)
+
   add_executable(asicen-product-shutdown-tests
     userland/tests/product_shutdown_hooks_tests.cpp)
   target_include_directories(asicen-product-shutdown-tests PRIVATE

@@ -29,6 +29,26 @@
 
 namespace asicen {
 
+enum class PoweredInitResult : std::uint8_t {
+    power_failed,
+    controller_guard_failed,
+    init_failed,
+    completed,
+};
+
+// The controller behind the USB bridge is not guaranteed to answer until the
+// source-verified startup/power steps have run. Keep its readiness check
+// strictly between power and demod initialization.
+template <typename PowerStep, typename ControllerGuard, typename InitStep>
+PoweredInitResult execute_powered_init_sequence(PowerStep power,
+                                                ControllerGuard guard,
+                                                InitStep init) {
+    if (!power()) return PoweredInitResult::power_failed;
+    if (!guard()) return PoweredInitResult::controller_guard_failed;
+    if (!init()) return PoweredInitResult::init_failed;
+    return PoweredInitResult::completed;
+}
+
 // One planned frontend operation. Planning is pure and offline testable;
 // execution is a separate concern (FrontendTransport) so tests can assert
 // operation order, GPIO masks, I2C modes, exact response lengths and

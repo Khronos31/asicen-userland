@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <sys/random.h>
 #include <sys/resource.h>
@@ -158,7 +159,8 @@ Result<void> LibusbW3u3Hardware::claim() {
                                          ? Error::BUSY
                                          : Error::INVALID_ARGUMENT);
     claimed_ = true;
-    if (!verify_link_identity()) {
+    if (!verify_device_revision()) {
+        std::fprintf(stderr, "asicend: bridge revision check failed\n");
         (void)release();
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -198,14 +200,70 @@ bool LibusbW3u3Hardware::requires_terrestrial_lock_settle() const noexcept { ret
 
 Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
     if (!claimed_ || receiver != 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<void>::failure(Error::USB_IO);
     if (initialized_) return Result<void>::success();
-    if (!verify_link_identity()) return Result<void>::failure(Error::UNSUPPORTED);
-    FrontendPlan plan = plan_startup_subset();
+    if (!verify_device_revision()) {
+        std::fprintf(stderr, "asicend: bridge revision check failed\n");
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
+    if (!snapshot_gpio_if_needed(&gpio_snapshot_valid_, &gpio_snapshot_,
+            [this](std::uint8_t* value) {
+                if (value == nullptr) return false;
+                const auto transfer = make_gpio_set(0U, 0U, 1000U);
+                std::array<unsigned char, 1> response{};
+                if (control(transfer, response.data()) != transfer.length) return false;
+                *value = response[0];
+                return true;
+            })) {
+        return Result<void>::failure(Error::USB_IO);
+    }
+    FrontendPlan power_plan = plan_startup_subset();
     const auto power = plan_safe_power_on();
-    plan.insert(plan.end(), power.begin(), power.end());
-    const auto init = plan_terrestrial_init_with_satellite_demod();
-    plan.insert(plan.end(), init.begin(), init.end());
-    if (!run_plan(plan, 20000U)) return Result<void>::failure(Error::USB_IO);
+    power_plan.insert(power_plan.end(), power.begin(), power.end());
+    const FrontendPlan init_plan = plan_terrestrial_init_with_satellite_demod();
+
+    // One deadline covers startup, the now-powered controller guard, and
+    // demod initialization. Never issue controller I2C before this power
+    // sequence: the device NACKs those accesses while its controller is off.
+    deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    deadline_active_ = true;
+    PoweredControllerCheck controller_check = PoweredControllerCheck::ready;
+    const PoweredInitResult result = execute_powered_init_sequence(
+        [&] { return run_frontend_plan(power_plan, this) == FrontendRunResult::Completed; },
+        [&] {
+            controller_check = verify_powered_controller();
+            return controller_check == PoweredControllerCheck::ready;
+        },
+        [&] { return run_frontend_plan(init_plan, this) == FrontendRunResult::Completed; });
+    deadline_active_ = false;
+    if (result != PoweredInitResult::completed) {
+        if (result == PoweredInitResult::controller_guard_failed) {
+            const char* reason = "controller guard failed";
+            switch (controller_check) {
+                case PoweredControllerCheck::type_read_failed:
+                    reason = "powered controller type read failed"; break;
+                case PoweredControllerCheck::unsupported_type:
+                    reason = "powered controller type unsupported"; break;
+                case PoweredControllerCheck::output_state_read_failed:
+                    reason = "controller output-idle read failed"; break;
+                case PoweredControllerCheck::output_busy:
+                    reason = "controller output is busy"; break;
+                case PoweredControllerCheck::ready: break;
+            }
+            std::fprintf(stderr, "asicend: %s\n", reason);
+        }
+        const bool restored = restore_gpio_snapshot_safely();
+        if (!restored) cleanup_failed_ = true;
+        Error error = Error::USB_IO;
+        if (result == PoweredInitResult::controller_guard_failed && restored) {
+            if (controller_check == PoweredControllerCheck::unsupported_type)
+                error = Error::UNSUPPORTED;
+            else if (controller_check == PoweredControllerCheck::output_busy)
+                error = Error::BUSY;
+        }
+        return Result<void>::failure(error);
+    }
     initialized_ = true;
     return Result<void>::success();
 }
@@ -213,6 +271,8 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
 Result<void> LibusbW3u3Hardware::tune_terrestrial(
     std::uint8_t receiver, std::uint32_t frequency_khz,
     std::uint32_t timeout_ms) noexcept {
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<void>::failure(Error::USB_IO);
     if (!claimed_ || receiver != 1U || !initialized_ || frequency_khz != 557142U)
         return Result<void>::failure(Error::UNSUPPORTED);
     if (!run_plan(plan_terrestrial_tune_full(frequency_khz, 6U), timeout_ms))
@@ -229,6 +289,8 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t, std::uint32_t,
 
 Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver,
                                            System system) noexcept {
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<bool>::failure(Error::USB_IO);
     if (receiver != 1U || system != System::ISDB_T || !tuned_)
         return Result<bool>::failure(Error::UNSUPPORTED);
     std::uint8_t lock = 0;
@@ -261,6 +323,8 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept 
 }
 Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System system,
                                                  std::uint8_t lnb_voltage) noexcept {
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<void>::failure(Error::USB_IO);
     if (receiver != 1U || system != System::ISDB_T || lnb_voltage != 0U)
         return Result<void>::failure(Error::UNSUPPORTED);
     // Power-on is part of the source-verified open sequence. The portable
@@ -356,6 +420,8 @@ bool LibusbW3u3Hardware::expired() const {
 
 Result<void> LibusbW3u3Hardware::prepare(
     std::uint8_t receiver, System system, const std::atomic<bool>& cancelled_flag) noexcept {
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<void>::failure(Error::USB_IO);
     if (!claimed_ || receiver != 1U || system != System::ISDB_T || !tuned_ ||
         source_prepared_ || stop_requested_.load())
         return Result<void>::failure(Error::UNSUPPORTED);
@@ -419,7 +485,8 @@ Result<void> LibusbW3u3Hardware::prepare(
 CaptureRunResult LibusbW3u3Hardware::run(
     const std::atomic<bool>& cancelled_flag,
     bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept {
-    if (!source_prepared_ || emit == nullptr) return CaptureRunResult::usb_error;
+    if (cleanup_failed_ || !source_prepared_ || emit == nullptr)
+        return CaptureRunResult::usb_error;
     AsyncState& state = *async_;
     CaptureRunResult outcome = CaptureRunResult::cancelled;
     while (!cancelled_flag.load() && !stop_requested_.load() &&
@@ -606,21 +673,30 @@ bool LibusbW3u3Hardware::set_cf_bit(std::uint8_t mask, bool value) noexcept {
     return next == current || write_cf40(1U, next);
 }
 bool LibusbW3u3Hardware::snapshot_link_diagnostic() {
-    ControlTransfer rev{0, Request::SysCtrlRead, 2, 0, 3, Direction::In, 1000};
-    std::array<unsigned char, 3> response{};
     std::uint8_t type_reg = 0;
-    return control(rev, response.data()) == rev.length && response[0] == 1U &&
-           response[1] == 0x11U && response[2] == 0x52U &&
-           read_i2c(0x4aU, 0x09U, 1U, &type_reg) && ((type_reg & 0x3eU) >> 1U) == 0x0fU &&
+    return verify_device_revision() &&
+           read_i2c(0x4aU, 0x09U, 1U, &type_reg) &&
+           ((type_reg & 0x3eU) >> 1U) == 0x0fU &&
            link_diagnostic_.snapshot_idle(this);
 }
-bool LibusbW3u3Hardware::verify_link_identity() noexcept {
+bool LibusbW3u3Hardware::verify_device_revision() noexcept {
     ControlTransfer rev{0, Request::SysCtrlRead, 2, 0, 3, Direction::In, 1000};
     std::array<unsigned char, 3> response{};
-    std::uint8_t type = 0;
     return control(rev, response.data()) == rev.length && response[0] == 1U &&
-           response[1] == 0x11U && response[2] == 0x52U &&
-           read_i2c(0x4aU, 0x09U, 1U, &type) && ((type & 0x3eU) >> 1U) == 0x0fU;
+           response[1] == 0x11U && response[2] == 0x52U;
+}
+LibusbW3u3Hardware::PoweredControllerCheck
+LibusbW3u3Hardware::verify_powered_controller() noexcept {
+    std::uint8_t type = 0xffU;
+    std::uint8_t state = 0xffU;
+    if (!read_i2c(0x4aU, 0x09U, 1U, &type))
+        return PoweredControllerCheck::type_read_failed;
+    if (((type & 0x3eU) >> 1U) != 0x0fU)
+        return PoweredControllerCheck::unsupported_type;
+    if (!read_controller05(&state))
+        return PoweredControllerCheck::output_state_read_failed;
+    return state == 0U ? PoweredControllerCheck::ready
+                       : PoweredControllerCheck::output_busy;
 }
 bool LibusbW3u3Hardware::apply_link_seed() {
     return link_diagnostic_.apply(this, link_seed_.data(), link_seed_.size());

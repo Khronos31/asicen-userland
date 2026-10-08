@@ -49,6 +49,12 @@ public:
     virtual bool restore_gpio_snapshot_safely() noexcept = 0;
 };
 
+// Cleanup uncertainty quarantines normal frontend work. Shutdown cleanup
+// routines remain callable so they can still retry safe restoration.
+constexpr bool frontend_io_allowed_after_cleanup(bool cleanup_failed) noexcept {
+    return !cleanup_failed;
+}
+
 CaptureRunResult drain_capture_callbacks(CaptureDrainOps& ops,
                                          bool dsc_attempted,
                                          bool dsc_already_stopped,
