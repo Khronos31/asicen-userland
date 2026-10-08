@@ -97,6 +97,8 @@ void usage(const char* argv0) {
         << " --device BUS:ADDRESS --port BUS-PORT --reg R [--local L] [--length N]"
            " demod-read\n"
         << "  " << argv0
+        << " --device BUS:ADDRESS --port BUS-PORT [--local 1] gain-once\n"
+        << "  " << argv0
         << " --device BUS:ADDRESS --port BUS-PORT --reset-state 0|1 [--local L] [--output PATH|-]"
            " [--seconds N] [--packet-count N] [--queue-depth 1|4] capture\n"
         << "\n"
@@ -108,6 +110,7 @@ void usage(const char* argv0) {
         << "         --filter-repeat before|after (experimental A/B; requires --filter-start, local 1, reset 1, queue 4)\n"
         << "         --queue-diagnostics (capture only; queue depth 4, bounded callback trace to stderr)\n"
         << "         --link-seed-file PATH (experimental capture only; exact 16-byte owner-private file, mode 0600)\n"
+        << "         gain-once (one source-recovered terrestrial FC0012 feedback step)\n"
         << "         --shared-demod (init/terrestrial only; also initialize satellite demod over I2C)\n"
         << "\n"
         << "Explicit-target frontend diagnostics. Every write verifies the fresh\n"
@@ -184,7 +187,8 @@ struct SeedWiper {
 
 const char* kCommands[] = {"power-on",     "restore-sibling", "init",
                            "tune",         "lock",            "terrestrial",
-                           "demod-read",   "capture",         "stream-setup"};
+                           "demod-read",   "capture",         "stream-setup",
+                           "gain-once"};
 
 bool is_command(const std::string& value) {
     for (const char* command : kCommands) {
@@ -1392,6 +1396,12 @@ int main(int argc, char** argv) {
             return 2;
         }
         plan = asicen::plan_stream_setup(args.local, args.reset_state);
+    } else if (args.command == "gain-once") {
+        if (args.local != 1) {
+            std::cerr << "gain-once is restricted to terrestrial local 1\n";
+            return 2;
+        }
+        plan = asicen::plan_fc0012_gain_once(1, 0);
     } else if (args.command == "capture") {
         if (!args.have_reset_state) {
             std::cerr << "capture requires --reset-state 0 or 1; source ctrl[0] is unresolved\n";

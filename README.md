@@ -95,6 +95,14 @@ satellite-demod register facts; it performs no satellite RF tuning or LNB
 enablement. Direct TS reception additionally required link preparation and
 the RF gain adjustment described in the direct receive evidence above.
 
+After terrestrial tuning, the opt-in `gain-once` command runs one conditional
+FC0012 feedback step using live register reads. It is restricted to local1,
+does not run periodically, and leaves the gain adjustment active for capture:
+
+```sh
+build/asicen-frontend --device BUS:ADDRESS --port BUS-PORT gain-once
+```
+
 `capture` saves raw bulk bytes rather than validated MPEG-TS. It requires
 `--reset-state 0|1` because the original caller's reset-state default remains
 unresolved, together with finite `--seconds` and optional `--output PATH|-`.
@@ -108,7 +116,11 @@ lock, repeats the source filter-reset operation at the selected point, logs CF
 boundary bytes and elapsed time, and restores/verifies the complete original
 CF block after cleanup. It is not a default acquisition requirement; the
 source's later polling path does not establish this as a mandatory sequence.
-The controller register05 setting remains an external test condition and is
-not changed by this command.
+Without `--link-seed-file`, controller register05 remains an external test
+condition. The opt-in [link diagnostic](docs/reverse-engineering/direct-link-diagnostic.md)
+requires a private16-byte seed file, sets the source-backed output state, and
+checks output shutdown after capture. `asicen-transform` then frames and
+decodes the saved raw bytes offline. Seed register state cannot be read back;
+the diagnostic reports this limitation explicitly.
 See [SPEC.md](SPEC.md) for the px4 CLI compatibility target and acceptance gates.
 Source attribution and component license details are in [NOTICES.md](NOTICES.md).

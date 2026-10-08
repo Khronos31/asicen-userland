@@ -52,6 +52,8 @@ enum class FrontendOpKind : std::uint8_t {
     // tuner-reg13/LNA/adapter/reg0e passes, demod 0x1c reset, FC0012 re-init,
     // then demod 0x0f, ReAcqDemod and demod 0x23=0x4c.
     TerrestrialTune,
+    // One source-recovered terrestrial FC0012 feedback step (Fiti_LAN_Gain).
+    Fc0012GainOnce,
     // USB_FilterReset(block_rmw=1): read the 0x45-byte CF block, set/clear
     // byte 0x40 bit2 from `flag` (the separate reset value), call ResetChannel,
     // then write back. `block_rmw` is the third argument; `flag` is the fourth.
@@ -140,6 +142,11 @@ FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz);
 FrontendPlan plan_terrestrial_tune_full(std::uint32_t freq_khz,
                                         std::uint8_t bandwidth_mhz);
 FrontendPlan plan_terrestrial_lock_read(std::uint32_t freq_khz);
+// One terrestrial feedback iteration. It performs the source-derived tuner
+// reads and only the conditional FC0012 writes selected by those readings.
+// Recovered from TunerControl.o Fiti_LAN_Gain (.text 0x13a0); this is an
+// explicit diagnostic command, never an automatic capture/setup step.
+FrontendPlan plan_fc0012_gain_once(std::uint8_t local, std::uint8_t source = 0);
 
 enum class FrontendRunResult : std::uint8_t {
     Completed,

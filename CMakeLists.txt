@@ -243,6 +243,11 @@ if(ASICEN_BUILD_TESTS)
   target_compile_options(asicen-frontend-tune-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-frontend-tune-tests COMMAND asicen-frontend-tune-tests)
 
+  add_executable(asicen-frontend-gain-tests userland/tests/frontend_gain_tests.cpp)
+  target_link_libraries(asicen-frontend-gain-tests PRIVATE asicen_core)
+  target_compile_options(asicen-frontend-gain-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-frontend-gain-tests COMMAND asicen-frontend-gain-tests)
+
   add_executable(asicen-stream-capture-tests userland/tests/stream_capture_tests.cpp)
   target_link_libraries(asicen-stream-capture-tests PRIVATE asicen_core)
   target_compile_options(asicen-stream-capture-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

@@ -17,6 +17,8 @@
 //   - FC0012 init table       InitRFDevice              .text 0x1970
 //   - FC0012 RSSI + PLL       FC0012_RSSI_Calibration   .text 0x1ae0,
 //                             Adpater_SetFreqISDBT      .text 0x1c50
+//   - FC0012 feedback step    Fiti_LAN_Gain              .text 0x13a0,
+//                             threshold/table scalars    .data 0x168..0x188
 //   - terrestrial lock        TC_IsLocked               .text 0x0880
 // No vendor object code, crypto material or large table is copied: the
 // demodulator init table is a 22-entry register/value fact, and the FC0012
@@ -325,6 +327,102 @@ FrontendRunResult run_vco_calibration(FrontendTransport* transport, const Fronte
         transport->delay_ms(1);
     }
     return FrontendRunResult::Completed;
+}
+
+FrontendRunResult run_fc0012_gain_once(FrontendTransport* transport,
+                                       const FrontendOp& op,
+                                       FrontendRunReport* report) {
+    // Fiti_LAN_Gain returns success without tuner I/O for source 1. The
+    // terrestrial CLI selects source 0; accepting source 1 here keeps the
+    // recovered branch explicit and independently testable.
+    if (op.source == 1) return FrontendRunResult::Completed;
+    if (op.local > 1 || op.source != 0) return FrontendRunResult::InvalidArgument;
+
+    const auto read = [&](std::uint8_t reg, std::uint8_t* value) {
+        return run_sequence(transport, build_tuner_read(op.local, 0, reg, 1),
+                            value, report);
+    };
+    const auto write = [&](std::uint8_t reg, std::uint8_t value) {
+        return run_sequence(transport, build_tuner_write(op.local, 0, reg, value),
+                            nullptr, report);
+    };
+    FrontendRunResult result = write(0x12, 0x00);
+    if (result != FrontendRunResult::Completed) return result;
+    std::uint8_t r12 = 0, r13 = 0, r0d = 0, r10 = 0;
+    result = read(0x12, &r12);
+    if (result != FrontendRunResult::Completed) return result;
+    result = read(0x13, &r13);
+    if (result != FrontendRunResult::Completed) return result;
+    r13 &= 0x1fU;
+    result = read(0x0d, &r0d);
+    if (result != FrontendRunResult::Completed) return result;
+    if ((r0d & 0x10U) == 0) {
+        result = write(0x10, 0x00);
+        if (result != FrontendRunResult::Completed) return result;
+    }
+    result = read(0x10, &r10);
+    if (result != FrontendRunResult::Completed) return result;
+
+    // The vendor calculates its scalar from the reg-0x12 sample, while the
+    // reg-0x10 read above is part of the routine's observable I/O sequence.
+    constexpr std::uint8_t kGainTable[8] = {10, 8, 6, 4, 2, 0, 0, 0};
+    const unsigned gain = static_cast<unsigned>(r12 & 0x1fU) * 2U +
+                          kGainTable[(r12 >> 5U) & 0x07U];
+    constexpr unsigned kLevel1 = 52;
+    constexpr unsigned kLevel2 = 54;
+    constexpr unsigned kLevel3 = 42;
+    constexpr unsigned kLevel4 = 56;
+    constexpr unsigned kLevel5 = 32;
+    constexpr unsigned kLevel6 = 54;
+
+    // Shared adjustment branch: clear reg0d bit4, reset/read reg10, then
+    // restore bit4 and apply the source's three-count adjustment.
+    const auto adjust_gain = [&](std::uint8_t final_r13) {
+        std::uint8_t current_d = 0, current_10 = 0;
+        FrontendRunResult step = read(0x0d, &current_d);
+        if (step != FrontendRunResult::Completed) return step;
+        step = write(0x0d, static_cast<std::uint8_t>(current_d & 0xefU));
+        if (step != FrontendRunResult::Completed) return step;
+        step = write(0x10, 0x00);
+        if (step != FrontendRunResult::Completed) return step;
+        step = read(0x10, &current_10);
+        if (step != FrontendRunResult::Completed) return step;
+        const std::uint8_t adjusted = static_cast<std::uint8_t>(current_10 - 3U);
+        step = read(0x0d, &current_d);
+        if (step != FrontendRunResult::Completed) return step;
+        step = write(0x0d, static_cast<std::uint8_t>(current_d | 0x10U));
+        if (step != FrontendRunResult::Completed) return step;
+        step = write(0x10, adjusted);
+        if (step != FrontendRunResult::Completed) return step;
+        return write(0x13, final_r13);
+    };
+    const auto set_r13_after_clear = [&](std::uint8_t final_r13) {
+        std::uint8_t current_d = 0;
+        FrontendRunResult step = read(0x0d, &current_d);
+        if (step != FrontendRunResult::Completed) return step;
+        step = write(0x0d, static_cast<std::uint8_t>(current_d & 0xefU));
+        if (step != FrontendRunResult::Completed) return step;
+        return write(0x13, final_r13);
+    };
+
+    if (r13 == 0x0aU) {
+        if (gain > kLevel4) result = set_r13_after_clear(0x14);
+        else if (gain >= kLevel5) return FrontendRunResult::Completed;
+        else result = adjust_gain(0x02);
+    } else if (r13 == 0x02U) {
+        if (gain <= kLevel6) return FrontendRunResult::Completed;
+        result = adjust_gain(0x0a);
+    } else if (r13 == 0x14U) {
+        if (gain > kLevel2) result = set_r13_after_clear(0x10);
+        else if (gain >= kLevel3) return FrontendRunResult::Completed;
+        else result = adjust_gain(0x0a);
+    } else if (r13 == 0x10U) {
+        if (gain >= kLevel1) return FrontendRunResult::Completed;
+        result = set_r13_after_clear(0x14);
+    } else {
+        result = set_r13_after_clear(0x10);
+    }
+    return result;
 }
 
 struct RegisterValue {
@@ -714,6 +812,18 @@ FrontendPlan plan_terrestrial_lock_read(std::uint32_t freq_khz) {
     return plan;
 }
 
+FrontendPlan plan_fc0012_gain_once(std::uint8_t local, std::uint8_t source) {
+    FrontendPlan plan;
+    if (local > 1 || source > 1) return plan;
+    FrontendOp op{};
+    op.kind = FrontendOpKind::Fc0012GainOnce;
+    op.local = local;
+    op.source = source;
+    op.label = "FC0012 gain feedback once (Fiti_LAN_Gain)";
+    plan.push_back(op);
+    return plan;
+}
+
 FrontendPlan plan_stream_setup(std::uint8_t local) {
     return plan_stream_setup(local, 1);
 }
@@ -967,6 +1077,9 @@ FrontendRunResult run_plan_ops(const FrontendPlan& plan, FrontendTransport* tran
                 break;
             case FrontendOpKind::TerrestrialTune:
                 result = run_terrestrial_tune(transport, op, report);
+                break;
+            case FrontendOpKind::Fc0012GainOnce:
+                result = run_fc0012_gain_once(transport, op, report);
                 break;
             case FrontendOpKind::FilterReset:
                 result = run_filter_reset(transport, op);
