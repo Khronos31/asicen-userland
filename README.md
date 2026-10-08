@@ -5,7 +5,11 @@ starting with the original PX-W3U3. Based on the protocol skeleton and evidence
 from [asicen-research](https://github.com/Khronos31/asicen-research).
 
 This repository is private during development. Public visibility is planned for
-the 0.1.0 release. Both USB functions have booted and responded to read-only
+the 0.1.0 release. **Distribution parity is not implemented:** the current
+native development binaries depend on glibc and dynamically linked libusb;
+the nine px4-equivalent platform archives, static builds and packaging audits
+are still required. See the [compatibility audit](docs/compatibility-audit-2026-10-09.md).
+Both USB functions have booted and responded to read-only
 queries. One terrestrial lane has tuned and locked on the attached PX-W3U3.
 The isolated official Linux environment now captures terrestrial TS; replacing
 its faulty multi-block DES routine also yielded valid PAT/PMT and decodable

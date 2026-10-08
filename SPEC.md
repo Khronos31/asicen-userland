@@ -45,6 +45,47 @@ source. recisdb remains an external downstream program.
 
 ## Acceptance increments
 
+### Distribution contract (clarified 2026-10-09)
+
+px4-userland compatibility includes its distribution targets and dependency
+contract, not only CLI spelling. This requirement is currently **UNMET**;
+successful native development builds and TS trials do not satisfy it.
+The audit baseline is px4-userland `3de7d512cef11756e6f033557ee49917cad2f11c`,
+SPEC section 10.4 and its release-candidate workflow.
+
+- Distribute the three product commands `asicend`, `asicen-ts`, `asicenctl`,
+  plus the applicable native card adapter and Android launcher. Research
+  diagnostics are not substitutes for product commands or platform artifacts.
+- Produce nine binary archives: Linux x86_64 and aarch64, each with glibc and
+  musl IFD variants; macOS arm64; Android aarch64, armv7a and x86_64; Windows
+  x86_64. Also provide one corresponding-source archive and SHA256SUMS.
+- Linux's three commands must be musl fully static executables, with no
+  PT_INTERP, DT_NEEDED or GLIBC version requirements. Merely statically
+  linking glibc does not satisfy this contract. Both Linux archive variants
+  use the same libc-independent command binaries for their architecture.
+- Linux IFD is a shared plugin loaded by host pcscd: provide a glibc 2.31
+  compatible variant and a musl variant, as px4-userland does. The command
+  binary independence requirement must not be misrepresented as an IFD ABI
+  guarantee across different host libcs.
+- Statically include libusb wherever the product links it. Clients/IFD that
+  use only IPC need not acquire an unnecessary libusb dependency. macOS may
+  depend on system libraries/frameworks; Android may depend on API24+ Bionic.
+  The reference Windows package currently ships a libusb DLL; that is a
+  reference difference, not permission to silently waive the user's static
+  libusb requirement for ASICEN's Windows build.
+- Package exact dependency licenses/notices, corresponding source and
+  reproducible build/relink materials alongside the binaries. Audit the
+  final archive inventory, machine architecture and dynamic dependencies;
+  run smoke tests from those archives rather than unrelated build trees.
+- Keep all targets in the acceptance matrix. An unavailable build/runtime
+  or unverified hardware path remains explicitly unverified, never omitted
+  or inferred from Linux x86_64 results. No release/publication is authorized
+  by this clarification.
+
+See [the compatibility audit](docs/compatibility-audit-2026-10-09.md) for the
+observed gaps and executable checks. The following reception increments
+remain useful development milestones, not a replacement for this contract.
+
 1. Enclosure bring-up: observe two runtime `0b06:0005` functions on the original
    sibling port paths, each with endpoints `81`/`82` and successful read-only
    queries. Establish the GPIO sequence from original-driver evidence before

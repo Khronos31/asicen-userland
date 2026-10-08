@@ -1,5 +1,11 @@
 # px4-userland CLI adaptation boundary
 
+Current compatibility verdict: see the
+[2026-10-09 audit](compatibility-audit-2026-10-09.md).
+This historical increment record does not establish distribution parity.
+Primary satellite and live internal-card use were added after its original
+hardware section; see the [live trial](reverse-engineering/live-card-stream-trial-2026-10-09.md).
+
 Reference revision: `Khronos31/px4-userland`
 `d51c83e1d7eeb829fd61f87f6ea93ad2043b9d00` (local source inspected).
 This document records the portable CLI increment and its original review.
