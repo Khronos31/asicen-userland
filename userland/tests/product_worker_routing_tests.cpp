@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 using namespace px4::userland;
