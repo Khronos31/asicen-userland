@@ -78,6 +78,7 @@ struct ControlEvent {
     std::uint16_t value = 0;
     std::uint16_t index = 0;
     std::uint16_t timeout_ms = 0;
+    std::chrono::steady_clock::time_point at{};
 };
 
 struct FakeUsb {
@@ -195,7 +196,7 @@ struct FakeUsb {
 
     int control(const ControlTransfer& transfer, unsigned char* response) {
         controls.push_back({transfer.request, transfer.value, transfer.index,
-                            transfer.timeout_ms});
+                            transfer.timeout_ms, std::chrono::steady_clock::now()});
         const auto status = [&] {
             if (response != nullptr && transfer.length > 0U) response[0] = 1U;
             return static_cast<int>(transfer.length);
@@ -632,15 +633,21 @@ bool test_satellite_slot_wait_uses_deadline_including_gate_wait() {
 
     std::atomic<int> result{static_cast<int>(Error::OK)};
     std::atomic<bool> started{false};
+    std::chrono::steady_clock::time_point invoke_at{};
+    std::chrono::steady_clock::time_point release_at{};
+    std::chrono::steady_clock::time_point done_at{};
     std::thread waiter([&] {
+        invoke_at = std::chrono::steady_clock::now();
         started.store(true, std::memory_order_release);
         const auto selected = hardware.select_satellite_slot(0U, 0U, 100U);
         result.store(selected ? static_cast<int>(Error::OK)
                               : static_cast<int>(selected.error()),
                      std::memory_order_release);
+        done_at = std::chrono::steady_clock::now();
     });
     while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
     std::this_thread::sleep_for(std::chrono::milliseconds(70));
+    release_at = std::chrono::steady_clock::now();
     LibusbW3u3HardwareTestPeer::end_card_operation(hardware);
     waiter.join();
 
@@ -649,6 +656,15 @@ bool test_satellite_slot_wait_uses_deadline_including_gate_wait() {
     for (const auto& event : fake.controls) {
         if (event.request == Request::I2cRead)
             max_read_timeout = std::max(max_read_timeout, event.timeout_ms);
+    }
+    if (max_read_timeout == 0U) {
+        std::fprintf(stderr, "deadline diag result=%d call-signal-to-release-ms=%lld release-to-return-ms=%lld controls=%zu first-control-timeout-ms=%u first-control-after-release-ms=%lld\n",
+                     result.load(),
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(release_at - invoke_at).count()),
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(done_at - release_at).count()),
+                     fake.controls.size(),
+                     fake.controls.empty() ? 0U : fake.controls.front().timeout_ms,
+                     fake.controls.empty() ? -1LL : static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(fake.controls.front().at - release_at).count()));
     }
     CHECK(max_read_timeout > 0U);
     CHECK(max_read_timeout <= 40U);
