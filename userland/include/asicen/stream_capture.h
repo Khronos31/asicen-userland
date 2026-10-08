@@ -41,8 +41,9 @@ struct CaptureStats {
     std::uint64_t bytes = 0;
     bool limit_reached = false;
     bool cf40_restore_failed = false;
-    bool link_state_restore_failed = false;
+    bool link_seed_cleanup_failed = false;
     bool link_seed_apply_failed = false;
+    bool link_seed_state_unverifiable = false;
 };
 
 bool parse_cf40_read_response(int transferred, const unsigned char* response,
@@ -85,11 +86,11 @@ public:
                                      std::chrono::steady_clock::time_point deadline) {
         (void)local; (void)reset_state; (void)deadline; return false;
     }
-    // Explicit experimental link preparation. Implementations must never log
-    // seed bytes, derived material, or saved register contents.
-    virtual bool snapshot_link_state() { return false; }
+    // Explicit experimental write-only link diagnostic. The hardware seed
+    // latch cannot be read back; implementations must never claim restoration.
+    virtual bool snapshot_link_diagnostic() { return false; }
     virtual bool apply_link_seed() { return false; }
-    virtual bool restore_link_state() { return false; }
+    virtual bool clear_link_seed_and_verify_controller() { return false; }
     virtual bool cancelled() const { return false; }
 };
 

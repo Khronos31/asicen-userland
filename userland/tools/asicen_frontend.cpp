@@ -25,7 +25,7 @@
 #include "asicen/device_profile.h"
 #include "asicen/frontend_sequence.h"
 #include "asicen/libusb_transport.h"
-#include "asicen/link_seed_state.h"
+#include "asicen/link_seed_diagnostic.h"
 #include "asicen/protocol.h"
 #include "asicen/queued_capture.h"
 #include "asicen/stream_capture.h"
@@ -551,7 +551,7 @@ int poll_lock(asicen::LibusbDevice* device, std::uint32_t frequency_khz,
 }
 
 class LibusbCaptureBackend final : public asicen::CaptureBackend,
-                                   public asicen::LinkSeedStateIo {
+                                   public asicen::LinkSeedDiagnosticIo {
 public:
     explicit LibusbCaptureBackend(asicen::LibusbDevice* device) : device_(device) {}
     ~LibusbCaptureBackend() override { link_seed_.fill(0); }
@@ -751,16 +751,21 @@ public:
         return valid;
     }
 
-    bool snapshot_link_state() override { return link_state_.snapshot(this); }
-    bool apply_link_seed() override {
-        return link_state_.apply(this, link_seed_.data(), link_seed_.size());
+    bool snapshot_link_diagnostic() override {
+        const bool idle = link_diagnostic_.snapshot_idle(this);
+        if (!idle)
+            std::cerr << "link diagnostic idle check failed (controller05 must read 0x00); "
+                         "no seed writes were issued\n";
+        return idle;
     }
-    bool restore_link_state() override { return link_state_.restore_and_verify(this); }
+    bool apply_link_seed() override {
+        return link_diagnostic_.apply(this, link_seed_.data(), link_seed_.size());
+    }
+    bool clear_link_seed_and_verify_controller() override {
+        return link_diagnostic_.clear_and_verify_controller(this);
+    }
     bool read_controller05(std::uint8_t* value) override {
         return read_i2c(0x4a, 0x05, 1, value);
-    }
-    bool read_link_seed(std::uint8_t* values, std::size_t size) override {
-        return size == 16 && read_i2c(0x4a, 0x10, 16, values);
     }
     bool write_controller05(std::uint8_t value) override {
         return write_i2c_byte(0x4a, 0x05, value);
@@ -800,7 +805,7 @@ private:
 
     asicen::LibusbDevice* device_;
     std::array<std::uint8_t, 16> link_seed_{};
-    asicen::LinkSeedState link_state_{};
+    asicen::LinkSeedDiagnostic link_diagnostic_{};
 };
 
 class LibusbQueuedCaptureIo final : public asicen::QueuedCaptureIo {
@@ -1247,11 +1252,14 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
             cf_block_guard.disarm();
         }
     }
+    if (stats.link_seed_state_unverifiable)
+        std::cerr << "seed_state_unverifiable=yes: link-register reads do not reflect writes; "
+                     "zero-write cleanup is acknowledged but erasure is not verified\n";
     if (stats.link_seed_apply_failed)
-        std::cerr << "link seed apply/readback failed; capture was aborted\n";
-    if (stats.link_state_restore_failed)
-        std::cerr << "ERROR: link seed/controller05 restoration or readback failed; "
-                     "restore is skipped when DSC stop fails\n";
+        std::cerr << "link seed writes or controller05=a0 readback failed; capture was aborted\n";
+    if (stats.link_seed_cleanup_failed)
+        std::cerr << "ERROR: link cleanup failed; prior seed state cannot be proven restored; "
+                     "cleanup is skipped if DSC stop fails\n";
 
     if (args.queue_diagnostics) {
         std::cerr << "queue diagnostics callbacks=" << queue_observation.callback_count

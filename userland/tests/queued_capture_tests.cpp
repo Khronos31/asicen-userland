@@ -45,7 +45,7 @@ public:
     std::uint8_t pulse_cf40 = 0;
     bool fail_link_snapshot = false;
     bool fail_link_apply = false;
-    bool fail_link_restore = false;
+    bool fail_link_cleanup = false;
 
     bool dsc_start(std::uint8_t) override {
         trace_->push_back("dsc-start");
@@ -118,7 +118,7 @@ public:
         pulse_cf40 = cf40;
         return true;
     }
-    bool snapshot_link_state() override {
+    bool snapshot_link_diagnostic() override {
         trace_->push_back("link-snapshot");
         return !fail_link_snapshot;
     }
@@ -126,9 +126,9 @@ public:
         trace_->push_back("link-apply");
         return !fail_link_apply;
     }
-    bool restore_link_state() override {
-        trace_->push_back("link-restore");
-        return !fail_link_restore;
+    bool clear_link_seed_and_verify_controller() override {
+        trace_->push_back("link-cleanup-zero-and-05-readback");
+        return !fail_link_cleanup;
     }
     bool cancelled() const override { return cancel; }
 
@@ -523,7 +523,7 @@ void filter_restore_failure_is_reported() {
           "restoration failure still follows DSC stop and callback drain");
 }
 
-void link_seed_is_applied_after_dsc_and_restored_after_drain() {
+void link_seed_is_applied_after_dsc_and_zeroed_after_drain() {
     std::vector<std::string> trace;
     Control control(&trace);
     Queue queue(&trace);
@@ -539,23 +539,24 @@ void link_seed_is_applied_after_dsc_and_restored_after_drain() {
         return static_cast<std::size_t>(std::distance(trace.begin(), it));
     };
     check(result == asicen::CaptureOutcome::Completed,
-          "link seed queue capture completes and restores");
+          "link seed queue capture completes and runs acknowledged cleanup");
     check(position("link-snapshot") < position("prepare") &&
               position("dsc-start") < position("link-apply") &&
               position("link-apply") < position("dsc-stop") &&
-              position("cancel-drain") < position("link-restore") &&
-              position("link-restore") < position("release"),
-          "link snapshot, DSC/apply and stop/drain/restore ordering is enforced");
-    check(!stats.link_state_restore_failed && !stats.link_seed_apply_failed,
-          "successful link state cleanup is reported");
+              position("cancel-drain") < position("link-cleanup-zero-and-05-readback") &&
+              position("link-cleanup-zero-and-05-readback") < position("release"),
+          "link snapshot, DSC/apply and stop/drain/zero-cleanup ordering is enforced");
+    check(!stats.link_seed_cleanup_failed && !stats.link_seed_apply_failed &&
+              stats.link_seed_state_unverifiable,
+          "cleanup passes while seed-register state remains explicitly unverifiable");
 }
 
-void link_seed_partial_apply_and_restore_failures_are_reported() {
-    for (const bool restore_failure : {false, true}) {
+void link_seed_partial_apply_and_cleanup_failures_are_reported() {
+    for (const bool cleanup_failure : {false, true}) {
         std::vector<std::string> trace;
         Control control(&trace);
         control.fail_link_apply = true;
-        control.fail_link_restore = restore_failure;
+        control.fail_link_cleanup = cleanup_failure;
         Queue queue(&trace);
         Output output;
         asicen::CaptureStats stats{};
@@ -565,16 +566,17 @@ void link_seed_partial_apply_and_restore_failures_are_reported() {
             &original[0x40], nullptr, asicen::FilterRepeat::None, 1, nullptr, true);
         check(result == asicen::CaptureOutcome::UsbFailed && stats.link_seed_apply_failed,
               "link apply failure is an explicit capture failure");
-        check(stats.link_state_restore_failed == restore_failure,
-              "link restore result is separately reported");
+        check(stats.link_seed_cleanup_failed == cleanup_failure,
+              "link cleanup result is separately reported");
         const auto drain = std::find(trace.begin(), trace.end(), "cancel-drain");
-        const auto restore = std::find(trace.begin(), trace.end(), "link-restore");
-        check(drain != trace.end() && restore != trace.end() && drain < restore,
-              "partial link writes restore only after transfer drain");
+        const auto cleanup = std::find(trace.begin(), trace.end(),
+                                       "link-cleanup-zero-and-05-readback");
+        check(drain != trace.end() && cleanup != trace.end() && drain < cleanup,
+              "partial link writes are zeroed only after transfer drain");
     }
 }
 
-void link_seed_is_not_restored_if_dsc_stop_fails() {
+void link_seed_is_not_cleared_if_dsc_stop_fails() {
     std::vector<std::string> trace;
     Control control(&trace);
     control.stop_result = false;
@@ -587,10 +589,11 @@ void link_seed_is_not_restored_if_dsc_stop_fails() {
         &control, &queue, &output, request(4), 4, &stats, true,
         &original[0x40], nullptr, asicen::FilterRepeat::None, 1, nullptr, true);
     check(result == asicen::CaptureOutcome::StopFailed &&
-              stats.link_state_restore_failed,
-          "failed DSC stop prevents unsafe link-state restore and fails capture");
-    check(std::find(trace.begin(), trace.end(), "link-restore") == trace.end(),
-          "link state is not restored while device-side stream may remain active");
+              stats.link_seed_cleanup_failed,
+          "failed DSC stop prevents link cleanup and fails capture");
+    check(std::find(trace.begin(), trace.end(),
+                    "link-cleanup-zero-and-05-readback") == trace.end(),
+          "seed writes are not zeroed while device-side stream may remain active");
     check(std::find(trace.begin(), trace.end(), "cancel-drain") != trace.end(),
           "host transfers are still drained after DSC stop failure");
 }
@@ -855,9 +858,9 @@ int main() {
     queue_observation_accounts_callbacks_once_and_bounds_events();
     queue_observation_preserves_normal_capture_accounting();
     queue_observation_counts_handoff_before_output_and_error_checks();
-    link_seed_is_applied_after_dsc_and_restored_after_drain();
-    link_seed_partial_apply_and_restore_failures_are_reported();
-    link_seed_is_not_restored_if_dsc_stop_fails();
+    link_seed_is_applied_after_dsc_and_zeroed_after_drain();
+    link_seed_partial_apply_and_cleanup_failures_are_reported();
+    link_seed_is_not_cleared_if_dsc_stop_fails();
     link_snapshot_failure_restores_filter_snapshot();
     filter_repeat_ab_orders_lock_reset_and_restoration();
     filter_repeat_failure_paths_restore_full_block();

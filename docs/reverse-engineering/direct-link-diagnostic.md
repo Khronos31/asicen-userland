@@ -26,22 +26,30 @@ type-0x0f conditions for selecting the v7 transform. The v7 packet transformer
 is a local implementation; no vendor library or authorization key table is
 linked.
 
-The read protocol is the ordinary I2C mode-0 path: request `0x02`,
+Controller reads use the ordinary I2C mode-0 path: request `0x02`,
 `wValue=(register<<8)|slave`, `wIndex=0`, vendor-IN, one status byte followed
-by payload; status must be `0x01`. This is the mode used by the recovered encryption-chip read
-helper and is independently observed for controller reads. Before applying a
-seed, the tool snapshots controller register `0x05` and link registers
-`0x10..0x1f` at slave `0x4a`. After the existing DSC start and queued host
-submission, it writes each seed byte with request `0x03`, then writes
-controller register `0x05 = 0xa0`. Every write checks full transfer length and
-status; the new state is read back before capture proceeds.
+by payload; status must be `0x01`. The recovered multi-byte seed-read helper
+also routes through this mode, but device measurements showed the bytes read
+from `0x10..0x1f` were identical before and after writes. That read window does
+not reveal the seed latch, so the tool never calls those bytes a seed snapshot
+or claims to restore a prior seed.
+
+Before applying anything, the diagnostic reads controller register `0x05` at
+slave `0x4a` and requires exactly `0x00` (output idle). After the existing DSC
+start and queued host submission, it writes each caller seed byte to
+`0x10..0x1f` with request `0x03`, then writes controller register `0x05 = 0xa0`.
+Each write checks full transfer length and status; controller `0x05` is read
+back as `0xa0`. Seed-register write acceptance is only a USB/I2C ACK, not
+readback proof.
 
 On completion or error, DSC is stopped and queued transfers are cancelled and
-drained before the saved seed bytes and controller `0x05` are restored and
-read back. If DSC stop fails, the tool skips link-state restoration because
-the device may still be streaming; it reports an error and fails. Failed
-partial application otherwise triggers restoration. Restoration write or
-readback failure is a hard error. The earlier CF/DSC/tuner setup is unchanged.
+drained before the diagnostic sends zero writes to `0x10..0x1f`, then writes
+controller `0x05 = 0x00` and verifies that controller value. Zero writes are
+cleanup requests only: their effect on the write-only seed latch is
+unverifiable. The tool reports `seed_state_unverifiable=yes` and fails if a
+cleanup ACK or controller readback fails. If DSC stop fails, it skips cleanup
+while the device may still be streaming and reports failure. The earlier
+CF/DSC/tuner setup is unchanged.
 For link-seed capture the raw output path must be new; exclusive creation
 prevents truncating the caller's seed if output and seed paths alias.
 

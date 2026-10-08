@@ -105,12 +105,12 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     }
     if (observation != nullptr) io->set_observation(observation);
 
-    bool link_snapshotted = false;
+    bool link_diagnostic_active = false;
     bool link_apply_attempted = false;
     bool link_apply_failed = false;
-    bool link_restored = true;
+    bool link_cleanup_ok = true;
     if (link_seed) {
-        if (!control->snapshot_link_state()) {
+        if (!control->snapshot_link_diagnostic()) {
             const bool cf_restored = repeat_enabled
                 ? restore_full_block()
                 : (initial_cf40 != nullptr &&
@@ -118,7 +118,7 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
             if (stats != nullptr) stats->cf40_restore_failed = !cf_restored;
             return CaptureOutcome::UsbFailed;
         }
-        link_snapshotted = true;
+        link_diagnostic_active = true;
     }
 
     std::uint8_t original_cf40 = 0;
@@ -208,6 +208,7 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     }
     if (dsc_started && !filter_failed && link_seed) {
         link_apply_attempted = true;
+        if (stats != nullptr) stats->link_seed_state_unverifiable = true;
         if (!control->apply_link_seed()) {
             link_apply_failed = true;
             filter_failed = true;
@@ -291,11 +292,12 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     }
     io->set_phase(QueuePhase::CancelDrain);
     io->cancel_and_drain();
-    if (link_snapshotted && link_apply_attempted) {
-        // Restoring controller output while DSC may still be active would
-        // violate the recovered stop/drain ordering. Report unsafe state and
-        // leave manual recovery explicit if the device-side stop failed.
-        link_restored = dsc_stopped && control->restore_link_state();
+    if (link_diagnostic_active && link_apply_attempted) {
+        // Seed registers are write-only through the recovered read path. After
+        // stop+drain, issue zero writes and verify controller05=0; never claim
+        // that the old seed was restored or that the latch was erased.
+        link_cleanup_ok = dsc_stopped &&
+                          control->clear_link_seed_and_verify_controller();
     }
     bool cf40_restored = true;
     if (repeat_enabled) {
@@ -309,11 +311,11 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         stats->bytes = total;
         stats->limit_reached = limit_reached;
         stats->cf40_restore_failed = cf40_snapshotted && !cf40_restored;
-        stats->link_state_restore_failed = link_apply_attempted && !link_restored;
+        stats->link_seed_cleanup_failed = link_apply_attempted && !link_cleanup_ok;
         stats->link_seed_apply_failed = link_apply_failed;
     }
     if (dsc_attempted && !dsc_stopped) return CaptureOutcome::StopFailed;
-    if (filter_failed || !cf40_restored || !link_restored) return CaptureOutcome::UsbFailed;
+    if (filter_failed || !cf40_restored || !link_cleanup_ok) return CaptureOutcome::UsbFailed;
     if (output_failed) return CaptureOutcome::OutputFailed;
     if (usb_failed) return CaptureOutcome::UsbFailed;
     if (cancelled) return CaptureOutcome::Cancelled;
