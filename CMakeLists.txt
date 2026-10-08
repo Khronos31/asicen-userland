@@ -267,6 +267,17 @@ if(ASICEN_BUILD_TESTS)
   target_compile_options(asicen-hardware-ownership-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-hardware-ownership-tests COMMAND asicen-hardware-ownership-tests)
 
+  if(ASICEN_ENABLE_LIBUSB)
+    add_executable(asicen-libusb-capture-lifecycle-tests
+      userland/tests/libusb_capture_lifecycle_tests.cpp)
+    target_link_libraries(asicen-libusb-capture-lifecycle-tests PRIVATE asicen_libusb)
+    target_compile_options(asicen-libusb-capture-lifecycle-tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME asicen-libusb-capture-lifecycle-tests
+      COMMAND asicen-libusb-capture-lifecycle-tests)
+    set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 20)
+  endif()
+
   add_executable(asicen-enclosure-lock-tests
     userland/tests/enclosure_lock_tests.cpp)
   target_include_directories(asicen-enclosure-lock-tests PRIVATE userland/include)

@@ -22,7 +22,8 @@ bool same_attachment(const TunerAttachment& a, const TunerAttachment& b) {
 }
 
 bool supported(std::uint8_t receiver, System system) {
-    return receiver == 1U && system == System::ISDB_T;
+    return (receiver == 0U && system == System::ISDB_S) ||
+           (receiver == 1U && system == System::ISDB_T);
 }
 }  // namespace
 
@@ -62,7 +63,7 @@ bool HardwareStreamService::requires_terrestrial_lock_settle() const noexcept {
 }
 
 Result<void> HardwareStreamService::open_receiver(std::uint8_t receiver) noexcept {
-    if (receiver != 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.open_receiver(receiver);
 }
 
@@ -74,8 +75,10 @@ Result<void> HardwareStreamService::tune_terrestrial(
 }
 
 Result<void> HardwareStreamService::tune_satellite(
-    std::uint8_t, std::uint32_t, std::uint32_t) noexcept {
-    return Result<void>::failure(Error::UNSUPPORTED);
+    std::uint8_t receiver, std::uint32_t frequency_khz,
+    std::uint32_t timeout_ms) noexcept {
+    if (receiver != 0U) return Result<void>::failure(Error::UNSUPPORTED);
+    return frontend_.tune_satellite(receiver, frequency_khz, timeout_ms);
 }
 
 Result<bool> HardwareStreamService::is_locked(std::uint8_t receiver,
@@ -85,17 +88,19 @@ Result<bool> HardwareStreamService::is_locked(std::uint8_t receiver,
 }
 
 Result<void> HardwareStreamService::select_satellite_slot(
-    std::uint8_t, std::uint8_t, std::uint32_t) noexcept {
-    return Result<void>::failure(Error::UNSUPPORTED);
+    std::uint8_t receiver, std::uint8_t slot, std::uint32_t timeout_ms) noexcept {
+    if (receiver != 0U) return Result<void>::failure(Error::UNSUPPORTED);
+    return frontend_.select_satellite_slot(receiver, slot, timeout_ms);
 }
 
 Result<void> HardwareStreamService::select_satellite_tsid(
-    std::uint8_t, std::uint16_t, std::uint32_t) noexcept {
-    return Result<void>::failure(Error::UNSUPPORTED);
+    std::uint8_t receiver, std::uint16_t tsid, std::uint32_t timeout_ms) noexcept {
+    if (receiver != 0U) return Result<void>::failure(Error::UNSUPPORTED);
+    return frontend_.select_satellite_tsid(receiver, tsid, timeout_ms);
 }
 
 Result<void> HardwareStreamService::close_receiver(std::uint8_t receiver) noexcept {
-    if (receiver != 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.close_receiver(receiver);
 }
 
@@ -107,17 +112,17 @@ Result<void> HardwareStreamService::begin_tune_power(
 }
 
 Result<void> HardwareStreamService::commit_tune_power(std::uint8_t receiver) noexcept {
-    if (receiver != 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.commit_tune_power(receiver);
 }
 
 Result<void> HardwareStreamService::rollback_tune_power(std::uint8_t receiver) noexcept {
-    if (receiver != 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.rollback_tune_power(receiver);
 }
 
 void HardwareStreamService::mark_receiver_disconnected(std::uint8_t receiver) noexcept {
-    if (receiver == 1U) frontend_.mark_receiver_disconnected(receiver);
+    if (receiver <= 1U) frontend_.mark_receiver_disconnected(receiver);
     request_stop();
 }
 

@@ -234,7 +234,12 @@ UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const {
         // cannot be using a nonzero alternate without changing configuration.
         result.active_alt0 = has_only_alt0 ? 0 : -1;
         for (std::uint8_t e = 0; e < interface0->bNumEndpoints; ++e) {
-            if (interface0->endpoint[e].bEndpointAddress == 0x82U) {
+            if (interface0->endpoint[e].bEndpointAddress == 0x81U) {
+                result.endpoint81_in_alt0 = true;
+                result.endpoint81_bulk_in_alt0 =
+                    (interface0->endpoint[e].bmAttributes &
+                     LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK;
+            } else if (interface0->endpoint[e].bEndpointAddress == 0x82U) {
                 result.endpoint82_in_alt0 = true;
                 result.endpoint82_bulk_in_alt0 =
                     (interface0->endpoint[e].bmAttributes &

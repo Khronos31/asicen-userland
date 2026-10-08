@@ -184,6 +184,19 @@ void test_rf_vectors_and_tune_plan() {
           "tuner messages have one source-derived 10ms delay");
 }
 
+void test_satellite_if_to_rf_conversion_is_exact() {
+    std::uint32_t rf = 0U;
+    check(asicen::w3u3_satellite_if_to_rf_khz(1049480U, &rf) &&
+          rf == 11727480U, "BS01 IF maps to the official RF row");
+    check(asicen::w3u3_satellite_if_to_rf_khz(1613000U, &rf) &&
+          rf == 12291000U, "CS02 IF maps to the official RF row");
+    rf = 0xdeadbeefU;
+    check(!asicen::w3u3_satellite_if_to_rf_khz(1049481U, &rf) &&
+          rf == 0xdeadbeefU, "non-row IF is rejected without output mutation");
+    check(!asicen::w3u3_satellite_if_to_rf_khz(1049480U, nullptr),
+          "null output is rejected");
+}
+
 void test_tune_stops_on_every_transfer_failure_and_cancel() {
     const auto plan = asicen::plan_w3u3_satellite_tune(11727480U);
     std::size_t control_count = 0;
@@ -382,12 +395,116 @@ void test_tsid_selection_validation_and_failures() {
     }
 }
 
+class TsidReadinessTransport final : public asicen::FrontendTransport {
+public:
+    int control(const asicen::ControlTransfer& transfer,
+                unsigned char* data) override {
+        transfers.push_back(transfer);
+        for (std::uint16_t i = 0; i < transfer.length; ++i) data[i] = 0;
+        if (transfer.request == asicen::Request::I2cRead &&
+            static_cast<std::uint8_t>(transfer.value >> 8U) == 0xceU) {
+            const std::size_t n = list_reads++;
+            const auto& values = snapshots[std::min(n, snapshots.size() - 1U)];
+            data[0] = 1;
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                data[1U + i * 2U] = static_cast<unsigned char>(values[i] >> 8U);
+                data[2U + i * 2U] = static_cast<unsigned char>(values[i]);
+            }
+        } else if (transfer.request == asicen::Request::I2cWrite) {
+            ++selection_writes;
+            data[0] = 1;
+        } else {
+            data[0] = 1;
+        }
+        return transfer.length;
+    }
+    void delay_ms(unsigned ms) override {
+        delays.push_back(ms);
+        if (cancel_after_delay) cancel = true;
+        if (expire_after_delay) expire = true;
+    }
+    bool cancelled() const override { return cancel; }
+    bool expired() const override { return expire; }
+
+    std::array<std::uint16_t, asicen::kW3u3SatelliteTsidSlots> empty{};
+    std::array<std::uint16_t, asicen::kW3u3SatelliteTsidSlots> valid{
+        0U, 0xffffU, 0x4010U, 0U, 0U, 0U, 0U, 0U};
+    std::vector<std::array<std::uint16_t, asicen::kW3u3SatelliteTsidSlots>> snapshots{
+        empty, valid};
+    std::vector<asicen::ControlTransfer> transfers;
+    std::vector<unsigned> delays;
+    std::size_t list_reads = 0;
+    std::size_t selection_writes = 0;
+    bool cancel_after_delay = false;
+    bool expire_after_delay = false;
+    bool cancel = false;
+    bool expire = false;
+};
+
+void test_tsid_readiness_poll_policy() {
+    TsidReadinessTransport invalid_slot;
+    check(asicen::wait_w3u3_satellite_slot_ready(
+              &invalid_slot, asicen::kW3u3SatelliteTsidSlots).result ==
+              asicen::SatelliteOperationResult::InvalidArgument &&
+          invalid_slot.transfers.empty(),
+          "out-of-range readiness slot is rejected before I/O");
+
+    TsidReadinessTransport slot;
+    const auto ready = asicen::wait_w3u3_satellite_slot_ready(&slot, 2, 3, 10);
+    check(ready.result == asicen::SatelliteOperationResult::Completed &&
+          ready.slot == 2 && ready.tsids[2] == 0x4010U,
+          "slot readiness retries empty list then returns requested nonempty TSID");
+    check(slot.list_reads == 2 && slot.delays == std::vector<unsigned>{10} &&
+          slot.selection_writes == 0,
+          "readiness waits only after an empty read and performs no writes");
+
+    TsidReadinessTransport by_id;
+    const auto id_ready = asicen::wait_w3u3_satellite_tsid_ready(
+        &by_id, 0x4010U, 3, 10);
+    check(id_ready.result == asicen::SatelliteOperationResult::Completed &&
+          id_ready.slot == 2,
+          "TSID readiness returns the slot containing the requested value");
+    check(by_id.selection_writes == 0,
+          "TSID readiness polling remains read-only");
+
+    TsidReadinessTransport timeout;
+    timeout.snapshots = {timeout.empty};
+    const auto timed_out = asicen::wait_w3u3_satellite_slot_ready(
+        &timeout, 2, 3, 10);
+    check(timed_out.result == asicen::SatelliteOperationResult::DeadlineExceeded &&
+          timeout.list_reads == 3 && timeout.delays.size() == 2 &&
+          timeout.selection_writes == 0,
+          "empty target times out after bounded reads without selection writes");
+
+    TsidReadinessTransport cancelled;
+    cancelled.snapshots = {cancelled.empty};
+    cancelled.cancel_after_delay = true;
+    const auto cancelled_result = asicen::wait_w3u3_satellite_slot_ready(
+        &cancelled, 2, 3, 10);
+    check(cancelled_result.result == asicen::SatelliteOperationResult::Cancelled &&
+          cancelled.list_reads == 1 && cancelled.delays.size() == 1 &&
+          cancelled.selection_writes == 0,
+          "cancellation after empty read prevents further reads and writes");
+
+    TsidReadinessTransport expired;
+    expired.snapshots = {expired.empty};
+    expired.expire_after_delay = true;
+    const auto expired_result = asicen::wait_w3u3_satellite_slot_ready(
+        &expired, 2, 3, 10);
+    check(expired_result.result == asicen::SatelliteOperationResult::DeadlineExceeded &&
+          expired.list_reads == 1 && expired.delays.size() == 1 &&
+          expired.selection_writes == 0,
+          "absolute deadline after poll interval prevents selection writes");
+}
+
 }  // namespace
 
 int main() {
     test_rf_vectors_and_tune_plan();
+    test_satellite_if_to_rf_conversion_is_exact();
     test_tune_stops_on_every_transfer_failure_and_cancel();
     test_lock_and_tsid_reads();
     test_tsid_selection_validation_and_failures();
+    test_tsid_readiness_poll_policy();
     return failures == 0 ? 0 : 1;
 }

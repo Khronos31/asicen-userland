@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <vector>
 
 namespace asicen {
@@ -16,6 +17,8 @@ struct UsbFunctionSnapshot {
     bool kernel_driver_state_known = false;
     bool interface0_kernel_driver = false;
     int active_alt0 = -1;
+    bool endpoint81_in_alt0 = false;
+    bool endpoint81_bulk_in_alt0 = false;
     bool endpoint82_in_alt0 = false;
     bool endpoint82_bulk_in_alt0 = false;
 };
@@ -55,10 +58,33 @@ public:
                               const std::vector<std::uint8_t>& sibling_path);
     OwnershipError release() noexcept;
     bool owns_both() const noexcept;
+    bool primary_supports_bulk_endpoint(std::uint8_t endpoint) const noexcept;
 
 private:
     UsbFunctionClaim* primary_ = nullptr;
     UsbFunctionClaim* sibling_ = nullptr;
+    bool primary_endpoint81_bulk_ = false;
+};
+
+enum class ReceiverReservationResult : std::uint8_t {
+    reserved,
+    already_owned,
+    busy,
+    invalid,
+};
+
+// The W3U3 frontend has two source lanes but a single mutable CF/DSC/link
+// state. A single owner prevents interleaved receiver leases/captures.
+class ReceiverLaneReservation final {
+public:
+    ReceiverReservationResult reserve(std::uint8_t receiver) noexcept;
+    bool release(std::uint8_t receiver) noexcept;
+    bool owns(std::uint8_t receiver) const noexcept;
+    std::uint8_t owner() const noexcept;
+
+private:
+    static constexpr std::uint8_t kNone = 0xffU;
+    std::atomic<std::uint8_t> owner_{kNone};
 };
 
 }  // namespace asicen

@@ -39,6 +39,12 @@ struct SatelliteTsidListResult {
     std::array<std::uint16_t, kW3u3SatelliteTsidSlots> tsids{};
 };
 
+struct SatelliteTsidReadyResult {
+    SatelliteOperationResult result = SatelliteOperationResult::InvalidArgument;
+    std::array<std::uint16_t, kW3u3SatelliteTsidSlots> tsids{};
+    std::size_t slot = kW3u3SatelliteTsidSlots;
+};
+
 struct SatelliteTsidSelectResult {
     SatelliteOperationResult result = SatelliteOperationResult::InvalidArgument;
     std::uint16_t selected_tsid = kW3u3SatelliteNoTsid;
@@ -46,6 +52,11 @@ struct SatelliteTsidSelectResult {
 
 // Supported RF values are exact matches for the 24 source table rows.
 bool is_w3u3_satellite_rf_khz(std::uint32_t rf_khz);
+
+// PX4 satellite channel plans expose IF; the W3U3 tuner table contains RF.
+// Only the 24 exact source rows are accepted.
+bool w3u3_satellite_if_to_rf_khz(std::uint32_t if_khz,
+                                std::uint32_t* rf_khz) noexcept;
 
 // Pure source-derived plan. An empty plan means the RF/TSID combination is not
 // source-valid. BS rows accept the previously selected TSID; CS rows require
@@ -64,6 +75,20 @@ SatelliteLockResult poll_w3u3_satellite_lock(
     FrontendTransport* transport, std::size_t max_attempts = 50,
     unsigned poll_interval_ms = 100);
 SatelliteTsidListResult read_w3u3_satellite_tsids(FrontendTransport* transport);
+
+// ASICEN policy: poll the read-only TSID list immediately, then at 10ms
+// intervals until the requested nonempty entry appears or the transport's
+// absolute deadline/cancellation fires. This is not claimed as vendor retry
+// behavior; the source helper performs only one list read.
+SatelliteTsidReadyResult wait_w3u3_satellite_slot_ready(
+    FrontendTransport* transport, std::size_t slot,
+    std::size_t max_attempts = 1000, unsigned poll_interval_ms = 10);
+SatelliteTsidReadyResult wait_w3u3_satellite_any_ready(
+    FrontendTransport* transport, std::size_t max_attempts = 1000,
+    unsigned poll_interval_ms = 10);
+SatelliteTsidReadyResult wait_w3u3_satellite_tsid_ready(
+    FrontendTransport* transport, std::uint16_t tsid,
+    std::size_t max_attempts = 1000, unsigned poll_interval_ms = 10);
 
 // Select a value from a previously read eight-entry TSID list. Empty 0xffff
 // entries and out-of-range slots are rejected before any write. The selected

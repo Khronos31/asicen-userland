@@ -136,9 +136,28 @@ private:
     std::vector<std::string>* trace_;
 };
 
+class PrimaryLaneControl final : public asicen::CaptureBackend {
+public:
+    bool dsc_start(std::uint8_t local) override {
+        start_local = local;
+        return local == 0U;
+    }
+    bool dsc_stop(std::uint8_t local) override {
+        stop_local = local;
+        return local == 0U;
+    }
+    asicen::CaptureIo bulk_read(std::uint8_t, unsigned char*, int, int*,
+                                unsigned) override {
+        return asicen::CaptureIo::Error;
+    }
+    std::uint8_t start_local = 0xffU;
+    std::uint8_t stop_local = 0xffU;
+};
+
 class Queue final : public asicen::QueuedCaptureIo {
 public:
-    explicit Queue(std::vector<std::string>* trace) : trace_(trace) {}
+    explicit Queue(std::vector<std::string>* trace, std::uint8_t expected_endpoint = 0x82U)
+        : trace_(trace), expected_endpoint_(expected_endpoint) {}
     std::array<unsigned char, 8> bytes{{'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'}};
     std::vector<asicen::QueueCompletion> events;
     std::size_t fail_submit = static_cast<std::size_t>(-1);
@@ -156,7 +175,7 @@ public:
     bool prepare(std::uint8_t endpoint, std::size_t wanted_depth,
                  std::size_t chunk_size) override {
         trace_->push_back("prepare");
-        check(endpoint == 0x82, "endpoint passed to queue");
+        check(endpoint == expected_endpoint_, "endpoint passed to queue");
         check(chunk_size == 4096, "chunk size passed to queue");
         depth = wanted_depth;
         return !fail_prepare;
@@ -220,6 +239,7 @@ public:
 
 private:
     std::vector<std::string>* trace_;
+    std::uint8_t expected_endpoint_;
 };
 
 class Output final : public asicen::CaptureOutput {
@@ -255,6 +275,25 @@ void successful_order_and_limit() {
         "prepare", "submit0", "submit1", "submit2", "submit3", "dsc-start",
         "dsc-stop", "cancel-drain", "release"};
     check(trace == expected, "submit queue before DSC; stop, drain, then free");
+}
+
+void primary_satellite_capture_uses_lane0_endpoint_and_dsc() {
+    std::vector<std::string> trace;
+    PrimaryLaneControl control;
+    Queue queue(&trace, 0x81U);
+    Output output;
+    queue.events.push_back({0U, asicen::CaptureIo::Ok, queue.bytes.data(), 4U});
+    asicen::CaptureStats stats{};
+    asicen::CaptureRequest primary{0U, 0x81U, 4U,
+        Clock::now() + std::chrono::seconds(1), 4096U};
+    check(asicen::run_queued_capture(&control, &queue, &output, primary,
+                                     4U, &stats) ==
+              asicen::CaptureOutcome::Completed,
+          "primary satellite lane capture completes");
+    check(control.start_local == 0U && control.stop_local == 0U,
+          "both DSC start and cleanup stop address primary local0");
+    check(queue.max_in_flight == 4U && stats.bytes == 4U,
+          "primary lane retains the four-slot capture lifecycle");
 }
 
 void partial_timeout_reuses_slot_without_exceeding_depth() {
@@ -841,6 +880,7 @@ void filter_repeat_failure_paths_restore_full_block() {
 
 int main() {
     successful_order_and_limit();
+    primary_satellite_capture_uses_lane0_endpoint_and_dsc();
     partial_timeout_reuses_slot_without_exceeding_depth();
     submit_failure_drains_partial_queue();
     dsc_start_failure_stops_then_drains();

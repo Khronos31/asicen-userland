@@ -61,6 +61,10 @@ constexpr unsigned long kIoctlStreamRead = 0x104;
 constexpr std::uint8_t kStreamLaneCount = 2;
 constexpr std::uint8_t kBulkEndpointLane0 = 0x81;
 constexpr std::uint8_t kBulkEndpointLane1 = 0x82;
+constexpr std::uint8_t bulk_endpoint_for_local(std::uint8_t local) noexcept {
+    return local == 0U ? kBulkEndpointLane0
+         : local == 1U ? kBulkEndpointLane1 : 0U;
+}
 constexpr std::size_t kStreamUnitBytes = 512;
 constexpr std::size_t kTsPacketBytes = 188;
 constexpr std::size_t kMaxUserspaceStreamRead = kTsPacketBytes * 1024;

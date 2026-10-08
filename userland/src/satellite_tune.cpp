@@ -46,6 +46,7 @@ constexpr std::uint32_t kBsFirstRfKhz = 11727480U;
 constexpr std::uint32_t kBsStepKhz = 38360U;
 constexpr std::uint32_t kCsFirstRfKhz = 12291000U;
 constexpr std::uint32_t kCsStepKhz = 40000U;
+constexpr std::uint32_t kIfToRfOffsetKhz = 10678000U;
 
 std::uint32_t rf_for_row(std::size_t row) {
     if (row < 12) {
@@ -175,6 +176,16 @@ SatelliteOperationResult run_i2c_read(FrontendTransport* transport,
 bool is_w3u3_satellite_rf_khz(std::uint32_t rf_khz) {
     std::size_t row = 0;
     return find_row(rf_khz, &row);
+}
+
+bool w3u3_satellite_if_to_rf_khz(std::uint32_t if_khz,
+                                 std::uint32_t* rf_khz) noexcept {
+    if (rf_khz == nullptr || if_khz > UINT32_MAX - kIfToRfOffsetKhz)
+        return false;
+    const std::uint32_t candidate = if_khz + kIfToRfOffsetKhz;
+    if (!is_w3u3_satellite_rf_khz(candidate)) return false;
+    *rf_khz = candidate;
+    return true;
 }
 
 FrontendPlan plan_w3u3_satellite_tune(std::uint32_t rf_khz,
@@ -312,6 +323,99 @@ SatelliteTsidListResult read_w3u3_satellite_tsids(FrontendTransport* transport) 
             static_cast<std::uint16_t>(data[i * 2 + 1]));
     }
     return result;
+}
+
+namespace {
+
+SatelliteTsidReadyResult wait_for_tsid_ready(
+    FrontendTransport* transport, std::size_t requested_slot,
+    std::uint16_t requested_tsid, bool match_tsid,
+    std::size_t max_attempts, unsigned poll_interval_ms) {
+    SatelliteTsidReadyResult result{};
+    if (transport == nullptr || max_attempts == 0 ||
+        (match_tsid && (requested_tsid == 0U ||
+                        requested_tsid == kW3u3SatelliteNoTsid)) ||
+        (!match_tsid && requested_slot > kW3u3SatelliteTsidSlots)) {
+        result.result = SatelliteOperationResult::InvalidArgument;
+        return result;
+    }
+
+    for (std::size_t attempt = 0; attempt < max_attempts; ++attempt) {
+        if (transport->cancelled()) {
+            result.result = SatelliteOperationResult::Cancelled;
+            return result;
+        }
+        if (transport->expired()) {
+            result.result = SatelliteOperationResult::DeadlineExceeded;
+            return result;
+        }
+        const SatelliteTsidListResult list = read_w3u3_satellite_tsids(transport);
+        if (list.result != SatelliteOperationResult::Completed) {
+            result.result = list.result;
+            return result;
+        }
+        result.tsids = list.tsids;
+        std::size_t slot = requested_slot;
+        if (match_tsid) {
+            const auto found = std::find(list.tsids.begin(), list.tsids.end(), requested_tsid);
+            if (found == list.tsids.end()) slot = kW3u3SatelliteTsidSlots;
+            else slot = static_cast<std::size_t>(found - list.tsids.begin());
+        }
+        if (!match_tsid && requested_slot == kW3u3SatelliteTsidSlots) {
+            const auto found = std::find_if(list.tsids.begin(), list.tsids.end(),
+                [](std::uint16_t value) {
+                    return value != 0U && value != kW3u3SatelliteNoTsid;
+                });
+            if (found != list.tsids.end())
+                slot = static_cast<std::size_t>(found - list.tsids.begin());
+        }
+        if (slot < kW3u3SatelliteTsidSlots && list.tsids[slot] != 0U &&
+            list.tsids[slot] != kW3u3SatelliteNoTsid) {
+            result.result = SatelliteOperationResult::Completed;
+            result.slot = slot;
+            return result;
+        }
+        if (attempt + 1U == max_attempts) break;
+        if (transport->cancelled()) {
+            result.result = SatelliteOperationResult::Cancelled;
+            return result;
+        }
+        if (transport->expired()) {
+            result.result = SatelliteOperationResult::DeadlineExceeded;
+            return result;
+        }
+        transport->delay_ms(poll_interval_ms);
+    }
+    result.result = SatelliteOperationResult::DeadlineExceeded;
+    return result;
+}
+
+}  // namespace
+
+SatelliteTsidReadyResult wait_w3u3_satellite_slot_ready(
+    FrontendTransport* transport, std::size_t slot,
+    std::size_t max_attempts, unsigned poll_interval_ms) {
+    if (slot >= kW3u3SatelliteTsidSlots) {
+        SatelliteTsidReadyResult invalid{};
+        invalid.result = SatelliteOperationResult::InvalidArgument;
+        return invalid;
+    }
+    return wait_for_tsid_ready(transport, slot, 0U, false,
+                               max_attempts, poll_interval_ms);
+}
+
+SatelliteTsidReadyResult wait_w3u3_satellite_tsid_ready(
+    FrontendTransport* transport, std::uint16_t tsid,
+    std::size_t max_attempts, unsigned poll_interval_ms) {
+    return wait_for_tsid_ready(transport, kW3u3SatelliteTsidSlots, tsid, true,
+                               max_attempts, poll_interval_ms);
+}
+
+SatelliteTsidReadyResult wait_w3u3_satellite_any_ready(
+    FrontendTransport* transport, std::size_t max_attempts,
+    unsigned poll_interval_ms) {
+    return wait_for_tsid_ready(transport, kW3u3SatelliteTsidSlots, 0U, false,
+                               max_attempts, poll_interval_ms);
 }
 
 SatelliteTsidSelectResult select_w3u3_satellite_tsid(

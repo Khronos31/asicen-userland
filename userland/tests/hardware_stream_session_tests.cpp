@@ -329,6 +329,25 @@ void shutdown_cleanup_failure_is_reported_in_final_state() {
           "cleanup failure upgrades lifecycle stopped state into an error snapshot");
 }
 
+void primary_satellite_receiver_mapping_is_explicit() {
+    ShutdownTrackingFrontend frontend;
+    FakeSource source;
+    FakeFatal fatal;
+    asicen::HardwareStreamService service(frontend, source, fatal);
+    check(service.receiver_supports(0U, ipc::System::ISDB_S),
+          "primary W3U3 receiver is satellite local zero");
+    check(service.receiver_supports(1U, ipc::System::ISDB_T),
+          "second W3U3 lane retains terrestrial local one");
+    check(!service.receiver_supports(0U, ipc::System::ISDB_T) &&
+          !service.receiver_supports(1U, ipc::System::ISDB_S) &&
+          !service.receiver_supports(2U, ipc::System::ISDB_S),
+          "unsupported receiver/system combinations stay unavailable");
+    check(service.tune_satellite(1U, 1049480U, 5000U).error() == Error::UNSUPPORTED,
+          "satellite tuning cannot route onto the wrong frontend lane");
+    check(service.select_satellite_slot(1U, 0U, 1000U).error() == Error::UNSUPPORTED,
+          "satellite TSID selection cannot route onto local one");
+}
+
 }  // namespace
 
 int main() {
@@ -339,6 +358,7 @@ int main() {
     fatal_callback_drain_exits_child_without_running_destructors();
     shutdown_cleans_source_and_is_sticky_against_restart();
     shutdown_cleanup_failure_is_reported_in_final_state();
+    primary_satellite_receiver_mapping_is_explicit();
     std::cout << "hardware stream session tests passed\n";
     return 0;
 }

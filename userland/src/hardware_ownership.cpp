@@ -69,6 +69,7 @@ OwnershipError EnclosureOwnership::claim_w3u3(
         return OwnershipError::sibling_claim_failed;
     }
     sibling_ = &sibling;
+    primary_endpoint81_bulk_ = p.endpoint81_in_alt0 && p.endpoint81_bulk_in_alt0;
     return OwnershipError::none;
 }
 
@@ -87,6 +88,39 @@ OwnershipError EnclosureOwnership::release() noexcept {
 
 bool EnclosureOwnership::owns_both() const noexcept {
     return primary_ != nullptr && sibling_ != nullptr;
+}
+
+bool EnclosureOwnership::primary_supports_bulk_endpoint(
+    std::uint8_t endpoint) const noexcept {
+    if (!owns_both()) return false;
+    if (endpoint == 0x81U) return primary_endpoint81_bulk_;
+    if (endpoint == 0x82U) return true;
+    return false;
+}
+
+ReceiverReservationResult ReceiverLaneReservation::reserve(
+    std::uint8_t receiver) noexcept {
+    if (receiver > 1U) return ReceiverReservationResult::invalid;
+    std::uint8_t expected = kNone;
+    if (owner_.compare_exchange_strong(expected, receiver,
+                                       std::memory_order_acq_rel))
+        return ReceiverReservationResult::reserved;
+    return expected == receiver ? ReceiverReservationResult::already_owned
+                                : ReceiverReservationResult::busy;
+}
+
+bool ReceiverLaneReservation::release(std::uint8_t receiver) noexcept {
+    if (receiver > 1U) return false;
+    return owner_.compare_exchange_strong(receiver, kNone,
+                                          std::memory_order_acq_rel);
+}
+
+bool ReceiverLaneReservation::owns(std::uint8_t receiver) const noexcept {
+    return receiver <= 1U && owner_.load(std::memory_order_acquire) == receiver;
+}
+
+std::uint8_t ReceiverLaneReservation::owner() const noexcept {
+    return owner_.load(std::memory_order_acquire);
 }
 
 }  // namespace asicen

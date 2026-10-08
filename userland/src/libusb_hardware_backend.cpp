@@ -24,6 +24,20 @@ using px4::userland::ipc::System;
 constexpr std::size_t kQueueDepth = 4U;
 constexpr std::size_t kChunkSize = 4096U;
 constexpr std::chrono::milliseconds kDrainLimit{2000};
+Error satellite_error(SatelliteOperationResult result) noexcept {
+    switch (result) {
+        case SatelliteOperationResult::Completed: return Error::OK;
+        case SatelliteOperationResult::InvalidArgument: return Error::INVALID_ARGUMENT;
+        case SatelliteOperationResult::Cancelled: return Error::NOT_READY;
+        case SatelliteOperationResult::DeadlineExceeded: return Error::TIMEOUT;
+        case SatelliteOperationResult::FailedTransfer:
+        case SatelliteOperationResult::ShortTransfer: return Error::USB_IO;
+        case SatelliteOperationResult::VerificationFailed: return Error::PROTOCOL_ERROR;
+    }
+    return Error::USB_IO;
+}
+
+std::uint8_t receiver_local(std::uint8_t receiver) noexcept { return receiver; }
 
 [[noreturn]] void fatal_drain_exit() {
     const rlimit no_core{0, 0};
@@ -74,7 +88,9 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps,
                                                 CaptureCleanupOps {
     explicit DrainAdapter(LibusbW3u3Hardware& owner) : owner_(owner) {}
     bool stop_dsc() noexcept override {
-        const bool ok = owner_.dsc_stop(1U);
+        if (owner_.source_receiver_ > 1U) return false;
+        const std::uint8_t local = receiver_local(owner_.source_receiver_);
+        const bool ok = owner_.dsc_stop(local);
         owner_.dsc_stopped_ = ok;
         return ok;
     }
@@ -82,7 +98,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps,
         if (!owner_.async_) return;
         for (auto& slot : owner_.async_->slots) {
             if (slot.transfer != nullptr && slot.pending)
-                (void)libusb_cancel_transfer(slot.transfer);
+                (void)owner_.cancel_transfer(slot.transfer);
         }
     }
     bool has_pending() const noexcept override {
@@ -98,7 +114,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps,
         if (!owner_.async_) return;
         for (auto& slot : owner_.async_->slots) {
             if (slot.transfer != nullptr) {
-                libusb_free_transfer(slot.transfer);
+                owner_.free_transfer(slot.transfer);
                 slot.transfer = nullptr;
             }
         }
@@ -118,10 +134,12 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps,
     }
     bool restore_cf_and_verify() noexcept override {
         if (!owner_.cf_snapshot_valid_) return true;
-        const bool written = owner_.write_cf_block(1U, owner_.cf_snapshot_.data(),
+        if (owner_.source_receiver_ > 1U) return false;
+        const std::uint8_t local = receiver_local(owner_.source_receiver_);
+        const bool written = owner_.write_cf_block(local, owner_.cf_snapshot_.data(),
                                                     owner_.cf_snapshot_.size());
         std::array<std::uint8_t, 0x45> verify{};
-        return written && owner_.read_cf_block(1U, verify.data(), verify.size()) &&
+        return written && owner_.read_cf_block(local, verify.data(), verify.size()) &&
                verify == owner_.cf_snapshot_;
     }
 private:
@@ -205,7 +223,7 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
     diagnostic_stop_flag_ = stop_flag;
     deadline_ = absolute_deadline;
     deadline_active_ = true;
-    const auto opened = open_receiver(1U);
+    const auto opened = open_receiver(0U);
     if (!opened) {
         if (cancelled()) summary.result = SatelliteOperationResult::Cancelled;
         else if (std::chrono::steady_clock::now() >= absolute_deadline)
@@ -236,14 +254,18 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
 
     if (summary.result == SatelliteOperationResult::Completed && summary.locked) {
         deadline_ = absolute_deadline;
-        const SatelliteTsidListResult list = read_w3u3_satellite_tsids(this);
+        const SatelliteTsidReadyResult list = select_slot
+            ? wait_w3u3_satellite_slot_ready(this, slot)
+            : wait_w3u3_satellite_any_ready(this);
         summary.result = list.result;
         if (list.result == SatelliteOperationResult::Completed) {
             for (const std::uint16_t tsid : list.tsids) {
-                if (tsid != kW3u3SatelliteNoTsid) ++summary.nonempty_tsid_slots;
+                if (tsid != 0U && tsid != kW3u3SatelliteNoTsid)
+                    ++summary.nonempty_tsid_slots;
             }
             if (select_slot) {
-                const auto selected = select_w3u3_satellite_tsid(this, slot, list.tsids);
+                const auto selected = select_w3u3_satellite_tsid(
+                    this, slot, list.tsids);
                 summary.result = selected.result;
                 summary.selected_slot = selected.result == SatelliteOperationResult::Completed;
             }
@@ -336,19 +358,35 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(
 
 std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept { return 4U; }
 bool LibusbW3u3Hardware::receiver_supports(std::uint8_t receiver, System system) const noexcept {
-    return receiver == 1U && system == System::ISDB_T;
+    return (receiver == 0U && system == System::ISDB_S) ||
+           (receiver == 1U && system == System::ISDB_T);
 }
 bool LibusbW3u3Hardware::selects_satellite_stream_before_tune() const noexcept { return false; }
 bool LibusbW3u3Hardware::requires_terrestrial_lock_settle() const noexcept { return true; }
 
 Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
-    if (!claimed_ || receiver != 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    const ReceiverReservationResult reservation = active_receiver_.reserve(receiver);
+    const bool newly_reserved = reservation == ReceiverReservationResult::reserved;
+    if (reservation == ReceiverReservationResult::busy ||
+        reservation == ReceiverReservationResult::invalid)
+        return Result<void>::failure(Error::BUSY);
+    const auto fail_open = [&](Error error) {
+        if (newly_reserved) (void)active_receiver_.release(receiver);
+        return Result<void>::failure(error);
+    };
+    // Reserve before reading mutable session/cleanup state so a competing
+    // receiver cannot race a capture teardown and start frontend I/O.
+    if (!claimed_) return fail_open(Error::NOT_READY);
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
-        return Result<void>::failure(Error::USB_IO);
+        return fail_open(Error::USB_IO);
+    if (receiver == 0U &&
+        !ownership_.primary_supports_bulk_endpoint(kBulkEndpointLane0))
+        return fail_open(Error::UNSUPPORTED);
     if (initialized_) return Result<void>::success();
     if (!verify_device_revision()) {
         std::fprintf(stderr, "asicend: bridge revision check failed\n");
-        return Result<void>::failure(Error::UNSUPPORTED);
+        return fail_open(Error::UNSUPPORTED);
     }
     if (!snapshot_gpio_if_needed(&gpio_snapshot_valid_, &gpio_snapshot_,
             [this](std::uint8_t* value) {
@@ -359,7 +397,7 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
                 *value = response[0];
                 return true;
             })) {
-        return Result<void>::failure(Error::USB_IO);
+        return fail_open(Error::USB_IO);
     }
     FrontendPlan power_plan = plan_startup_subset();
     const auto power = plan_safe_power_on();
@@ -405,7 +443,7 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
             else if (controller_check == PoweredControllerCheck::output_busy)
                 error = Error::BUSY;
         }
-        return Result<void>::failure(error);
+        return fail_open(error);
     }
     initialized_ = true;
     return Result<void>::success();
@@ -416,26 +454,62 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(
     std::uint32_t timeout_ms) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
         return Result<void>::failure(Error::USB_IO);
-    if (!claimed_ || receiver != 1U || !initialized_ || frequency_khz != 557142U)
+    if (!claimed_ || receiver != 1U || !active_receiver_.owns(receiver) ||
+        !initialized_ || frequency_khz != 557142U)
         return Result<void>::failure(Error::UNSUPPORTED);
     if (!run_plan(plan_terrestrial_tune_full(frequency_khz, 6U), timeout_ms))
         return Result<void>::failure(disconnected_.load() ? Error::DISCONNECTED : Error::USB_IO);
     tuned_ = true;
+    tuned_receiver_ = receiver;
+    tuned_system_ = System::ISDB_T;
     gain_applied_ = false;
     return Result<void>::success();
 }
 
-Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t, std::uint32_t,
-                                               std::uint32_t) noexcept {
-    return Result<void>::failure(Error::UNSUPPORTED);
+Result<void> LibusbW3u3Hardware::tune_satellite(
+    std::uint8_t receiver, std::uint32_t frequency_khz,
+    std::uint32_t timeout_ms) noexcept {
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<void>::failure(Error::USB_IO);
+    std::uint32_t rf_khz = 0U;
+    if (!claimed_ || receiver != 0U || !active_receiver_.owns(receiver) ||
+        !initialized_ || timeout_ms == 0U ||
+        !w3u3_satellite_if_to_rf_khz(frequency_khz, &rf_khz))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    const auto previous_deadline = deadline_;
+    const bool previous_deadline_active = deadline_active_;
+    const auto selection_deadline = std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(timeout_ms);
+    deadline_ = previous_deadline_active
+        ? std::min(previous_deadline, selection_deadline)
+        : selection_deadline;
+    deadline_active_ = true;
+    const SatelliteOperationResult tuned = run_w3u3_satellite_tune(
+        this, rf_khz);
+    deadline_ = previous_deadline;
+    deadline_active_ = previous_deadline_active;
+    const Error error = satellite_error(tuned);
+    if (error != Error::OK) return Result<void>::failure(error);
+    tuned_ = true;
+    tuned_receiver_ = receiver;
+    tuned_system_ = System::ISDB_S;
+    gain_applied_ = false;
+    return Result<void>::success();
 }
 
 Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver,
                                            System system) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
         return Result<bool>::failure(Error::USB_IO);
-    if (receiver != 1U || system != System::ISDB_T || !tuned_)
+    if (!active_receiver_.owns(receiver) || receiver != tuned_receiver_ ||
+        system != tuned_system_ || !tuned_)
         return Result<bool>::failure(Error::UNSUPPORTED);
+    if (system == System::ISDB_S) {
+        const SatelliteLockResult result = read_w3u3_satellite_lock(this);
+        if (result.result != SatelliteOperationResult::Completed)
+            return Result<bool>::failure(satellite_error(result.result));
+        return Result<bool>::success(result.locked);
+    }
     std::uint8_t lock = 0;
     bool have = false;
     const auto plan = plan_terrestrial_lock_read(557142U);
@@ -453,37 +527,93 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver,
     return Result<bool>::success(locked);
 }
 
-Result<void> LibusbW3u3Hardware::select_satellite_slot(std::uint8_t, std::uint8_t,
-                                                      std::uint32_t) noexcept {
-    return Result<void>::failure(Error::UNSUPPORTED);
+Result<void> LibusbW3u3Hardware::select_satellite_slot(
+    std::uint8_t receiver, std::uint8_t slot, std::uint32_t timeout_ms) noexcept {
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<void>::failure(Error::USB_IO);
+    if (receiver != 0U || !active_receiver_.owns(receiver) ||
+        tuned_receiver_ != receiver || tuned_system_ != System::ISDB_S ||
+        !tuned_ || slot >= kW3u3SatelliteTsidSlots || timeout_ms == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    const auto previous_deadline = deadline_;
+    const bool previous_deadline_active = deadline_active_;
+    const auto selection_deadline = std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(timeout_ms);
+    deadline_ = previous_deadline_active
+        ? std::min(previous_deadline, selection_deadline)
+        : selection_deadline;
+    deadline_active_ = true;
+    const auto list = wait_w3u3_satellite_slot_ready(this, slot);
+    SatelliteOperationResult result = list.result;
+    if (result == SatelliteOperationResult::Completed)
+        result = select_w3u3_satellite_tsid(this, slot, list.tsids).result;
+    deadline_ = previous_deadline;
+    deadline_active_ = previous_deadline_active;
+    const Error error = satellite_error(result);
+    return error == Error::OK ? Result<void>::success()
+                              : Result<void>::failure(error);
 }
-Result<void> LibusbW3u3Hardware::select_satellite_tsid(std::uint8_t, std::uint16_t,
-                                                      std::uint32_t) noexcept {
-    return Result<void>::failure(Error::UNSUPPORTED);
+Result<void> LibusbW3u3Hardware::select_satellite_tsid(
+    std::uint8_t receiver, std::uint16_t tsid, std::uint32_t timeout_ms) noexcept {
+    if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
+        return Result<void>::failure(Error::USB_IO);
+    if (receiver != 0U || !active_receiver_.owns(receiver) ||
+        tuned_receiver_ != receiver || tuned_system_ != System::ISDB_S ||
+        !tuned_ || timeout_ms == 0U || tsid == kW3u3SatelliteNoTsid)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    const auto previous_deadline = deadline_;
+    const bool previous_deadline_active = deadline_active_;
+    const auto selection_deadline = std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(timeout_ms);
+    deadline_ = previous_deadline_active
+        ? std::min(previous_deadline, selection_deadline)
+        : selection_deadline;
+    deadline_active_ = true;
+    const auto list = wait_w3u3_satellite_tsid_ready(this, tsid);
+    SatelliteOperationResult result = list.result;
+    if (result == SatelliteOperationResult::Completed) {
+        result = select_w3u3_satellite_tsid(this, list.slot, list.tsids).result;
+    }
+    deadline_ = previous_deadline;
+    deadline_active_ = previous_deadline_active;
+    const Error error = satellite_error(result);
+    return error == Error::OK ? Result<void>::success()
+                              : Result<void>::failure(error);
 }
 Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept {
-    return receiver == 1U ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!active_receiver_.owns(receiver)) return Result<void>::failure(Error::NOT_FOUND);
+    if (source_prepared_) return Result<void>::failure(Error::BUSY);
+    tuned_ = false;
+    tuned_receiver_ = kNoActiveReceiver;
+    gain_applied_ = false;
+    (void)active_receiver_.release(receiver);
+    return Result<void>::success();
 }
 Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System system,
                                                  std::uint8_t lnb_voltage) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
         return Result<void>::failure(Error::USB_IO);
-    if (receiver != 1U || system != System::ISDB_T || lnb_voltage != 0U)
+    if (receiver > 1U || !active_receiver_.owns(receiver) || lnb_voltage != 0U ||
+        (receiver == 0U && system != System::ISDB_S) ||
+        (receiver == 1U && system != System::ISDB_T))
         return Result<void>::failure(Error::UNSUPPORTED);
-    // Power-on is part of the source-verified open sequence. The portable
-    // TunerService transaction hook is intentionally a no-op for the one safe
-    // zero-voltage terrestrial path so it cannot duplicate GPIO writes.
+    // Power-on is part of the source-verified shared open sequence. This
+    // transaction hook is a no-op for both zero-voltage data paths so it
+    // cannot duplicate the GPIO writes or request satellite LNB voltage.
     return initialized_ ? Result<void>::success()
                         : Result<void>::failure(Error::NOT_READY);
 }
 Result<void> LibusbW3u3Hardware::commit_tune_power(std::uint8_t receiver) noexcept {
-    return receiver == 1U ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
+    return receiver <= 1U && active_receiver_.owns(receiver)
+        ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
 }
 Result<void> LibusbW3u3Hardware::rollback_tune_power(std::uint8_t receiver) noexcept {
-    return receiver == 1U ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
+    return receiver <= 1U && active_receiver_.owns(receiver)
+        ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
 }
 void LibusbW3u3Hardware::mark_receiver_disconnected(std::uint8_t receiver) noexcept {
-    if (receiver == 1U) disconnected_.store(true);
+    if (receiver <= 1U) disconnected_.store(true);
 }
 void LibusbW3u3Hardware::request_stop() noexcept { stop_requested_.store(true); interrupt(); }
 bool LibusbW3u3Hardware::begin_card_operation(
@@ -581,7 +711,11 @@ int LibusbW3u3Hardware::control(const ControlTransfer& original, unsigned char* 
         transfer.timeout_ms = static_cast<std::uint16_t>(
             std::min<long long>(left, requested));
     }
-    const int rc = primary_.control(transfer, data);
+    const int rc = capture_usb_hooks_ != nullptr &&
+                           capture_usb_hooks_->control != nullptr
+                       ? capture_usb_hooks_->control(capture_usb_hooks_->context,
+                                                     transfer, data)
+                       : primary_.control(transfer, data);
     if (rc == LIBUSB_ERROR_NO_DEVICE) disconnected_.store(true);
     return rc;
 }
@@ -608,36 +742,50 @@ Result<void> LibusbW3u3Hardware::prepare(
     std::uint8_t receiver, System system, const std::atomic<bool>& cancelled_flag) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_))
         return Result<void>::failure(Error::USB_IO);
-    if (!claimed_ || receiver != 1U || system != System::ISDB_T || !tuned_ ||
+    if (!claimed_ || receiver > 1U || !active_receiver_.owns(receiver) ||
+        tuned_receiver_ != receiver || tuned_system_ != system || !tuned_ ||
         source_prepared_ || stop_requested_.load())
         return Result<void>::failure(Error::UNSUPPORTED);
+    const std::uint8_t local = receiver_local(receiver);
+    const std::uint8_t endpoint = bulk_endpoint_for_local(local);
+    if (endpoint == 0U) return Result<void>::failure(Error::UNSUPPORTED);
+    source_receiver_ = receiver;
+    dsc_attempted_ = false;
+    dsc_stopped_ = true;
     capture_interrupted_.store(false);
     link_diagnostic_ = LinkSeedDiagnostic{};
     link_apply_attempted_ = false;
     output_start_attempted_ = false;
-    if (cancelled_flag.load()) return Result<void>::failure(Error::NOT_READY);
-    if (!snapshot_link_diagnostic()) return Result<void>::failure(Error::NOT_READY);
+    const auto fail_prepare = [this](Error error) {
+        const CaptureRunResult cleanup = stop_and_drain(dsc_attempted_);
+        if (cleanup == CaptureRunResult::fatal_drain) fatal_drain_exit();
+        if (cleanup != CaptureRunResult::cancelled) cleanup_failed_ = true;
+        return Result<void>::failure(error);
+    };
+    if (cancelled_flag.load()) return fail_prepare(Error::NOT_READY);
+    if (!snapshot_link_diagnostic()) return fail_prepare(Error::NOT_READY);
     link_snapshot_valid_ = true;
-    cf_snapshot_valid_ = read_cf_block(1U, cf_snapshot_.data(), cf_snapshot_.size());
-    if (!cf_snapshot_valid_) return Result<void>::failure(Error::USB_IO);
+    cf_snapshot_valid_ = read_cf_block(local, cf_snapshot_.data(), cf_snapshot_.size());
+    if (!cf_snapshot_valid_) return fail_prepare(Error::USB_IO);
     std::size_t random_offset = 0U;
     while (random_offset < link_seed_.size()) {
         const ssize_t received = getrandom(link_seed_.data() + random_offset,
                                            link_seed_.size() - random_offset, 0);
         if (received < 0 && errno == EINTR) continue;
-        if (received <= 0) return Result<void>::failure(Error::INTERNAL);
+        if (received <= 0) return fail_prepare(Error::INTERNAL);
         random_offset += static_cast<std::size_t>(received);
     }
-    if (!run_plan(plan_stream_setup(1U, 1U), 5000U)) return Result<void>::failure(Error::USB_IO);
-    if (!set_cf_bit(0x03U, true)) return Result<void>::failure(Error::USB_IO);
+    if (!run_plan(plan_stream_setup(local, 1U), 5000U))
+        return fail_prepare(Error::USB_IO);
+    if (!set_cf_bit(local, 0x03U, true)) return fail_prepare(Error::USB_IO);
     if (!async_) async_ = std::make_unique<AsyncState>();
     AsyncState& state = *async_;
     state = AsyncState{};
     for (auto& slot : state.slots) {
         slot.owner = &state;
-        slot.transfer = libusb_alloc_transfer(0);
-        if (slot.transfer == nullptr) return Result<void>::failure(Error::INTERNAL);
-        libusb_fill_bulk_transfer(slot.transfer, primary_.handle(), 0x82U,
+        slot.transfer = allocate_transfer();
+        if (slot.transfer == nullptr) return fail_prepare(Error::INTERNAL);
+        libusb_fill_bulk_transfer(slot.transfer, primary_.handle(), endpoint,
                                   slot.buffer.data(), static_cast<int>(slot.buffer.size()),
                                   AsyncState::completed, &slot, 0U);
     }
@@ -645,22 +793,18 @@ Result<void> LibusbW3u3Hardware::prepare(
     for (auto& slot : state.slots) {
         slot.pending = true;
         ++slot.generation;
-        if (libusb_submit_transfer(slot.transfer) != 0) {
+        if (submit_transfer(slot.transfer) != 0) {
             slot.pending = false;
-            const auto cleaned = stop_and_drain(false);
-            if (cleaned == CaptureRunResult::fatal_drain) fatal_drain_exit();
-            if (cleaned != CaptureRunResult::cancelled) cleanup_failed_ = true;
-            return Result<void>::failure(Error::USB_IO);
+            return fail_prepare(Error::USB_IO);
         }
     }
     dsc_attempted_ = true;
     dsc_stopped_ = false;
-    if (!dsc_start(1U)) return Result<void>::failure(Error::USB_IO);
-    if (!set_cf_bit(0x08U, true))
-        return Result<void>::failure(Error::USB_IO);
-    link_apply_attempted_ = true;
+    if (!dsc_start(local)) return fail_prepare(Error::USB_IO);
     output_start_attempted_ = true;
-    if (!apply_link_seed()) return Result<void>::failure(Error::USB_IO);
+    if (!set_cf_bit(local, 0x08U, true)) return fail_prepare(Error::USB_IO);
+    link_apply_attempted_ = true;
+    if (!apply_link_seed()) return fail_prepare(Error::USB_IO);
     decoder_.clear();
     source_prepared_ = true;
     decoder_ = TransportCaptureDecoderV7(link_seed_.data(), link_seed_.size());
@@ -707,7 +851,7 @@ CaptureRunResult LibusbW3u3Hardware::run(
         slot.ready = false;
         slot.pending = true;
         ++slot.generation;
-        if (libusb_submit_transfer(slot.transfer) != 0) {
+        if (submit_transfer(slot.transfer) != 0) {
             slot.pending = false;
             outcome = CaptureRunResult::usb_error;
             break;
@@ -742,6 +886,7 @@ Result<void> LibusbW3u3Hardware::stop() noexcept {
         }
         source_prepared_ = false;
     }
+    if (!cleanup_failed_) source_receiver_ = kNoActiveReceiver;
     return cleanup_failed_ ? Result<void>::failure(Error::USB_IO)
                            : Result<void>::success();
 }
@@ -769,6 +914,9 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(
         link_apply_attempted_ = false;
         output_start_attempted_ = false;
         link_diagnostic_ = LinkSeedDiagnostic{};
+        source_receiver_ = kNoActiveReceiver;
+        dsc_attempted_ = false;
+        dsc_stopped_ = true;
     } else {
         cleanup_failed_ = true;
     }
@@ -776,6 +924,12 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(
 }
 
 bool LibusbW3u3Hardware::handle_events(unsigned timeout_ms) noexcept {
+    if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->pump_events != nullptr) {
+        const int rc = capture_usb_hooks_->pump_events(capture_usb_hooks_->context,
+                                                       timeout_ms);
+        if (rc == LIBUSB_ERROR_NO_DEVICE) disconnected_.store(true);
+        return rc >= 0;
+    }
     if (context_ == nullptr) return false;
     timeval timeout{};
     timeout.tv_sec = static_cast<long>(timeout_ms / 1000U);
@@ -783,6 +937,32 @@ bool LibusbW3u3Hardware::handle_events(unsigned timeout_ms) noexcept {
     const int rc = libusb_handle_events_timeout_completed(context_, &timeout, nullptr);
     if (rc == LIBUSB_ERROR_NO_DEVICE) disconnected_.store(true);
     return rc >= 0;
+}
+
+libusb_transfer* LibusbW3u3Hardware::allocate_transfer() noexcept {
+    return capture_usb_hooks_ != nullptr && capture_usb_hooks_->allocate != nullptr
+               ? capture_usb_hooks_->allocate(capture_usb_hooks_->context)
+               : libusb_alloc_transfer(0);
+}
+
+int LibusbW3u3Hardware::submit_transfer(libusb_transfer* transfer) noexcept {
+    return capture_usb_hooks_ != nullptr && capture_usb_hooks_->submit != nullptr
+               ? capture_usb_hooks_->submit(capture_usb_hooks_->context, transfer)
+               : libusb_submit_transfer(transfer);
+}
+
+int LibusbW3u3Hardware::cancel_transfer(libusb_transfer* transfer) noexcept {
+    return capture_usb_hooks_ != nullptr && capture_usb_hooks_->cancel != nullptr
+               ? capture_usb_hooks_->cancel(capture_usb_hooks_->context, transfer)
+               : libusb_cancel_transfer(transfer);
+}
+
+void LibusbW3u3Hardware::free_transfer(libusb_transfer* transfer) noexcept {
+    if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->free != nullptr) {
+        capture_usb_hooks_->free(capture_usb_hooks_->context, transfer);
+    } else {
+        libusb_free_transfer(transfer);
+    }
 }
 
 bool LibusbW3u3Hardware::dsc_start(std::uint8_t local) {
@@ -814,7 +994,7 @@ bool LibusbW3u3Hardware::write_cf40(std::uint8_t local, std::uint8_t value) {
 }
 bool LibusbW3u3Hardware::read_cf_block(std::uint8_t local, std::uint8_t* data,
                                        std::size_t size) {
-    if (data == nullptr || local != 1U || size != 0x45U) return false;
+    if (data == nullptr || local > 1U || size != 0x45U) return false;
     for (std::size_t offset = 0; offset < size;) {
         const std::size_t chunk = std::min<std::size_t>(0x20U, size - offset);
         const auto transfer = make_cf_read(local, static_cast<std::uint8_t>(offset),
@@ -828,7 +1008,7 @@ bool LibusbW3u3Hardware::read_cf_block(std::uint8_t local, std::uint8_t* data,
 }
 bool LibusbW3u3Hardware::write_cf_block(std::uint8_t local, const std::uint8_t* data,
                                         std::size_t size) {
-    if (data == nullptr || local != 1U || size != 0x45U) return false;
+    if (data == nullptr || local > 1U || size != 0x45U) return false;
     for (std::size_t offset = 0; offset < size;) {
         const std::size_t chunk = std::min<std::size_t>(3U, size - offset);
         ControlTransfer transfer{};
@@ -851,12 +1031,13 @@ bool LibusbW3u3Hardware::terrestrial_locked(
     *locked = (report.last_read & 0x0fU) == 0x09U;
     return true;
 }
-bool LibusbW3u3Hardware::set_cf_bit(std::uint8_t mask, bool value) noexcept {
+bool LibusbW3u3Hardware::set_cf_bit(
+    std::uint8_t local, std::uint8_t mask, bool value) noexcept {
     std::uint8_t current = 0;
-    if (!read_cf40(1U, &current)) return false;
+    if (!read_cf40(local, &current)) return false;
     const std::uint8_t next = value ? static_cast<std::uint8_t>(current | mask)
                                     : static_cast<std::uint8_t>(current & ~mask);
-    return next == current || write_cf40(1U, next);
+    return next == current || write_cf40(local, next);
 }
 bool LibusbW3u3Hardware::snapshot_link_diagnostic() {
     std::uint8_t type_reg = 0;

@@ -84,6 +84,11 @@ int main() {
           "stream setup pid 41");
     check(setup[2].transfer.value == 0x1fc3, "stream setup pid 43");
     check(asicen::plan_stream_setup(2).empty(), "stream setup rejects local2");
+    const asicen::FrontendPlan primary_setup = asicen::plan_stream_setup(0U, 1U);
+    check(primary_setup.size() == 3U && primary_setup[0].local == 0U &&
+          primary_setup[1].transfer.value == 0x1f41 &&
+          primary_setup[2].transfer.value == 0x1f43,
+          "primary satellite capture setup addresses local0 filter registers");
 
     // Filter reset execution: 3 CF reads at subcmd 0, ResetChannel, one CF write
     // (all-zero 3-byte chunks skipped, so only the chunk carrying byte 0x40).

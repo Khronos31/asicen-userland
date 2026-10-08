@@ -18,6 +18,7 @@
 #include <chrono>
 #include <csignal>
 #include <memory>
+#include <mutex>
 
 namespace asicen {
 
@@ -36,8 +37,9 @@ struct CardProbeSummary {
     std::uint16_t status_word = 0;
 };
 
-// In-process backend for the one source-verified terrestrial lane. Both USB
-// functions are opened and claimed before this object permits frontend writes.
+// In-process backend: primary receiver 0 is satellite and receiver 1 is
+// terrestrial. Both USB functions are claimed before frontend writes; the
+// shared frontend permits one active receiver lease/capture at a time.
 class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
                                  public StreamCaptureSource,
                                  public CardOperationGuard,
@@ -97,6 +99,8 @@ public:
     px4::userland::Result<void> stop() noexcept override;
 
 private:
+    friend struct LibusbW3u3HardwareTestPeer;
+
     friend int run_card_only_server(
         LibusbW3u3Hardware&, const char*, const char*,
         const volatile std::sig_atomic_t*) noexcept;
@@ -115,6 +119,19 @@ private:
     };
 
     int control(const ControlTransfer&, unsigned char*) override;
+    struct CaptureUsbHooks {
+        void* context = nullptr;
+        int (*control)(void*, const ControlTransfer&, unsigned char*) = nullptr;
+        libusb_transfer* (*allocate)(void*) = nullptr;
+        int (*submit)(void*, libusb_transfer*) = nullptr;
+        int (*cancel)(void*, libusb_transfer*) = nullptr;
+        void (*free)(void*, libusb_transfer*) = nullptr;
+        int (*pump_events)(void*, unsigned) = nullptr;
+    };
+    libusb_transfer* allocate_transfer() noexcept;
+    int submit_transfer(libusb_transfer*) noexcept;
+    int cancel_transfer(libusb_transfer*) noexcept;
+    void free_transfer(libusb_transfer*) noexcept;
     void delay_ms(unsigned) override;
     bool cancelled() const override;
     bool expired() const override;
@@ -142,7 +159,7 @@ private:
                   std::uint8_t* output) noexcept;
     bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg,
                         std::uint8_t value) noexcept;
-    bool set_cf_bit(std::uint8_t mask, bool value) noexcept;
+    bool set_cf_bit(std::uint8_t local, std::uint8_t mask, bool value) noexcept;
     CaptureRunResult stop_and_drain(bool dsc_was_attempted) noexcept;
     CaptureRunResult cleanup_after_drain(bool dsc_stopped,
                                          bool dsc_attempted) noexcept;
@@ -176,6 +193,11 @@ private:
     bool link_apply_attempted_ = false;
     bool output_start_attempted_ = false;
     bool cleanup_failed_ = false;
+    static constexpr std::uint8_t kNoActiveReceiver = 0xffU;
+    ReceiverLaneReservation active_receiver_{};
+    std::uint8_t tuned_receiver_ = kNoActiveReceiver;
+    std::uint8_t source_receiver_ = kNoActiveReceiver;
+    px4::userland::ipc::System tuned_system_ = px4::userland::ipc::System::ISDB_T;
     const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
     bool gpio_snapshot_valid_ = false;
     std::uint8_t gpio_snapshot_ = 0;
@@ -186,6 +208,7 @@ private:
     struct DrainAdapter;
     std::unique_ptr<AsyncState> async_;
     TransportCaptureDecoderV7 decoder_;
+    const CaptureUsbHooks* capture_usb_hooks_ = nullptr;
 };
 
 }  // namespace asicen

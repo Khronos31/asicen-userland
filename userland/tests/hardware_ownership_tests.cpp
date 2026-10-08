@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/hardware_ownership.h"
+#include "asicen/protocol.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -95,6 +96,56 @@ void known_loader_sibling_is_reserved_and_claimed() {
               asicen::OwnershipError::none,
           "known loader sibling is accepted");
     check(owner.owns_both(), "loader sibling remains reserved");
+}
+
+void primary_endpoint81_capability_is_optional_and_measured() {
+    check(asicen::bulk_endpoint_for_local(0U) == 0x81U &&
+          asicen::bulk_endpoint_for_local(1U) == 0x82U &&
+          asicen::bulk_endpoint_for_local(2U) == 0U,
+          "local zero and one map to the proven bulk IN endpoints");
+    std::vector<std::string> events;
+    auto primary_state = primary_snapshot();
+    primary_state.endpoint81_in_alt0 = true;
+    primary_state.endpoint81_bulk_in_alt0 = true;
+    FakeFunction primary(primary_state, &events, "primary");
+    FakeFunction sibling(sibling_snapshot(), &events, "sibling");
+    asicen::EnclosureOwnership owner;
+    check(owner.claim_w3u3(primary, sibling, {1, 2, 1}, {1, 2, 2}) ==
+              asicen::OwnershipError::none,
+          "legacy lane-1 endpoint remains the baseline claim contract");
+    check(owner.primary_supports_bulk_endpoint(0x82U),
+          "lane 1 capability follows the original contract");
+    check(owner.primary_supports_bulk_endpoint(0x81U),
+          "lane 0 is reported only when endpoint 81 is present and bulk");
+    owner.release();
+
+    primary_state.endpoint81_bulk_in_alt0 = false;
+    FakeFunction no_lane0(primary_state, &events, "primary-no-lane0");
+    FakeFunction sibling_again(sibling_snapshot(), &events, "sibling-again");
+    asicen::EnclosureOwnership owner_without_lane0;
+    check(owner_without_lane0.claim_w3u3(no_lane0, sibling_again,
+                                         {1, 2, 1}, {1, 2, 2}) ==
+              asicen::OwnershipError::none,
+          "lane 0 absence does not invalidate existing lane-1 ownership");
+    check(!owner_without_lane0.primary_supports_bulk_endpoint(0x81U),
+          "non-bulk lane 0 is unavailable");
+}
+
+void receiver_lane_reservation_rejects_cross_lane_ownership() {
+    asicen::ReceiverLaneReservation reservation;
+    check(reservation.reserve(0U) == asicen::ReceiverReservationResult::reserved,
+          "primary satellite lane reserves shared frontend state");
+    check(reservation.reserve(1U) == asicen::ReceiverReservationResult::busy,
+          "terrestrial lane cannot interleave while primary owns shared state");
+    check(reservation.reserve(0U) == asicen::ReceiverReservationResult::already_owned,
+          "same lease lane can be observed idempotently");
+    check(reservation.release(1U) == false,
+          "non-owner cannot clear the active lane reservation");
+    check(reservation.release(0U), "owner releases the lane after cleanup");
+    check(reservation.reserve(1U) == asicen::ReceiverReservationResult::reserved,
+          "terrestrial lane can acquire after prior release");
+    check(reservation.reserve(2U) == asicen::ReceiverReservationResult::invalid,
+          "unsupported receiver cannot reserve shared frontend state");
 }
 
 void wrong_topology_or_busy_interfaces_fail_before_claim() {
@@ -193,6 +244,8 @@ void invalid_paths_reject_before_claim() {
 int main() {
     valid_runtime_claims_and_releases_in_reverse_order();
     known_loader_sibling_is_reserved_and_claimed();
+    primary_endpoint81_capability_is_optional_and_measured();
+    receiver_lane_reservation_rejects_cross_lane_ownership();
     wrong_topology_or_busy_interfaces_fail_before_claim();
     second_claim_failure_rolls_back_first_without_writes();
     failed_release_remains_visible_and_blocks_reclaim();
