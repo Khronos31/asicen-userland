@@ -672,3 +672,53 @@ its startup command. Host physical-port matching avoids pinning an address
 or product ID, but firmware re-enumeration through QEMU remains untested.
 Rollback via the same monitor: `device_del asicen_primary`, then
 `device_del asicen_secondary`, then `device_del asicen_ehci`.
+
+### Official loader/probe USB trace, before userspace initialization
+
+On 2026-10-08 around 21:58 JST, capture was started before loading either
+official receiver module. Physical power-on and the initial guest USB
+enumeration had already happened and are not in this recording.
+Guest CONFIG_USB_MON=y supplied usbmon after mounting debugfs; no usbmon
+module was needed. Guest bus 1 contained only the virtual root hub and the
+two receiver functions. A text capture covered both functions continuously.
+Latitude simultaneously recorded full-snaplen USB pcap, initially filtered
+to receiver addresses 99/100. That filter does not include later addresses.
+After firmware re-enumeration, a separate pcap used device address >=99 on
+bus 1; the observed webcam, Bluetooth, keyboard and physical hub were all
+below that range and excluded. There is a host-capture gap between these
+files; guest text capture remained active through it.
+
+Loading official loader.ko produced, on each guest function, nineteen
+request AB writes and a final request AC write, all with length 512,
+wIndex 5399. All forty write completions reported status 0 / length 512.
+The initial host pcap contains 92 events and tcpdump reported zero drops.
+The later host pcap contains 34 events and zero reported drops.
+Guest text contains 164 events; text payloads are truncated by usbmon, so
+the host pcap is the source for full captured firmware payloads.
+
+After the firmware transition, Latitude showed only primary 0b06:0005 at
+physical port 1-2.1, address 102. QEMU retained stale guest device state.
+Parent removed and re-added only asicen_primary/asicen_secondary through
+HMP, with capture still running. Guest then enumerated primary runtime at
+bus 1 address 4. The secondary physical function remained absent.
+Loading as11usbdtv.ko bound interface 0 and created /dev/as11usbdtv0.
+Interface 1 probe reported -12; this agrees with the official driver's
+one-endpoint-interface rejection described in the continuation audit.
+
+No official userspace initializer, tuning or stream start was executed.
+There are no bulk submissions or nonzero bulk completions in this trace.
+Static inspection found that the required TF_DTV_DevCreate -> DTV_Start
+path clears GPIO bit 20, which TC_SetLNB uses as its LNB-on encoding.
+Physical voltage/polarity remains unverified; parent requested authorization
+before running this operation. bBCardInit performs decoder-chip I2C and GPIO
+operations, not a B-CAS APDU read; Linux random-key wrappers are no-op stubs.
+
+The sanitized guest trace, with firmware payload bytes omitted, is in
+docs/hardware-traces/2026-10-08-official-loader-probe.usbmon.txt.
+Raw guest text and both pcaps are preserved locally under
+/config/.tools/asicen-work/official-trace-20261008/ and on the SSH machines.
+Capture processes were stopped after this bounded recording. Both official
+modules remain loaded, the runtime interface remains bound, and passthrough
+remains configured. This is a loader/probe reference, not a successful
+reception reference. A subsequent initializer run must restart recording
+before its first call and retain the previously captured startup segment.
