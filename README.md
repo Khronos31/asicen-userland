@@ -18,6 +18,9 @@ continuity errors; reception quality is not yet guaranteed.
 Primary satellite TS and offline B25 decoding through the internal card,
 PC/SC and recisdb have also succeeded. BS01 slots0/1 selected distinct TSIDs
 matching the received PAT; see the [satellite trial](docs/reverse-engineering/satellite-ts-trial-2026-10-09.md).
+The combined daemon also passed live internal-card decoding of T27 and
+BS01_0:200,000 packets each, zero TEI/continuity errors and a decoded video
+frame from each output. See the [live trial](docs/reverse-engineering/live-card-stream-trial-2026-10-09.md).
 This is not yet a working four-receiver driver. See the
 [direct receive evidence](docs/reverse-engineering/direct-link-trial-2026-10-09.md).
 
@@ -87,11 +90,26 @@ Hardware capture supports primary receiver0 satellite channels and
 receiver1/T27 (557142kHz), with one active receiver lease at a time. It performs
 frontend initialization, one RF gain feedback step, acquisition and the
 device-link transform internally; the caller does not provide a seed file.
-The resulting TS can still be B25-scrambled. A separate `--card-only` daemon
-and `libifd-asicen.so` support offline recisdb decoding through PC/SC; see the
-[isolated PC/SC trial](docs/reverse-engineering/pcsc-recisdb-trial-2026-10-09.md).
-Simultaneous capture/card use, other terrestrial channels, secondary USB
-receivers and cold-start validation remain unfinished. LNB voltage changes
+The resulting TS can still be B25-scrambled. The hardware daemon now serves
+the internal card alongside capture. Configure a private PC/SC reader with
+`libifd-asicen.so` and
+`DEVICENAME asicen-userland:runtime=/tmp/asicen-example:instance=w3u3:access=user`;
+the [isolated PC/SC trial](docs/reverse-engineering/pcsc-recisdb-trial-2026-10-09.md)
+describes reader and socket isolation. With that private PC/SC socket selected:
+
+```sh
+build/asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
+  --receiver 0 --channel BS01_0 --packet-count 200000 --output - |
+  recisdb decode --input - --no-strip decoded.ts
+```
+
+Use a recisdb build containing `265fa62` (flush decoded stdin output).
+The installed1.2.4 binary used in testing omitted the last packet on stdin;
+version1.2.4 alone does not identify whether this fix is present.
+`--card-only` remains available for offline decoding.
+See the [live capture/card evidence](docs/reverse-engineering/live-card-stream-trial-2026-10-09.md).
+Other terrestrial channels, secondary USB receivers and cold-start validation
+remain unfinished. LNB voltage changes
 are unsupported. Hardware `--list` enumeration is also not implemented; use the
 probe tool for USB discovery. Daemon TS quality counters are not yet measured;
 use the offline validator rather than interpreting their zero values as proof
