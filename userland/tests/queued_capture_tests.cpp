@@ -74,6 +74,9 @@ public:
     std::size_t max_in_flight = 0;
     std::size_t depth = 0;
     bool released_after_drain = false;
+    asicen::QueueObservation* observation = nullptr;
+    std::array<std::uint64_t, 4> generations{};
+    std::array<bool, 4> slot_pending{};
 
     bool prepare(std::uint8_t endpoint, std::size_t wanted_depth,
                  std::size_t chunk_size) override {
@@ -86,6 +89,8 @@ public:
     bool submit(std::size_t slot) override {
         trace_->push_back("submit" + std::to_string(slot));
         if (slot == fail_submit) return false;
+        ++generations[slot];
+        slot_pending[slot] = true;
         ++in_flight;
         if (in_flight > max_in_flight) max_in_flight = in_flight;
         return true;
@@ -93,6 +98,12 @@ public:
     asicen::QueueWait wait(unsigned, asicen::QueueCompletion* completion) override {
         if (cursor >= events.size()) return asicen::QueueWait::Timeout;
         *completion = events[cursor++];
+        slot_pending[completion->slot] = false;
+        if (observation != nullptr)
+            observation->record_callback(completion->slot, completion->generation,
+                                         completion->raw_status,
+                                         completion->requested_length,
+                                         completion->actual_length);
         if (completion->io != asicen::CaptureIo::Error || completion->size != 0)
             --in_flight;
         return asicen::QueueWait::Completion;
@@ -100,12 +111,29 @@ public:
     bool resubmit(std::size_t slot) override {
         trace_->push_back("resubmit" + std::to_string(slot));
         if (fail_resubmit) return false;
+        ++generations[slot];
+        slot_pending[slot] = true;
         ++in_flight;
         if (in_flight > max_in_flight) max_in_flight = in_flight;
         return true;
     }
+    void set_observation(asicen::QueueObservation* value) override {
+        observation = value;
+    }
+    void snapshot_before_stop() override {
+        if (observation != nullptr)
+            observation->record_before_stop(in_flight, events.size() - cursor);
+    }
+    void set_phase(asicen::QueuePhase phase) override {
+        if (observation != nullptr) observation->set_phase(phase);
+    }
     void cancel_and_drain() override {
         trace_->push_back("cancel-drain");
+        if (observation != nullptr) {
+            for (std::size_t slot = 0; slot < depth; ++slot)
+                if (slot_pending[slot])
+                    observation->record_cancel(slot, generations[slot], -5);
+        }
         in_flight = 0;
         released_after_drain = true;
     }
@@ -420,6 +448,117 @@ void filter_restore_failure_is_reported() {
           "restoration failure still follows DSC stop and callback drain");
 }
 
+void queue_observation_accounts_callbacks_once_and_bounds_events() {
+    asicen::QueueObservation observation;
+    observation.record_callback(0, 1, 0, 4096, 12);
+    observation.record_callback(0, 1, 0, 4096, 12);  // duplicate callback
+    observation.set_phase(asicen::QueuePhase::StoppingDsc);
+    observation.record_callback(1, 1, 3, 4096, 7);  // cancelled partial completion
+    observation.set_phase(asicen::QueuePhase::CancelDrain);
+    observation.record_callback(0, 2, 3, 4096, 5);  // next generation
+    for (std::uint64_t generation = 2; generation < 260; ++generation)
+        observation.record_callback(2, generation, 0, 4096, 1);
+    observation.record_before_stop(2, 1);
+    observation.record_cancel(1, 1, -5);  // libusb NOT_FOUND
+    check(observation.callback_count == 261,
+          "unique callback generations counted once across reused slots");
+    check(observation.duplicate_or_stale_callbacks == 1,
+          "duplicate generation is excluded from accounting");
+    check(observation.callback_actual_bytes == 282,
+          "actual byte totals include partial and drained callback payloads");
+    check(observation.phase_counts[0] == 1 && observation.phase_counts[1] == 1 &&
+              observation.phase_counts[2] == 259,
+          "callbacks retain the phase observed at entry");
+    check(observation.event_count == asicen::QueueObservation::kMaxEvents &&
+              observation.event_overflow == 5,
+          "event storage is capped while all callback totals continue");
+    check(observation.pending_before_stop == 2 && observation.ready_before_stop == 1,
+          "pre-stop pending and ready counts are retained");
+    check(observation.cancellation_count == 1 &&
+              observation.cancellations[0].return_code == -5,
+          "cancel return codes including NOT_FOUND are retained");
+}
+
+void queue_observation_preserves_normal_capture_accounting() {
+    std::vector<std::string> trace;
+    Control control(&trace);
+    Queue queue(&trace);
+    Output output;
+    queue.events.push_back({0, asicen::CaptureIo::Ok, queue.bytes.data(), 4,
+                            1, 0, 4096, 4});
+    asicen::QueueObservation observation;
+    asicen::CaptureStats stats{};
+    const auto result = asicen::run_queued_capture(
+        &control, &queue, &output, request(4), 4, &stats, false, nullptr,
+        &observation);
+    check(result == asicen::CaptureOutcome::Completed,
+          "observation-enabled queue retains successful capture outcome");
+    check(stats.bytes == 4 && output.bytes.size() == 4,
+          "diagnostics do not change bytes written to the capture output");
+    check(observation.callback_count == 1 &&
+              observation.normal_delivery_count == 1 &&
+              observation.normal_delivery_actual_bytes == 4,
+          "normal callback and normal delivery are accounted independently");
+    check(observation.pending_before_stop == 3 &&
+              observation.ready_before_stop == 0 &&
+              observation.cancellation_count == 3,
+          "capture snapshots queued work and records each cancel attempt");
+}
+
+void queue_observation_counts_handoff_before_output_and_error_checks() {
+    {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        Queue queue(&trace);
+        Output output;
+        queue.events.push_back({0, asicen::CaptureIo::Ok, nullptr, 0, 1, 0, 4096, 0});
+        asicen::QueueObservation observation;
+        auto zero_request = request();
+        zero_request.deadline = Clock::now() + std::chrono::milliseconds(2);
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, zero_request, 4, nullptr, false, nullptr,
+            &observation);
+        check(result == asicen::CaptureOutcome::ZeroBytes &&
+                  observation.normal_delivery_count == 1 &&
+                  observation.normal_delivery_actual_bytes == 0,
+              "zero-length completion is counted as a normal handoff");
+    }
+    {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        Queue queue(&trace);
+        Output output;
+        queue.events.push_back({0, asicen::CaptureIo::Error, queue.bytes.data(), 2,
+                                1, 3, 4096, 2});
+        asicen::QueueObservation observation;
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(), 4, nullptr, false, nullptr,
+            &observation);
+        check(result == asicen::CaptureOutcome::UsbFailed &&
+                  observation.normal_delivery_count == 1 &&
+                  observation.normal_delivery_actual_bytes == 2,
+              "error completion partial payload is counted at normal handoff");
+    }
+    {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        Queue queue(&trace);
+        Output output;
+        output.accept = false;
+        queue.events.push_back({0, asicen::CaptureIo::Ok, queue.bytes.data(), 3,
+                                1, 0, 4096, 3});
+        asicen::QueueObservation observation;
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(), 4, nullptr, false, nullptr,
+            &observation);
+        check(result == asicen::CaptureOutcome::OutputFailed &&
+                  observation.normal_delivery_count == 1 &&
+                  observation.normal_delivery_actual_bytes == 3 &&
+                  output.bytes.empty(),
+              "handoff is counted even when the downstream output rejects the data");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -438,6 +577,9 @@ int main() {
     filter_start_write_failures_restore_snapshot();
     cf40_response_uses_transfer_length_not_status_byte();
     filter_restore_failure_is_reported();
+    queue_observation_accounts_callbacks_once_and_bounds_events();
+    queue_observation_preserves_normal_capture_accounting();
+    queue_observation_counts_handoff_before_output_and_error_checks();
     std::cout << "queued capture lifecycle tests passed\n";
     return 0;
 }

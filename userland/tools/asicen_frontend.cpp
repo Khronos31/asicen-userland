@@ -65,6 +65,7 @@ struct Arguments {
     unsigned queue_depth = 1;
     bool have_queue_depth = false;
     bool filter_start = false;
+    bool queue_diagnostics = false;
     bool shared_demod = false;
     bool have_timeout = false;
     unsigned timeout_ms = 20000;
@@ -101,6 +102,7 @@ void usage(const char* argv0) {
         << "         --reset-state 0|1 (required: fourth USB_FilterReset argument)\n"
         << "         --queue-depth 1|4 (capture only; default 1, 4 queues async reads before DSC)\n"
         << "         --filter-start (capture only; local 1 + queue depth 4, restore CF40)\n"
+        << "         --queue-diagnostics (capture only; queue depth 4, bounded callback trace to stderr)\n"
         << "         --shared-demod (init/terrestrial only; also initialize satellite demod over I2C)\n"
         << "\n"
         << "Explicit-target frontend diagnostics. Every write verifies the fresh\n"
@@ -231,6 +233,8 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
             out->have_queue_depth = true;
         } else if (arg == "--filter-start") {
             out->filter_start = true;
+        } else if (arg == "--queue-diagnostics") {
+            out->queue_diagnostics = true;
         } else if (arg == "--shared-demod") {
             out->shared_demod = true;
         } else if (arg == "--timeout-ms") {
@@ -580,6 +584,7 @@ public:
         if (slot == nullptr || slot->transfer == nullptr || slot->pending) return false;
         slot->pending = true;
         slot->queued = false;
+        ++slot->generation;
         const int rc = libusb_submit_transfer(slot->transfer);
         if (rc != 0) slot->pending = false;
         return rc == 0;
@@ -608,15 +613,38 @@ public:
         completion->size = slot->transfer->actual_length > 0
                                ? static_cast<std::size_t>(slot->transfer->actual_length)
                                : 0;
+        completion->generation = slot->generation;
+        completion->raw_status = static_cast<int>(slot->transfer->status);
+        completion->requested_length = slot->transfer->length;
+        completion->actual_length = slot->transfer->actual_length;
         return asicen::QueueWait::Completion;
     }
 
     bool resubmit(std::size_t slot) override { return submit(slot); }
 
+    void set_observation(asicen::QueueObservation* observation) override {
+        observation_ = observation;
+        if (observation_ != nullptr) observation_->set_phase(phase_);
+    }
+
+    void set_phase(asicen::QueuePhase phase) override {
+        phase_ = phase;
+        if (observation_ != nullptr) observation_->set_phase(phase);
+    }
+
+    void snapshot_before_stop() override {
+        if (observation_ == nullptr) return;
+        std::size_t pending = 0;
+        for (const auto& slot : slots_) if (slot->pending) ++pending;
+        observation_->record_before_stop(pending, ready_.size());
+    }
+
     void cancel_and_drain() override {
         for (const auto& slot : slots_) {
             if (slot->pending) {
                 const int rc = libusb_cancel_transfer(slot->transfer);
+                if (observation_ != nullptr)
+                    observation_->record_cancel(slot->index, slot->generation, rc);
                 (void)rc;  // NOT_FOUND means completion is already being delivered.
             }
         }
@@ -652,11 +680,16 @@ private:
         asicen::CaptureIo io = asicen::CaptureIo::Error;
         bool pending = false;
         bool queued = false;
+        std::uint64_t generation = 0;
     };
 
     static void LIBUSB_CALL transfer_complete(libusb_transfer* transfer) {
         auto* slot = static_cast<Slot*>(transfer->user_data);
         if (slot == nullptr || slot->owner == nullptr) return;
+        if (slot->owner->observation_ != nullptr)
+            slot->owner->observation_->record_callback(
+                slot->index, slot->generation, static_cast<int>(transfer->status),
+                transfer->length, transfer->actual_length);
         slot->pending = false;
         switch (transfer->status) {
             case LIBUSB_TRANSFER_COMPLETED:
@@ -686,6 +719,8 @@ private:
 
     libusb_context* context_;
     libusb_device_handle* handle_;
+    asicen::QueueObservation* observation_ = nullptr;
+    asicen::QueuePhase phase_ = asicen::QueuePhase::Normal;
     std::uint8_t endpoint_ = 0;
     std::vector<std::unique_ptr<Slot>> slots_;
     std::deque<std::size_t> ready_;
@@ -846,14 +881,58 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
 
     PosixCaptureOutput output(out_fd, deadline);
     asicen::CaptureStats stats{};
+    asicen::QueueObservation queue_observation{};
     asicen::CaptureOutcome outcome = asicen::CaptureOutcome::InvalidArgument;
     if (args.queue_depth == 4) {
         LibusbQueuedCaptureIo queued(context, device->handle());
         outcome = asicen::run_queued_capture(&backend, &queued, &output, request,
                                              args.queue_depth, &stats,
-                                             args.filter_start, cf40_to_restore);
+                                             args.filter_start, cf40_to_restore,
+                                             args.queue_diagnostics ? &queue_observation : nullptr);
     } else {
         outcome = asicen::run_raw_capture(&backend, &output, request, &stats);
+    }
+
+    if (args.queue_diagnostics) {
+        std::cerr << "queue diagnostics callbacks=" << queue_observation.callback_count
+                  << " actual_bytes=" << queue_observation.callback_actual_bytes
+                  << " normal_handoffs=" << queue_observation.normal_delivery_count
+                  << " normal_handoff_bytes="
+                  << queue_observation.normal_delivery_actual_bytes
+                  << " before_stop_pending=" << queue_observation.pending_before_stop
+                  << " before_stop_ready=" << queue_observation.ready_before_stop
+                  << " retained=" << queue_observation.event_count
+                  << " overflow=" << queue_observation.event_overflow
+                  << " duplicate_or_stale="
+                  << queue_observation.duplicate_or_stale_callbacks << '\n';
+        for (std::size_t i = 0; i < queue_observation.event_count; ++i) {
+            const auto& event = queue_observation.events[i];
+            std::cerr << "queue event slot=" << event.slot
+                      << " generation=" << event.generation
+                      << " monotonic_ns=" << event.monotonic_ns
+                      << " phase=" << static_cast<unsigned>(event.phase)
+                      << " status=" << event.raw_status
+                      << " requested=" << event.requested_length
+                      << " actual=" << event.actual_length << '\n';
+        }
+        for (std::size_t i = 0; i < queue_observation.cancellation_count; ++i) {
+            const auto& event = queue_observation.cancellations[i];
+            std::cerr << "queue cancel slot=" << event.slot
+                      << " generation=" << event.generation
+                      << " rc=" << event.return_code << '\n';
+        }
+        std::cerr << "queue phase_legend=0:Normal,1:StoppingDsc,2:CancelDrain"
+                  << " counts normal=" << queue_observation.phase_counts[0]
+                  << " stopping_dsc=" << queue_observation.phase_counts[1]
+                  << " cancel_drain=" << queue_observation.phase_counts[2]
+                  << " phase_actual_bytes=" << queue_observation.phase_actual_bytes[0]
+                  << ',' << queue_observation.phase_actual_bytes[1] << ','
+                  << queue_observation.phase_actual_bytes[2] << " status=count:bytes:";
+        for (std::size_t i = 0; i < queue_observation.status_counts.size(); ++i)
+            std::cerr << queue_observation.status_counts[i] << ':'
+                      << queue_observation.status_actual_bytes[i] << ',';
+        std::cerr << " unknown_status=" << queue_observation.unknown_status_count
+                  << " cancel_overflow=" << queue_observation.cancellation_overflow << '\n';
     }
 
     const bool close_ok = finish_output();
@@ -960,6 +1039,11 @@ int main(int argc, char** argv) {
     if (args.filter_start &&
         (args.command != "capture" || args.local != 1 || args.queue_depth != 4)) {
         std::cerr << "--filter-start requires capture on local 1 with --queue-depth 4\n";
+        return 2;
+    }
+    if (args.queue_diagnostics &&
+        (args.command != "capture" || args.queue_depth != 4)) {
+        std::cerr << "--queue-diagnostics requires capture with --queue-depth 4\n";
         return 2;
     }
     if (args.shared_demod && args.command != "init" && args.command != "terrestrial") {

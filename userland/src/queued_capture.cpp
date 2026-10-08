@@ -5,6 +5,60 @@
 #include <vector>
 
 namespace asicen {
+void QueueObservation::set_phase(QueuePhase phase) { phase_ = phase; }
+
+void QueueObservation::record_callback(std::size_t slot, std::uint64_t generation,
+                                      int raw_status, int requested_length,
+                                      int actual_length) {
+    if (slot >= kMaxSlots || (saw_generation_[slot] &&
+                              generation <= last_generation_[slot])) {
+        ++duplicate_or_stale_callbacks;
+        return;
+    }
+    saw_generation_[slot] = true;
+    last_generation_[slot] = generation;
+    ++callback_count;
+    const auto actual = actual_length > 0 ? static_cast<std::uint64_t>(actual_length) : 0;
+    callback_actual_bytes += actual;
+    const auto phase_index = static_cast<std::size_t>(phase_);
+    ++phase_counts[phase_index];
+    phase_actual_bytes[phase_index] += actual;
+    if (raw_status >= 0 && static_cast<std::size_t>(raw_status) < kStatusCount) {
+        const auto status_index = static_cast<std::size_t>(raw_status);
+        ++status_counts[status_index];
+        status_actual_bytes[status_index] += actual;
+    } else {
+        ++unknown_status_count;
+    }
+    if (event_count < events.size()) {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        events[event_count++] = {slot, generation,
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()),
+            phase_, raw_status, requested_length, actual_length};
+    } else {
+        ++event_overflow;
+    }
+}
+
+void QueueObservation::record_normal_delivery(std::size_t size) {
+    ++normal_delivery_count;
+    normal_delivery_actual_bytes += size;
+}
+
+void QueueObservation::record_before_stop(std::size_t pending, std::size_t ready) {
+    pending_before_stop = pending;
+    ready_before_stop = ready;
+}
+
+void QueueObservation::record_cancel(std::size_t slot, std::uint64_t generation,
+                                     int return_code) {
+    if (cancellation_count < cancellations.size()) {
+        cancellations[cancellation_count++] = {slot, generation, return_code};
+    } else {
+        ++cancellation_overflow;
+    }
+}
+
 namespace {
 
 int remaining_ms(std::chrono::steady_clock::time_point deadline) {
@@ -22,13 +76,15 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
                                  const CaptureRequest& request,
                                  std::size_t depth, CaptureStats* stats,
                                  bool filter_start,
-                                 const std::uint8_t* initial_cf40) {
+                                 const std::uint8_t* initial_cf40,
+                                 QueueObservation* observation) {
     if (stats != nullptr) *stats = {};
     if (control == nullptr || io == nullptr || output == nullptr ||
         request.endpoint == 0 || request.local > 1 || request.chunk_size == 0 ||
         depth == 0 || depth > 4 || (filter_start && (request.local != 1 || depth != 4))) {
         return CaptureOutcome::InvalidArgument;
     }
+    if (observation != nullptr) io->set_observation(observation);
 
     std::uint8_t original_cf40 = 0;
     bool cf40_snapshotted = false;
@@ -129,6 +185,8 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         }
 
         pending[completion.slot] = false;
+        if (observation != nullptr)
+            observation->record_normal_delivery(completion.size);
         std::size_t to_write = completion.size;
         if (request.byte_limit != 0 && total + to_write > request.byte_limit) {
             to_write = static_cast<std::size_t>(request.byte_limit - total);
@@ -162,8 +220,11 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     // Stop the device-side stream before cancelling host URBs. A failed start
     // is also stopped because the control transfer may have partially taken effect.
     if (dsc_attempted) {
+        io->snapshot_before_stop();
+        io->set_phase(QueuePhase::StoppingDsc);
         dsc_stopped = control->dsc_stop(request.local);
     }
+    io->set_phase(QueuePhase::CancelDrain);
     io->cancel_and_drain();
     bool cf40_restored = true;
     if (cf40_snapshotted) {

@@ -445,3 +445,48 @@ for matching the original API but did not yield data in this first bounded
 trial. Other earlier register-combination trials have not been repeated with
 the corrected DSC requests. Local build and17 CTests passed, with independent
 literal USB setup checks for start/stop on both local lanes.
+
+### Callback-observed controller05 comparison
+
+Optional `--queue-diagnostics` now retains up to256 callback events and
+uncapped counters, recording slot, submit generation, monotonic time, phase,
+raw libusb status, requested length and actual length. Phases are0 Normal,
+1 StoppingDsc and2 CancelDrain. It also records normal-loop handoffs before
+output handling, pending/ready counts before stop and cancellation return
+codes. Diagnostics print to stderr after queue cleanup. No transfer size,
+timeout, DSC/filter operation or cleanup order was changed.
+
+Parent compared two5-second primary T27 trials using corrected DSC06/07,
+reset1, local1, queue-depth4 (four4096-byte reads) and filter-start:
+
+| Observation | controller05=00 baseline | controller05=20 comparison |
+| --- | --- | --- |
+| Raw file bytes / exit | 0 / 1 | 0 / 1 |
+| Normal handoffs / bytes | 0 / 0 | 0 / 0 |
+| Pending / ready before stop | 4 / 0 | 4 / 0 |
+| Callbacks Normal / StoppingDsc / CancelDrain | 0 / 0 / 4 | 0 / 0 / 4 |
+| Callback actual bytes, all phases | 0 | 0 |
+| Callback status | four CANCELLED (raw3) | four CANCELLED (raw3) |
+| Requested / actual length, each slot | 4096 / 0 | 4096 / 0 |
+| Cancel return, each slot | 0 | 0 |
+| Event overflow / duplicate callbacks | 0 / 0 | 0 / 0 |
+
+Before comparison, terrestrial lock readA9 and controller05 read00. Parent
+wrote `c0:03 value054a index0020 length2` and confirmed05 read20, then ran
+the same capture command. No additional GPIO, seed, satellite or SlowdownIC
+operation was added. Output20 is derived from original initializer flags;
+this experiment tests only that register difference, not the full original
+polling sequence. It did not produce an observable sample or nonzero callback
+length, and does not establish that output20 is unnecessary in other states.
+
+Logs: `evidence/raw/capture-primary-T27-observed-controller00.txt` and
+`evidence/raw/capture-primary-T27-observed-controller20.txt`; both raw files
+are empty. Terminal callback payload discarded by the existing drain path
+does not explain these two outputs: all observed actual lengths were zero.
+This is a libusb observation, not a USB bus-analyzer capture.
+
+Parent sent corrected stop07, restored/read back controller05=00 and
+CF40..44=`04 00 20 1f ff`; final GPIO76 and terrestrial b0=A9. Local build
+and17 CTests passed, including callback accounting and handoff cases.
+The next proposed independent comparison is the source-observed post-lock
+FilterReset/FilterONOFF timing; that comparison has not been performed.
