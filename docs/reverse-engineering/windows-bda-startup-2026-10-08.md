@@ -3,8 +3,9 @@
 Follow-up (23:07 JST): the Linux prerequisite left unresolved by this review
 has now been identified and tested. Calling the public TF_bGetCusInfo before
 Init populated the identity cache through a successful58-byte USB0c read;
-both lanes returned Init=1. The guarded T27 trial still did not lock or
-receive nonzero bulk data. See [the hardware record](../../HARDWARE-VALIDATION.md#customer_info-prerequisite-trial-2026-10-08-2307-jst)
+both lanes returned Init=1. Subsequent [readiness-gate analysis](official-tune-readiness-gate-2026-10-08.md)
+showed that trial did not actually retune or measure RF lock; its public
+APIs short-circuited. No nonzero bulk data was received. See [the hardware record](../../HARDWARE-VALIDATION.md#customer_info-prerequisite-trial-2026-10-08-2307-jst)
 and [the dedicated API audit](https://github.com/Khronos31/asicen-userland/blob/40343327409e38ba499032c5a54e044ac542bb0e/docs/reverse-engineering/official-init-customer-info-2026-10-08.md).
 No GenEncSeed call was needed for that initialization result. The sections
 below preserve the narrower findings of the preceding Windows review.

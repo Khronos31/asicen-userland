@@ -45,6 +45,9 @@ extern "C" int TF_DTV_UnInit(PVOID, BYTE) asm("_Z13TF_DTV_UnInitPvh");
 extern "C" int TF_DTV_SetTunerFreq(PVOID, BYTE, ULONG, BYTE) asm("_Z19TF_DTV_SetTunerFreqPvhmh");
 extern "C" int TF_DTV_TunerLockCheck(PVOID, BYTE) asm("_Z21TF_DTV_TunerLockCheckPvh");
 extern "C" BOOL TF_DTV_DevClose(PVOID) asm("_Z15TF_DTV_DevClosePv");
+extern "C" BOOL Tnim_AcquireFrequency(PVOID, ULONG, BYTE)
+    asm("_Z21Tnim_AcquireFrequencyP13_STnimControlmh");
+extern "C" BOOL Tnim_IsLocked(PVOID) asm("_Z13Tnim_IsLockedP13_STnimControl");
 
 extern "C" int real_ucSetGPIO(BYTE, BYTE, int) asm("__real__Z9ucSetGPIOhhi");
 
@@ -136,9 +139,10 @@ static bool cleanup(RunState &state) {
 
 int main(int argc, char **argv) {
   const bool customer_only = argc == 4 && strcmp(argv[3], "--customer-only") == 0;
-  if ((argc != 3 && !customer_only) || argv[1][0] != '/' || strlen(argv[2]) != 2) {
+  const bool rf_diagnostic = argc == 4 && strcmp(argv[3], "--rf-diagnostic") == 0;
+  if ((argc != 3 && !customer_only && !rf_diagnostic) || argv[1][0] != '/' || strlen(argv[2]) != 2) {
     fprintf(stderr,
-            "usage: %s /dev/as11usbdtv0 initial_gpio_hex [--customer-only]\n",
+            "usage: %s /dev/as11usbdtv0 initial_gpio_hex [--customer-only|--rf-diagnostic]\n",
             argv[0]);
     return 2;
   }
@@ -257,8 +261,90 @@ int main(int argc, char **argv) {
 
   // StreamThreadRun was started by the official Init wrapper; deliberately
   // omit StreamDataRead because its bulk-read ioctl has no proven 5s timeout.
-  fprintf(stderr, "StreamDataRead omitted; lock_seen=%d lock_final=%d\n",
+  fprintf(stderr, "StreamDataRead omitted; public_api_lock_seen=%d public_api_lock_final=%d\n",
           lock_seen ? 1 : 0, lock_rc);
+
+  bool rf_lock_seen = false;
+  int rf_acquire_rc = 0;
+  if (rf_diagnostic) {
+    // This opt-in path is a lower-level RF diagnostic, not the normal public
+    // receive chain. Resolve the active local1 control object read-only and
+    // reject unexpected object identity, lifecycle, or tune scratch state.
+    const BYTE *ext_bytes = static_cast<const BYTE *>(state.extension);
+    PVOID control = 0;
+    memcpy(&control, ext_bytes + 0x460, sizeof(control));
+    if (control == 0) {
+      fprintf(stderr, "RF diagnostic rejected: local1 control pointer is null\n");
+      cleanup(state);
+      return 1;
+    }
+    const BYTE *ctrl_bytes = static_cast<const BYTE *>(control);
+    PVOID back_reference = 0;
+    memcpy(&back_reference, ctrl_bytes + 0x1d38, sizeof(back_reference));
+    const BYTE control_lane = ctrl_bytes[0x1d30];
+    unsigned int init_count = 0;
+    memcpy(&init_count, ctrl_bytes + 0x1d40, sizeof(init_count));
+    const BYTE stream_gate = ctrl_bytes[0x30d60];
+    unsigned int acquire_state = 0;
+    memcpy(&acquire_state, ctrl_bytes + 0x1c70, sizeof(acquire_state));
+    const size_t lane_scratch = 0x4ea0 + 1 * 0x50;
+    ULONG scratch0 = 0, scratch1 = 0, scratch2 = 0;
+    memcpy(&scratch0, ext_bytes + lane_scratch, sizeof(scratch0));
+    memcpy(&scratch1, ext_bytes + lane_scratch + 8, sizeof(scratch1));
+    memcpy(&scratch2, ext_bytes + lane_scratch + 16, sizeof(scratch2));
+    fprintf(stderr,
+            "RF diagnostic state: control=%p backref_match=%d lane=%u init_count=%u stream_gate=%u acquire_state_nonzero=%d scratch=%lx/%lx/%lx\n",
+            control, back_reference == state.extension ? 1 : 0,
+            static_cast<unsigned>(control_lane), init_count,
+            static_cast<unsigned>(stream_gate), acquire_state != 0 ? 1 : 0,
+            static_cast<unsigned long>(scratch0),
+            static_cast<unsigned long>(scratch1), static_cast<unsigned long>(scratch2));
+    if (back_reference != state.extension || control_lane != 1 ||
+        init_count != 1 || stream_gate != 1 || scratch0 != 0 ||
+        scratch1 != 0 || scratch2 != 0) {
+      fprintf(stderr, "RF diagnostic rejected: control identity/lifecycle/scratch validation failed\n");
+      cleanup(state);
+      return 1;
+    }
+
+    // The public tune wrapper short-circuits in the observed post-stream
+    // state. Call the vendor's lower-level acquisition primitive once without
+    // altering state flags or seed inputs, then use its RF lock primitive.
+    const int rf_lock_before = Tnim_IsLocked(control);
+    fprintf(stderr, "RF diagnostic Tnim_IsLocked before acquire local1 rc=%d\n",
+            rf_lock_before);
+    rf_acquire_rc = Tnim_AcquireFrequency(control, 557142UL, 6);
+    fprintf(stderr,
+            "RF diagnostic Tnim_AcquireFrequency local1 freq_khz=557142 bw=6 rc=%d\n",
+            rf_acquire_rc);
+    fprintf(stderr, "RF diagnostic stream_gate_after_acquire=%u\n",
+            static_cast<unsigned>(ctrl_bytes[0x30d60]));
+    timespec rf_deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &rf_deadline) != 0) {
+      cleanup(state);
+      return 1;
+    }
+    rf_deadline.tv_sec += 5;
+    int rf_lock_rc = 0;
+    bool rf_lock_hold_started = false;
+    do {
+      rf_lock_rc = Tnim_IsLocked(control);
+      fprintf(stderr, "RF diagnostic Tnim_IsLocked local1 rc=%d\n", rf_lock_rc);
+      if (rf_lock_rc == 1 && !rf_lock_hold_started) {
+        rf_lock_seen = true;
+        rf_lock_hold_started = true;
+        if (clock_gettime(CLOCK_MONOTONIC, &rf_deadline) != 0) break;
+        rf_deadline.tv_sec += 5;
+        fprintf(stderr, "RF lock held observation started for 5 seconds\n");
+      }
+      if (read_deadline_expired(rf_deadline)) break;
+      struct timespec pause = {0, 100000000};
+      while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+    } while (!read_deadline_expired(rf_deadline));
+    fprintf(stderr, "RF diagnostic result: lock_seen=%d\n", rf_lock_seen ? 1 : 0);
+  }
+
   bool cleanup_ok = cleanup(state);
+  if (rf_diagnostic) return rf_acquire_rc == 1 && rf_lock_seen && cleanup_ok ? 0 : 1;
   return lock_seen && lock_rc == 1 && cleanup_ok ? 0 : 1;
 }

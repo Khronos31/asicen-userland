@@ -865,14 +865,16 @@ the full trial. The full trial repeated the same successful58-byte read.
 | DevCreate / AssignDevExt_0 | 1 / 1 |
 | Customer_Info | 1; returned and cached VID/PID0b06/0005 |
 | Init local0 / local1 | 1 / 1 |
-| T27 local1, 557142kHz, bandwidth6 | 1 |
-| Lock checks during the five-second window | All0; no lock observed |
+| Requested T27 local1, 557142kHz, bandwidth6 | API returned1; later audit shows no RF retune occurred |
+| Public lock checks during the five-second window | All0; later audit shows RF was not measured |
 | UnInit local1 / local0 / DevClose | 1 / 1 / 1 |
 | Harness exit | 1, because no lock was observed; watchdog not reached |
 
 This resolves the observed harness Init=-2 with the normal public API.
-It does not resolve the earlier userland zero-byte result after lock:
-this trial did not lock. Init now emits its own SysCtrl reads and frontend
+It does not resolve the earlier userland zero-byte result after lock.
+Subsequent audit showed the public tune and lock APIs short-circuited while
+control+30d60 remained1; this trial cannot establish RF unlock at T27.
+Init now emits its own SysCtrl reads and frontend
 configuration, unlike the previous failed trial. Guest trace records four
 65536-byte submissions each to endpoint81 and82; all eight completions
 are cleanup cancellations, status-2 and actual_length0. The host capture
@@ -915,3 +917,28 @@ sudo timeout -s KILL 45s ./official-trace-harness /dev/as11usbdtv0 ff
 
 Run restoration after DevClose (also after watchdog termination), rather
 than interpreting --customer-only or the watchdog as device restoration.
+
+### Public readiness gate and actual RF retune (2026-10-08, 23:30 JST)
+
+The public frequency API's return1 was not evidence of a T27 retune:
+DTV_SetTunerFreq .text6755..6768 returns1 after400ms when control+30d60
+is1. DTV_TunerLockCheck .text5017..5028 likewise returns0 without reading
+RF when that byte is nonzero. TF_DTV_Init sets it to1. The previous trace
+contains only initial773143kHz PLL settings, not T27 settings. The earlier
+description of that trial as RF no-lock is therefore corrected above.
+
+An opt-in --rf-diagnostic trial called the official lower-level
+Tnim_AcquireFrequency / Tnim_IsLocked components on the validated real
+local1 control object. It left the readiness gate1 and supplied no seed,
+key or direct flag write. Actual T27 PLL writes appeared;47 direct RF
+polls returned1 in41 cases and0 in6, including the last poll. Demod b0
+reachedA9. RF lock was observed, but uninterrupted lock and valid TS
+were not established. All eight guest bulk completions had cancellation
+status-2 and length0. Init/UnInit/DevClose succeeded, and non-LNB GPIO
+restoration read backFF/GPIOEx02. No LNB mask or GPIOEx write was sent.
+
+See [the analysis and bounded trial](docs/reverse-engineering/official-tune-readiness-gate-2026-10-08.md)
+for API addresses, the lower-level call's side effects and limitations,
+trace counts, preservation locations and the still-unresolved supported
+public receive-chain preparation. This trial does not reproduce the full
+official application sequence or resolve the original locked zero-byte case.
