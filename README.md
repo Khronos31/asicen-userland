@@ -5,9 +5,10 @@ starting with the original PX-W3U3. Based on the protocol skeleton and evidence
 from [asicen-research](https://github.com/Khronos31/asicen-research).
 
 This repository is private during development. Public visibility is planned for
-the 0.1.0 release. This is not yet a working four-receiver driver: the first USB
-function boots and responds to read-only queries, while booting it disconnects
-the sibling function. Tuning and real TS reception are not implemented.
+the 0.1.0 release. Both USB functions boot and respond to read-only queries.
+One terrestrial lane has tuned and locked on the attached PX-W3U3. Finite raw
+capture still returns zero bytes; TS reception, satellite reception and B-CAS
+decoding are unverified. This is not yet a working four-receiver driver.
 
 ## Build and offline tests
 
@@ -38,3 +39,32 @@ vendor `loader.ko`; vendor binaries and firmware remain locally ignored.
 
 See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md) for provenance, observed
 USB topology, transfer results, and unresolved bring-up work.
+
+### Terrestrial frontend diagnostic
+
+`asicen-frontend` performs bounded, explicit-target experiments. Every command
+requires a fresh USB address and matching physical port path, verifies the
+runtime VID/PID and exclusively claims interface0. It does not detach a kernel
+driver, reset the parent hub or enable LNB voltage.
+
+```sh
+build/asicen-frontend --device BUS:ADDRESS --port BUS-PORT \
+  --frequency-khz 557142 --timeout-ms 20000 --lock-timeout-ms 3000 terrestrial
+```
+
+557142kHz locked on the development machine; choose an available local channel
+for another installation. Cold-start repeatability and the second terrestrial
+lane remain unverified. `lock` can query the demodulator separately.
+An opt-in `--shared-demod` on `init`/`terrestrial` also programs the42 original
+satellite-demod register facts; it performs no satellite RF tuning or LNB
+enablement. This combination has not produced TS on the development machine.
+
+`capture` saves raw bulk bytes rather than validated MPEG-TS. It requires
+`--reset-state 0|1` because the original caller's reset-state default remains
+unresolved, together with finite `--seconds` and optional `--output PATH|-`.
+Diagnostics use stderr when capturing. Zero-byte captures return failure.
+`--queue-depth 4` reserves four asynchronous reads before acquisition starts;
+the default depth1 uses synchronous reads. The deadline bounds acquisition,
+while cleanup waits for terminal callbacks before freeing transfer buffers.
+See [SPEC.md](SPEC.md) for the px4 CLI compatibility target and acceptance gates.
+Source attribution and component license details are in [NOTICES.md](NOTICES.md).

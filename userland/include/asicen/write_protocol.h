@@ -50,6 +50,21 @@ ControlTransfer make_reset_channel(std::uint8_t first,
                                    std::uint8_t second,
                                    std::uint16_t timeout_ms = 1000);
 
+// Channel-filter (CF) transfers. Recovered from UsbDTV_u32ChannelFilter:
+// read  uses bRequest 0x04, wValue = subcmd (|0x80 when local == 1), wIndex 0;
+// write uses bRequest 0x05, wValue = subcmd | data[0]<<8,
+//       wIndex = data[1] | data[2]<<8. Both return length+1 vendor-IN bytes.
+ControlTransfer make_cf_read(std::uint8_t local,
+                             std::uint8_t subcmd,
+                             std::uint16_t length,
+                             std::uint16_t timeout_ms = 1000);
+bool make_cf_write(std::uint8_t local,
+                   std::uint8_t subcmd,
+                   const std::uint8_t* data,
+                   std::size_t size,
+                   ControlTransfer* out,
+                   std::uint16_t timeout_ms = 1000);
+
 // Reconstructs the packetization performed by UsbDTV_u32I2C for writes.
 // mode 2/3 uses the 0x0d staging buffer + 0x0e send path.
 // other modes use 0x03, except modes with bit 2 set use 0x14 no-stop.

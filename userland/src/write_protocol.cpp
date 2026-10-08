@@ -151,6 +151,48 @@ ControlTransfer make_reset_channel(std::uint8_t first,
     };
 }
 
+ControlTransfer make_cf_read(std::uint8_t local,
+                             std::uint8_t subcmd,
+                             std::uint16_t length,
+                             std::uint16_t timeout_ms) {
+    const std::uint8_t effective =
+        static_cast<std::uint8_t>(local == 1 ? (subcmd | 0x80U) : subcmd);
+    return ControlTransfer{
+        0,
+        Request::ChannelFilterRead,
+        effective,
+        0,
+        static_cast<std::uint16_t>(length + 1U),
+        Direction::In,
+        timeout_ms,
+    };
+}
+
+bool make_cf_write(std::uint8_t local,
+                   std::uint8_t subcmd,
+                   const std::uint8_t* data,
+                   std::size_t size,
+                   ControlTransfer* out,
+                   std::uint16_t timeout_ms) {
+    if (out == nullptr || data == nullptr || size == 0 || size > 3) {
+        return false;
+    }
+    const std::uint8_t effective =
+        static_cast<std::uint8_t>(local == 1 ? (subcmd | 0x80U) : subcmd);
+    const std::uint8_t d1 = size > 1 ? data[1] : 0;
+    const std::uint8_t d2 = size > 2 ? data[2] : 0;
+    *out = ControlTransfer{
+        0,
+        Request::ChannelFilterWrite,
+        setup_word(effective, data[0]),
+        setup_word(d1, d2),
+        static_cast<std::uint16_t>(size + 1U),
+        Direction::In,
+        timeout_ms,
+    };
+    return true;
+}
+
 std::vector<ControlTransfer> build_i2c_write_sequence(
     std::uint8_t slave,
     std::uint8_t reg,

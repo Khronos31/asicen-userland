@@ -17,11 +17,14 @@ add_library(asicen_core STATIC
   userland/src/enclosure.cpp
   userland/src/enclosure_grouping.cpp
   userland/src/frontend_facts.cpp
+  userland/src/frontend_sequence.cpp
   userland/src/ipc.cpp
   userland/src/loader_firmware.cpp
   userland/src/mock_backend.cpp
   userland/src/protocol.cpp
+  userland/src/queued_capture.cpp
   userland/src/receiver_service.cpp
+  userland/src/stream_capture.cpp
   userland/src/stream_queue.cpp
   userland/src/ts_framer.cpp
   userland/src/write_protocol.cpp
@@ -44,6 +47,10 @@ if(ASICEN_ENABLE_LIBUSB)
   add_executable(asicen-probe userland/tools/asicen_probe.cpp)
   target_link_libraries(asicen-probe PRIVATE asicen_libusb)
   target_compile_options(asicen-probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+  add_executable(asicen-frontend userland/tools/asicen_frontend.cpp)
+  target_link_libraries(asicen-frontend PRIVATE asicen_libusb)
+  target_compile_options(asicen-frontend PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
 if(UNIX)
@@ -98,6 +105,46 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-loader-firmware-tests PRIVATE asicen_core)
   target_compile_options(asicen-loader-firmware-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-loader-firmware-tests COMMAND asicen-loader-firmware-tests)
+
+  add_executable(asicen-frontend-sequence-tests userland/tests/frontend_sequence_tests.cpp)
+  target_link_libraries(asicen-frontend-sequence-tests PRIVATE asicen_core)
+  target_compile_options(asicen-frontend-sequence-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-frontend-sequence-tests COMMAND asicen-frontend-sequence-tests)
+
+  add_executable(asicen-shared-demod-tests userland/tests/shared_demod_tests.cpp)
+  target_link_libraries(asicen-shared-demod-tests PRIVATE asicen_core)
+  target_compile_options(asicen-shared-demod-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-shared-demod-tests COMMAND asicen-shared-demod-tests)
+
+  add_executable(asicen-frontend-tune-tests userland/tests/frontend_tune_tests.cpp)
+  target_link_libraries(asicen-frontend-tune-tests PRIVATE asicen_core)
+  target_compile_options(asicen-frontend-tune-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-frontend-tune-tests COMMAND asicen-frontend-tune-tests)
+
+  add_executable(asicen-stream-capture-tests userland/tests/stream_capture_tests.cpp)
+  target_link_libraries(asicen-stream-capture-tests PRIVATE asicen_core)
+  target_compile_options(asicen-stream-capture-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-stream-capture-tests COMMAND asicen-stream-capture-tests)
+
+  add_executable(asicen-queued-capture-tests userland/tests/queued_capture_tests.cpp)
+  target_link_libraries(asicen-queued-capture-tests PRIVATE asicen_core)
+  target_compile_options(asicen-queued-capture-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-queued-capture-tests COMMAND asicen-queued-capture-tests)
+
+  add_executable(asicen-stream-setup-tests userland/tests/stream_setup_tests.cpp)
+  target_link_libraries(asicen-stream-setup-tests PRIVATE asicen_core)
+  target_compile_options(asicen-stream-setup-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-stream-setup-tests COMMAND asicen-stream-setup-tests)
+
+  add_executable(asicen-cf-chunk-address-tests userland/tests/cf_chunk_address_tests.cpp)
+  target_link_libraries(asicen-cf-chunk-address-tests PRIVATE asicen_core)
+  target_compile_options(asicen-cf-chunk-address-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-cf-chunk-address-tests COMMAND asicen-cf-chunk-address-tests)
+
+  add_executable(asicen-capture-stdout-tests userland/tests/capture_stdout_tests.cpp)
+  target_link_libraries(asicen-capture-stdout-tests PRIVATE asicen_core)
+  target_compile_options(asicen-capture-stdout-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-capture-stdout-tests COMMAND asicen-capture-stdout-tests)
 
   if(UNIX)
     add_test(
