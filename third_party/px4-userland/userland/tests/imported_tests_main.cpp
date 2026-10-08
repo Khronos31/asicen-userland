@@ -3,6 +3,7 @@
 
 bool run_control_integration_tests();
 bool run_control_workers_tests();
+bool run_card_tests();
 bool run_card_service_tests();
 bool run_tuner_service_tests();
 bool run_ipc_state_tests();
@@ -16,6 +17,7 @@ int main()
 {
     const bool passed = run_control_integration_tests() &&
                         run_control_workers_tests() &&
+                        run_card_tests() &&
                         run_card_service_tests() &&
                         run_tuner_service_tests() &&
                         run_ipc_state_tests() &&

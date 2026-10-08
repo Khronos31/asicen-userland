@@ -30,6 +30,11 @@ struct CardMailboxChunk {
 // This is transport-independent; it does not perform any I2C writes.
 std::vector<CardMailboxChunk> build_card_mailbox_chunks(std::size_t length);
 
+// Expands logical mailboxes into actual window transactions: a new page is
+// selected every64 bytes and each window read/write is limited to8 bytes.
+// Lengths above the protocol's 9-bit maximum511 return an empty plan.
+std::vector<CardMailboxChunk> build_card_mailbox_io_chunks(std::size_t length);
+
 std::uint16_t decode_card_mailbox_length(std::uint8_t low,
                                          std::uint8_t high_bit_source);
 

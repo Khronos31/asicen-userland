@@ -13,9 +13,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,7 +49,29 @@ struct Options {
     std::string sibling_port;
     std::string runtime_dir;
     std::string instance = "default";
+    bool probe_satellite = false;
+    bool probe_card = false;
+    bool have_satellite_slot = false;
+    std::uint32_t satellite_rf_khz = 0;
+    std::uint8_t satellite_slot = 0;
 };
+
+bool parse_unsigned_decimal(const std::string& text, std::uint64_t maximum,
+                            std::uint64_t* value) {
+    if (value == nullptr || text.empty() ||
+        !std::all_of(text.begin(), text.end(), [](unsigned char c) {
+            return c >= '0' && c <= '9';
+        })) return false;
+    try {
+        std::size_t consumed = 0;
+        const unsigned long long parsed = std::stoull(text, &consumed, 10);
+        if (consumed != text.size() || parsed > maximum) return false;
+        *value = static_cast<std::uint64_t>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 bool parse_port(const std::string& text, std::uint8_t bus,
                 std::vector<std::uint8_t>* ports) {
@@ -109,16 +133,41 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             out->runtime_dir = argv[++i];
         } else if (arg == "--instance" && i + 1 < argc) {
             out->instance = argv[++i];
+        } else if (arg == "--probe-satellite" && i + 1 < argc) {
+            if (out->probe_satellite || out->probe_card) return false;
+            std::uint64_t parsed = 0;
+            if (!parse_unsigned_decimal(argv[++i],
+                    std::numeric_limits<std::uint32_t>::max(), &parsed) ||
+                !asicen::is_w3u3_satellite_rf_khz(static_cast<std::uint32_t>(parsed)))
+                return false;
+            out->probe_satellite = true;
+            out->satellite_rf_khz = static_cast<std::uint32_t>(parsed);
+        } else if (arg == "--probe-card") {
+            if (out->probe_satellite || out->probe_card) return false;
+            out->probe_card = true;
+        } else if (arg == "--slot" && i + 1 < argc) {
+            if (out->have_satellite_slot) return false;
+            std::uint64_t parsed = 0;
+            if (!parse_unsigned_decimal(argv[++i],
+                    asicen::kW3u3SatelliteTsidSlots - 1U, &parsed)) return false;
+            out->have_satellite_slot = true;
+            out->satellite_slot = static_cast<std::uint8_t>(parsed);
         } else if (arg == "--help" || arg == "-h") {
             std::puts("usage: asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
                       "--sibling BUS:ADDR --sibling-port BUS-PORT "
-                      "[--runtime-dir PATH] [--instance TOKEN]");
+                      "[--runtime-dir PATH] [--instance TOKEN]\n"
+                      "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
+                      "--sibling BUS:ADDR --sibling-port BUS-PORT "
+                      "--probe-satellite RF_KHZ [--slot 0..7]\n"
+                      "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
+                      "--sibling BUS:ADDR --sibling-port BUS-PORT --probe-card");
             std::exit(0);
         } else return false;
     }
     return out->hardware && out->have_primary && out->have_sibling &&
            !out->primary_port.empty() && !out->sibling_port.empty() &&
-           out->runtime_dir.size() < 400U && valid_instance(out->instance);
+           out->runtime_dir.size() < 400U && valid_instance(out->instance) &&
+           (!out->have_satellite_slot || out->probe_satellite);
 }
 
 int lock_runtime() {
@@ -134,6 +183,13 @@ int run_asicend_hardware(int argc, char** argv) {
                              "[--runtime-dir PATH] [--instance TOKEN]\n");
         return 2;
     }
+    stop_requested = 0;
+    struct sigaction action{};
+    action.sa_handler = signal_handler;
+    ::sigemptyset(&action.sa_mask);
+    ::sigaction(SIGINT, &action, nullptr);
+    ::sigaction(SIGTERM, &action, nullptr);
+    ::signal(SIGPIPE, SIG_IGN);
     std::vector<std::uint8_t> primary_path, sibling_path;
     if (!parse_port(options.primary_port, options.primary_bus, &primary_path) ||
         !parse_port(options.sibling_port, options.sibling_bus, &sibling_path)) {
@@ -167,6 +223,48 @@ int run_asicend_hardware(int argc, char** argv) {
             std::fprintf(stderr, "hardware topology/claim refused: %s\n",
                          px4::userland::error_string(claimed.error()));
             result = claimed.error() == px4::userland::Error::BUSY ? 4 : 3;
+        } else if (options.probe_satellite) {
+            const auto probe = hardware.probe_satellite(
+                options.satellite_rf_khz, options.have_satellite_slot,
+                options.satellite_slot, &stop_requested);
+            std::fprintf(stderr,
+                "satellite-probe status=%s rf_khz=%u lock=%u nonempty_slots=%u selected=%u\n",
+                asicen::satellite_operation_result_name(probe.result),
+                options.satellite_rf_khz, probe.locked ? 1U : 0U,
+                static_cast<unsigned>(probe.nonempty_tsid_slots),
+                probe.selected_slot ? 1U : 0U);
+            result = probe.result == asicen::SatelliteOperationResult::Completed ? 0 :
+                     probe.result == asicen::SatelliteOperationResult::Cancelled ? 130 : 70;
+            const auto stopped = hardware.shutdown();
+            if (!stopped) {
+                std::fprintf(stderr, "satellite-probe cleanup failed\n");
+                result = 70;
+            }
+            const auto released = hardware.release();
+            if (!released) {
+                std::fprintf(stderr, "USB claim release failed\n");
+                result = 70;
+            }
+        } else if (options.probe_card) {
+            const auto probe = hardware.probe_card(&stop_requested);
+            std::fprintf(stderr,
+                "card-probe status=%s atr_valid=%u atr_length=%zu "
+                "response_length=%zu sw=%04x\n",
+                px4::userland::error_string(probe.error),
+                probe.atr_valid ? 1U : 0U, probe.atr_length,
+                probe.response_length, probe.status_word);
+            result = probe.error == px4::userland::Error::OK ? 0 :
+                     probe.error == px4::userland::Error::TIMEOUT ? 130 : 70;
+            const auto stopped = hardware.shutdown();
+            if (!stopped) {
+                std::fprintf(stderr, "card-probe cleanup failed\n");
+                result = 70;
+            }
+            const auto released = hardware.release();
+            if (!released) {
+                std::fprintf(stderr, "USB claim release failed\n");
+                result = 70;
+            }
         } else {
           {
             asicen::ExitProcessFatal fatal;
@@ -191,12 +289,6 @@ int run_asicend_hardware(int argc, char** argv) {
                 result = server_result.error() == px4::userland::Error::BUSY ? 4 : 70;
             } else {
                 auto server = std::move(server_result.value());
-                struct sigaction action{};
-                action.sa_handler = signal_handler;
-                ::sigemptyset(&action.sa_mask);
-                ::sigaction(SIGINT, &action, nullptr);
-                ::sigaction(SIGTERM, &action, nullptr);
-                ::signal(SIGPIPE, SIG_IGN);
                 std::fprintf(stderr,
                     "asicend ready backend=asicen-w3u3 receiver=1 system=ISDB-T "
                     "primary=%u:%u sibling=%u:%u endpoint=%s\n",

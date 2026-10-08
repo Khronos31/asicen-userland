@@ -186,6 +186,154 @@ Result<void> LibusbW3u3Hardware::release() noexcept {
     return ok ? Result<void>::success() : Result<void>::failure(Error::USB_IO);
 }
 
+SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
+    std::uint32_t rf_khz, bool select_slot, std::size_t slot,
+    const volatile std::sig_atomic_t* stop_flag) noexcept {
+    SatelliteProbeSummary summary{};
+    if (!claimed_ || cleanup_failed_ || !is_w3u3_satellite_rf_khz(rf_khz) ||
+        (select_slot && slot >= kW3u3SatelliteTsidSlots)) {
+        summary.result = SatelliteOperationResult::InvalidArgument;
+        return summary;
+    }
+    if (stop_flag != nullptr && *stop_flag != 0) {
+        summary.result = SatelliteOperationResult::Cancelled;
+        return summary;
+    }
+
+    const auto absolute_deadline = std::chrono::steady_clock::now() +
+                                   std::chrono::seconds(60);
+    diagnostic_stop_flag_ = stop_flag;
+    deadline_ = absolute_deadline;
+    deadline_active_ = true;
+    const auto opened = open_receiver(1U);
+    if (!opened) {
+        if (cancelled()) summary.result = SatelliteOperationResult::Cancelled;
+        else if (std::chrono::steady_clock::now() >= absolute_deadline)
+            summary.result = SatelliteOperationResult::DeadlineExceeded;
+        else summary.result = SatelliteOperationResult::FailedTransfer;
+        deadline_active_ = false;
+        diagnostic_stop_flag_ = nullptr;
+        return summary;
+    }
+
+    // open_receiver owns a separate bounded startup deadline. Restore the
+    // diagnostic's one absolute deadline for tune, lock polling and TSID I/O.
+    deadline_ = absolute_deadline;
+    deadline_active_ = true;
+    summary.result = run_w3u3_satellite_tune(this, rf_khz);
+    if (summary.result != SatelliteOperationResult::Completed) {
+        deadline_active_ = false;
+        diagnostic_stop_flag_ = nullptr;
+        return summary;
+    }
+
+    const auto lock_deadline = std::min(absolute_deadline,
+        std::chrono::steady_clock::now() + std::chrono::seconds(5));
+    deadline_ = lock_deadline;
+    const SatelliteLockResult lock = poll_w3u3_satellite_lock(this);
+    summary.result = lock.result;
+    summary.locked = lock.locked;
+
+    if (summary.result == SatelliteOperationResult::Completed && summary.locked) {
+        deadline_ = absolute_deadline;
+        const SatelliteTsidListResult list = read_w3u3_satellite_tsids(this);
+        summary.result = list.result;
+        if (list.result == SatelliteOperationResult::Completed) {
+            for (const std::uint16_t tsid : list.tsids) {
+                if (tsid != kW3u3SatelliteNoTsid) ++summary.nonempty_tsid_slots;
+            }
+            if (select_slot) {
+                const auto selected = select_w3u3_satellite_tsid(this, slot, list.tsids);
+                summary.result = selected.result;
+                summary.selected_slot = selected.result == SatelliteOperationResult::Completed;
+            }
+        }
+    }
+    deadline_active_ = false;
+    diagnostic_stop_flag_ = nullptr;
+    return summary;
+}
+
+CardProbeSummary LibusbW3u3Hardware::probe_card(
+    const volatile std::sig_atomic_t* stop_flag) noexcept {
+    CardProbeSummary summary{};
+    summary.error = Error::UNSUPPORTED;
+    if (!claimed_ || cleanup_failed_) return summary;
+    if (stop_flag != nullptr && *stop_flag != 0) {
+        summary.error = Error::TIMEOUT;
+        return summary;
+    }
+
+    const auto absolute_deadline = std::chrono::steady_clock::now() +
+                                   std::chrono::seconds(30);
+    diagnostic_stop_flag_ = stop_flag;
+    deadline_ = absolute_deadline;
+    deadline_active_ = true;
+    const auto opened = open_receiver(1U);
+    if (!opened) {
+        summary.error = opened.error();
+        deadline_active_ = false;
+        diagnostic_stop_flag_ = nullptr;
+        return summary;
+    }
+    deadline_ = absolute_deadline;
+    deadline_active_ = true;
+
+    W3u3CardMailboxHardware mailbox(*this);
+    px4::userland::CardSession session(mailbox, mailbox);
+    const auto atr = px4::userland::reset_and_read_card_atr(mailbox, mailbox);
+    if (!atr) {
+        summary.error = atr.error();
+    } else {
+        summary.atr_valid = true;
+        summary.atr_length = atr.value().length;
+        if (atr.value().edc != px4::userland::CardEdc::lrc ||
+            atr.value().baud_rate != px4::userland::It930xCardBaudRate::baud_19200) {
+            summary.error = Error::UNSUPPORTED;
+        } else {
+            const auto initialized = session.initialize_with_atr(atr.value());
+            if (!initialized) {
+                summary.error = initialized.error();
+            } else {
+                const std::array<std::uint8_t, 5> apdu{{0x90U, 0x30U, 0x00U, 0x00U, 0x00U}};
+                std::array<std::uint8_t, 258> response{};
+                const auto transmitted = session.transmit(
+                    px4::userland::ByteView{apdu.data(), apdu.size()},
+                    px4::userland::MutableByteView{response.data(), response.size()});
+                if (!transmitted) {
+                    summary.error = transmitted.error();
+                } else if (transmitted.value() < 2U) {
+                    summary.error = Error::PROTOCOL_ERROR;
+                } else {
+                    summary.response_length = transmitted.value();
+                    summary.status_word = static_cast<std::uint16_t>(
+                        (static_cast<std::uint16_t>(response[transmitted.value() - 2U]) << 8U) |
+                        response[transmitted.value() - 1U]);
+                    summary.error = transmitted.value() >= 57U && summary.status_word == 0x9000U
+                        ? Error::OK : Error::PROTOCOL_ERROR;
+                }
+                volatile std::uint8_t* response_bytes = response.data();
+                for (std::size_t i = 0U; i < response.size(); ++i)
+                    response_bytes[i] = 0U;
+            }
+        }
+    }
+
+    // Cleanup gets a fresh finite budget and ignores the signal cancellation,
+    // while the first operation error remains the reported result.
+    diagnostic_stop_flag_ = nullptr;
+    deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    deadline_active_ = true;
+    const auto card_cleanup = mailbox.shutdown_controller();
+    if (!card_cleanup) {
+        cleanup_failed_ = true;
+        if (summary.error == Error::OK) summary.error = card_cleanup.error();
+    }
+    deadline_active_ = false;
+    diagnostic_stop_flag_ = nullptr;
+    return summary;
+}
+
 std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept { return 4U; }
 bool LibusbW3u3Hardware::receiver_supports(std::uint8_t receiver, System system) const noexcept {
     return receiver == 1U && system == System::ISDB_T;
@@ -391,7 +539,9 @@ int LibusbW3u3Hardware::control(const ControlTransfer& original, unsigned char* 
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline_ - std::chrono::steady_clock::now()).count();
         if (left <= 0) return LIBUSB_ERROR_TIMEOUT;
-        transfer.timeout_ms = static_cast<std::uint16_t>(std::min<long long>(left, 60000));
+        const unsigned requested = transfer.timeout_ms == 0U ? 1000U : transfer.timeout_ms;
+        transfer.timeout_ms = static_cast<std::uint16_t>(
+            std::min<long long>(left, requested));
     }
     const int rc = primary_.control(transfer, data);
     if (rc == LIBUSB_ERROR_NO_DEVICE) disconnected_.store(true);
@@ -408,7 +558,10 @@ void LibusbW3u3Hardware::delay_ms(unsigned ms) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
 }
-bool LibusbW3u3Hardware::cancelled() const { return stop_requested_.load(); }
+bool LibusbW3u3Hardware::cancelled() const {
+    return stop_requested_.load() ||
+           (diagnostic_stop_flag_ != nullptr && *diagnostic_stop_flag_ != 0);
+}
 bool LibusbW3u3Hardware::expired() const {
     return deadline_active_ && std::chrono::steady_clock::now() >= deadline_;
 }

@@ -9,13 +9,31 @@
 #include "asicen/transport_capture.h"
 #include "asicen/stream_capture.h"
 #include "asicen/frontend_sequence.h"
+#include "asicen/satellite_tune.h"
+#include "asicen/card_mailbox_hardware.h"
 
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <memory>
 
 namespace asicen {
+
+struct SatelliteProbeSummary {
+    SatelliteOperationResult result = SatelliteOperationResult::InvalidArgument;
+    bool locked = false;
+    std::uint8_t nonempty_tsid_slots = 0;
+    bool selected_slot = false;
+};
+
+struct CardProbeSummary {
+    px4::userland::Error error = px4::userland::Error::INTERNAL;
+    bool atr_valid = false;
+    std::size_t atr_length = 0;
+    std::size_t response_length = 0;
+    std::uint16_t status_word = 0;
+};
 
 // In-process backend for the one source-verified terrestrial lane. Both USB
 // functions are opened and claimed before this object permits frontend writes.
@@ -35,6 +53,11 @@ public:
 
     px4::userland::Result<void> claim();
     px4::userland::Result<void> release() noexcept;
+    SatelliteProbeSummary probe_satellite(
+        std::uint32_t rf_khz, bool select_slot, std::size_t slot,
+        const volatile std::sig_atomic_t* stop_flag) noexcept;
+    CardProbeSummary probe_card(
+        const volatile std::sig_atomic_t* stop_flag) noexcept;
 
     std::uint8_t receiver_count() const noexcept override;
     bool receiver_supports(std::uint8_t, px4::userland::ipc::System) const noexcept override;
@@ -140,6 +163,7 @@ private:
     bool link_apply_attempted_ = false;
     bool output_start_attempted_ = false;
     bool cleanup_failed_ = false;
+    const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
     bool gpio_snapshot_valid_ = false;
     std::uint8_t gpio_snapshot_ = 0;
     std::array<std::uint8_t, 0x45> cf_snapshot_{};

@@ -24,6 +24,7 @@ userland/include/px4/posix_tuner_nonce.h
 userland/include/px4/transport.h
 userland/include/px4/tuner_service.h
 userland/src/card_service.cpp
+userland/src/card.cpp
 userland/src/control_client.cpp
 userland/src/control_server.cpp
 userland/src/control_server_test_access.h
@@ -38,6 +39,7 @@ userland/src/posix_tuner_nonce.cpp
 userland/src/posix_tuner_nonce_internal.h
 userland/src/tuner_service.cpp
 userland/tests/card_service_tests.cpp
+userland/tests/card_tests.cpp
 userland/tests/control_integration_tests.cpp
 userland/tests/control_workers_tests.cpp
 userland/tests/ipc_state_tests.cpp
@@ -61,10 +63,11 @@ userland/tools/px4d_list_format.cpp
 userland/tools/px4d_list_format.h
 ```
 
-The build uses the portable sources and the ten service, IPC, worker, nonce,
-stream-client, and formatter test suites named in `docs/cli-adaptation.md`.
-`tests/imported_tests_main.cpp` is local glue; upstream test files remain
-unchanged.
+The build uses the portable sources and the service, card protocol, IPC,
+worker, nonce, stream-client, and formatter test suites named in
+`docs/cli-adaptation.md`.
+`tests/imported_tests_main.cpp` is local glue. Upstream test assertions are
+retained; the additional local test is listed with the other deltas below.
 
 ## Local deltas
 
@@ -74,9 +77,17 @@ unchanged.
   for the backend and card protocol session. Its native `CardSession` adapter
   is conditionally omitted in this product's portable targets via the
   propagated `PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION` build definition; the
-  protocol session interface and `CardService` remain available. The adapter
-  depends on `card.cpp`/IT930x card transport, which is not part of this
-  portable product subset.
+  protocol session interface and `CardService` remain available. The native
+  adapter still depends on the excluded It930x card transport.
+- `userland/include/px4/card.h`: adds `CardSession::initialize_with_atr()` so a
+  hardware shim can validate the ATR profile before beginning T=1 negotiation.
+- `userland/src/card.cpp`: retains the upstream CardSession, ATR and T=1 code,
+  adds validation for `initialize_with_atr()`, and excludes the
+  `It930xCardHardware` forwarding definitions when `ASICEN_PROFILE_ASICEN` or
+  `PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION` is defined. ASICEN supplies its
+  own mailbox-backed `CardHardware`.
+- `userland/tests/card_tests.cpp`: retains the upstream assertions and adds
+  focused validation for `initialize_with_atr()`.
 - `userland/src/control_server.cpp`: ASICEN receiver-lane dispatch and invokes
   tuner, card, and stream cancellation hooks before draining workers.
 - `userland/src/control_workers.cpp`: ASICEN receiver-to-USB-function lane

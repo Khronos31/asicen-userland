@@ -36,6 +36,7 @@ target_compile_options(px4_portable_reference PRIVATE -Wall -Wextra -Wpedantic -
 # Product profile compiles the same portable lifecycle with ASICEN's local
 # receiver mapping, product directory, and wire magic.
 add_library(asicen_px4_mock STATIC ${ASICEN_PX4_CORE_SOURCES}
+  ${ASICEN_PX4_ROOT}/src/card.cpp
   userland/src/px4_mock_backend.cpp)
 target_include_directories(asicen_px4_mock PUBLIC
   ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
@@ -71,6 +72,7 @@ add_library(asicen_core STATIC
   userland/src/protocol.cpp
   userland/src/queued_capture.cpp
   userland/src/receiver_service.cpp
+  userland/src/satellite_tune.cpp
   userland/src/stream_capture.cpp
   userland/src/stream_queue.cpp
   userland/src/ts_framer.cpp
@@ -89,6 +91,7 @@ if(ASICEN_ENABLE_LIBUSB)
   add_library(asicen_libusb STATIC
     userland/src/libusb_transport.cpp
     userland/src/libusb_hardware_backend.cpp
+    userland/src/card_mailbox_hardware.cpp
   )
   target_include_directories(asicen_libusb PUBLIC userland/include)
   target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session PkgConfig::LIBUSB)
@@ -147,6 +150,7 @@ if(ASICEN_BUILD_TESTS)
 
   add_executable(px4-portable-tests
     ${ASICEN_PX4_CORE_SOURCES}
+    ${ASICEN_PX4_ROOT}/src/card.cpp
     ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
     ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp
     ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp
@@ -154,6 +158,7 @@ if(ASICEN_BUILD_TESTS)
     ${ASICEN_PX4_ROOT}/tests/control_integration_tests.cpp
     ${ASICEN_PX4_ROOT}/tests/control_workers_tests.cpp
     ${ASICEN_PX4_ROOT}/tests/card_service_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/card_tests.cpp
     ${ASICEN_PX4_ROOT}/tests/tuner_service_tests.cpp
     ${ASICEN_PX4_ROOT}/tests/ipc_state_tests.cpp
     ${ASICEN_PX4_ROOT}/tests/posix_ipc_tests.cpp
@@ -312,6 +317,19 @@ if(ASICEN_BUILD_TESTS)
   target_compile_options(asicen-card-mailbox-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-card-mailbox-tests COMMAND asicen-card-mailbox-tests)
 
+  add_executable(asicen-card-mailbox-hardware-tests
+    userland/tests/card_mailbox_hardware_tests.cpp
+    userland/src/card_mailbox_hardware.cpp)
+  target_include_directories(asicen-card-mailbox-hardware-tests PRIVATE
+    userland/include ${ASICEN_PX4_ROOT}/include)
+  target_link_libraries(asicen-card-mailbox-hardware-tests PRIVATE
+    asicen_core asicen_px4_mock Threads::Threads)
+  target_compile_options(asicen-card-mailbox-hardware-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-card-mailbox-hardware-tests
+    COMMAND asicen-card-mailbox-hardware-tests)
+  set_tests_properties(asicen-card-mailbox-hardware-tests PROPERTIES TIMEOUT 15)
+
   add_executable(asicen-loader-firmware-tests userland/tests/loader_firmware_tests.cpp)
   target_link_libraries(asicen-loader-firmware-tests PRIVATE asicen_core)
   target_compile_options(asicen-loader-firmware-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -336,6 +354,11 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-frontend-gain-tests PRIVATE asicen_core)
   target_compile_options(asicen-frontend-gain-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-frontend-gain-tests COMMAND asicen-frontend-gain-tests)
+
+  add_executable(asicen-satellite-tune-tests userland/tests/satellite_tune_tests.cpp)
+  target_link_libraries(asicen-satellite-tune-tests PRIVATE asicen_core)
+  target_compile_options(asicen-satellite-tune-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-satellite-tune-tests COMMAND asicen-satellite-tune-tests)
 
   add_executable(asicen-stream-capture-tests userland/tests/stream_capture_tests.cpp)
   target_link_libraries(asicen-stream-capture-tests PRIVATE asicen_core)

@@ -103,6 +103,10 @@ public:
     CardSession& operator=(CardSession&&) = delete;
 
     Result<void> initialize() noexcept;
+    // Initializes T=1 from an ATR already acquired and validated by the caller.
+    // The transport integration can reject unsupported ATR profiles before
+    // consuming any card response or starting T=1 negotiation.
+    Result<void> initialize_with_atr(const CardAtr& atr) noexcept;
     Result<std::size_t> transmit(ByteView apdu, MutableByteView response) noexcept;
     bool initialized() const noexcept { return initialized_; }
     const CardAtr& atr() const noexcept { return atr_; }

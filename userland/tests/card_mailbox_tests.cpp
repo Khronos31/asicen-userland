@@ -35,5 +35,30 @@ int main(){
     check(asicen::decode_card_mailbox_length(0x23,1)==0x123,"length high bit");
     check(asicen::decode_card_mailbox_length(0x23,3)==0x123,"length masks high source");
 
+    const auto boundaries = [](std::size_t length, std::size_t chunks) {
+        const auto plan = asicen::build_card_mailbox_io_chunks(length);
+        if (plan.size() != chunks) return false;
+        std::size_t covered = 0U;
+        for (const auto& item : plan) {
+            if (item.length == 0U || item.length > 8U ||
+                item.buffer_offset != covered ||
+                item.register_address < asicen::CardMailboxFacts::kDataWindowBase ||
+                static_cast<std::size_t>(item.register_address) + item.length > 0x80U)
+                return false;
+            covered += item.length;
+        }
+        return covered == length;
+    };
+    check(boundaries(8U,1U),"8-byte window transfer");
+    check(boundaries(9U,2U),"9-byte window split");
+    check(boundaries(63U,8U),"63-byte page tail");
+    check(boundaries(64U,8U),"64-byte page exact");
+    check(boundaries(65U,9U),"65-byte page crossing");
+    check(boundaries(255U,32U),"255-byte card frame window plan");
+    check(boundaries(256U,32U),"256-byte logical mailbox window plan");
+    check(boundaries(511U,64U),"511-byte maximum mailbox window plan");
+    check(asicen::build_card_mailbox_io_chunks(512U).empty(),
+          "512-byte mailbox length rejected");
+
     return failures==0?0:1;
 }
