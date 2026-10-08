@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace asicen {
@@ -30,5 +31,16 @@ constexpr std::uint8_t kLoaderFinishRequest = 0xac;
 
 const std::array<LoaderFirmwareStage, 4>& loader_firmware_stages();
 std::vector<LoaderTransfer> build_loader_transfer_plan();
+
+enum class LoaderFirmwareRead {
+    Ok,
+    OpenFailed,
+    WrongSize,
+};
+
+// Reads path and requires exactly kLoaderFirmwareBlobSize bytes. On failure
+// out is left empty so a rejected file is never used for a USB transfer.
+LoaderFirmwareRead read_loader_firmware_file(const std::string& path,
+                                             std::vector<std::uint8_t>* out);
 
 }  // namespace asicen

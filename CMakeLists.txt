@@ -94,6 +94,11 @@ if(ASICEN_BUILD_TESTS)
   target_compile_options(asicen-card-mailbox-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-card-mailbox-tests COMMAND asicen-card-mailbox-tests)
 
+  add_executable(asicen-loader-firmware-tests userland/tests/loader_firmware_tests.cpp)
+  target_link_libraries(asicen-loader-firmware-tests PRIVATE asicen_core)
+  target_compile_options(asicen-loader-firmware-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-loader-firmware-tests COMMAND asicen-loader-firmware-tests)
+
   if(UNIX)
     add_test(
       NAME asicen-mock-integration

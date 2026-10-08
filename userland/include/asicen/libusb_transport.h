@@ -31,6 +31,23 @@ public:
 
     int control(const ControlTransfer& transfer, unsigned char* data);
 
+    // Vendor host-to-device control transfer with an explicit setup. Returns the
+    // transferred byte count or a negative libusb error code.
+    int vendor_out(std::uint8_t request,
+                   std::uint16_t value,
+                   std::uint16_t index,
+                   const unsigned char* data,
+                   std::uint16_t length,
+                   unsigned int timeout_ms);
+
+    // Returns 1 when a kernel driver is bound to interface_number, 0 when the
+    // interface is free, or a negative libusb error code.
+    int kernel_driver_active(int interface_number) const;
+
+    // Claims interface_number as-is. Released by close(). Repeated claims are
+    // ignored; kernel drivers are never detached.
+    int claim_interface(int interface_number);
+
     // Finds the active alternate setting that owns endpoint_address, claims
     // its interface, and selects the alternate setting when needed.
     // Kernel drivers are never detached implicitly.

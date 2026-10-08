@@ -8,9 +8,11 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "asicen/device_profile.h"
 #include "asicen/libusb_transport.h"
+#include "asicen/loader_firmware.h"
 #include "asicen/protocol.h"
 
 namespace {
@@ -19,6 +21,8 @@ struct Arguments {
     std::string command = "list";
     bool have_device = false;
     asicen::UsbLocation location{};
+    std::string firmware;
+    bool have_firmware = false;
 };
 
 void usage(const char* argv0) {
@@ -28,7 +32,9 @@ void usage(const char* argv0) {
         << "  " << argv0 << " --device BUS:ADDRESS describe\n"
         << "  " << argv0 << " --device BUS:ADDRESS high-speed\n"
         << "  " << argv0 << " --device BUS:ADDRESS customer-info\n"
-        << "  " << argv0 << " --device BUS:ADDRESS random-key\n";
+        << "  " << argv0 << " --device BUS:ADDRESS random-key\n"
+        << "  " << argv0
+        << " --device BUS:ADDRESS --firmware PATH load-firmware\n";
 }
 
 bool parse_u8(const std::string& value, std::uint8_t* out) {
@@ -61,8 +67,15 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
                 return false;
             }
             out->have_device = true;
+        } else if (arg == "--firmware") {
+            if (++i >= argc) {
+                return false;
+            }
+            out->firmware = argv[i];
+            out->have_firmware = true;
         } else if (arg == "list" || arg == "describe" || arg == "high-speed" ||
-                   arg == "customer-info" || arg == "random-key") {
+                   arg == "customer-info" || arg == "random-key" ||
+                   arg == "load-firmware") {
             out->command = arg;
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
@@ -72,6 +85,9 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
         }
     }
 
+    if (out->command == "load-firmware" && !out->have_firmware) {
+        return false;
+    }
     return out->command == "list" || out->have_device;
 }
 
@@ -297,10 +313,12 @@ int run_runtime_command(asicen::LibusbDevice* device, const std::string& command
             return 1;
         }
 
-        const std::uint16_t vid = static_cast<std::uint16_t>(info.vid[0]) |
-                                  (static_cast<std::uint16_t>(info.vid[1]) << 8);
-        const std::uint16_t pid = static_cast<std::uint16_t>(info.pid[0]) |
-                                  (static_cast<std::uint16_t>(info.pid[1]) << 8);
+        const std::uint16_t vid =
+            (static_cast<std::uint16_t>(info.vid[0]) << 8) |
+            static_cast<std::uint16_t>(info.vid[1]);
+        const std::uint16_t pid =
+            (static_cast<std::uint16_t>(info.pid[0]) << 8) |
+            static_cast<std::uint16_t>(info.pid[1]);
 
         std::cout << "use=" << static_cast<unsigned>(info.use_customer_info)
                   << " vid=0x" << std::hex << std::setw(4) << std::setfill('0') << vid
@@ -311,7 +329,9 @@ int run_runtime_command(asicen::LibusbDevice* device, const std::string& command
                   << " remote=" << static_cast<unsigned>(info.remote_control_number)
                   << " support_feature=0x" << std::hex
                   << static_cast<unsigned>(info.support_feature) << std::dec
-                  << '\n';
+                  << " raw=";
+        print_hex(data);
+        std::cout << '\n';
         return 0;
     }
 
@@ -330,6 +350,122 @@ int run_runtime_command(asicen::LibusbDevice* device, const std::string& command
     return 1;
 }
 
+bool loader_interface_ready(libusb_device* device) {
+    libusb_config_descriptor* config = nullptr;
+    const int rc = libusb_get_active_config_descriptor(device, &config);
+    if (rc != 0 || config == nullptr) {
+        return false;
+    }
+
+    bool ready = false;
+    for (int i = 0; i < config->bNumInterfaces && !ready; ++i) {
+        const libusb_interface& interface = config->interface[i];
+        for (int a = 0; a < interface.num_altsetting && !ready; ++a) {
+            const libusb_interface_descriptor& alt = interface.altsetting[a];
+            if (alt.bInterfaceNumber != 0 || alt.bAlternateSetting != 0) {
+                continue;
+            }
+            for (std::uint8_t e = 0; e < alt.bNumEndpoints; ++e) {
+                const libusb_endpoint_descriptor& ep = alt.endpoint[e];
+                if (ep.bEndpointAddress == 0x01 &&
+                    (ep.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) ==
+                        LIBUSB_TRANSFER_TYPE_BULK &&
+                    ep.wMaxPacketSize == 512) {
+                    ready = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    libusb_free_config_descriptor(config);
+    return ready;
+}
+
+int load_firmware(asicen::LibusbDevice* device,
+                  const std::vector<std::uint8_t>& firmware) {
+    libusb_device* raw = device->device();
+    if (raw == nullptr) {
+        std::cerr << "selected device is not available\n";
+        return 1;
+    }
+
+    libusb_device_descriptor desc{};
+    const int desc_rc = libusb_get_device_descriptor(raw, &desc);
+    if (desc_rc != 0) {
+        std::cerr << "libusb_get_device_descriptor: "
+                  << libusb_error_name(desc_rc) << '\n';
+        return 1;
+    }
+    if (!is_loader(desc)) {
+        std::cerr << "selected device is not an ASICEN firmware loader\n";
+        return 1;
+    }
+    if (!loader_interface_ready(raw)) {
+        std::cerr << "loader interface 0 alt 0 with bulk OUT 0x01 "
+                     "(512-byte packets) not present\n";
+        return 1;
+    }
+
+    const int driver = device->kernel_driver_active(0);
+    if (driver > 0) {
+        std::cerr << "refusing to load: kernel driver bound to interface 0\n";
+        return 1;
+    }
+    if (driver < 0 && driver != LIBUSB_ERROR_NOT_SUPPORTED) {
+        std::cerr << "kernel_driver_active: " << libusb_error_name(driver) << '\n';
+        return 1;
+    }
+
+    const int claim = device->claim_interface(0);
+    if (claim < 0) {
+        std::cerr << "claim interface 0: " << libusb_error_name(claim) << '\n';
+        return 1;
+    }
+
+    const std::vector<asicen::LoaderTransfer> plan =
+        asicen::build_loader_transfer_plan();
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+        const asicen::LoaderTransfer& transfer = plan[i];
+        const bool final_transfer = (i + 1 == plan.size());
+        const int rc = device->vendor_out(
+            transfer.request,
+            transfer.value,
+            transfer.index,
+            firmware.data() + transfer.blob_offset,
+            transfer.length,
+            1000);
+
+        std::cout << "transfer=" << (i + 1)
+                  << " request=0x" << std::hex << std::setw(2) << std::setfill('0')
+                  << static_cast<unsigned>(transfer.request)
+                  << " value=0x" << std::setw(4) << transfer.value
+                  << " index=0x" << transfer.index
+                  << " length=" << std::dec << transfer.length
+                  << " returned=" << rc << '\n';
+
+        if (rc == LIBUSB_ERROR_NO_DEVICE && final_transfer) {
+            std::cout << "final AC transfer returned NO_DEVICE; firmware "
+                         "acceptance is ambiguous, not success. "
+                         "Inspect enumeration.\n";
+            return 1;
+        }
+        if (rc < 0) {
+            std::cerr << "control transfer failed: " << libusb_error_name(rc) << '\n';
+            return 1;
+        }
+        if (rc != transfer.length) {
+            std::cerr << "short control transfer: expected=" << transfer.length
+                      << " actual=" << rc << '\n';
+            return 1;
+        }
+    }
+
+    std::cout << "sent all " << plan.size()
+              << " loader transfers; inspect enumeration before use\n";
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -337,6 +473,21 @@ int main(int argc, char** argv) {
     if (!parse_arguments(argc, argv, &args)) {
         usage(argv[0]);
         return 2;
+    }
+
+    std::vector<std::uint8_t> firmware;
+    if (args.command == "load-firmware") {
+        const asicen::LoaderFirmwareRead read =
+            asicen::read_loader_firmware_file(args.firmware, &firmware);
+        if (read == asicen::LoaderFirmwareRead::OpenFailed) {
+            std::cerr << "cannot read firmware: " << args.firmware << '\n';
+            return 1;
+        }
+        if (read == asicen::LoaderFirmwareRead::WrongSize) {
+            std::cerr << "firmware must be exactly "
+                      << asicen::kLoaderFirmwareBlobSize << " bytes\n";
+            return 1;
+        }
     }
 
     libusb_context* context = nullptr;
@@ -363,7 +514,9 @@ int main(int argc, char** argv) {
     }
 
     int result = 1;
-    if (args.command == "describe") {
+    if (args.command == "load-firmware") {
+        result = load_firmware(&device, firmware);
+    } else if (args.command == "describe") {
         result = describe_device(device.device());
     } else {
         result = run_runtime_command(&device, args.command);

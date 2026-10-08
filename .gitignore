@@ -1,0 +1,6 @@
+/build/
+/out/
+/firmware/
+/evidence/raw/
+/evidence/loader-task.md
+/evidence/loader-code.md

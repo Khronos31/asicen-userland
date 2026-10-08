@@ -1,6 +1,8 @@
 #include "asicen/loader_firmware.h"
 
 #include <algorithm>
+#include <fstream>
+#include <utility>
 
 namespace asicen {
 
@@ -40,6 +42,34 @@ std::vector<LoaderTransfer> build_loader_transfer_plan() {
         }
     }
     return result;
+}
+
+LoaderFirmwareRead read_loader_firmware_file(const std::string& path,
+                                             std::vector<std::uint8_t>* out) {
+    if (out == nullptr) {
+        return LoaderFirmwareRead::OpenFailed;
+    }
+    out->clear();
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return LoaderFirmwareRead::OpenFailed;
+    }
+
+    std::vector<std::uint8_t> data(kLoaderFirmwareBlobSize + 1);
+    file.read(reinterpret_cast<char*>(data.data()),
+              static_cast<std::streamsize>(data.size()));
+    const std::streamsize got = file.gcount();
+    if (file.bad() || got < 0) {
+        return LoaderFirmwareRead::OpenFailed;
+    }
+    if (static_cast<std::size_t>(got) != kLoaderFirmwareBlobSize) {
+        return LoaderFirmwareRead::WrongSize;
+    }
+    data.resize(static_cast<std::size_t>(got));
+
+    *out = std::move(data);
+    return LoaderFirmwareRead::Ok;
 }
 
 }  // namespace asicen

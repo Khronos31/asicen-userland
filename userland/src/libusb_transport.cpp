@@ -75,6 +75,44 @@ int LibusbDevice::control(const ControlTransfer& transfer, unsigned char* data) 
         transfer.timeout_ms);
 }
 
+int LibusbDevice::vendor_out(std::uint8_t request,
+                             std::uint16_t value,
+                             std::uint16_t index,
+                             const unsigned char* data,
+                             std::uint16_t length,
+                             unsigned int timeout_ms) {
+    if (handle_ == nullptr) {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+    return libusb_control_transfer(handle_, kVendorOut, request, value, index,
+                                   const_cast<unsigned char*>(data), length,
+                                   timeout_ms);
+}
+
+int LibusbDevice::kernel_driver_active(int interface_number) const {
+    if (handle_ == nullptr) {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+    return libusb_kernel_driver_active(handle_, interface_number);
+}
+
+int LibusbDevice::claim_interface(int interface_number) {
+    if (handle_ == nullptr) {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+    if (interface_claimed(interface_number)) {
+        return interface_number;
+    }
+
+    const int claim_rc = libusb_claim_interface(handle_, interface_number);
+    if (claim_rc != 0) {
+        return claim_rc;
+    }
+
+    claimed_interfaces_.push_back(interface_number);
+    return interface_number;
+}
+
 bool LibusbDevice::interface_claimed(int interface_number) const {
     return std::find(claimed_interfaces_.begin(), claimed_interfaces_.end(),
                      interface_number) != claimed_interfaces_.end();
