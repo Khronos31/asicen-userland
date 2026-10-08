@@ -3,6 +3,7 @@
 
 #include "asicen/device_profile.h"
 #include "asicen/hardware_gpio_guard.h"
+#include "asicen/secure_entropy.h"
 #include "asicen/transport_transform.h"
 #include "asicen/write_protocol.h"
 
@@ -11,7 +12,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <thread>
@@ -911,14 +911,8 @@ Result<void> LibusbW3u3Hardware::prepare(
     link_snapshot_valid_ = true;
     cf_snapshot_valid_ = read_cf_block(local, cf_snapshot_.data(), cf_snapshot_.size());
     if (!cf_snapshot_valid_) return fail_prepare(Error::USB_IO);
-    std::size_t random_offset = 0U;
-    while (random_offset < link_seed_.size()) {
-        const ssize_t received = getrandom(link_seed_.data() + random_offset,
-                                           link_seed_.size() - random_offset, 0);
-        if (received < 0 && errno == EINTR) continue;
-        if (received <= 0) return fail_prepare(Error::INTERNAL);
-        random_offset += static_cast<std::size_t>(received);
-    }
+    if (!fill_secure_entropy(link_seed_.data(), link_seed_.size()))
+        return fail_prepare(Error::INTERNAL);
     if (!run_plan(plan_stream_setup(local, 1U), 5000U))
         return fail_prepare(Error::USB_IO);
     if (!set_cf_bit(local, 0x03U, true)) return fail_prepare(Error::USB_IO);

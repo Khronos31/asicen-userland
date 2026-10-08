@@ -12,6 +12,7 @@ option(ASICEN_BUILD_TESTS "Build offline protocol tests" ON)
 set(ASICEN_LIBUSB_INCLUDE_DIR "" CACHE PATH "libusb include directory (overrides pkg-config)")
 set(ASICEN_LIBUSB_LIBRARY "" CACHE FILEPATH "libusb library/archive (overrides pkg-config)")
 set(ASICEN_LIBUSB_EXTRA_LIBRARIES "" CACHE STRING "Additional private libraries required by the selected libusb archive")
+set(ASICEN_LIBUSB_EXTRA_LINK_OPTIONS "" CACHE STRING "Additional linker options required by the selected libusb archive")
 
 find_package(Threads REQUIRED)
 
@@ -79,6 +80,7 @@ add_library(asicen_core STATIC
   userland/src/queued_capture.cpp
   userland/src/receiver_service.cpp
   userland/src/satellite_tune.cpp
+  userland/src/secure_entropy.cpp
   userland/src/stream_capture.cpp
   userland/src/stream_queue.cpp
   userland/src/ts_framer.cpp
@@ -121,6 +123,7 @@ if(ASICEN_ENABLE_LIBUSB)
   target_include_directories(asicen_libusb PUBLIC userland/include)
   target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session
     ${ASICEN_LIBUSB_TARGET} ${ASICEN_LIBUSB_EXTRA_LIBRARIES})
+  target_link_options(asicen_libusb INTERFACE ${ASICEN_LIBUSB_EXTRA_LINK_OPTIONS})
   target_compile_options(asicen_libusb PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
@@ -146,24 +149,68 @@ if(UNIX)
   endif()
 
   if(ASICEN_ENABLE_IFD)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-      pkg_check_modules(PCSCLITE QUIET IMPORTED_TARGET libpcsclite)
+    if(NOT APPLE)
+      find_package(PkgConfig QUIET)
+      if(PkgConfig_FOUND)
+        pkg_check_modules(PCSCLITE QUIET IMPORTED_TARGET libpcsclite)
+      endif()
     endif()
-    if(PCSCLITE_FOUND)
+    if(APPLE)
+      find_path(ASICEN_PCSC_IFD_INCLUDE_DIR
+        NAMES ifdhandler.h
+        HINTS "${CMAKE_OSX_SYSROOT}/System/Library/Frameworks/PCSC.framework/Headers"
+        PATH_SUFFIXES PCSC PCSC.framework/Headers)
+      set(ASICEN_PCSC_AVAILABLE ${ASICEN_PCSC_IFD_INCLUDE_DIR})
+    else()
+      set(ASICEN_PCSC_AVAILABLE ${PCSCLITE_FOUND})
+      set(ASICEN_PCSC_IFD_INCLUDE_DIR ${PCSCLITE_INCLUDE_DIRS})
+    endif()
+    if(ASICEN_PCSC_AVAILABLE)
       add_library(asicen-ifdhandler SHARED
         third_party/px4-userland/userland/src/pcsc_ifd.cpp)
       target_include_directories(asicen-ifdhandler PRIVATE
-        third_party/px4-userland/userland/include)
-      target_link_libraries(asicen-ifdhandler PRIVATE
-        asicen_pcsc_ifd_core PkgConfig::PCSCLITE)
+        third_party/px4-userland/userland/include ${ASICEN_PCSC_IFD_INCLUDE_DIR})
+      if(APPLE)
+        target_link_libraries(asicen-ifdhandler PRIVATE asicen_pcsc_ifd_core)
+      else()
+        target_link_libraries(asicen-ifdhandler PRIVATE
+          asicen_pcsc_ifd_core PkgConfig::PCSCLITE)
+      endif()
       target_compile_options(asicen-ifdhandler PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
       set_target_properties(asicen-ifdhandler PROPERTIES OUTPUT_NAME ifd-asicen)
+      if(APPLE)
+        target_link_options(asicen-ifdhandler PRIVATE
+          "LINKER:-install_name,@rpath/libifd-asicen.dylib")
+        set(ASICEN_IFD_BUNDLE_DIR "${CMAKE_CURRENT_BINARY_DIR}/ASICEN-IFD.bundle")
+        set(ASICEN_IFD_BUNDLE_EXECUTABLE
+          "${CMAKE_SHARED_LIBRARY_PREFIX}ifd-asicen${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        set(ASICEN_IFD_BUNDLE_PLIST "${CMAKE_CURRENT_BINARY_DIR}/ASICEN-IFD-Info.plist")
+        configure_file(packaging/pcsc/macos/Info.plist.in
+          "${ASICEN_IFD_BUNDLE_PLIST}" @ONLY)
+        add_custom_command(OUTPUT
+            "${ASICEN_IFD_BUNDLE_DIR}/Contents/Info.plist"
+            "${ASICEN_IFD_BUNDLE_DIR}/Contents/MacOS/${ASICEN_IFD_BUNDLE_EXECUTABLE}"
+          COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${ASICEN_IFD_BUNDLE_DIR}/Contents/MacOS"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ASICEN_IFD_BUNDLE_PLIST}"
+            "${ASICEN_IFD_BUNDLE_DIR}/Contents/Info.plist"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:asicen-ifdhandler>"
+            "${ASICEN_IFD_BUNDLE_DIR}/Contents/MacOS/${ASICEN_IFD_BUNDLE_EXECUTABLE}"
+          DEPENDS asicen-ifdhandler "${ASICEN_IFD_BUNDLE_PLIST}"
+          VERBATIM)
+        add_custom_target(asicen-ifd-bundle ALL DEPENDS
+          "${ASICEN_IFD_BUNDLE_DIR}/Contents/Info.plist"
+          "${ASICEN_IFD_BUNDLE_DIR}/Contents/MacOS/${ASICEN_IFD_BUNDLE_EXECUTABLE}")
+        set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+          "${ASICEN_IFD_BUNDLE_DIR}")
+        target_link_options(asicen-ifdhandler PRIVATE
+          "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/scripts/ifd.exports.macos")
+      endif()
     elseif(ASICEN_REQUIRE_IFD)
-      message(FATAL_ERROR "ASICEN_ENABLE_IFD=ON requires pcsc-lite development files")
+      message(FATAL_ERROR "ASICEN_ENABLE_IFD=ON requires native PC/SC IFD headers")
     else()
-      message(STATUS "pcsc-lite development files unavailable; skipping asicen-ifdhandler")
+      message(STATUS "native PC/SC IFD headers unavailable; skipping asicen-ifdhandler")
     endif()
   endif()
 endif()
@@ -289,6 +336,9 @@ if(ASICEN_BUILD_TESTS)
       endif()
     endif()
   endif()
+  if(APPLE AND TARGET asicen-ifd-prefix-tests)
+    add_test(NAME asicen-ifd-prefix-tests-macos COMMAND asicen-ifd-prefix-tests)
+  endif()
   set_tests_properties(px4-portable-tests PROPERTIES TIMEOUT 60)
 
   add_executable(asicen-product-profile-tests userland/tests/product_profile_tests.cpp)
@@ -350,6 +400,12 @@ if(ASICEN_BUILD_TESTS)
   add_test(NAME asicen-capture-drain-tests COMMAND asicen-capture-drain-tests)
   set_tests_properties(asicen-capture-drain-tests PROPERTIES TIMEOUT 10)
 
+  add_executable(asicen-secure-entropy-tests
+    userland/tests/secure_entropy_tests.cpp userland/src/secure_entropy.cpp)
+  target_include_directories(asicen-secure-entropy-tests PRIVATE userland/include)
+  target_compile_options(asicen-secure-entropy-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-secure-entropy-tests COMMAND asicen-secure-entropy-tests)
+
   add_executable(asicen-hardware-gpio-guard-tests
     userland/tests/hardware_gpio_guard_tests.cpp)
   target_include_directories(asicen-hardware-gpio-guard-tests PRIVATE userland/include)
@@ -400,6 +456,12 @@ if(ASICEN_BUILD_TESTS)
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/static_distribution_tests.py)
     set_tests_properties(asicen-static-distribution-tests PROPERTIES TIMEOUT 20)
+    add_test(NAME asicen-macos-distribution-tests
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/macos_distribution_tests.py)
+    add_test(NAME asicen-linux-ifd-allowlist-tests
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/linux_ifd_allowlist_tests.py)
     add_test(NAME asicen-product-cli-integration
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/product_cli_integration.py

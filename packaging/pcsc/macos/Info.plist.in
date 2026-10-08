@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>English</string>
+    <key>CFBundleExecutable</key>
+    <string>@ASICEN_IFD_BUNDLE_EXECUTABLE@</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.khronos31.asicen-userland.ifd</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>ASICEN Userland IFD Handler</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@PROJECT_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@PROJECT_VERSION@</string>
+    <key>ifdCapabilities</key>
+    <string>0x00000000</string>
+    <key>ifdManufacturerString</key>
+    <string>ASICEN Userland</string>
+    <key>ifdProductString</key>
+    <string>ASICEN W3U3 Card Reader IPC Adapter</string>
+    <key>ifdVersionNumber</key>
+    <string>0x00000001</string>
+</dict>
+</plist>

@@ -50,6 +50,28 @@ def machine_of(path: Path) -> str:
     return match.group(1).strip()
 
 
+def allowed_ifd_needed(variant: str, machine: str) -> set[str]:
+    if variant == "glibc":
+        if machine == "AArch64":
+            return {"libc.so.6", "libpthread.so.0"}
+        if machine == "Advanced Micro Devices X86-64":
+            return {"libc.so.6", "libpthread.so.0", "ld-linux-x86-64.so.2"}
+        fail(f"unsupported glibc IFD machine: {machine}")
+    if variant == "musl":
+        if machine == "AArch64":
+            return {"libc.musl-aarch64.so.1"}
+        if machine == "Advanced Micro Devices X86-64":
+            return {"libc.musl-x86_64.so.1"}
+        fail(f"unsupported musl IFD machine: {machine}")
+    fail(f"unsupported IFD libc variant: {variant}")
+
+
+def validate_ifd_needed(needed: set[str], variant: str, machine: str) -> None:
+    allowed = allowed_ifd_needed(variant, machine)
+    if needed != allowed:
+        fail(f"IFD dynamic dependency allowlist mismatch: {sorted(needed)}")
+
+
 def validate_ifd(directory: Path, variant: str, source_sha: str,
                  expected_machine: str) -> Path:
     if directory.is_symlink() or not directory.is_dir():
@@ -73,12 +95,7 @@ def validate_ifd(directory: Path, variant: str, source_sha: str,
     if "NEEDED" not in dynamic:
         fail("IFD plugin has no dynamic host dependency; expected host PC/SC/libc linkage")
     needed = set(re.findall(r"Shared library: \[([^]]+)\]", dynamic))
-    musl_libc = "libc.musl-aarch64.so.1" if expected_machine == "AArch64" else "libc.musl-x86_64.so.1"
-    glibc_loader = "ld-linux-aarch64.so.1" if expected_machine == "AArch64" else "ld-linux-x86-64.so.2"
-    allowed_needed = ({"libc.so.6", "libpthread.so.0", glibc_loader}
-                      if variant == "glibc" else {musl_libc})
-    if needed != allowed_needed:
-        fail(f"IFD dynamic dependency allowlist mismatch: {sorted(needed)}")
+    validate_ifd_needed(needed, variant, expected_machine)
     versions = subprocess.run(["readelf", "-V", str(plugin)], check=True,
                               text=True, stdout=subprocess.PIPE).stdout
     glibc_versions = sorted(set(re.findall(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", versions)))
@@ -265,12 +282,7 @@ def audit_final(root: Path, variant: str) -> dict[str, str]:
     if "NEEDED" not in dynamic:
         fail("final IFD is not a dynamically loaded host plugin")
     needed = set(re.findall(r"Shared library: \[([^]]+)\]", dynamic))
-    musl_libc = "libc.musl-aarch64.so.1" if expected_machine == "AArch64" else "libc.musl-x86_64.so.1"
-    glibc_loader = "ld-linux-aarch64.so.1" if expected_machine == "AArch64" else "ld-linux-x86-64.so.2"
-    allowed_needed = ({"libc.so.6", "libpthread.so.0", glibc_loader}
-                      if variant == "glibc" else {musl_libc})
-    if needed != allowed_needed:
-        fail(f"final IFD dynamic dependency allowlist mismatch: {sorted(needed)}")
+    validate_ifd_needed(needed, variant, expected_machine)
     versions = subprocess.run(["readelf", "-V", str(plugin)], check=True,
                               text=True, stdout=subprocess.PIPE).stdout
     glibc_versions = re.findall(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", versions)

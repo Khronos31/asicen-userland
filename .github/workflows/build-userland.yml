@@ -15,3 +15,41 @@ jobs:
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
       - run: ./build/asicen-probe
+
+  macos-arm64-intermediate:
+    runs-on: macos-14
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Ninja
+        run: brew list ninja >/dev/null 2>&1 || brew install ninja
+      - name: Create immutable source and pinned dependency inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar HEAD | gzip -n > "$RUNNER_TEMP/asicen-userland-source.tar.gz"
+          curl -fsSL --retry 2 \
+            -o "$RUNNER_TEMP/libusb-1.0.30.tar.bz2" \
+            https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
+          echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$RUNNER_TEMP/libusb-1.0.30.tar.bz2" \
+            | shasum -a 256 -c -
+      - name: Build, test, and audit firmware-free macOS candidate
+        run: >-
+          sh scripts/build-macos-static.sh
+          --source-snapshot "$RUNNER_TEMP/asicen-userland-source.tar.gz"
+          --libusb-archive "$RUNNER_TEMP/libusb-1.0.30.tar.bz2"
+          --output "$RUNNER_TEMP/asicen-macos-arm64-intermediate"
+      - name: Verify modified-libUSB relink recipe and IPC smoke
+        run: sh scripts/test-macos-libusb-relink.sh "$RUNNER_TEMP/asicen-macos-arm64-intermediate"
+      - name: Upload firmware-free candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: asicen-macos-arm64-intermediate
+          path: ${{ runner.temp }}/asicen-macos-arm64-intermediate.tar.gz
+          if-no-files-found: error
+          retention-days: 3
