@@ -41,6 +41,13 @@ target_compile_definitions(asicen_px4_mock PRIVATE ASICEN_PROFILE_ASICEN=1)
 target_link_libraries(asicen_px4_mock PUBLIC Threads::Threads)
 target_compile_options(asicen_px4_mock PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+add_library(asicen_hardware_session STATIC
+  userland/src/hardware_stream_session.cpp)
+target_include_directories(asicen_hardware_session PUBLIC
+  userland/include ${ASICEN_PX4_ROOT}/include)
+target_link_libraries(asicen_hardware_session PUBLIC asicen_px4_mock Threads::Threads)
+target_compile_options(asicen_hardware_session PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 add_library(asicen_core STATIC
   userland/src/card_mailbox.cpp
   userland/src/channel_plan.cpp
@@ -49,6 +56,7 @@ add_library(asicen_core STATIC
   userland/src/enclosure_grouping.cpp
   userland/src/frontend_facts.cpp
   userland/src/frontend_sequence.cpp
+  userland/src/hardware_gpio_guard.cpp
   userland/src/hardware_ownership.cpp
   userland/src/ipc.cpp
   userland/src/loader_firmware.cpp
@@ -165,6 +173,24 @@ if(ASICEN_BUILD_TESTS)
   target_include_directories(asicen-hardware-ownership-tests PRIVATE userland/include)
   target_compile_options(asicen-hardware-ownership-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-hardware-ownership-tests COMMAND asicen-hardware-ownership-tests)
+
+  add_executable(asicen-hardware-session-tests
+    userland/tests/hardware_stream_session_tests.cpp)
+  target_include_directories(asicen-hardware-session-tests PRIVATE
+    userland/include ${ASICEN_PX4_ROOT}/include)
+  target_link_libraries(asicen-hardware-session-tests PRIVATE asicen_hardware_session)
+  target_compile_options(asicen-hardware-session-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-hardware-session-tests COMMAND asicen-hardware-session-tests)
+  set_tests_properties(asicen-hardware-session-tests PROPERTIES TIMEOUT 10)
+
+  add_executable(asicen-hardware-gpio-guard-tests
+    userland/tests/hardware_gpio_guard_tests.cpp)
+  target_include_directories(asicen-hardware-gpio-guard-tests PRIVATE userland/include)
+  target_link_libraries(asicen-hardware-gpio-guard-tests PRIVATE asicen_core)
+  target_compile_options(asicen-hardware-gpio-guard-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-hardware-gpio-guard-tests COMMAND asicen-hardware-gpio-guard-tests)
 
   add_executable(asicen-product-shutdown-tests
     userland/tests/product_shutdown_hooks_tests.cpp)
