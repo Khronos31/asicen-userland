@@ -486,6 +486,44 @@ void LibusbW3u3Hardware::mark_receiver_disconnected(std::uint8_t receiver) noexc
     if (receiver == 1U) disconnected_.store(true);
 }
 void LibusbW3u3Hardware::request_stop() noexcept { stop_requested_.store(true); interrupt(); }
+bool LibusbW3u3Hardware::begin_card_operation(
+    std::uint32_t timeout_ms,
+    const volatile std::sig_atomic_t* stop_flag) noexcept {
+    if (!claimed_ || !initialized_ || cleanup_failed_ || disconnected_.load() ||
+        deadline_active_ || timeout_ms == 0U)
+        return false;
+    diagnostic_stop_flag_ = stop_flag;
+    deadline_ = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(timeout_ms);
+    deadline_active_ = true;
+    return true;
+}
+
+void LibusbW3u3Hardware::end_card_operation() noexcept {
+    deadline_active_ = false;
+    diagnostic_stop_flag_ = nullptr;
+}
+
+bool LibusbW3u3Hardware::begin_card_cleanup(std::uint32_t timeout_ms) noexcept {
+    if (!claimed_ || disconnected_.load() || deadline_active_ || timeout_ms == 0U) {
+        cleanup_failed_ = true;
+        return false;
+    }
+    diagnostic_stop_flag_ = nullptr;
+    deadline_ = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(timeout_ms);
+    deadline_active_ = true;
+    card_cleanup_active_ = true;
+    return true;
+}
+
+void LibusbW3u3Hardware::end_card_cleanup(bool cleanup_succeeded) noexcept {
+    if (!cleanup_succeeded) cleanup_failed_ = true;
+    card_cleanup_active_ = false;
+    deadline_active_ = false;
+    diagnostic_stop_flag_ = nullptr;
+}
+
 Result<void> LibusbW3u3Hardware::shutdown() noexcept {
     stop_requested_.store(true);
     const bool needs_stop = source_prepared_ || cf_snapshot_valid_ ||
@@ -559,7 +597,7 @@ void LibusbW3u3Hardware::delay_ms(unsigned ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
 }
 bool LibusbW3u3Hardware::cancelled() const {
-    return stop_requested_.load() ||
+    return (!card_cleanup_active_ && stop_requested_.load()) ||
            (diagnostic_stop_flag_ != nullptr && *diagnostic_stop_flag_ != 0);
 }
 bool LibusbW3u3Hardware::expired() const {

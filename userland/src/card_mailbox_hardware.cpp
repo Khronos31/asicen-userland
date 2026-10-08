@@ -86,7 +86,7 @@ Result<bool> W3u3CardMailboxHardware::detect_card() noexcept {
     const auto status = read_reg(CardMailboxFacts::kStatusHighRegister);
     if (!status) return Result<bool>::failure(status.error());
     if ((status.value() & 0x01U) == 0U)
-        return Result<bool>::failure(Error::CARD_REMOVED);
+        return Result<bool>::success(false);
     controller_initialized_ = true;
     return Result<bool>::success(true);
 }

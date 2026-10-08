@@ -45,6 +45,7 @@ target_compile_definitions(asicen_px4_mock PUBLIC
   PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
 target_link_libraries(asicen_px4_mock PUBLIC Threads::Threads)
 target_compile_options(asicen_px4_mock PRIVATE -Wall -Wextra -Wpedantic -Werror)
+set_target_properties(asicen_px4_mock PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(asicen_hardware_session STATIC
   userland/src/hardware_stream_session.cpp)
@@ -92,10 +93,45 @@ if(ASICEN_ENABLE_LIBUSB)
     userland/src/libusb_transport.cpp
     userland/src/libusb_hardware_backend.cpp
     userland/src/card_mailbox_hardware.cpp
+    userland/src/card_only_service.cpp
   )
   target_include_directories(asicen_libusb PUBLIC userland/include)
   target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session PkgConfig::LIBUSB)
   target_compile_options(asicen_libusb PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+  pkg_check_modules(PCSCLITE QUIET IMPORTED_TARGET libpcsclite)
+  if(PCSCLITE_FOUND)
+    add_library(asicen_pcsc_ifd_core STATIC
+      third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp)
+    set_target_properties(asicen_pcsc_ifd_core PROPERTIES
+      POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(asicen_pcsc_ifd_core PUBLIC
+      third_party/px4-userland/userland/include)
+    target_compile_definitions(asicen_pcsc_ifd_core PRIVATE
+      ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:")
+    target_link_libraries(asicen_pcsc_ifd_core PUBLIC asicen_px4_mock)
+    target_compile_options(asicen_pcsc_ifd_core PRIVATE
+      -Wall -Wextra -Wpedantic -Werror)
+
+    add_library(asicen-ifdhandler SHARED
+      third_party/px4-userland/userland/src/pcsc_ifd.cpp)
+    target_include_directories(asicen-ifdhandler PRIVATE
+      third_party/px4-userland/userland/include)
+    target_link_libraries(asicen-ifdhandler PRIVATE
+      asicen_pcsc_ifd_core PkgConfig::PCSCLITE)
+    target_compile_options(asicen-ifdhandler PRIVATE
+      -Wall -Wextra -Wpedantic -Werror)
+    set_target_properties(asicen-ifdhandler PROPERTIES OUTPUT_NAME ifd-asicen)
+    if(ASICEN_BUILD_TESTS)
+      add_executable(asicen-ifd-prefix-tests
+        userland/tests/asicen_ifd_prefix_tests.cpp)
+      target_link_libraries(asicen-ifd-prefix-tests PRIVATE asicen_pcsc_ifd_core)
+      target_compile_options(asicen-ifd-prefix-tests PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+    endif()
+  else()
+    message(STATUS "pcsc-lite headers unavailable; skipping asicen-ifdhandler")
+  endif()
 
   add_executable(asicen-probe userland/tools/asicen_probe.cpp)
   target_link_libraries(asicen-probe PRIVATE asicen_libusb)
@@ -179,6 +215,44 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(px4-portable-tests PRIVATE Threads::Threads)
   target_compile_options(px4-portable-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
+
+  if(UNIX)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(PCSCLITE_TEST QUIET IMPORTED_TARGET libpcsclite)
+    endif()
+    if(PCSCLITE_TEST_FOUND)
+      add_executable(px4-pcsc-ifd-tests
+        third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp
+        third_party/px4-userland/userland/src/pcsc_ifd.cpp
+        third_party/px4-userland/userland/tests/pcsc_ifd_tests.cpp)
+      target_include_directories(px4-pcsc-ifd-tests PRIVATE
+        third_party/px4-userland/userland/include
+        third_party/px4-userland/userland/tests)
+      target_link_libraries(px4-pcsc-ifd-tests PRIVATE
+        px4_portable_reference PkgConfig::PCSCLITE_TEST Threads::Threads)
+      target_compile_options(px4-pcsc-ifd-tests PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+      add_test(NAME px4-pcsc-ifd-tests COMMAND px4-pcsc-ifd-tests)
+      set_tests_properties(px4-pcsc-ifd-tests PROPERTIES TIMEOUT 20)
+      if(TARGET asicen-ifd-prefix-tests)
+        add_test(NAME asicen-ifd-prefix-tests COMMAND asicen-ifd-prefix-tests)
+      endif()
+      if(ASICEN_ENABLE_LIBUSB)
+        add_executable(asicen-card-only-service-tests
+          userland/tests/card_only_service_tests.cpp)
+        target_include_directories(asicen-card-only-service-tests PRIVATE
+          third_party/px4-userland/userland/include)
+        target_link_libraries(asicen-card-only-service-tests PRIVATE
+          asicen_libusb asicen_pcsc_ifd_core)
+        target_compile_options(asicen-card-only-service-tests PRIVATE
+          -Wall -Wextra -Wpedantic -Werror)
+        add_test(NAME asicen-card-only-service-tests
+          COMMAND asicen-card-only-service-tests)
+        set_tests_properties(asicen-card-only-service-tests PROPERTIES TIMEOUT 20)
+      endif()
+    endif()
+  endif()
   set_tests_properties(px4-portable-tests PROPERTIES TIMEOUT 60)
 
   add_executable(asicen-product-profile-tests userland/tests/product_profile_tests.cpp)

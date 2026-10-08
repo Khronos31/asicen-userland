@@ -62,7 +62,7 @@ public:
                                                reg - 0x40U;
                     window[offset] = value;
                 }
-                if (reg == 0x00U && value == 0U && ++reset_writes == 2U)
+                if (reg == 0x00U && value == 0U && ++reset_writes == 2U && present)
                     registers[0x04U] = 0x81U;
                 if (script_card && reg == 0x00U && value == 0x09U) load_atr();
                 if (script_card && reg == 0x00U && value == 0x0aU) load_next_frame();
@@ -123,6 +123,7 @@ public:
     bool change_length_after_low_read = false;
     std::uint8_t changed_length_value = 4U;
     bool script_card = false;
+    bool present = true;
     std::deque<std::vector<std::uint8_t>> scripted_frames;
 
     void load_frame(const std::vector<std::uint8_t>& frame) {
@@ -169,6 +170,18 @@ bool test_detect_reset_and_baud() {
     const auto unsupported = card.set_baud_rate(px4::userland::It930xCardBaudRate::baud_38400);
     return check(!unsupported && unsupported.error() == px4::userland::Error::UNSUPPORTED,
                  "unsupported baud rejected");
+}
+
+bool test_initial_absence_is_no_card() {
+    MailboxTransport transport;
+    transport.present = false;
+    asicen::W3u3CardMailboxHardware card(transport);
+    const auto detected = card.detect_card();
+    if (!check(detected && !detected.value(), "initial absence is a false presence result"))
+        return false;
+    const auto atr = px4::userland::reset_and_read_card_atr(card, card);
+    return check(!atr && atr.error() == px4::userland::Error::NO_CARD,
+                 "initial absence maps to NO_CARD");
 }
 
 bool test_complete_frame_and_consume() {
@@ -439,7 +452,8 @@ bool test_short_nack_cancellation_and_changing_length() {
 }  // namespace
 
 int main() {
-    return test_detect_reset_and_baud() && test_complete_frame_and_consume() &&
+    return test_detect_reset_and_baud() && test_initial_absence_is_no_card() &&
+           test_complete_frame_and_consume() &&
            test_invalid_logical_lengths() &&
            test_page_crossing_read_and_write() &&
            test_card_session_transmit_through_mailbox() &&

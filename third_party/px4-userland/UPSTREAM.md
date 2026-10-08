@@ -10,6 +10,7 @@ The upstream checkout was not modified.
 
 ```text
 LICENSE
+packaging/pcsc/reader.conf.d/px4-userland.conf.in
 userland/include/px4/card.h
 userland/include/px4/card_service.h
 userland/include/px4/control_client.h
@@ -21,6 +22,7 @@ userland/include/px4/ipc.h
 userland/include/px4/it930x.h
 userland/include/px4/posix_ipc.h
 userland/include/px4/posix_tuner_nonce.h
+userland/include/px4/pcsc_ifd_adapter.h
 userland/include/px4/transport.h
 userland/include/px4/tuner_service.h
 userland/src/card_service.cpp
@@ -37,6 +39,8 @@ userland/src/posix_ipc.cpp
 userland/src/posix_ipc_test_access.h
 userland/src/posix_tuner_nonce.cpp
 userland/src/posix_tuner_nonce_internal.h
+userland/src/pcsc_ifd.cpp
+userland/src/pcsc_ifd_adapter.cpp
 userland/src/tuner_service.cpp
 userland/tests/card_service_tests.cpp
 userland/tests/card_tests.cpp
@@ -45,6 +49,7 @@ userland/tests/control_workers_tests.cpp
 userland/tests/ipc_state_tests.cpp
 userland/tests/posix_ipc_tests.cpp
 userland/tests/posix_tuner_nonce_tests.cpp
+userland/tests/pcsc_ifd_tests.cpp
 userland/tests/px4_ts_tests.cpp
 userland/tests/px4ctl_format_tests.cpp
 userland/tests/px4d_list_format_tests.cpp
@@ -97,6 +102,9 @@ retained; the additional local test is listed with the other deltas below.
   inventory under the profile macro.
 - `userland/src/posix_ipc.cpp`: ASICEN runtime path and product instance
   validation under the profile macro.
+- `userland/src/pcsc_ifd_adapter.cpp`: supports a build-time IFD device-name
+  prefix override; the reference test keeps the upstream `px4-userland:`
+  prefix and the ASICEN driver uses `asicen-userland:` while sharing ASICEN IPC.
 - `userland/tools/px4_ts_core.cpp` and `userland/tools/px4ctl.cpp`: product
   command naming, receiver bounds, serial-free instance routing, no-LNB guard,
   usage and error labels under `ASICEN_PRODUCT_CLI`.

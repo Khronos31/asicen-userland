@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/hardware_stream_session.h"
 #include "asicen/enclosure_lock.h"
+#include "asicen/card_only_service.h"
 #include "asicen/libusb_hardware_backend.h"
 #include "asicen/product_profile.h"
 #include "asicen/px4_mock_backend.h"
@@ -51,6 +52,7 @@ struct Options {
     std::string instance = "default";
     bool probe_satellite = false;
     bool probe_card = false;
+    bool card_only = false;
     bool have_satellite_slot = false;
     std::uint32_t satellite_rf_khz = 0;
     std::uint8_t satellite_slot = 0;
@@ -143,8 +145,11 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             out->probe_satellite = true;
             out->satellite_rf_khz = static_cast<std::uint32_t>(parsed);
         } else if (arg == "--probe-card") {
-            if (out->probe_satellite || out->probe_card) return false;
+            if (out->probe_satellite || out->probe_card || out->card_only) return false;
             out->probe_card = true;
+        } else if (arg == "--card-only") {
+            if (out->probe_satellite || out->probe_card || out->card_only) return false;
+            out->card_only = true;
         } else if (arg == "--slot" && i + 1 < argc) {
             if (out->have_satellite_slot) return false;
             std::uint64_t parsed = 0;
@@ -160,14 +165,18 @@ bool parse_arguments(int argc, char** argv, Options* out) {
                       "--sibling BUS:ADDR --sibling-port BUS-PORT "
                       "--probe-satellite RF_KHZ [--slot 0..7]\n"
                       "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
-                      "--sibling BUS:ADDR --sibling-port BUS-PORT --probe-card");
+                      "--sibling BUS:ADDR --sibling-port BUS-PORT --probe-card\n"
+                      "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
+                      "--sibling BUS:ADDR --sibling-port BUS-PORT --card-only "
+                      "[--runtime-dir PATH] [--instance TOKEN]");
             std::exit(0);
         } else return false;
     }
     return out->hardware && out->have_primary && out->have_sibling &&
            !out->primary_port.empty() && !out->sibling_port.empty() &&
-           out->runtime_dir.size() < 400U && valid_instance(out->instance) &&
-           (!out->have_satellite_slot || out->probe_satellite);
+            out->runtime_dir.size() < 400U && valid_instance(out->instance) &&
+           (!out->have_satellite_slot || out->probe_satellite) &&
+           (!out->card_only || (!out->probe_satellite && !out->probe_card));
 }
 
 int lock_runtime() {
@@ -258,6 +267,22 @@ int run_asicend_hardware(int argc, char** argv) {
             const auto stopped = hardware.shutdown();
             if (!stopped) {
                 std::fprintf(stderr, "card-probe cleanup failed\n");
+                result = 70;
+            }
+            const auto released = hardware.release();
+            if (!released) {
+                std::fprintf(stderr, "USB claim release failed\n");
+                result = 70;
+            }
+        } else if (options.card_only) {
+            std::fprintf(stderr,
+                "asicend card-only mode: tuner operations are unsupported\n");
+            result = asicen::run_card_only_server(
+                hardware, options.runtime_dir.c_str(), options.instance.c_str(),
+                &stop_requested);
+            const auto stopped = hardware.shutdown();
+            if (!stopped) {
+                std::fprintf(stderr, "card-only hardware cleanup failed\n");
                 result = 70;
             }
             const auto released = hardware.release();

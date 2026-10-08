@@ -11,6 +11,7 @@
 #include "asicen/frontend_sequence.h"
 #include "asicen/satellite_tune.h"
 #include "asicen/card_mailbox_hardware.h"
+#include "asicen/card_operation_guard.h"
 
 #include <atomic>
 #include <array>
@@ -39,6 +40,7 @@ struct CardProbeSummary {
 // functions are opened and claimed before this object permits frontend writes.
 class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
                                  public StreamCaptureSource,
+                                 public CardOperationGuard,
                                  private HardwareShutdownOps,
                                  private FrontendTransport,
                                  private CaptureBackend,
@@ -82,6 +84,7 @@ public:
     px4::userland::Result<void> rollback_tune_power(std::uint8_t) noexcept override;
     void mark_receiver_disconnected(std::uint8_t) noexcept override;
     void request_stop() noexcept override;
+    void request_card_stop() noexcept override { request_stop(); }
     px4::userland::Result<void> shutdown() noexcept override;
 
     px4::userland::Result<void> prepare(
@@ -94,6 +97,15 @@ public:
     px4::userland::Result<void> stop() noexcept override;
 
 private:
+    friend int run_card_only_server(
+        LibusbW3u3Hardware&, const char*, const char*,
+        const volatile std::sig_atomic_t*) noexcept;
+    bool begin_card_operation(
+        std::uint32_t timeout_ms,
+        const volatile std::sig_atomic_t* stop_flag) noexcept override;
+    void end_card_operation() noexcept override;
+    bool begin_card_cleanup(std::uint32_t timeout_ms) noexcept override;
+    void end_card_cleanup(bool cleanup_succeeded) noexcept override;
     enum class PoweredControllerCheck : std::uint8_t {
         ready,
         type_read_failed,
@@ -149,6 +161,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> disconnected_{false};
     std::atomic<bool> capture_interrupted_{false};
+    bool card_cleanup_active_ = false;
     std::chrono::steady_clock::time_point deadline_{};
     bool deadline_active_ = false;
     bool claimed_ = false;
