@@ -722,3 +722,116 @@ modules remain loaded, the runtime interface remains bound, and passthrough
 remains configured. This is a loader/probe reference, not a successful
 reception reference. A subsequent initializer run must restart recording
 before its first call and retain the previously captured startup segment.
+
+### Read-only GPIOEx and endpoint diagnostics with LNB excluded
+
+On 2026-10-08 around 22:10 JST, the user explicitly excluded LNB operations
+and noted that establishing the antenna voltage requires a physical tester.
+Parent started a new guest bus-1 usbmon recording before diagnostic calls.
+No GPIO write with a nonzero mask, GPIOEx write, clear-halt, USB reset or
+SET_INTERFACE request was issued in this diagnostic experiment.
+
+With as11usbdtv bound, device-recipient GPIO/GPIOEx/configuration reads
+succeeded, but endpoint/interface-recipient requests failed with libusb -1.
+Debug output identified submiturb errno16 (EBUSY), and kernel messages said
+the process had not claimed interface0. Those failed requests did not appear
+on usbmon; they are not evidence of an endpoint halt or a firmware refusal.
+
+Parent temporarily unloaded as11usbdtv, claimed only interface0 for each
+explicit guest bus/address, performed the reads, released/closed the handles,
+then reloaded as11usbdtv. No SET_INTERFACE occurred in the captured trace.
+During this recording, secondary also enumerated as loader address5 and
+then runtime address6. This was not initiated by an explicit power command.
+
+| Observation | Primary bus1/address4 | Secondary bus1/address6 |
+| --- | --- | --- |
+| GPIO request08, value/index0, length1 | ff | ff |
+| GPIOEx request11, value/index0, length1 | 02 | 02 |
+| endpoint82 GET_STATUS, actual length2 | 0000 | 0000 |
+| endpoint81 GET_STATUS, actual length2 | 0000 | 0000 |
+| GET_CONFIGURATION | 01 | 01 |
+| GET_INTERFACE interface0 | 00 | 00 |
+
+GPIO bit20 remained set in all observed reads. These are pre-initialization,
+pre-tune observations; endpoint halt absence here does not establish its
+state during a locked capture. GPIOEx reports pin levels; 02 means bit0 low
+and bit1 high, without proving the output latch or electrical function.
+No GPIOEx write was inferred from this observation.
+
+The 194-event trace is preserved in
+docs/hardware-traces/2026-10-08-readonly-diagnostics.usbmon.txt; its raw copy
+is in the local official-trace-20261008 directory. Both receiver functions
+are now runtime 0b06:0005 and the official runtime module is loaded again.
+The bounded usbmon reader was stopped. No reception was attempted here.
+
+### LNB-excluded official-library startup trial
+
+On 2026-10-08 around 22:22 JST, parent ran the standalone guarded harness
+preserved in docs/hardware-traces/official-trace-harness.cpp. This is a
+modified-library comparison, not an unmodified official reception reference.
+Linker wrapping removes bit20 from both GPIO value and mask and skips
+GPIOEx writes. Host compilation and linking passed; disassembly of the
+guest-linked executable confirmed the vendor GPIO/GPIOEx helpers called
+the guards. An exhaustive offline check of value/mask/initial-state
+combinations confirmed bit20 is preserved. Both USB traces started before
+the first library call. No B-CAS APDU or seed-generation API was invoked.
+
+The harness object was compiled with g++ -std=c++11 -O0
+-fno-stack-protector -Wall -Wextra -Werror -c. Guest linking used:
+
+```sh
+gcc official-trace-harness.o libPlexLib_W3U3.a /usr/lib64/libstdc++.so.6 \
+  -Wl,--wrap=_Z9ucSetGPIOhhi -Wl,--wrap=_Z11ucSetGPIOExhhi \
+  -lpthread -lm -lrt -o official-trace-harness
+```
+
+The archive SHA-256 was
+e1d68db2e09c584912a60363d89e56271ff3ad3b1bd0a319a7076fe914dad2c0.
+The host-compiled object was linked using the guest GCC4.4.6 and its own
+libstdc++.so.6, with both --wrap flags, -lpthread -lm -lrt. GCC4.4.6 uses
+non-PIE linking by default; the newer -no-pie switch was not used. A first
+timeout invocation rejected unsupported -k before executing the harness;
+the subsequent timeout -s KILL 45s invocation completed normally in under
+one second, returning exit1, without reaching its watchdog.
+
+| Call/result | Observation |
+| --- | --- |
+| DevCreate /dev/as11usbdtv0 | 1 |
+| AssignDevExt_0 | 1 |
+| Init(local0, mode0, final mode byte0) | -2 |
+| UnInit(local0) | -10 |
+| DevClose | 1 |
+| Guard totals | 12 GPIO calls, 2 with bit20 masked, 1 empty mask skipped, 1 GPIOEx skipped |
+
+Local1 initialization, T27 retune and lock polling were not reached. Despite
+DTV_Init's failure, TF_DTV_Init continued its polling/filter/bulk wrapper
+path: local0 endpoint81 received four submissions of65536 bytes, followed
+by four completions with status-2 and actual_length0 on cleanup. No
+endpoint82 transfer or nonzero bulk completion was recorded. This observed
+65536-byte path does not invalidate the separate official4096-byte path.
+
+Static inspection identifies an early DTV_Init -2 branch at
+DTV_Lib.o .text7250..72f5: it checks extension bytes476b..476e for VID0b06
+and PID0004/0005. The observed USB descriptor matches, but the harness did
+not read those internal bytes; the precise failed check is therefore not
+confirmed dynamically. The GenEncSeed path has references that prepare
+these fields, while DevCreate/Init alone have no identified assignments.
+That is a candidate missing prerequisite, not authorization to supply
+guessed seed inputs or bypass validation. No such change was made.
+
+After DevClose, parent sent DSC07 to both lanes, restored only non-LNB GPIO
+bits with valueDF/maskDF, then read GPIOff and GPIOEx02. All234 guest trace
+events were audited: zero request08 write masks selected bit20, and zero
+request10 GPIOEx writes occurred. The host pcap has202 events and tcpdump
+reported zero dropped packets. Secondary reset/re-enumeration caused by
+the non-LNB startup sequence is included; final guest runtime devices were
+primary address4 and secondary address8.
+
+The sanitized trace is
+docs/hardware-traces/2026-10-08-guarded-init.usbmon.txt; firmware and device
+identity payloads were omitted. Raw guest text, host pcap and stderr remain
+under /config/.tools/asicen-work/official-trace-20261008/ and on the SSH
+machines. Capture readers were stopped. GPIO was restored; frontend/CF
+register snapshots were not taken for this startup trial, so their full
+restoration is not claimed. This run did not establish a usable frontend
+initialization or a successful official reception reference.
