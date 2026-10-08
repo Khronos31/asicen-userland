@@ -7,6 +7,10 @@ Inspected ASICEN main `3a06b336f233a0f9e28716678f9b6dc237b857c7` and local
 px4-userland `3de7d512cef11756e6f033557ee49917cad2f11c`. The latter's SPEC
 10.4, `.github/workflows/build_userland.yml`, `scripts/build-linux-static.sh`
 and packaging scripts are the reference. No reference repository was edited.
+The user clarified that px4-userland Windows support is still in development.
+Windows entries in its SPEC/CI describe intended output, not completed support
+or a proven release artifact. ASICEN must also implement Windows; this target
+is retained without treating the reference implementation as finished.
 
 ## Actual executable dependency evidence
 
@@ -51,10 +55,10 @@ tools do not count toward this parity.
 | android-x86_64 | API24+, static libusb, Termux launcher | unimplemented/unverified |
 | windows-x86_64 | three commands + native IPC/card path | unimplemented/unverified |
 
-The reference Windows archive currently bundles a libusb DLL. ASICEN's
+The in-progress reference Windows packaging specifies a libusb DLL. ASICEN's
 explicit static-libusb requirement is stricter on that target; copying that
-package unchanged would not satisfy it. The reference does not provide a
-Windows WinSCard/PCSC IFD in Phase1, so one is not implied by package parity.
+package unchanged would not satisfy it. The reference's planned Phase1 excludes
+a Windows WinSCard/PCSC IFD, so one is not implied by package parity.
 The corresponding-source archive, dependency notices, relink verification
 and checksum manifest are also missing on the ASICEN side.
 

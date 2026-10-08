@@ -52,6 +52,9 @@ contract, not only CLI spelling. This requirement is currently **UNMET**;
 successful native development builds and TS trials do not satisfy it.
 The audit baseline is px4-userland `3de7d512cef11756e6f033557ee49917cad2f11c`,
 SPEC section 10.4 and its release-candidate workflow.
+Windows support in the reference is still being implemented (user clarification
+2026-10-09). Its presence in the specification/workflow is a target definition,
+not evidence of completion. Windows remains required for ASICEN as well.
 
 - Distribute the three product commands `asicend`, `asicen-ts`, `asicenctl`,
   plus the applicable native card adapter and Android launcher. Research
@@ -70,7 +73,7 @@ SPEC section 10.4 and its release-candidate workflow.
 - Statically include libusb wherever the product links it. Clients/IFD that
   use only IPC need not acquire an unnecessary libusb dependency. macOS may
   depend on system libraries/frameworks; Android may depend on API24+ Bionic.
-  The reference Windows package currently ships a libusb DLL; that is a
+  The in-progress reference Windows packaging specifies a libusb DLL; that is a
   reference difference, not permission to silently waive the user's static
   libusb requirement for ASICEN's Windows build.
 - Package exact dependency licenses/notices, corresponding source and
