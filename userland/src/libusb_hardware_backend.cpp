@@ -164,11 +164,6 @@ Result<void> LibusbW3u3Hardware::claim() {
         (void)release();
         return Result<void>::failure(Error::UNSUPPORTED);
     }
-    std::uint8_t controller_state = 0xffU;
-    if (!read_controller05(&controller_state) || controller_state != 0U) {
-        (void)release();
-        return Result<void>::failure(Error::BUSY);
-    }
     const auto gpio_read = make_gpio_set(0U, 0U, 1000U);
     std::array<unsigned char, 1> gpio_response{};
     if (control(gpio_read, gpio_response.data()) != gpio_read.length) {
