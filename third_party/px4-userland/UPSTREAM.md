@@ -71,7 +71,12 @@ unchanged.
 - `userland/include/px4/tuner_service.h`: adds a default no-op
   `TunerServiceBackend::request_stop()` and a forwarding service method.
 - `userland/include/px4/card_service.h`: adds default no-op stop notifications
-  for the backend and card protocol session.
+  for the backend and card protocol session. Its native `CardSession` adapter
+  is conditionally omitted in this product's portable targets via the
+  propagated `PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION` build definition; the
+  protocol session interface and `CardService` remain available. The adapter
+  depends on `card.cpp`/IT930x card transport, which is not part of this
+  portable product subset.
 - `userland/src/control_server.cpp`: ASICEN receiver-lane dispatch and invokes
   tuner, card, and stream cancellation hooks before draining workers.
 - `userland/src/control_workers.cpp`: ASICEN receiver-to-USB-function lane

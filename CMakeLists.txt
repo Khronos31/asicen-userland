@@ -29,6 +29,8 @@ add_library(px4_portable_reference STATIC ${ASICEN_PX4_CORE_SOURCES})
 target_include_directories(px4_portable_reference PUBLIC
   ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src)
 target_link_libraries(px4_portable_reference PUBLIC Threads::Threads)
+target_compile_definitions(px4_portable_reference PUBLIC
+  PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
 target_compile_options(px4_portable_reference PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 # Product profile compiles the same portable lifecycle with ASICEN's local
@@ -38,6 +40,8 @@ add_library(asicen_px4_mock STATIC ${ASICEN_PX4_CORE_SOURCES}
 target_include_directories(asicen_px4_mock PUBLIC
   ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
 target_compile_definitions(asicen_px4_mock PRIVATE ASICEN_PROFILE_ASICEN=1)
+target_compile_definitions(asicen_px4_mock PUBLIC
+  PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
 target_link_libraries(asicen_px4_mock PUBLIC Threads::Threads)
 target_compile_options(asicen_px4_mock PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
@@ -164,7 +168,8 @@ if(ASICEN_BUILD_TESTS)
   target_compile_definitions(px4-portable-tests PRIVATE
     PX4_CONTROL_WORKERS_TEST_ACCESS=1
     PX4_CONTROL_SERVER_TEST_ACCESS=1
-    PX4_POSIX_IPC_TEST_ACCESS=1)
+    PX4_POSIX_IPC_TEST_ACCESS=1
+    PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
   target_link_libraries(px4-portable-tests PRIVATE Threads::Threads)
   target_compile_options(px4-portable-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME px4-portable-tests COMMAND px4-portable-tests)

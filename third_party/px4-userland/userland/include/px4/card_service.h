@@ -27,6 +27,10 @@ public:
     virtual void request_stop() noexcept {}
 };
 
+// Portable product profiles without the IT930x card transport keep the
+// protocol-session interface/service while excluding this adapter, whose
+// inline methods require the separately imported CardSession implementation.
+#if !defined(PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION)
 class NativeCardProtocolSession final : public CardProtocolSession {
 public:
     explicit NativeCardProtocolSession(CardSession& session) noexcept : session_(session) {}
@@ -44,6 +48,7 @@ public:
 private:
     CardSession& session_;
 };
+#endif
 
 // Device-1-only backend seam. Implementations perform the Q3U4 backend power
 // sequence and UART initialization; CardService never addresses device 2.
