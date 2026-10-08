@@ -37,7 +37,8 @@ void regular_lock_is_created_exclusively_and_existing_inode_reopens() {
     if (::geteuid() == 0) {
         const int raw = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
         check(raw >= 0, "open temporary inode for ownership test");
-        (void)::fchown(raw, 65534, 65534);
+        check(::fchown(raw, 65534, 65534) == 0,
+              "set temporary lock owner for root/non-root split test");
         (void)::close(raw);
     }
     const int reopened = asicen::acquire_enclosure_lock(path.c_str());
