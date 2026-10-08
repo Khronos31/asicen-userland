@@ -942,3 +942,30 @@ for API addresses, the lower-level call's side effects and limitations,
 trace counts, preservation locations and the still-unresolved supported
 public receive-chain preparation. This trial does not reproduce the full
 official application sequence or resolve the original locked zero-byte case.
+
+### First official SDK TS capture (2026-10-08, 23:55 JST)
+
+The next bounded trial supplied source-derived valid inputs to the public
+TF_DTV_GenEncSeed API. Key2 row0 selected the normal read transform,
+cleared the readiness gate, and allowed public T27 tune/lock followed by
+38,420,244 bytes in20seconds. ffprobe recognizes four programs and their
+video/audio PIDs. Key1 instead selected an application AES output path:
+its188-byte framing was not sufficient evidence of usable payload.
+
+The raw Key2 file has damaged startup packets within its first128packets;
+the remaining204,235packets have no sync errors or TEI. This establishes
+an official-SDK receive reference, not completion of the libusb userland
+implementation or B-CAS/recisdb decoding. No LNB-mask/GPIOEx writes were
+sent; both UnInit calls and DevClose succeeded, and restoration read back
+GPIOFF/GPIOEx02.
+
+Payload integrity is not yet clean: after the startup region,187 complete
+PAT and423 PMT sections pass CRC, but15 complete PMT sections fail
+validation, other sections are truncated, and20 CC jumps remain. Do not
+interpret zero sync/TEI errors as zero loss or claim the initial128packet
+exclusion repairs the entire recording.
+
+See [the first-TS report](docs/reverse-engineering/official-first-ts-2026-10-08.md)
+for the public API sequence, transform distinction, validation, invocation,
+trace limitations and retained artifacts. Full seed traces and TS remain
+local; only code and non-key diagnostics are committed.

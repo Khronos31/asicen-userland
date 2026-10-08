@@ -1,0 +1,96 @@
+GPIO guard: value=00 mask=40 -> value=00 mask=40
+GPIO guard: value=00 mask=08 -> value=00 mask=08
+GPIO guard: value=10 mask=10 -> value=10 mask=10
+GPIO guard: value=00 mask=10 -> value=00 mask=10
+GPIO guard: value=10 mask=10 -> value=10 mask=10
+GPIO guard: value=04 mask=04 -> value=04 mask=04
+GPIO guard: value=00 mask=04 -> value=00 mask=04
+GPIO guard: value=04 mask=04 -> value=04 mask=04
+GPIO guard: value=27 mask=fb -> value=07 mask=db
+GPIO guard: value=40 mask=40 -> value=40 mask=40
+GPIO guard: value=00 mask=04 -> value=00 mask=04
+GPIOEx guard: request skipped (value=01 mask=01)
+GPIO guard: request blocked (value=00 mask=20; remaining mask=00)
+DevCreate rc=1 extension=0xd03010
+AssignDevExt_0 rc=1
+CustomerInfo rc=1 vid=0b06 pid=0005 cached_vid=0b06 cached_pid=0005
+GPIO guard: value=00 mask=08 -> value=00 mask=08
+GPIO guard: value=05 mask=05 -> value=05 mask=05
+GPIO guard: value=00 mask=04 -> value=00 mask=04
+GPIO guard: value=05 mask=05 -> value=05 mask=05
+GPIO guard: value=10 mask=10 -> value=10 mask=10
+GPIO guard: value=00 mask=10 -> value=00 mask=10
+GPIO guard: value=10 mask=10 -> value=10 mask=10
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: value=00 mask=01 -> value=00 mask=01
+GPIO guard: value=ff mask=11 -> value=df mask=11
+GPIO guard: value=00 mask=11 -> value=00 mask=11
+GPIO guard: value=ff mask=11 -> value=df mask=11
+Init local0 rc=1
+GPIO guard: value=00 mask=08 -> value=00 mask=08
+Init local1 rc=1
+Seed API local1 selection=Key2 rc=1 readiness_gate_after=0 app_key_state=1
+GPIO guard: value=00 mask=01 -> value=00 mask=01
+Seed capture tune local1 freq_khz=557142 bw=6 rc=1 readiness_gate_after=0
+Seed capture RF lock local1 rc=0
+Seed capture RF lock local1 rc=0
+Seed capture RF lock local1 rc=0
+Seed capture RF lock local1 rc=1
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+GPIO guard: request blocked (value=20 mask=20; remaining mask=00)
+Seed capture finished: bytes=38420244 read_calls=3204
+UnInit local1 rc=1
+GPIO guard: value=00 mask=04 -> value=00 mask=04
+GPIOEx guard: request skipped (value=01 mask=01)
+GPIO guard: request blocked (value=00 mask=20; remaining mask=00)
+UnInit local0 rc=1
+DevClose rc=1
+GPIO guard totals: calls=77 bit20_masked=53 empty_mask_skipped=52 GPIOEx_skipped=2
+Initial GPIO snapshot=ff; parent must restore non-LNB bits with mask df after DevClose

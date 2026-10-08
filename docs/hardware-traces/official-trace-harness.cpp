@@ -3,12 +3,14 @@
 // HARDWARE-VALIDATION.md. All diagnostics go to stderr.
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
@@ -44,12 +46,19 @@ extern "C" int TF_DTV_Init(PVOID, BYTE, BOOL, BYTE) asm("_Z11TF_DTV_InitPvhhh");
 extern "C" int TF_DTV_UnInit(PVOID, BYTE) asm("_Z13TF_DTV_UnInitPvh");
 extern "C" int TF_DTV_SetTunerFreq(PVOID, BYTE, ULONG, BYTE) asm("_Z19TF_DTV_SetTunerFreqPvhmh");
 extern "C" int TF_DTV_TunerLockCheck(PVOID, BYTE) asm("_Z21TF_DTV_TunerLockCheckPvh");
+extern "C" int TF_DTV_GenEncSeed(PVOID, BYTE, BYTE *, BYTE, BYTE *, BYTE)
+    asm("_Z17TF_DTV_GenEncSeedPvhPhhS0_h");
+extern "C" BOOL TF_bGetBufLen(PVOID, BYTE, ULONG *) asm("_Z13TF_bGetBufLenPvhPm");
+extern "C" int TF_DTV_StreamDataRead(PVOID, BYTE, BYTE *, unsigned int)
+    asm("_Z21TF_DTV_StreamDataReadPvhPhj");
 extern "C" BOOL TF_DTV_DevClose(PVOID) asm("_Z15TF_DTV_DevClosePv");
 extern "C" BOOL Tnim_AcquireFrequency(PVOID, ULONG, BYTE)
     asm("_Z21Tnim_AcquireFrequencyP13_STnimControlmh");
 extern "C" BOOL Tnim_IsLocked(PVOID) asm("_Z13Tnim_IsLockedP13_STnimControl");
 
 extern "C" int real_ucSetGPIO(BYTE, BYTE, int) asm("__real__Z9ucSetGPIOhhi");
+extern "C" BYTE Key1[];
+extern "C" BYTE Key2[];
 
 static unsigned long gpio_calls;
 static unsigned long gpio_lnb_masked;
@@ -137,12 +146,197 @@ static bool cleanup(RunState &state) {
   return ok;
 }
 
+static bool fill_random16(BYTE *bytes) {
+  int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  size_t offset = 0;
+  while (offset < 16) {
+    ssize_t count = read(fd, bytes + offset, 16 - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) {
+      close(fd);
+      return false;
+    }
+    offset += static_cast<size_t>(count);
+  }
+  close(fd);
+  return true;
+}
+
+static bool write_all(int fd, const BYTE *bytes, size_t length) {
+  size_t offset = 0;
+  while (offset < length) {
+    ssize_t count = write(fd, bytes + offset, length - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return false;
+    offset += static_cast<size_t>(count);
+  }
+  return true;
+}
+
+static bool run_seed_capture(RunState &state, const char *output_path,
+                             bool use_key2) {
+  const BYTE mask[16] = {
+      0x1f, 0xc5, 0x62, 0xb9, 0xb3, 0x36, 0x4c, 0x38,
+      0x86, 0xe5, 0x21, 0x1e, 0x94, 0x4e, 0xce, 0x3a};
+  BYTE ap_seed[16] = {};
+  BYTE pc_key[16] = {};
+  BYTE stream_buffer[188 * 64] = {};
+  bool ok = false;
+  int output_fd = -1;
+  PVOID control = 0;
+  PVOID back_reference = 0;
+  const BYTE *ctrl_bytes = 0;
+  const BYTE *selected_key = use_key2 ? Key2 : Key1;
+  unsigned int init_count = 0;
+
+  const BYTE *ext_bytes = static_cast<const BYTE *>(state.extension);
+  memcpy(&control, ext_bytes + 0x460, sizeof(control));
+  if (control == 0) {
+    fprintf(stderr, "Seed capture rejected: local1 control pointer is null\n");
+    goto done;
+  }
+  ctrl_bytes = static_cast<const BYTE *>(control);
+  memcpy(&back_reference, ctrl_bytes + 0x1d38, sizeof(back_reference));
+  memcpy(&init_count, ctrl_bytes + 0x1d40, sizeof(init_count));
+  if (back_reference != state.extension || ctrl_bytes[0x1d30] != 1 ||
+      init_count != 1 || ctrl_bytes[0x15d8] != 1 || ctrl_bytes[0x15ec] != 0 ||
+      ctrl_bytes[0x30d60] != 1 || ctrl_bytes[0x30d61] != 1) {
+    fprintf(stderr,
+            "Seed capture rejected: local1 control/init/controller/identify/gate/row0 validation failed\n");
+    goto done;
+  }
+
+  // The distributed archive exports Key1 and Key2 as 64 fixed-width rows.
+  // Init marks row0 eligible; direct identify compares APEncSeed against the
+  // selected row XOR the library's fixed local 16-byte mask. Never log bytes.
+  for (size_t i = 0; i < 16; ++i)
+    ap_seed[i] = static_cast<BYTE>(selected_key[i] ^ mask[i]);
+  if (!fill_random16(pc_key)) {
+    fprintf(stderr, "Seed capture failed: could not obtain 16 random PCKey bytes\n");
+    goto done;
+  }
+
+  {
+    int seed_rc = TF_DTV_GenEncSeed(state.extension, 1, ap_seed, 16, pc_key, 16);
+    const BYTE gate_after_seed = ctrl_bytes[0x30d60];
+    const BYTE app_key_state = ctrl_bytes[0x30da1];
+    const BYTE expected_app_key_state = use_key2 ? 1 : 0;
+    fprintf(stderr,
+            "Seed API local1 selection=Key%u rc=%d readiness_gate_after=%u app_key_state=%u\n",
+            use_key2 ? 2U : 1U, seed_rc,
+            static_cast<unsigned>(gate_after_seed),
+            static_cast<unsigned>(app_key_state));
+    // A controller-state early return can report 1 without reaching the
+    // output path. Require the source-observed readiness transition as well.
+    if (seed_rc != 1 || gate_after_seed != 0 ||
+        app_key_state != expected_app_key_state)
+      goto done;
+  }
+
+  {
+    int tune_rc = TF_DTV_SetTunerFreq(state.extension, 1, 557142UL, 6);
+    const BYTE gate_after_tune = ctrl_bytes[0x30d60];
+    fprintf(stderr,
+            "Seed capture tune local1 freq_khz=557142 bw=6 rc=%d readiness_gate_after=%u\n",
+            tune_rc, static_cast<unsigned>(gate_after_tune));
+    if (tune_rc != 1 || gate_after_tune != 0) goto done;
+  }
+
+  {
+    timespec lock_deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &lock_deadline) != 0) goto done;
+    lock_deadline.tv_sec += 5;
+    bool lock_seen = false;
+    do {
+      int lock_rc = TF_DTV_TunerLockCheck(state.extension, 1);
+      fprintf(stderr, "Seed capture RF lock local1 rc=%d\n", lock_rc);
+      if (lock_rc == 1) {
+        lock_seen = true;
+        break;
+      }
+      if (lock_rc < 0 || read_deadline_expired(lock_deadline)) break;
+      struct timespec pause = {0, 100000000};
+      while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+    } while (!read_deadline_expired(lock_deadline));
+    if (!lock_seen) {
+      fprintf(stderr, "Seed capture stopped: RF lock not observed within 5 seconds\n");
+      goto done;
+    }
+  }
+
+  output_fd = open(output_path,
+                   O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                   S_IRUSR | S_IWUSR);
+  if (output_fd < 0) {
+    fprintf(stderr, "Seed capture output create failed (errno=%d)\n", errno);
+    goto done;
+  }
+
+  {
+    timespec capture_deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &capture_deadline) != 0) goto done;
+    capture_deadline.tv_sec += 20;
+    unsigned long long total_bytes = 0;
+    unsigned int read_calls = 0;
+    while (!read_deadline_expired(capture_deadline) && read_calls < 4096) {
+      ULONG available = 0;
+      BOOL length_rc = TF_bGetBufLen(state.extension, 1, &available);
+      if (!length_rc || available < sizeof(stream_buffer)) {
+        struct timespec pause = {0, 100000000};
+        while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+        continue;
+      }
+      int actual = TF_DTV_StreamDataRead(state.extension, 1, stream_buffer,
+                                         sizeof(stream_buffer));
+      ++read_calls;
+      if (actual < 0 || static_cast<size_t>(actual) > sizeof(stream_buffer)) {
+        fprintf(stderr, "Seed capture read failed: rc=%d\n", actual);
+        goto done;
+      }
+      if (actual == 0) {
+        struct timespec pause = {0, 100000000};
+        while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+        continue;
+      }
+      if (!write_all(output_fd, stream_buffer, static_cast<size_t>(actual))) {
+        fprintf(stderr, "Seed capture output write failed (errno=%d)\n", errno);
+        goto done;
+      }
+      total_bytes += static_cast<unsigned int>(actual);
+    }
+    if (fsync(output_fd) != 0) {
+      fprintf(stderr, "Seed capture output sync failed (errno=%d)\n", errno);
+      goto done;
+    }
+    fprintf(stderr, "Seed capture finished: bytes=%llu read_calls=%u\n",
+            total_bytes, read_calls);
+    ok = total_bytes != 0;
+  }
+
+done:
+  if (output_fd >= 0 && close(output_fd) != 0) {
+    fprintf(stderr, "Seed capture output close failed (errno=%d)\n", errno);
+    ok = false;
+  }
+  memset(ap_seed, 0, sizeof(ap_seed));
+  memset(pc_key, 0, sizeof(pc_key));
+  memset(stream_buffer, 0, sizeof(stream_buffer));
+  return ok;
+}
+
 int main(int argc, char **argv) {
   const bool customer_only = argc == 4 && strcmp(argv[3], "--customer-only") == 0;
   const bool rf_diagnostic = argc == 4 && strcmp(argv[3], "--rf-diagnostic") == 0;
-  if ((argc != 3 && !customer_only && !rf_diagnostic) || argv[1][0] != '/' || strlen(argv[2]) != 2) {
+  const bool seed_capture = argc == 5 && strcmp(argv[3], "--seed-capture") == 0;
+  const bool seed_key2_capture =
+      argc == 5 && strcmp(argv[3], "--seed-key2-capture") == 0;
+  if ((argc != 3 && !customer_only && !rf_diagnostic && !seed_capture &&
+       !seed_key2_capture) ||
+      argv[1][0] != '/' || strlen(argv[2]) != 2 ||
+      ((seed_capture || seed_key2_capture) && argv[4][0] != '/')) {
     fprintf(stderr,
-            "usage: %s /dev/as11usbdtv0 initial_gpio_hex [--customer-only|--rf-diagnostic]\n",
+            "usage: %s /dev/as11usbdtv0 initial_gpio_hex [--customer-only|--rf-diagnostic|--seed-capture|--seed-key2-capture /absolute/output.ts]\n",
             argv[0]);
     return 2;
   }
@@ -224,6 +418,13 @@ int main(int argc, char **argv) {
       cleanup(state);
       return 1;
     }
+  }
+
+  if (seed_capture || seed_key2_capture) {
+    const bool capture_ok =
+        run_seed_capture(state, argv[4], seed_key2_capture);
+    const bool cleanup_ok = cleanup(state);
+    return capture_ok && cleanup_ok ? 0 : 1;
   }
 
   int tune_rc = TF_DTV_SetTunerFreq(state.extension, 1, 557142UL, 6);
