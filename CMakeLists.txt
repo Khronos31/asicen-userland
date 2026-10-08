@@ -10,6 +10,37 @@ option(ASICEN_BUILD_TESTS "Build offline protocol tests" ON)
 
 find_package(Threads REQUIRED)
 
+set(ASICEN_PX4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland)
+set(ASICEN_PX4_CORE_SOURCES
+    ${ASICEN_PX4_ROOT}/src/error.cpp
+    ${ASICEN_PX4_ROOT}/src/identity.cpp
+  ${ASICEN_PX4_ROOT}/src/ipc.cpp
+  ${ASICEN_PX4_ROOT}/src/posix_ipc.cpp
+  ${ASICEN_PX4_ROOT}/src/control_client.cpp
+  ${ASICEN_PX4_ROOT}/src/control_server.cpp
+  ${ASICEN_PX4_ROOT}/src/control_workers.cpp
+  ${ASICEN_PX4_ROOT}/src/posix_tuner_nonce.cpp
+  ${ASICEN_PX4_ROOT}/src/tuner_service.cpp
+  ${ASICEN_PX4_ROOT}/src/card_service.cpp
+)
+
+# The reference profile is built unchanged for its original lifecycle tests.
+add_library(px4_portable_reference STATIC ${ASICEN_PX4_CORE_SOURCES})
+target_include_directories(px4_portable_reference PUBLIC
+  ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src)
+target_link_libraries(px4_portable_reference PUBLIC Threads::Threads)
+target_compile_options(px4_portable_reference PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+# Product profile compiles the same portable lifecycle with ASICEN's local
+# receiver mapping, product directory, and wire magic.
+add_library(asicen_px4_mock STATIC ${ASICEN_PX4_CORE_SOURCES}
+  userland/src/px4_mock_backend.cpp)
+target_include_directories(asicen_px4_mock PUBLIC
+  ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
+target_compile_definitions(asicen_px4_mock PRIVATE ASICEN_PROFILE_ASICEN=1)
+target_link_libraries(asicen_px4_mock PUBLIC Threads::Threads)
+target_compile_options(asicen_px4_mock PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 add_library(asicen_core STATIC
   userland/src/card_mailbox.cpp
   userland/src/channel_plan.cpp
@@ -55,17 +86,101 @@ if(ASICEN_ENABLE_LIBUSB)
 endif()
 
 if(UNIX)
-  add_executable(asicend userland/tools/asicend.cpp)
-  target_link_libraries(asicend PRIVATE asicen_core Threads::Threads)
+  add_executable(asicend
+    userland/tools/asicend.cpp
+    userland/tools/asicend_research.cpp)
+  target_link_libraries(asicend PRIVATE asicen_px4_mock asicen_core Threads::Threads)
   target_compile_options(asicend PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-  add_executable(asicen-ts userland/tools/asicen_ts.cpp)
-  target_link_libraries(asicen-ts PRIVATE asicen_core)
+  add_executable(asicenctl
+    userland/tools/asicenctl.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp)
+  target_include_directories(asicenctl PRIVATE
+    ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
+  target_compile_definitions(asicenctl PRIVATE ASICEN_PRODUCT_CLI=1)
+  target_link_libraries(asicenctl PRIVATE asicen_px4_mock)
+  target_compile_options(asicenctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+  add_executable(asicen-ts
+    userland/tools/asicen_ts.cpp
+    userland/tools/asicen_ts_research.cpp
+    userland/tools/asicen_ts_portable.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp)
+  target_include_directories(asicen-ts PRIVATE
+    ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
+  target_compile_definitions(asicen-ts PRIVATE ASICEN_PRODUCT_CLI=1)
+  target_link_libraries(asicen-ts PRIVATE asicen_core asicen_px4_mock)
   target_compile_options(asicen-ts PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
 if(ASICEN_BUILD_TESTS)
   enable_testing()
+
+  add_executable(px4-portable-tests
+    ${ASICEN_PX4_CORE_SOURCES}
+    ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4d_list_format.cpp
+    ${ASICEN_PX4_ROOT}/tests/control_integration_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/control_workers_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/card_service_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/tuner_service_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/ipc_state_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/posix_ipc_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/posix_tuner_nonce_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/px4_ts_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/px4ctl_format_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/px4d_list_format_tests.cpp
+    ${ASICEN_PX4_ROOT}/tests/imported_tests_main.cpp
+  )
+  target_include_directories(px4-portable-tests PRIVATE
+    ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
+    ${ASICEN_PX4_ROOT}/tools ${ASICEN_PX4_ROOT}/tests)
+  target_compile_definitions(px4-portable-tests PRIVATE
+    PX4_CONTROL_WORKERS_TEST_ACCESS=1
+    PX4_CONTROL_SERVER_TEST_ACCESS=1
+    PX4_POSIX_IPC_TEST_ACCESS=1)
+  target_link_libraries(px4-portable-tests PRIVATE Threads::Threads)
+  target_compile_options(px4-portable-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
+  set_tests_properties(px4-portable-tests PROPERTIES TIMEOUT 60)
+
+  add_executable(asicen-product-profile-tests userland/tests/product_profile_tests.cpp)
+  target_include_directories(asicen-product-profile-tests PRIVATE userland/include)
+  target_compile_options(asicen-product-profile-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-product-profile-tests COMMAND asicen-product-profile-tests)
+
+  add_executable(asicen-product-shutdown-tests
+    userland/tests/product_shutdown_hooks_tests.cpp)
+  target_include_directories(asicen-product-shutdown-tests PRIVATE
+    userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tests)
+  target_link_libraries(asicen-product-shutdown-tests PRIVATE asicen_px4_mock)
+  target_compile_options(asicen-product-shutdown-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-product-shutdown-tests COMMAND asicen-product-shutdown-tests)
+  set_tests_properties(asicen-product-shutdown-tests PROPERTIES TIMEOUT 10)
+
+  add_executable(asicen-product-worker-routing-tests
+    userland/tests/product_worker_routing_tests.cpp)
+  target_include_directories(asicen-product-worker-routing-tests PRIVATE
+    userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tests)
+  target_link_libraries(asicen-product-worker-routing-tests PRIVATE asicen_px4_mock)
+  target_compile_options(asicen-product-worker-routing-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-product-worker-routing-tests
+    COMMAND asicen-product-worker-routing-tests)
+  set_tests_properties(asicen-product-worker-routing-tests PROPERTIES TIMEOUT 10)
+
+  if(UNIX)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME asicen-product-cli-integration
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/product_cli_integration.py
+        $<TARGET_FILE:asicend> $<TARGET_FILE:asicenctl> $<TARGET_FILE:asicen-ts>)
+    set_tests_properties(asicen-product-cli-integration PROPERTIES TIMEOUT 15)
+  endif()
 
   add_executable(asicen-protocol-tests userland/tests/protocol_tests.cpp)
   target_link_libraries(asicen-protocol-tests PRIVATE asicen_core)

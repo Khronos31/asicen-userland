@@ -5,10 +5,14 @@ starting with the original PX-W3U3. Based on the protocol skeleton and evidence
 from [asicen-research](https://github.com/Khronos31/asicen-research).
 
 This repository is private during development. Public visibility is planned for
-the 0.1.0 release. Both USB functions boot and respond to read-only queries.
-One terrestrial lane has tuned and locked on the attached PX-W3U3. Finite raw
-capture still returns zero bytes; TS reception, satellite reception and B-CAS
-decoding are unverified. This is not yet a working four-receiver driver.
+the 0.1.0 release. Both USB functions have booted and responded to read-only
+queries. One terrestrial lane has tuned and locked on the attached PX-W3U3.
+The isolated official Linux environment now captures terrestrial TS; replacing
+its faulty multi-block DES routine also yielded valid PAT/PMT and decodable
+video after startup. Portable device-link transformation has been checked
+against actual USB fragments. Direct-libusb acquisition, satellite reception,
+and the portable B-CAS/recisdb path remain unverified. This is not yet a working
+four-receiver driver. See the [latest evidence](docs/reverse-engineering/transport-transform-2026-10-09.md).
 
 ## Build and offline tests
 
@@ -20,8 +24,37 @@ cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
 
-`asicend` and `asicen-ts` currently exercise the mock backend. Passing their
-integration test does not demonstrate reception from hardware.
+`asicend`, `asicenctl`, and `asicen-ts` currently exercise the mock backend.
+Passing their integration tests does not demonstrate reception from hardware.
+
+## px4-compatible command workflow
+
+The portable clients and service are adapted from px4-userland, retaining its
+channel syntax, tune timeout, finite capture, output and terminal-error
+handling. ASICEN uses `--instance` because this hardware has no USB serial
+descriptor. Receivers are `0:S, 1:T, 2:S, 3:T`. Its socket directory and wire
+magic are separate from px4-userland.
+
+For an isolated mock trial, create a private runtime directory, run the daemon
+in one terminal, and use the clients from another:
+
+```sh
+mkdir -m 700 /tmp/asicen-example
+build/asicend --mock --runtime-dir /tmp/asicen-example --instance test
+```
+
+```sh
+build/asicenctl --runtime-dir /tmp/asicen-example --instance test list
+build/asicen-ts --runtime-dir /tmp/asicen-example --instance test \
+  --receiver 1 --channel T27 --packet-count 100 --output mock.ts
+```
+
+The output contains synthetic null packets. Card operations and combined
+`status` return unsupported (exit3) until a card backend is attached; they do
+not report the physical card as absent. Hardware daemon mode is disabled.
+Use Ctrl-C to stop the foreground daemon. The original `--mock --socket PATH`
+research workflow remains available. The [adaptation record](docs/cli-adaptation.md)
+documents compatibility, source provenance and the hardware gates.
 
 ## Hardware diagnostics
 

@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace asicen::profile {
+
+inline constexpr std::uint8_t kReceiverCount = 4U;
+inline constexpr std::uint8_t kUsbFunctionCount = 2U;
+inline constexpr std::uint8_t kReceiversPerUsbFunction = 2U;
+inline constexpr std::uint8_t kUsbPresentMask = 0x03U;
+inline constexpr const char* kRuntimeDirectoryName = "asicen-userland";
+inline constexpr const char* kIpcMagic = "ASCN";
+
+constexpr std::uint8_t usb_function_for_receiver(std::uint8_t receiver) noexcept
+{
+    return static_cast<std::uint8_t>(receiver / kReceiversPerUsbFunction);
+}
+
+constexpr std::uint8_t local_receiver_for(std::uint8_t receiver) noexcept
+{
+    return static_cast<std::uint8_t>(receiver % kReceiversPerUsbFunction);
+}
+
+constexpr std::uint8_t receiver_for(std::uint8_t usb_function,
+                                    std::uint8_t local_receiver) noexcept
+{
+    return static_cast<std::uint8_t>(usb_function * kReceiversPerUsbFunction +
+                                     local_receiver);
+}
+
+constexpr bool is_satellite_receiver(std::uint8_t receiver) noexcept
+{
+    return local_receiver_for(receiver) == 0U;
+}
+
+static_assert(receiver_for(0, 0) == 0 && receiver_for(0, 1) == 1 &&
+              receiver_for(1, 0) == 2 && receiver_for(1, 1) == 3);
+
+}  // namespace asicen::profile

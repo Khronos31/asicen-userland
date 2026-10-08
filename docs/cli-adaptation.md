@@ -2,8 +2,8 @@
 
 Reference revision: `Khronos31/px4-userland`
 `d51c83e1d7eeb829fd61f87f6ea93ad2043b9d00` (local source inspected).
-This document specifies the next implementation; it is not a claim that
-the current mock commands already implement it.
+This document records the mock-only portable CLI increment and its boundary.
+It does not claim that the disabled ASICEN hardware backend is implemented.
 
 ## Reuse decision under review
 
@@ -107,3 +107,75 @@ within these constraints; no release or production deployment is included.
 
 The accepted revisions govern the mock implementation; attaching hardware is
 a later, separately tested increment within the same authorized scope.
+
+## Implemented mock increment
+
+`asicend`, `asicenctl`, and `asicen-ts` are now the product target names.
+`asicend --mock` starts the imported IPC service with the ASICEN profile;
+`--list` and `--list-json` return an empty mock-only inventory with
+`serial:null`. `--usb-path` is rejected while hardware support is disabled.
+The service exposes four receivers in the mapping `0:S, 1:T, 2:S, 3:T` and
+routes receiver 0/1 work to USB-function lane 0 and 2/3 work to lane 1.
+`asicen-ts` accepts the reference channel/frequency, stream ID/slot,
+bandwidth, tune timeout, duration, packet-count and output options. Mock TS
+packets are synthetic null packets; their count is not evidence of reception.
+
+The mock has no card detector or card protocol backend. `status`,
+`card-status`, `card-atr`, `card-reset`, and `card-apdu` therefore report
+`UNSUPPORTED` (exit 3) where card state is required; they do not claim that a
+physical card is absent and do not fabricate ATR/APDU data. `list` remains
+available without card state. The selected mock daemon lock in `/tmp` exists
+only to test duplicate mock instances. It is not shared with USB tools and
+does not satisfy hardware enclosure ownership.
+
+The explicit `asicend --mock --socket PATH` and `asicen-ts --socket PATH`
+research workflow remains available. The research daemon no longer removes a
+pre-existing socket, removes only the inode it created, bounds client I/O,
+limits active clients, interrupts sockets at shutdown, and joins client
+threads before backend destruction. The product test starts a client that
+disconnects its output and one that leaves a partial control frame before
+SIGTERM; both daemon lifecycle paths are bounded in the mock suite.
+
+## Vendored reference and local deltas
+
+The selected reference files under `third_party/px4-userland/userland/` come
+from revision `d51c83e1d7eeb829fd61f87f6ea93ad2043b9d00`; `third_party/px4-userland/LICENSE`
+is copied from that revision. All imported source and test files retain their
+SPDX headers. The files used in the build are:
+
+- `include/px4/{card,card_service,control_client,control_server,error,firmware,identity,ipc,it930x,posix_ipc,posix_tuner_nonce,transport,tuner_service}.h`;
+- `src/{card_service,control_client,control_server,control_workers,error,identity,ipc,posix_ipc,posix_tuner_nonce,tuner_service}.cpp`, plus `src/control_workers.h`, `src/control_server_test_access.h`, `src/posix_ipc_test_access.h`, and `src/posix_tuner_nonce_internal.h`;
+- `tools/px4_ts.cpp`, `tools/px4_ts_core.cpp`, `tools/px4_ts_core.h`, `tools/px4_ts_posix.cpp`, `tools/px4_ts_posix.h`, `tools/px4ctl.cpp`, `tools/px4ctl_format.cpp`, `tools/px4ctl_format.h`, `tools/px4d_list_format.cpp`, and `tools/px4d_list_format.h`;
+- unchanged upstream tests `card_service_tests.cpp`, `control_integration_tests.cpp`, `control_workers_tests.cpp`, `ipc_state_tests.cpp`, `posix_ipc_tests.cpp`, `posix_tuner_nonce_tests.cpp`, `px4_ts_tests.cpp`, `px4ctl_format_tests.cpp`, `px4d_list_format_tests.cpp`, and `tuner_service_tests.cpp`, plus `tests/test_temp_directory.h`.
+
+The vendored snapshot also retains the upstream command entrypoints and test
+runner sources for review. The compiled upstream test files are byte-identical
+to the named revision. The local `tests/imported_tests_main.cpp` only calls
+those test entry points; it does not edit or weaken their expectations.
+`px4_portable_reference` builds the reference behavior without product profile
+defines. `asicen_px4_mock` builds the same service sources with the local
+mapping and magic. Product targets compile the local `userland/tools/asicend.cpp`,
+`asicend_research.cpp`, `asicenctl.cpp`, `asicen_ts.cpp`,
+`asicen_ts_research.cpp`, and `asicen_ts_portable.cpp`, plus imported
+`px4_ts_core.cpp`, `px4_ts_posix.cpp`, and formatting code as appropriate.
+
+The copied `src/ipc.cpp`, `src/posix_ipc.cpp`, `src/control_server.cpp`,
+`src/control_workers.cpp`, and `include/px4/tuner_service.h` carry the product
+profile and/or shutdown-hook deltas. `include/px4/card_service.h` adds default
+no-op stop notifications for cancellable card backend/session calls. The
+copied `tools/px4ctl.cpp` and `tools/px4_ts_core.cpp` add product-specific
+identity validation, help/error labels, receiver bounds, and the no-LNB
+product CLI guard; default reference-profile behavior remains compiled without
+`ASICEN_PRODUCT_CLI`. These deltas are isolated behind profile/CLI macros
+where applicable. The local mock backends and product tool entry points live
+under `userland/`; the upstream checkout was not changed.
+
+The product lifecycle tests cover profile mapping, USB-function worker lane
+separation, an active and queued same-lane IPC acquire interrupted by shutdown
+while the other lane completes, delayed tuner/card/session/stream test doubles,
+duplicate daemon endpoint preservation, finite output length, unavailable-
+daemon and unsupported-card errors, closed and unread output consumers, and
+partial-request SIGTERM cleanup in both product and research daemon modes.
+All tests are offline. They do not validate USB exclusivity,
+physical reset/tune behavior, stream reception, card status, or hardware
+shutdown deadlines.

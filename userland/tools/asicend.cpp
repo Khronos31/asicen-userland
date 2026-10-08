@@ -1,256 +1,180 @@
-#include "asicen/backend.h"
-#include "asicen/ipc.h"
-#include "asicen/receiver_service.h"
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "asicen/product_profile.h"
+#include "asicen/px4_mock_backend.h"
+#include "px4/control_server.h"
+#include "px4/posix_tuner_nonce.h"
 
-#include <sys/socket.h>
+#include <sys/file.h>
 #include <sys/stat.h>
-#include <sys/un.h>
-#include <poll.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <algorithm>
-#include <array>
-#include <cerrno>
-#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
-#include <memory>
 #include <string>
 #include <thread>
-#include <vector>
+
+int run_asicend_research(int argc, char** argv);
 
 namespace {
 
-volatile sig_atomic_t g_stop = 0;
+volatile sig_atomic_t stop_requested = 0;
 
-void on_signal(int) {
-    g_stop = 1;
-}
+void signal_handler(int) { stop_requested = 1; }
 
-bool read_exact(int fd, std::uint8_t* data, std::size_t size) {
-    std::size_t done = 0;
-    while (done < size) {
-        const ssize_t rc = ::read(fd, data + done, size - done);
-        if (rc == 0) {
-            return false;
-        }
-        if (rc < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        done += static_cast<std::size_t>(rc);
+class MockTime final : public px4::userland::TunerServiceTime {
+public:
+    std::uint64_t monotonic_ms() noexcept override
+    {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    void sleep_ms(std::uint32_t ms) noexcept override
+    { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+};
+
+bool valid_instance(const std::string& value)
+{
+    if (value.empty() || value.size() > 80U || value == "." || value == "..") return false;
+    const bool serial_shaped = (value.size() == 14U || value.size() == 15U) &&
+        std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return c >= '0' && c <= '9';
+        });
+    if (serial_shaped) return false;
+    for (const unsigned char c : value) {
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') || c == '_' || c == '-' || c == '.') continue;
+        return false;
     }
     return true;
 }
 
-bool write_all(int fd, const std::uint8_t* data, std::size_t size) {
-    std::size_t done = 0;
-    while (done < size) {
-        const ssize_t rc = ::write(fd, data + done, size - done);
-        if (rc < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        done += static_cast<std::size_t>(rc);
+int acquire_enclosure_lock()
+{
+    const int fd = ::open("/tmp/asicen-userland-enclosure.lock",
+                          O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    struct stat info{};
+    if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+        ::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        ::close(fd);
+        return -1;
     }
-    return true;
+    return fd;
 }
 
-void send_status(int fd,
-                 asicen::IpcStatus status,
-                 std::uint64_t lease_id,
-                 std::size_t receiver_count) {
-    const auto response = asicen::encode_response(
-        asicen::IpcResponse{status, lease_id,
-                            static_cast<std::uint32_t>(receiver_count)});
-    write_all(fd, response.data(), response.size());
+void print_usage(FILE* output)
+{
+    std::fprintf(output,
+        "usage: asicend --mock [--runtime-dir PATH] [--instance TOKEN]\n"
+        "       asicend --list | --list-json\n"
+        "ASICEN hardware access is disabled in this mock-only build.\n");
 }
 
-void handle_client(int fd,
-                   asicen::ReceiverLeaseTable* leases,
-                   asicen::DeviceBackend* backend) {
-    std::array<std::uint8_t, asicen::kIpcMessageSize> raw{};
-    if (!read_exact(fd, raw.data(), raw.size())) {
-        ::close(fd);
-        return;
-    }
-
-    asicen::IpcRequest request{};
-    if (!asicen::decode_request(raw.data(), raw.size(), &request)) {
-        send_status(fd, asicen::IpcStatus::Invalid, 0, leases->size());
-        ::close(fd);
-        return;
-    }
-
-    if (request.command == asicen::IpcCommand::Status) {
-        send_status(fd, asicen::IpcStatus::Ok, 0, leases->size());
-        ::close(fd);
-        return;
-    }
-
-    if (request.receiver >= leases->size() || request.packet_count == 0 ||
-        request.packet_count > 1000000U) {
-        send_status(fd, asicen::IpcStatus::Invalid, 0, leases->size());
-        ::close(fd);
-        return;
-    }
-
-    const auto lease = leases->acquire(request.receiver);
-    if (!lease.has_value()) {
-        send_status(fd, asicen::IpcStatus::Busy, 0, leases->size());
-        ::close(fd);
-        return;
-    }
-
-    auto stream = backend->open_stream(request.receiver);
-    if (!stream) {
-        send_status(fd, asicen::IpcStatus::Internal, *lease, leases->size());
-        leases->release(request.receiver, *lease);
-        ::close(fd);
-        return;
-    }
-
-    const auto response = asicen::encode_response(
-        asicen::IpcResponse{asicen::IpcStatus::Ok, *lease,
-                            static_cast<std::uint32_t>(leases->size())});
-    if (!write_all(fd, response.data(), response.size())) {
-        leases->release(request.receiver, *lease);
-        ::close(fd);
-        return;
-    }
-
-    leases->set_streaming(request.receiver, *lease, true);
-
-    constexpr std::size_t kPacketBytes = 188;
-    constexpr std::size_t kChunkPackets = 256;
-    std::array<std::uint8_t, kPacketBytes * kChunkPackets> buffer{};
-    std::uint64_t remaining =
-        static_cast<std::uint64_t>(request.packet_count) * kPacketBytes;
-    bool ok = true;
-
-    while (remaining != 0) {
-        const std::size_t capacity =
-            std::min<std::uint64_t>(remaining, buffer.size());
-        std::size_t bytes_read = 0;
-        if (!stream->read(buffer.data(), capacity, &bytes_read) ||
-            bytes_read == 0 || bytes_read > capacity ||
-            (bytes_read % kPacketBytes) != 0) {
-            ok = false;
-            break;
-        }
-        if (!write_all(fd, buffer.data(), bytes_read)) {
-            ok = false;
-            break;
-        }
-        remaining -= bytes_read;
-    }
-
-    if (!ok) {
-        leases->set_error(request.receiver, *lease);
-    }
-    leases->release(request.receiver, *lease);
-    ::close(fd);
-}
-
-bool parse_args(int argc, char** argv, std::string* socket_path) {
-    bool mock = false;
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg == "--mock") {
-            mock = true;
-        } else if (arg == "--socket" && i + 1 < argc) {
-            *socket_path = argv[++i];
-        } else if (arg == "-h" || arg == "--help") {
-            std::cout << "usage: asicend --mock --socket PATH\n";
-            std::exit(0);
-        } else {
-            return false;
-        }
-    }
-    return mock && !socket_path->empty();
+int list_devices(bool json)
+{
+    if (json) std::puts("{\"devices\":[],\"serial\":null,\"backend\":\"mock-only\"}");
+    else std::puts("No ASICEN hardware backend is enabled (mock-only build).");
+    return 0;
 }
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    std::string socket_path;
-    if (!parse_args(argc, argv, &socket_path)) {
-        std::cerr << "usage: asicend --mock --socket PATH\n";
-        return 2;
+int main(int argc, char** argv)
+{
+    bool has_mock = false;
+    bool has_research_socket = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--mock") == 0) has_mock = true;
+        if (std::strcmp(argv[i], "--socket") == 0) has_research_socket = true;
     }
-    if (socket_path.size() >= sizeof(sockaddr_un{}.sun_path)) {
-        std::cerr << "socket path too long\n";
-        return 2;
-    }
-
-    auto backend = asicen::make_mock_backend(4);
-    if (!backend) {
-        std::cerr << "backend creation failed\n";
-        return 1;
-    }
-    asicen::ReceiverLeaseTable leases(backend->receiver_count());
-
-    ::signal(SIGPIPE, SIG_IGN);
-    ::signal(SIGINT, on_signal);
-    ::signal(SIGTERM, on_signal);
-
-    const int listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (listener < 0) {
-        std::perror("socket");
-        return 1;
-    }
-
-    sockaddr_un address{};
-    address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, socket_path.c_str(), sizeof(address.sun_path) - 1);
-    ::unlink(socket_path.c_str());
-
-    if (::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        std::perror("bind");
-        ::close(listener);
-        return 1;
-    }
-    ::chmod(socket_path.c_str(), 0600);
-    if (::listen(listener, 16) != 0) {
-        std::perror("listen");
-        ::unlink(socket_path.c_str());
-        ::close(listener);
-        return 1;
-    }
-
-    std::cerr << "asicend mock ready socket=" << socket_path
-              << " receivers=" << backend->receiver_count() << '\n';
-
-    while (!g_stop) {
-        pollfd pfd{listener, POLLIN, 0};
-        const int ready = ::poll(&pfd, 1, 200);
-        if (ready < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;
-        }
-        if (ready == 0 || (pfd.revents & POLLIN) == 0) {
+    if (has_mock && has_research_socket) return run_asicend_research(argc, argv);
+    bool mock = false;
+    bool list = false;
+    bool list_json = false;
+    std::string runtime_directory;
+    std::string instance = "default";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg == "--help" || arg == "-h") { print_usage(stdout); return 0; }
+        if (arg == "--mock") { mock = true; continue; }
+        if (arg == "--list") { list = true; continue; }
+        if (arg == "--list-json") { list_json = true; continue; }
+        if ((arg == "--runtime-dir" || arg == "--instance") && i + 1 < argc) {
+            const std::string value(argv[++i]);
+            if (arg == "--runtime-dir") runtime_directory = value;
+            else instance = value;
             continue;
         }
-
-        const int client = ::accept(listener, nullptr, nullptr);
-        if (client < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;
+        if (arg == "--usb-path" && i + 1 < argc) {
+            std::fprintf(stderr, "USB topology selection requires the disabled hardware backend\n");
+            return 3;
         }
-        std::thread(handle_client, client, &leases, backend.get()).detach();
+        print_usage(stderr);
+        return 2;
+    }
+    if (list || list_json) return list_devices(list_json);
+    if (!mock) {
+        std::fprintf(stderr, "hardware backend disabled; pass --mock for the isolated mock service\n");
+        return 3;
+    }
+    if (!valid_instance(instance) || runtime_directory.size() >= 400U) {
+        std::fprintf(stderr, "invalid runtime directory or instance token\n");
+        return 2;
+    }
+    const int enclosure_lock = acquire_enclosure_lock();
+    if (enclosure_lock < 0) {
+        std::fprintf(stderr, "ASICEN enclosure is already owned or lock path is unsafe\n");
+        return 4;
     }
 
-    ::close(listener);
-    ::unlink(socket_path.c_str());
+    asicen::MockTunerBackend tuner_backend;
+    asicen::MockTunerStream stream;
+    asicen::UnsupportedCardBackend card_backend;
+    asicen::UnsupportedCardSession card_session;
+    px4::userland::CardService card_service(card_backend, card_session);
+    px4::userland::ipc::posix::PosixTunerNonceSource nonce_source;
+    MockTime time;
+    px4::userland::TunerService tuner_service(
+        tuner_backend, nonce_source, time, nullptr, nullptr, &stream);
+    const px4::userland::ipc::posix::EndpointConfig endpoint{
+        runtime_directory.empty() ? nullptr : runtime_directory.c_str(),
+        instance.c_str(), px4::userland::ipc::posix::kControlEndpointName};
+    auto server = px4::userland::ipc::posix::PosixControlServer::create(
+        endpoint, card_service, tuner_service, {}, true,
+        asicen::profile::kUsbPresentMask, &stream,
+        asicen::profile::kReceiverCount, false);
+    if (!server) {
+        std::fprintf(stderr, "asicend: %s\n", px4::userland::error_string(server.error()));
+        ::close(enclosure_lock);
+        return server.error() == px4::userland::Error::BUSY ? 4 : 70;
+    }
+
+    struct sigaction action{};
+    action.sa_handler = signal_handler;
+    ::sigemptyset(&action.sa_mask);
+    ::sigaction(SIGINT, &action, nullptr);
+    ::sigaction(SIGTERM, &action, nullptr);
+    ::signal(SIGPIPE, SIG_IGN);
+    std::fprintf(stderr, "asicend ready backend=mock-only serial=none receivers=4 endpoint=%s\n",
+                 server.value()->endpoint_path());
+    px4::userland::Error loop_error = px4::userland::Error::OK;
+    while (!stop_requested) {
+        const auto polled = server.value()->poll_once(px4::userland::Timeout{100U});
+        if (!polled) { loop_error = polled.error(); break; }
+    }
+    const auto stopped = server.value()->shutdown();
+    if (!stopped && loop_error == px4::userland::Error::OK) loop_error = stopped.error();
+    server.value().reset();
+    ::close(enclosure_lock);
+    if (loop_error != px4::userland::Error::OK) {
+        std::fprintf(stderr, "asicend shutdown: %s\n", px4::userland::error_string(loop_error));
+        return 70;
+    }
     return 0;
 }
