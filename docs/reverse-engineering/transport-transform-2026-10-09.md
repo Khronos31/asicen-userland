@@ -68,3 +68,20 @@ GPIOEx 02. LNB and GPIOEx writes remained blocked.
 Raw TS and USB traces stay outside Git because traces contain device-link
 seed material. Only the source, synthetic oracle and compact numerical
 validation belong in the repository.
+
+## Portable transform against actual USB fragments
+
+As a separate offline check, the trace's sixteen controller seed writes were
+read into memory and passed through the portable seed derivation. All 631
+fully captured successful endpoint-82 completions were considered; larger
+completions with missing usbmon payloads were excluded. Each fragment needed
+its own eight-packet sync proof. This produced 13,110 transformed packets
+(2,464,680 bytes), with 12 valid PAT and 25 valid PMT sections and no invalid
+complete PAT/PMT sections. All four expected program numbers were present.
+
+The missing fragments cause artificial continuity gaps and incomplete PSI:
+three truncated sections on PID01f0 and seven on PID03f0. This sample must not
+be treated as a continuous capture. The check validates portable processing
+of actual device bytes using the observed seed; it still does not prove that
+the device accepts an independently chosen seed or that direct libusb startup
+is complete. Seed values and raw transformed fragments were not committed.
