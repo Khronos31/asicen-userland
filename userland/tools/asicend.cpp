@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/product_profile.h"
 #include "asicen/px4_mock_backend.h"
+#include "asicen/enclosure_lock.h"
 #include "px4/control_server.h"
 #include "px4/posix_tuner_nonce.h"
 
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -59,16 +57,7 @@ bool valid_instance(const std::string& value)
 
 int acquire_enclosure_lock()
 {
-    const int fd = ::open("/tmp/asicen-userland-enclosure.lock",
-                          O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) return -1;
-    struct stat info{};
-    if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
-        ::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        ::close(fd);
-        return -1;
-    }
-    return fd;
+    return asicen::acquire_enclosure_lock("/tmp/asicen-userland-enclosure.lock");
 }
 
 void print_usage(FILE* output)

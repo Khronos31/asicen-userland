@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/hardware_stream_session.h"
+#include "asicen/enclosure_lock.h"
 #include "asicen/libusb_hardware_backend.h"
 #include "asicen/product_profile.h"
 #include "asicen/px4_mock_backend.h"
 #include "px4/control_server.h"
 #include "px4/posix_tuner_nonce.h"
 
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
 #include <libusb.h>
@@ -124,15 +122,7 @@ bool parse_arguments(int argc, char** argv, Options* out) {
 }
 
 int lock_runtime() {
-    const int fd = ::open("/tmp/asicen-userland-enclosure.lock",
-                          O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) return -1;
-    struct stat st{};
-    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        ::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        ::close(fd); return -1;
-    }
-    return fd;
+    return asicen::acquire_enclosure_lock("/tmp/asicen-userland-enclosure.lock");
 }
 }  // namespace
 

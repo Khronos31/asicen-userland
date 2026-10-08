@@ -59,6 +59,7 @@ add_library(asicen_core STATIC
   userland/src/device_profile.cpp
   userland/src/enclosure.cpp
   userland/src/enclosure_grouping.cpp
+  userland/src/enclosure_lock.cpp
   userland/src/frontend_facts.cpp
   userland/src/frontend_sequence.cpp
   userland/src/hardware_gpio_guard.cpp
@@ -186,6 +187,14 @@ if(ASICEN_BUILD_TESTS)
   target_include_directories(asicen-hardware-ownership-tests PRIVATE userland/include)
   target_compile_options(asicen-hardware-ownership-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-hardware-ownership-tests COMMAND asicen-hardware-ownership-tests)
+
+  add_executable(asicen-enclosure-lock-tests
+    userland/tests/enclosure_lock_tests.cpp)
+  target_include_directories(asicen-enclosure-lock-tests PRIVATE userland/include)
+  target_link_libraries(asicen-enclosure-lock-tests PRIVATE asicen_core)
+  target_compile_options(asicen-enclosure-lock-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-enclosure-lock-tests COMMAND asicen-enclosure-lock-tests)
 
   add_executable(asicen-hardware-session-tests
     userland/tests/hardware_stream_session_tests.cpp)
