@@ -43,6 +43,9 @@ public:
     std::size_t lock_cursor = 0;
     int full_block_writes = 0;
     std::uint8_t pulse_cf40 = 0;
+    bool fail_link_snapshot = false;
+    bool fail_link_apply = false;
+    bool fail_link_restore = false;
 
     bool dsc_start(std::uint8_t) override {
         trace_->push_back("dsc-start");
@@ -114,6 +117,18 @@ public:
         cf40 = block[0x40];
         pulse_cf40 = cf40;
         return true;
+    }
+    bool snapshot_link_state() override {
+        trace_->push_back("link-snapshot");
+        return !fail_link_snapshot;
+    }
+    bool apply_link_seed() override {
+        trace_->push_back("link-apply");
+        return !fail_link_apply;
+    }
+    bool restore_link_state() override {
+        trace_->push_back("link-restore");
+        return !fail_link_restore;
     }
     bool cancelled() const override { return cancel; }
 
@@ -508,6 +523,98 @@ void filter_restore_failure_is_reported() {
           "restoration failure still follows DSC stop and callback drain");
 }
 
+void link_seed_is_applied_after_dsc_and_restored_after_drain() {
+    std::vector<std::string> trace;
+    Control control(&trace);
+    Queue queue(&trace);
+    Output output;
+    queue.events.push_back({0, asicen::CaptureIo::Ok, queue.bytes.data(), 4});
+    asicen::CaptureStats stats{};
+    const auto original = control.block;
+    const auto result = asicen::run_queued_capture(
+        &control, &queue, &output, request(4), 4, &stats, true,
+        &original[0x40], nullptr, asicen::FilterRepeat::None, 1, nullptr, true);
+    const auto position = [&](const char* value) {
+        const auto it = std::find(trace.begin(), trace.end(), value);
+        return static_cast<std::size_t>(std::distance(trace.begin(), it));
+    };
+    check(result == asicen::CaptureOutcome::Completed,
+          "link seed queue capture completes and restores");
+    check(position("link-snapshot") < position("prepare") &&
+              position("dsc-start") < position("link-apply") &&
+              position("link-apply") < position("dsc-stop") &&
+              position("cancel-drain") < position("link-restore") &&
+              position("link-restore") < position("release"),
+          "link snapshot, DSC/apply and stop/drain/restore ordering is enforced");
+    check(!stats.link_state_restore_failed && !stats.link_seed_apply_failed,
+          "successful link state cleanup is reported");
+}
+
+void link_seed_partial_apply_and_restore_failures_are_reported() {
+    for (const bool restore_failure : {false, true}) {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        control.fail_link_apply = true;
+        control.fail_link_restore = restore_failure;
+        Queue queue(&trace);
+        Output output;
+        asicen::CaptureStats stats{};
+        const auto original = control.block;
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(), 4, &stats, true,
+            &original[0x40], nullptr, asicen::FilterRepeat::None, 1, nullptr, true);
+        check(result == asicen::CaptureOutcome::UsbFailed && stats.link_seed_apply_failed,
+              "link apply failure is an explicit capture failure");
+        check(stats.link_state_restore_failed == restore_failure,
+              "link restore result is separately reported");
+        const auto drain = std::find(trace.begin(), trace.end(), "cancel-drain");
+        const auto restore = std::find(trace.begin(), trace.end(), "link-restore");
+        check(drain != trace.end() && restore != trace.end() && drain < restore,
+              "partial link writes restore only after transfer drain");
+    }
+}
+
+void link_seed_is_not_restored_if_dsc_stop_fails() {
+    std::vector<std::string> trace;
+    Control control(&trace);
+    control.stop_result = false;
+    Queue queue(&trace);
+    Output output;
+    queue.events.push_back({0, asicen::CaptureIo::Ok, queue.bytes.data(), 4});
+    asicen::CaptureStats stats{};
+    const auto original = control.block;
+    const auto result = asicen::run_queued_capture(
+        &control, &queue, &output, request(4), 4, &stats, true,
+        &original[0x40], nullptr, asicen::FilterRepeat::None, 1, nullptr, true);
+    check(result == asicen::CaptureOutcome::StopFailed &&
+              stats.link_state_restore_failed,
+          "failed DSC stop prevents unsafe link-state restore and fails capture");
+    check(std::find(trace.begin(), trace.end(), "link-restore") == trace.end(),
+          "link state is not restored while device-side stream may remain active");
+    check(std::find(trace.begin(), trace.end(), "cancel-drain") != trace.end(),
+          "host transfers are still drained after DSC stop failure");
+}
+
+void link_snapshot_failure_restores_filter_snapshot() {
+    std::vector<std::string> trace;
+    Control control(&trace);
+    control.fail_link_snapshot = true;
+    control.cf40 = 0x03;
+    control.block[0x40] = 0x03;
+    const std::uint8_t original_cf40 = 0xa4;
+    Queue queue(&trace);
+    Output output;
+    asicen::CaptureStats stats{};
+    const auto result = asicen::run_queued_capture(
+        &control, &queue, &output, request(), 4, &stats, true,
+        &original_cf40, nullptr, asicen::FilterRepeat::None, 1, nullptr, true);
+    check(result == asicen::CaptureOutcome::UsbFailed &&
+              control.cf40 == original_cf40 && !stats.cf40_restore_failed,
+          "link snapshot failure still restores CF40 reset by outer setup");
+    check(std::find(trace.begin(), trace.end(), "prepare") == trace.end(),
+          "capture queue is not prepared after link snapshot failure");
+}
+
 void queue_observation_accounts_callbacks_once_and_bounds_events() {
     asicen::QueueObservation observation;
     observation.record_callback(0, 1, 0, 4096, 12);
@@ -748,6 +855,10 @@ int main() {
     queue_observation_accounts_callbacks_once_and_bounds_events();
     queue_observation_preserves_normal_capture_accounting();
     queue_observation_counts_handoff_before_output_and_error_checks();
+    link_seed_is_applied_after_dsc_and_restored_after_drain();
+    link_seed_partial_apply_and_restore_failures_are_reported();
+    link_seed_is_not_restored_if_dsc_stop_fails();
+    link_snapshot_failure_restores_filter_snapshot();
     filter_repeat_ab_orders_lock_reset_and_restoration();
     filter_repeat_failure_paths_restore_full_block();
     std::cout << "queued capture lifecycle tests passed\n";

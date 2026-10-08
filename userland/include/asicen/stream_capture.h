@@ -41,6 +41,8 @@ struct CaptureStats {
     std::uint64_t bytes = 0;
     bool limit_reached = false;
     bool cf40_restore_failed = false;
+    bool link_state_restore_failed = false;
+    bool link_seed_apply_failed = false;
 };
 
 bool parse_cf40_read_response(int transferred, const unsigned char* response,
@@ -83,6 +85,11 @@ public:
                                      std::chrono::steady_clock::time_point deadline) {
         (void)local; (void)reset_state; (void)deadline; return false;
     }
+    // Explicit experimental link preparation. Implementations must never log
+    // seed bytes, derived material, or saved register contents.
+    virtual bool snapshot_link_state() { return false; }
+    virtual bool apply_link_seed() { return false; }
+    virtual bool restore_link_state() { return false; }
     virtual bool cancelled() const { return false; }
 };
 

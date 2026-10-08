@@ -25,6 +25,7 @@
 #include "asicen/device_profile.h"
 #include "asicen/frontend_sequence.h"
 #include "asicen/libusb_transport.h"
+#include "asicen/link_seed_state.h"
 #include "asicen/protocol.h"
 #include "asicen/queued_capture.h"
 #include "asicen/stream_capture.h"
@@ -67,6 +68,7 @@ struct Arguments {
     bool filter_start = false;
     std::string filter_repeat;
     bool queue_diagnostics = false;
+    std::string link_seed_file;
     bool shared_demod = false;
     bool have_timeout = false;
     unsigned timeout_ms = 20000;
@@ -105,6 +107,7 @@ void usage(const char* argv0) {
         << "         --filter-start (capture only; local 1 + queue depth 4, restore CF40)\n"
         << "         --filter-repeat before|after (experimental A/B; requires --filter-start, local 1, reset 1, queue 4)\n"
         << "         --queue-diagnostics (capture only; queue depth 4, bounded callback trace to stderr)\n"
+        << "         --link-seed-file PATH (experimental capture only; exact 16-byte owner-private file, mode 0600)\n"
         << "         --shared-demod (init/terrestrial only; also initialize satellite demod over I2C)\n"
         << "\n"
         << "Explicit-target frontend diagnostics. Every write verifies the fresh\n"
@@ -136,6 +139,48 @@ bool parse_u8(const std::string& text, std::uint8_t* out) {
     *out = static_cast<std::uint8_t>(value);
     return true;
 }
+
+struct FileIdentity { dev_t device = 0; ino_t inode = 0; };
+
+bool read_private_link_seed(const std::string& path,
+                            std::array<std::uint8_t, 16>* seed,
+                            FileIdentity* identity) {
+    if (seed == nullptr || path.empty() || path.front() != '/') return false;
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    struct stat info {};
+    bool ok = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
+              info.st_uid == ::geteuid() && (info.st_mode & 0777) == 0600 &&
+              info.st_size == 16;
+    if (ok && identity != nullptr) {
+        identity->device = info.st_dev;
+        identity->inode = info.st_ino;
+    }
+    std::size_t received = 0;
+    while (ok && received < seed->size()) {
+        const ssize_t rc = ::read(fd, seed->data() + received, seed->size() - received);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) {
+            ok = false;
+            break;
+        }
+        received += static_cast<std::size_t>(rc);
+    }
+    unsigned char extra = 0;
+    if (ok) {
+        ssize_t rc = -1;
+        do { rc = ::read(fd, &extra, 1); } while (rc < 0 && errno == EINTR);
+        ok = rc == 0;
+    }
+    ::close(fd);
+    if (!ok) std::fill(seed->begin(), seed->end(), 0);
+    return ok;
+}
+
+struct SeedWiper {
+    std::array<std::uint8_t, 16>* value;
+    ~SeedWiper() { if (value != nullptr) value->fill(0); }
+};
 
 const char* kCommands[] = {"power-on",     "restore-sibling", "init",
                            "tune",         "lock",            "terrestrial",
@@ -242,6 +287,9 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
             out->filter_repeat = argv[i];
         } else if (arg == "--queue-diagnostics") {
             out->queue_diagnostics = true;
+        } else if (arg == "--link-seed-file") {
+            if (++i >= argc || argv[i][0] == '\0') return false;
+            out->link_seed_file = argv[i];
         } else if (arg == "--shared-demod") {
             out->shared_demod = true;
         } else if (arg == "--timeout-ms") {
@@ -502,9 +550,11 @@ int poll_lock(asicen::LibusbDevice* device, std::uint32_t frequency_khz,
     }
 }
 
-class LibusbCaptureBackend final : public asicen::CaptureBackend {
+class LibusbCaptureBackend final : public asicen::CaptureBackend,
+                                   public asicen::LinkSeedStateIo {
 public:
     explicit LibusbCaptureBackend(asicen::LibusbDevice* device) : device_(device) {}
+    ~LibusbCaptureBackend() override { link_seed_.fill(0); }
 
     bool dsc_start(std::uint8_t local) override {
         unsigned char status = 0;
@@ -679,10 +729,78 @@ public:
         return ok;
     }
 
+    void set_link_seed(const std::array<std::uint8_t, 16>& seed) { link_seed_ = seed; }
+
+    bool link_guard() {
+        asicen::ControlTransfer transfer{
+            0, asicen::Request::SysCtrlRead, 2, 0, 3,
+            asicen::Direction::In, 1000};
+        std::array<unsigned char, 3> response{};
+        const int rc = device_->control(transfer, response.data());
+        std::uint8_t type_byte = 0;
+        const bool type_read = read_i2c(0x4a, 0x09, 1, &type_byte);
+        const std::uint8_t type = static_cast<std::uint8_t>((type_byte & 0x3eU) >> 1U);
+        const bool valid = rc == transfer.length && response[1] == 0x11 &&
+                           response[2] == 0x52 && type_read && type == 0x0f;
+        std::cerr << "link guard revision=0x" << std::hex
+                  << static_cast<unsigned>(response[1])
+                  << " tag=0x" << static_cast<unsigned>(response[2])
+                  << " controller_type=0x" << static_cast<unsigned>(type)
+                  << std::dec << " transform=v7-selected valid="
+                  << (valid ? "yes" : "no") << '\n';
+        return valid;
+    }
+
+    bool snapshot_link_state() override { return link_state_.snapshot(this); }
+    bool apply_link_seed() override {
+        return link_state_.apply(this, link_seed_.data(), link_seed_.size());
+    }
+    bool restore_link_state() override { return link_state_.restore_and_verify(this); }
+    bool read_controller05(std::uint8_t* value) override {
+        return read_i2c(0x4a, 0x05, 1, value);
+    }
+    bool read_link_seed(std::uint8_t* values, std::size_t size) override {
+        return size == 16 && read_i2c(0x4a, 0x10, 16, values);
+    }
+    bool write_controller05(std::uint8_t value) override {
+        return write_i2c_byte(0x4a, 0x05, value);
+    }
+    bool write_link_seed_byte(std::uint8_t reg, std::uint8_t value) override {
+        return reg >= 0x10 && reg <= 0x1f && write_i2c_byte(0x4a, reg, value);
+    }
+
     bool cancelled() const override { return g_stop != 0; }
 
 private:
+    bool read_i2c(std::uint8_t slave, std::uint8_t reg, std::uint16_t length,
+                  std::uint8_t* output) {
+        if (output == nullptr || length == 0 || length > 0x20) return false;
+        const auto transfer = asicen::make_i2c_read(slave, reg, length, 0, 1000);
+        std::array<unsigned char, 0x21> response{};
+        const int rc = device_->control(transfer, response.data());
+        if (rc != transfer.length ||
+            !asicen::parse_status_response(response.data(),
+                                           static_cast<std::size_t>(rc), nullptr, 0))
+            return false;
+        std::copy_n(response.begin() + 1, length, output);
+        return true;
+    }
+
+    bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value) {
+        asicen::ControlTransfer transfer{};
+        if (!asicen::make_i2c_write_chunk(slave, reg, &value, 1, false,
+                                          &transfer, 1000))
+            return false;
+        std::array<unsigned char, 2> response{};
+        const int rc = device_->control(transfer, response.data());
+        return rc == transfer.length &&
+               asicen::parse_status_response(response.data(),
+                                             static_cast<std::size_t>(rc), nullptr, 0);
+    }
+
     asicen::LibusbDevice* device_;
+    std::array<std::uint8_t, 16> link_seed_{};
+    asicen::LinkSeedState link_state_{};
 };
 
 class LibusbQueuedCaptureIo final : public asicen::QueuedCaptureIo {
@@ -957,13 +1075,33 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         return 2;
     }
 
+    const bool link_seed_mode = !args.link_seed_file.empty();
+    std::array<std::uint8_t, 16> link_seed{};
+    const SeedWiper seed_wiper{&link_seed};
+    FileIdentity seed_identity{};
+    if (link_seed_mode &&
+        !read_private_link_seed(args.link_seed_file, &link_seed, &seed_identity)) {
+        std::cerr << "link seed file must be an absolute regular file owned by this user, "
+                     "mode 0600, and exactly 16 bytes\n";
+        return 2;
+    }
+    LibusbCaptureBackend backend(device);
+    if (link_seed_mode) {
+        backend.set_link_seed(link_seed);
+        if (!backend.link_guard()) {
+            std::cerr << "link seed diagnostic requires revision 0x11/0x52 and controller type 0x0f\n";
+            return 2;
+        }
+    }
+
     int out_fd = STDOUT_FILENO;
     int close_fd = -1;
     bool restore_flags = false;
     int saved_flags = 0;
     if (args.output != "-") {
-        out_fd = ::open(args.output.c_str(),
-                        O_WRONLY | O_CREAT | O_TRUNC | O_NONBLOCK, 0644);
+        int output_flags = O_WRONLY | O_CREAT | O_NONBLOCK;
+        if (link_seed_mode) output_flags |= O_NOFOLLOW | O_EXCL;
+        out_fd = ::open(args.output.c_str(), output_flags, 0644);
         if (out_fd < 0) {
             std::cerr << "cannot open output " << args.output << ": "
                       << std::strerror(errno) << '\n';
@@ -971,7 +1109,10 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         }
         close_fd = out_fd;
         struct stat info {};
-        if (::fstat(out_fd, &info) != 0 || S_ISDIR(info.st_mode)) {
+        if (::fstat(out_fd, &info) != 0 || S_ISDIR(info.st_mode) ||
+            (link_seed_mode && S_ISREG(info.st_mode) &&
+             info.st_dev == seed_identity.device && info.st_ino == seed_identity.inode) ||
+            (S_ISREG(info.st_mode) && ::ftruncate(out_fd, 0) != 0)) {
             std::cerr << "output is not a regular file or pipe\n";
             ::close(out_fd);
             return 1;
@@ -1004,7 +1145,6 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         return close_ok;
     };
 
-    LibusbCaptureBackend backend(device);
     const bool filter_repeat = !args.filter_repeat.empty();
     std::array<std::uint8_t, 0x45> original_cf_block{};
     const std::array<std::uint8_t, 0x45>* cf_block_to_restore = nullptr;
@@ -1051,8 +1191,13 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         return restored ? setup_result : 1;
     }
 
-    std::cerr << "RAW_UNVALIDATED: link transform is not implemented; saved bytes are "
-                 "raw bulk endpoint output, not validated MPEG-TS\n";
+    if (link_seed_mode) {
+        std::cerr << "LINK_DIAGNOSTIC: raw bulk bytes are saved; offline v7 framing/transform "
+                     "is a separate step and may discard startup bytes\n";
+    } else {
+        std::cerr << "RAW_UNVALIDATED: link transform is not implemented; saved bytes are "
+                     "raw bulk endpoint output, not validated MPEG-TS\n";
+    }
     std::cerr << "capture lane=" << static_cast<unsigned>(args.local)
               << " endpoint=0x" << std::hex << static_cast<unsigned>(endpoint)
               << std::dec << " seconds=" << args.seconds
@@ -1089,7 +1234,8 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
                                                  : (args.filter_repeat == "after"
                                                         ? asicen::FilterRepeat::AfterPostStartBit
                                                         : asicen::FilterRepeat::None),
-                                             args.reset_state, original_cf_block.data());
+                                             args.reset_state, original_cf_block.data(),
+                                             link_seed_mode);
     } else {
         outcome = asicen::run_raw_capture(&backend, &output, request, &stats);
     }
@@ -1101,6 +1247,11 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
             cf_block_guard.disarm();
         }
     }
+    if (stats.link_seed_apply_failed)
+        std::cerr << "link seed apply/readback failed; capture was aborted\n";
+    if (stats.link_state_restore_failed)
+        std::cerr << "ERROR: link seed/controller05 restoration or readback failed; "
+                     "restore is skipped when DSC stop fails\n";
 
     if (args.queue_diagnostics) {
         std::cerr << "queue diagnostics callbacks=" << queue_observation.callback_count
@@ -1259,6 +1410,16 @@ int main(int argc, char** argv) {
     if (args.queue_diagnostics &&
         (args.command != "capture" || args.queue_depth != 4)) {
         std::cerr << "--queue-diagnostics requires capture with --queue-depth 4\n";
+        return 2;
+    }
+    if (!args.link_seed_file.empty() &&
+        (args.command != "capture" || !args.filter_start ||
+         !args.have_reset_state || args.reset_state != 1 || args.local != 1 ||
+         args.queue_depth != 4 || args.seconds > 20 ||
+         !args.filter_repeat.empty())) {
+        std::cerr << "--link-seed-file requires capture with --filter-start, "
+                     "--reset-state 1, local 1, queue depth 4, at most 20 seconds, "
+                     "and no filter-repeat\n";
         return 2;
     }
     if (args.shared_demod && args.command != "init" && args.command != "terrestrial") {

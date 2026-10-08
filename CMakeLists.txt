@@ -51,6 +51,7 @@ add_library(asicen_core STATIC
   userland/src/frontend_sequence.cpp
   userland/src/ipc.cpp
   userland/src/loader_firmware.cpp
+  userland/src/link_seed_state.cpp
   userland/src/mock_backend.cpp
   userland/src/protocol.cpp
   userland/src/queued_capture.cpp
@@ -59,6 +60,7 @@ add_library(asicen_core STATIC
   userland/src/stream_queue.cpp
   userland/src/ts_framer.cpp
   userland/src/transport_transform.cpp
+  userland/src/transport_capture.cpp
   userland/src/write_protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include)
@@ -86,6 +88,10 @@ if(ASICEN_ENABLE_LIBUSB)
 endif()
 
 if(UNIX)
+  add_executable(asicen-transform userland/tools/asicen_transform.cpp)
+  target_link_libraries(asicen-transform PRIVATE asicen_core)
+  target_compile_options(asicen-transform PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
   add_executable(asicend
     userland/tools/asicend.cpp
     userland/tools/asicend_research.cpp)
@@ -266,6 +272,16 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-transport-transform-tests PRIVATE asicen_core)
   target_compile_options(asicen-transport-transform-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-transport-transform-tests COMMAND asicen-transport-transform-tests)
+
+  add_executable(asicen-link-seed-state-tests userland/tests/link_seed_state_tests.cpp)
+  target_link_libraries(asicen-link-seed-state-tests PRIVATE asicen_core)
+  target_compile_options(asicen-link-seed-state-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-link-seed-state-tests COMMAND asicen-link-seed-state-tests)
+
+  add_executable(asicen-transport-capture-tests userland/tests/transport_capture_tests.cpp)
+  target_link_libraries(asicen-transport-capture-tests PRIVATE asicen_core)
+  target_compile_options(asicen-transport-capture-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-transport-capture-tests COMMAND asicen-transport-capture-tests)
 
   if(UNIX)
     add_test(

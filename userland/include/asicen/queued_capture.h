@@ -105,6 +105,7 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
                                  QueueObservation* observation = nullptr,
                                  FilterRepeat filter_repeat = FilterRepeat::None,
                                  std::uint8_t reset_state = 1,
-                                 const std::uint8_t* original_cf_block = nullptr);
+                                 const std::uint8_t* original_cf_block = nullptr,
+                                 bool link_seed = false);
 
 }  // namespace asicen

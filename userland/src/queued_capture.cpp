@@ -80,7 +80,8 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
                                  QueueObservation* observation,
                                  FilterRepeat filter_repeat,
                                  std::uint8_t reset_state,
-                                 const std::uint8_t* initial_cf_block) {
+                                 const std::uint8_t* initial_cf_block,
+                                 bool link_seed) {
     if (stats != nullptr) *stats = {};
     const bool repeat_enabled = filter_repeat != FilterRepeat::None;
     const auto restore_full_block = [&]() {
@@ -92,6 +93,8 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     if (control == nullptr || io == nullptr || output == nullptr ||
         request.endpoint == 0 || request.local > 1 || request.chunk_size == 0 ||
         depth == 0 || depth > 4 || (filter_start && (request.local != 1 || depth != 4)) ||
+        (link_seed && (!filter_start || request.local != 1 || depth != 4 ||
+                       reset_state != 1)) ||
         (repeat_enabled && (!filter_start || request.local != 1 || depth != 4 ||
                             reset_state != 1 || initial_cf_block == nullptr))) {
         const bool restored = restore_full_block();
@@ -101,6 +104,22 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
                                            : CaptureOutcome::InvalidArgument;
     }
     if (observation != nullptr) io->set_observation(observation);
+
+    bool link_snapshotted = false;
+    bool link_apply_attempted = false;
+    bool link_apply_failed = false;
+    bool link_restored = true;
+    if (link_seed) {
+        if (!control->snapshot_link_state()) {
+            const bool cf_restored = repeat_enabled
+                ? restore_full_block()
+                : (initial_cf40 != nullptr &&
+                   control->write_cf40(request.local, *initial_cf40));
+            if (stats != nullptr) stats->cf40_restore_failed = !cf_restored;
+            return CaptureOutcome::UsbFailed;
+        }
+        link_snapshotted = true;
+    }
 
     std::uint8_t original_cf40 = 0;
     bool cf40_snapshotted = false;
@@ -187,6 +206,13 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
             filter_failed = true;
         }
     }
+    if (dsc_started && !filter_failed && link_seed) {
+        link_apply_attempted = true;
+        if (!control->apply_link_seed()) {
+            link_apply_failed = true;
+            filter_failed = true;
+        }
+    }
     if (dsc_started && !filter_failed && filter_repeat != FilterRepeat::None) {
         if (!check_locked()) {
             filter_failed = true;
@@ -265,6 +291,12 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     }
     io->set_phase(QueuePhase::CancelDrain);
     io->cancel_and_drain();
+    if (link_snapshotted && link_apply_attempted) {
+        // Restoring controller output while DSC may still be active would
+        // violate the recovered stop/drain ordering. Report unsafe state and
+        // leave manual recovery explicit if the device-side stop failed.
+        link_restored = dsc_stopped && control->restore_link_state();
+    }
     bool cf40_restored = true;
     if (repeat_enabled) {
         cf40_restored = restore_full_block();
@@ -277,9 +309,11 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         stats->bytes = total;
         stats->limit_reached = limit_reached;
         stats->cf40_restore_failed = cf40_snapshotted && !cf40_restored;
+        stats->link_state_restore_failed = link_apply_attempted && !link_restored;
+        stats->link_seed_apply_failed = link_apply_failed;
     }
     if (dsc_attempted && !dsc_stopped) return CaptureOutcome::StopFailed;
-    if (filter_failed || !cf40_restored) return CaptureOutcome::UsbFailed;
+    if (filter_failed || !cf40_restored || !link_restored) return CaptureOutcome::UsbFailed;
     if (output_failed) return CaptureOutcome::OutputFailed;
     if (usb_failed) return CaptureOutcome::UsbFailed;
     if (cancelled) return CaptureOutcome::Cancelled;
