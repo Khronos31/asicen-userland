@@ -146,3 +146,12 @@ Red-team gate was not triggered for this local diagnostic increment and private
 development push: no production configuration, public release, version bump,
 or architecture commitment was made. Source rollback is the research base plus
 this isolated commit; hardware recovery by power cycle remains unverified.
+
+## GitHub CI limitation
+
+Initial private push commit `7cbc15d` triggered workflow run `37717743836`.
+The build job failed before any step ran: GitHub reported that recent account
+payments failed or the spending limit needs to be increased. There is no build
+log because the runner job did not start. Remote build/test verification remains
+UNVERIFIED; the local libusb-enabled build and 9/9 tests passed. Resolving this
+requires the repository owner's GitHub billing/settings action.
