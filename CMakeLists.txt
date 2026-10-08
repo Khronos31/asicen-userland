@@ -27,6 +27,7 @@ add_library(asicen_core STATIC
   userland/src/stream_capture.cpp
   userland/src/stream_queue.cpp
   userland/src/ts_framer.cpp
+  userland/src/transport_transform.cpp
   userland/src/write_protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include)
@@ -145,6 +146,11 @@ if(ASICEN_BUILD_TESTS)
   target_link_libraries(asicen-capture-stdout-tests PRIVATE asicen_core)
   target_compile_options(asicen-capture-stdout-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-capture-stdout-tests COMMAND asicen-capture-stdout-tests)
+
+  add_executable(asicen-transport-transform-tests userland/tests/transport_transform_tests.cpp)
+  target_link_libraries(asicen-transport-transform-tests PRIVATE asicen_core)
+  target_compile_options(asicen-transport-transform-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-transport-transform-tests COMMAND asicen-transport-transform-tests)
 
   if(UNIX)
     add_test(
