@@ -607,3 +607,51 @@ b0=A9. The corrected shared table did not yield observable bulk data in
 this tested state; it remains a required implementation correction and
 does not establish whether shared initialization is unnecessary. Local
 build and17 CTests passed. No satellite tuning or card APDU occurred.
+
+### Dedicated static-audit branch hardware verification
+
+On2026-10-08 parent fetched `dot/static-audit-20261008` at
+`948b890effa80007e71615c5eb3577745102e838` and tested it in a detached,
+separate worktree. Main remained at `baab83e132cc737f4d78dd3b3d5a4eff4e226d04`.
+No source changes or merge into main were performed for this verification.
+
+The libusb-enabled build with Clang19.1.7 succeeded. All18 local CTests
+passed, including the new vendor wire-order regression and mock integration.
+This supplements the static audit's cloud-environment test limitation;
+it does not change the historical cloud result.
+
+Parent compared main versus the branch with identical explicit primary
+target1:29/port1-2.1, corrected shared-demod initialization and T27 tune.
+Both initializations completed and terrestrial lock readA9. After each
+lock controller4a/05 was written20 and read back20, then capture ran with
+reset1, local1, queue-depth4, filter-start, queue-diagnostics and5 seconds.
+Filter-repeat was disabled. No timer, new GPIO sequence, D2/SlowdownIC or
+crypto operation was added. The branch's three frontend ordering corrections
+were tested together; this is not an individual-defect causality experiment.
+
+| Observation | main baab83e | branch948b890 |
+| --- | --- | --- |
+| Tune / lock | success / A9 | success / A9 |
+| File bytes / exit | 0 / 1 | 0 / 1 |
+| Normal handoffs / bytes | 0 / 0 | 0 / 0 |
+| Pre-stop pending / ready | 4 / 0 | 4 / 0 |
+| Callback counts Normal / StoppingDsc / CancelDrain | 0 / 0 / 4 | 0 / 0 / 4 |
+| Callback actual bytes, all phases | 0 | 0 |
+| Each terminal callback | CANCELLED, requested4096, actual0 | same |
+| Each cancel return | 0 | 0 |
+| Event overflow / duplicate callbacks | 0 / 0 | 0 / 0 |
+
+After each condition parent sent stop07, restored/read back the42 saved
+satellite registers and all69 saved CF bytes, and checked exact equality.
+Final public readbacks: controller05=00, GPIO76, terrestrial30/b0=A9;
+CF00..3f allzero, CF40..44=`04 00 20 1f ff`. No satellite tuning, card APDU,
+LNB enablement, kernel module load or HA configuration/service change occurred.
+
+Main logs are in the original worktree at
+`evidence/raw/branch-948b890-main-tune.txt` and
+`evidence/raw/branch-948b890-main.txt`. Branch logs are in the test worktree at
+`evidence/raw/branch-948b890-dot-tune.txt` and
+`evidence/raw/branch-948b890-dot.txt`; corresponding raw captures are empty.
+These ignored logs remain local; the table above preserves their observations
+for GitHub-only readers. Corrected ordering passed offline verification but
+did not yield an observable sample in this bounded hardware comparison.
