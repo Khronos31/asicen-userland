@@ -49,3 +49,5 @@ cancellation and changing response length. An end-to-end fake connects the
 imported CardSession to the mailbox and passes a65-byte T=1 frame across
 the page boundary. Focused tests including the upstream card suite pass
 with libusb ON and OFF; host mailbox/satellite tests also pass.
+After the trial, Latitude's full Release/libusb-ON suite passed36/36tests
+in34.45seconds using the same isolated source snapshot.
