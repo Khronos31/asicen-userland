@@ -1,4 +1,57 @@
 {
+  "cli-capture": {
+    "continuity_events": {},
+    "continuity_totals": {
+      "discontinuities": 0,
+      "discontinuity_resets": 0,
+      "duplicate_cc_conflicts": 0,
+      "duplicates": 0
+    },
+    "file_bytes": 5639812,
+    "packet_totals": {
+      "adaptation_only_packets": 59,
+      "discontinuity_indicators": 0,
+      "invalid_packets": 0,
+      "payload_packets": 29940,
+      "scrambled_packets": 28905,
+      "tei_packets": 0,
+      "valid_packets": 29999
+    },
+    "packets": 29999,
+    "psi": {
+      "pat": {
+        "incomplete_at_eof": 0,
+        "invalid": 0,
+        "sections": 27,
+        "truncated_sections": 0,
+        "unique_program_to_pmt_pid": {
+          "1024": 496,
+          "1025": 1008,
+          "1408": 8136,
+          "65520": 7408
+        },
+        "valid": 27
+      },
+      "pmt": {
+        "incomplete_by_pid": {
+          "0x01f0": 0,
+          "0x03f0": 183,
+          "0x1cf0": 0,
+          "0x1fc8": 0
+        },
+        "invalid": 0,
+        "sections": 62,
+        "truncated_by_pid": {
+          "0x01f0": 0,
+          "0x03f0": 0,
+          "0x1cf0": 0,
+          "0x1fc8": 0
+        },
+        "valid": 62
+      }
+    },
+    "sha256": "2da1b95fab7a788682a3b6d6cf71efbc56619ca0ccb88361bb2e64adf5163d1c"
+  },
   "direct-gain-repeat": {
     "continuity_events": {
       "0x0100": [

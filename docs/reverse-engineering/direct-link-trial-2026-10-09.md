@@ -125,3 +125,59 @@ function was reattached to the CentOS VM, which enumerated it as device011.
 The tracked host tcpdump PID88875 was stopped:9414 records, zero kernel drops.
 Trace payload truncation is still possible despite that drop count. Private
 raw evidence was copied to the persistent tool directory, with mode0600.
+
+## Reproduction using only the committed diagnostic CLI
+
+Commit5617359 adds `gain-once`, reproducing the conditional routine rather
+than replaying the observed constants. The strict offline suite passed26/26.
+The separate [synthetic oracle](../hardware-traces/fc0012-gain-oracle.cpp)
+matched read order and writes against archived TunerControl.o in12 cases
+covering every branch. It replaces undefined TLIB bus functions with test
+stubs and never opens USB. It can be built from the repository root with:
+
+```sh
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -no-pie \
+  -Iuserland/include docs/hardware-traces/fc0012-gain-oracle.cpp \
+  /private/path/TunerControl.o build/libasicen_core.a -pthread \
+  -o /private/path/gain-oracle
+/private/path/gain-oracle
+```
+
+The same official archive is the source; the proprietary object is not
+included in Git or linked into the product. The parent independently rebuilt
+and reran the oracle successfully.
+
+For the hardware repeat, host usbmon started before detaching the primary
+function from the VM. After restoring power via the existing frontend, the
+following sequence was used (a new owner-private16-byte seed file was created
+without printing its contents):
+
+```sh
+asicen-frontend --device 1:102 --port 1-2.1 --frequency-khz 557142 \
+  --timeout-ms 20000 --lock-timeout-ms 5000 --shared-demod terrestrial
+asicen-frontend --device 1:102 --port 1-2.1 --timeout-ms 3000 gain-once
+asicen-frontend --device 1:102 --port 1-2.1 --reset-state 1 --local 1 \
+  --seconds 10 --packet-count 30000 --queue-depth 4 --filter-start \
+  --queue-diagnostics --link-seed-file /private/path/cli.seed \
+  --output /private/path/cli-capture.raw capture
+asicen-transform --seed-file /private/path/cli.seed \
+  --input /private/path/cli-capture.raw --output /private/path/cli-capture.ts
+```
+
+The addresses above record this trial, not stable device identities to reuse
+without checking. Selection reached lockA9, gain-once completed, capture
+returned0 with5,640,000 raw bytes and the count limit reached. Transformation
+yielded5,639,812 bytes /29,999 packets, discarding16 framing bytes with172
+pending at EOF. Validation found27 valid PAT,62 valid PMT, zero invalid
+complete sections, zero invalid sync, zero TEI, and zero CC discontinuities.
+This proves acceptance of a second independently generated seed on the
+tested path. SHA-256:
+`2da1b95fab7a788682a3b6d6cf71efbc56619ca0ccb88361bb2e64adf5163d1c`.
+
+The gain initialization values were restored, controller05 read back00,
+DSC stopped on both locals, and GPIO/GPIOEx read backff/02 after the same
+non-LNB cleanup. The primary was reattached to the VM. The second tracked
+tcpdump PID90718 was explicitly stopped; private evidence was preserved.
+This reproduction used no SDK or kernel driver for acquisition or packet
+transformation. It still does not enable hardware in the px4-compatible
+daemon or validate the portable B-CAS path.
