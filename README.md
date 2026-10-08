@@ -15,7 +15,9 @@ seed and source-backed RF gain adjustment. The px4-derived daemon/client path
 also captures real TS on receiver1/T27, including repeated finite captures,
 stdout, timed capture and SIGTERM shutdown. Some captures have startup
 continuity errors; reception quality is not yet guaranteed.
-Satellite reception and the portable B-CAS/recisdb path remain unverified.
+Primary satellite TS and offline B25 decoding through the internal card,
+PC/SC and recisdb have also succeeded. BS01 slots0/1 selected distinct TSIDs
+matching the received PAT; see the [satellite trial](docs/reverse-engineering/satellite-ts-trial-2026-10-09.md).
 This is not yet a working four-receiver driver. See the
 [direct receive evidence](docs/reverse-engineering/direct-link-trial-2026-10-09.md).
 
@@ -24,10 +26,14 @@ This is not yet a working four-receiver driver. See the
 Requires a C++17 compiler, CMake, pkg-config, and libusb development headers.
 
 ```sh
-cmake -S . -B build -DASICEN_ENABLE_LIBUSB=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DASICEN_ENABLE_LIBUSB=ON
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
+
+Use Release for physical capture. In a same-source comparison on Latitude,
+the unoptimized build produced TS errors on both lanes; the Release build
+produced 30,000 packets per lane without TEI or continuity errors.
 
 `asicend`, `asicenctl`, and `asicen-ts` support both an isolated mock backend
 and an experimental explicit-target hardware backend. Offline tests alone do
@@ -73,14 +79,20 @@ build/asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT \
   --runtime-dir /tmp/asicen-example --instance w3u3
 build/asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
   --receiver 1 --channel T27 --packet-count 30000 --output capture.ts
+build/asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
+  --receiver 0 --channel BS01_0 --packet-count 30000 --output satellite.ts
 ```
 
-Hardware capture currently accepts only receiver1/T27 (557142kHz). It performs
+Hardware capture supports primary receiver0 satellite channels and
+receiver1/T27 (557142kHz), with one active receiver lease at a time. It performs
 frontend initialization, one RF gain feedback step, acquisition and the
 device-link transform internally; the caller does not provide a seed file.
-The resulting TS can still be B25-scrambled. Card/recisdb integration, other
-channels and receivers, satellite reception and cold-start validation remain
-unfinished. Hardware `--list` enumeration is also not implemented; use the
+The resulting TS can still be B25-scrambled. A separate `--card-only` daemon
+and `libifd-asicen.so` support offline recisdb decoding through PC/SC; see the
+[isolated PC/SC trial](docs/reverse-engineering/pcsc-recisdb-trial-2026-10-09.md).
+Simultaneous capture/card use, other terrestrial channels, secondary USB
+receivers and cold-start validation remain unfinished. LNB voltage changes
+are unsupported. Hardware `--list` enumeration is also not implemented; use the
 probe tool for USB discovery. Daemon TS quality counters are not yet measured;
 use the offline validator rather than interpreting their zero values as proof
 of an error-free recording.
