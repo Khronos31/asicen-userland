@@ -140,6 +140,7 @@ private:
     State state_ = State::idle;
     bool have_attachment_ = false;
     bool have_final_attachment_ = false;
+    bool final_snapshot_ready_ = false;
     bool worker_done_ = false;
     bool source_prepared_ = false;
     bool source_stopped_ = true;

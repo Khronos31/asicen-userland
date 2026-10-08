@@ -287,6 +287,7 @@ Result<void> HardwareStreamService::detach(const TunerAttachment& attachment) no
         if (!matches_locked(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         final_attachment_ = attachment_;
         have_final_attachment_ = true;
+        final_snapshot_ready_ = false;
         have_attachment_ = false;
         attachment_ = {};
         state_ = State::detached;
@@ -300,6 +301,8 @@ Result<void> HardwareStreamService::detach(const TunerAttachment& attachment) no
     {
         std::lock_guard<std::mutex> lock(mutex_);
         final_ = {counters_, static_cast<std::uint8_t>(terminal_)};
+        final_snapshot_ready_ = true;
+        condition_.notify_all();
     }
     return Result<void>::success();
 }
@@ -314,9 +317,10 @@ Result<px4::userland::TunerStreamCounters> HardwareStreamService::stats(
 Result<px4::userland::TunerStreamFinalSnapshot> HardwareStreamService::final_snapshot(
     const TunerAttachment& attachment) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!matches_final_locked(attachment) ||
+    if (!matches_final_locked(attachment) || !final_snapshot_ready_ ||
         (state_ != State::detached && state_ != State::quarantined))
-        return Result<px4::userland::TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
+        return Result<px4::userland::TunerStreamFinalSnapshot>::failure(
+            matches_final_locked(attachment) ? Error::NOT_READY : Error::NOT_FOUND);
     return Result<px4::userland::TunerStreamFinalSnapshot>::success(final_);
 }
 
@@ -339,14 +343,24 @@ Result<px4::userland::TunerStreamReadResult> HardwareStreamService::read(
     if (output.data == nullptr || packet_capacity == 0U)
         return Result<px4::userland::TunerStreamReadResult>::failure(Error::BUFFER_TOO_SMALL);
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!matches_locked(attachment))
+    if (!matches_locked(attachment)) {
+        if (matches_final_locked(attachment) && state_ == State::detached &&
+            !final_snapshot_ready_)
+            return Result<px4::userland::TunerStreamReadResult>::success(
+                {0U, false, true, TunerStreamTerminal::none});
         return Result<px4::userland::TunerStreamReadResult>::failure(Error::NOT_FOUND);
+    }
     if (queue_.empty() && !worker_done_ && state_ == State::running)
         condition_.wait_for(lock, std::chrono::milliseconds(timeout.milliseconds), [&] {
             return !queue_.empty() || worker_done_ || state_ != State::running;
         });
-    if (!matches_locked(attachment))
+    if (!matches_locked(attachment)) {
+        if (matches_final_locked(attachment) && state_ == State::detached &&
+            !final_snapshot_ready_)
+            return Result<px4::userland::TunerStreamReadResult>::success(
+                {0U, false, true, TunerStreamTerminal::none});
         return Result<px4::userland::TunerStreamReadResult>::failure(Error::NOT_FOUND);
+    }
     if (queue_.empty()) {
         const bool eof = worker_done_ || state_ == State::detached ||
                          state_ == State::quarantined;
@@ -467,6 +481,7 @@ void HardwareStreamService::clear_attempt_locked() noexcept {
     final_ = {};
     have_attachment_ = false;
     have_final_attachment_ = false;
+    final_snapshot_ready_ = false;
     worker_done_ = false;
     source_prepared_ = false;
     source_stopped_ = true;

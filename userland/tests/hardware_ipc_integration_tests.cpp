@@ -50,18 +50,40 @@ public:
         packet[3] = 0x10U;
         if (!cancelled.load()) (void)emit(context, packet.data(), packet.size());
         std::unique_lock<std::mutex> lock(mutex_);
+        run_started_.store(true, std::memory_order_release);
+        condition_.notify_all();
         condition_.wait(lock, [&] { return cancelled.load() || interrupted_; });
+        if (hold_after_interrupt_)
+            condition_.wait(lock, [&] { return release_run_; });
         return asicen::CaptureRunResult::cancelled;
     }
     void interrupt() noexcept override {
-        { std::lock_guard<std::mutex> lock(mutex_); interrupted_ = true; }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            interrupted_ = true;
+            interrupt_seen_.store(true, std::memory_order_release);
+        }
         condition_.notify_all();
     }
     Result<void> stop() noexcept override { return Result<void>::success(); }
+    void hold_after_interrupt() noexcept { hold_after_interrupt_ = true; }
+    void release_run() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            release_run_ = true;
+        }
+        condition_.notify_all();
+    }
+    bool run_started() const noexcept { return run_started_.load(std::memory_order_acquire); }
+    bool interrupt_seen() const noexcept { return interrupt_seen_.load(std::memory_order_acquire); }
 private:
     std::mutex mutex_;
     std::condition_variable condition_;
     bool interrupted_ = false;
+    bool hold_after_interrupt_ = false;
+    bool release_run_ = false;
+    std::atomic<bool> run_started_{false};
+    std::atomic<bool> interrupt_seen_{false};
 };
 
 class Fatal final : public asicen::StreamProcessFatal {
@@ -81,10 +103,19 @@ public:
                 return Result<void>::failure(Error::PROTOCOL_ERROR);
             ts_packets += data.value().bytes.size / 188U;
         }
+        if (frame.header.type == MessageType::STREAM_END &&
+            frame.header.kind == MessageKind::event) {
+            const auto end = decode_stream_end_event_payload(frame.payload);
+            if (!end) return Result<void>::failure(Error::PROTOCOL_ERROR);
+            stream_end = end.value();
+            stream_end_seen = true;
+        }
         return Result<void>::success();
     }
     bool attached = false;
     std::size_t ts_packets = 0U;
+    bool stream_end_seen = false;
+    StreamEndEventPayload stream_end{};
 };
 
 template <typename T>
@@ -96,13 +127,14 @@ Result<ControlResponse> typed_request(PosixControlClient& client, MessageType ty
     return client.request(type, {encoded.data(), size.value()}, Timeout{2000U});
 }
 
-bool run() {
+bool run(bool hold_detach = false) {
     std::string pattern = test::temporary_directory_template("asicen-hw-ipc-");
     char* made = ::mkdtemp(pattern.data());
     if (made == nullptr) return false;
     const std::string root(made);
     asicen::MockTunerBackend frontend;
     Source source;
+    if (hold_detach) source.hold_after_interrupt();
     Fatal fatal;
     asicen::HardwareStreamService stream(frontend, source, fatal);
     asicen::UnsupportedCardBackend card_backend;
@@ -177,9 +209,57 @@ bool run() {
         stage = "attach-or-ts-data";
         if (!read_ok || !counter.attached || counter.ts_packets == 0U) goto fail;
         stage = "stop-stream";
-        const auto stop = typed_request(*client, MessageType::STOP_STREAM,
-                                        LeaseRequestPayload{lease.value().lease_id});
+        if (!hold_detach) {
+            const auto stop = typed_request(*client, MessageType::STOP_STREAM,
+                LeaseRequestPayload{lease.value().lease_id});
+            if (!stop) goto fail;
+            socket.close();
+            client->close();
+            polling.store(false); poller.join();
+            const auto stopped = server->shutdown();
+            server.reset();
+            std::filesystem::remove_all(root);
+            return static_cast<bool>(stopped);
+        }
+
+        Result<ControlResponse> stop = Result<ControlResponse>::failure(Error::INTERNAL);
+        std::thread stop_thread([&] {
+            stop = typed_request(*client, MessageType::STOP_STREAM,
+                                 LeaseRequestPayload{lease.value().lease_id});
+        });
+        const auto interrupt_deadline = std::chrono::steady_clock::now() +
+                                        std::chrono::seconds(2);
+        while (!source.interrupt_seen() &&
+               std::chrono::steady_clock::now() < interrupt_deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!source.interrupt_seen()) {
+            source.release_run();
+            stop_thread.join();
+            goto fail;
+        }
+        // Keep the producer blocked after detach has invalidated the live
+        // attachment, so the server polls read() during the join window.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        source.release_run();
+        stop_thread.join();
         if (!stop) goto fail;
+        const auto stop_counters = decode_counters_payload(
+            {stop.value().payload.data(), stop.value().payload.size()});
+        if (!stop_counters) goto fail;
+        stage = "stream-end-after-stop";
+        const auto end_deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(2);
+        while (!counter.stream_end_seen &&
+               std::chrono::steady_clock::now() < end_deadline) {
+            const auto received = socket.read_frames(
+                {storage.data(), storage.size()}, framer, counter, Timeout{100U});
+            if (!received && received.error() != Error::TIMEOUT) goto fail;
+        }
+        if (!counter.stream_end_seen ||
+            counter.stream_end.error_code != ErrorCode::OK ||
+            counter.stream_end.counters.packets != stop_counters.value().packets ||
+            counter.stream_end.counters.bytes != stop_counters.value().bytes)
+            goto fail;
         socket.close();
         client->close();
         polling.store(false); poller.join();
@@ -190,6 +270,7 @@ bool run() {
     }
 fail:
     std::fprintf(stderr, "hardware IPC integration failed at %s\n", stage);
+    source.release_run();
     client->close();
     stream.request_stop();
     polling.store(false); poller.join();
@@ -202,5 +283,6 @@ fail:
 
 int main() {
     if (!run()) return 1;
+    if (!run(true)) return 1;
     return 0;
 }

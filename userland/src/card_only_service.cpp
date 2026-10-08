@@ -2,6 +2,7 @@
 #include "asicen/card_only_service.h"
 
 #include "asicen/libusb_hardware_backend.h"
+#include "asicen/hardware_stream_session.h"
 #include "asicen/product_profile.h"
 #include "px4/control_server.h"
 #include "px4/posix_tuner_nonce.h"
@@ -25,6 +26,73 @@ public:
     void sleep_ms(std::uint32_t milliseconds) noexcept override {
         std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
     }
+};
+
+// HardwareStreamService calls its frontend shutdown while the control server
+// is joining tuner and card workers concurrently. The real USB/GPIO shutdown
+// is owned by the outer daemon after both workers have joined.
+class DeferredHardwareShutdown final : public px4::userland::TunerServiceBackend {
+public:
+    explicit DeferredHardwareShutdown(LibusbW3u3Hardware& hardware) noexcept
+        : hardware_(hardware) {}
+    std::uint8_t receiver_count() const noexcept override {
+        return hardware_.receiver_count();
+    }
+    bool receiver_supports(std::uint8_t receiver,
+                           px4::userland::ipc::System system) const noexcept override {
+        return hardware_.receiver_supports(receiver, system);
+    }
+    bool selects_satellite_stream_before_tune() const noexcept override {
+        return hardware_.selects_satellite_stream_before_tune();
+    }
+    bool requires_terrestrial_lock_settle() const noexcept override {
+        return hardware_.requires_terrestrial_lock_settle();
+    }
+    Result<void> open_receiver(std::uint8_t receiver) noexcept override {
+        return hardware_.open_receiver(receiver);
+    }
+    Result<void> tune_terrestrial(std::uint8_t receiver, std::uint32_t frequency,
+                                  std::uint32_t timeout) noexcept override {
+        return hardware_.tune_terrestrial(receiver, frequency, timeout);
+    }
+    Result<void> tune_satellite(std::uint8_t receiver, std::uint32_t frequency,
+                                std::uint32_t timeout) noexcept override {
+        return hardware_.tune_satellite(receiver, frequency, timeout);
+    }
+    Result<bool> is_locked(std::uint8_t receiver,
+                           px4::userland::ipc::System system) noexcept override {
+        return hardware_.is_locked(receiver, system);
+    }
+    Result<void> select_satellite_slot(std::uint8_t receiver, std::uint8_t slot,
+                                       std::uint32_t timeout) noexcept override {
+        return hardware_.select_satellite_slot(receiver, slot, timeout);
+    }
+    Result<void> select_satellite_tsid(std::uint8_t receiver, std::uint16_t tsid,
+                                       std::uint32_t timeout) noexcept override {
+        return hardware_.select_satellite_tsid(receiver, tsid, timeout);
+    }
+    Result<void> close_receiver(std::uint8_t receiver) noexcept override {
+        return hardware_.close_receiver(receiver);
+    }
+    Result<void> begin_tune_power(std::uint8_t receiver,
+                                  px4::userland::ipc::System system,
+                                  std::uint8_t voltage) noexcept override {
+        return hardware_.begin_tune_power(receiver, system, voltage);
+    }
+    Result<void> commit_tune_power(std::uint8_t receiver) noexcept override {
+        return hardware_.commit_tune_power(receiver);
+    }
+    Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override {
+        return hardware_.rollback_tune_power(receiver);
+    }
+    void mark_receiver_disconnected(std::uint8_t receiver) noexcept override {
+        hardware_.mark_receiver_disconnected(receiver);
+    }
+    void request_stop() noexcept override { hardware_.request_stop(); }
+    Result<void> shutdown() noexcept override { return Result<void>::success(); }
+
+private:
+    LibusbW3u3Hardware& hardware_;
 };
 
 }  // namespace
@@ -178,6 +246,65 @@ int run_card_only_server(
     server.reset();
     const auto card_stopped = card.shutdown();
     return stopped && card_stopped ? 0 : 70;
+}
+
+int run_live_card_stream_server(
+    LibusbW3u3Hardware& hardware, const char* runtime_directory,
+    const char* instance, const volatile std::sig_atomic_t* stop_requested) noexcept {
+    // Initialize shared bridge/demod state once, then release the temporary
+    // frontend lease. Card traffic does not retain receiver 1 ownership.
+    hardware.diagnostic_stop_flag_ = stop_requested;
+    const auto opened = hardware.open_receiver(1U);
+    hardware.diagnostic_stop_flag_ = nullptr;
+    if (!opened) return opened.error() == Error::UNSUPPORTED ? 3 : 70;
+    const auto closed = hardware.close_receiver(1U);
+    if (!closed) return 70;
+
+    W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware));
+    W3u3CardServiceBackend card_backend(mailbox, hardware, stop_requested);
+    px4::userland::CardSession raw_session(mailbox, mailbox);
+    W3u3CardProtocolSession card_session(raw_session, hardware, stop_requested);
+    px4::userland::CardService card(card_backend, card_session);
+    DeferredHardwareShutdown frontend(hardware);
+    ExitProcessFatal fatal;
+    HardwareStreamService stream(frontend, hardware, fatal);
+    px4::userland::ipc::posix::PosixTunerNonceSource nonce;
+    CardOnlyTime time;
+    px4::userland::TunerService tuner(stream, nonce, time,
+                                      nullptr, nullptr, &stream);
+    const px4::userland::ipc::posix::EndpointConfig endpoint{
+        runtime_directory != nullptr && runtime_directory[0] != '\0'
+            ? runtime_directory : nullptr,
+        instance, px4::userland::ipc::posix::kControlEndpointName};
+    auto created = px4::userland::ipc::posix::PosixControlServer::create(
+        endpoint, card, tuner, {}, true, profile::kUsbPresentMask,
+        &stream, profile::kReceiverCount, false);
+    if (!created) {
+        (void)card.shutdown();
+        (void)stream.shutdown();
+        return created.error() == Error::BUSY ? 4 : 70;
+    }
+
+    auto server = std::move(created.value());
+    std::fprintf(stderr, "asicend ready backend=asicen-w3u3-live-card-stream "
+                         "receiver=0/1 endpoint=%s\n", server->endpoint_path());
+    int result = 0;
+    while (stop_requested == nullptr || *stop_requested == 0) {
+        const auto polled = server->poll_once(px4::userland::Timeout{100U});
+        if (!polled) {
+            std::fprintf(stderr, "asicend poll: %s\n",
+                         px4::userland::error_string(polled.error()));
+            result = 70;
+            break;
+        }
+    }
+    // The server joins both service workers before returning. The real
+    // frontend.shutdown()/GPIO restore is deliberately left to the caller.
+    const auto stopped = server->shutdown();
+    server.reset();
+    const auto card_stopped = card.shutdown();
+    if (!stopped || !card_stopped) result = 70;
+    return result;
 }
 
 }  // namespace asicen

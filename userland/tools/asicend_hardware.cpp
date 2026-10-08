@@ -291,54 +291,16 @@ int run_asicend_hardware(int argc, char** argv) {
                 result = 70;
             }
         } else {
-          {
-            asicen::ExitProcessFatal fatal;
-            asicen::HardwareStreamService stream(hardware, hardware, fatal);
-            asicen::UnsupportedCardBackend card_backend;
-            asicen::UnsupportedCardSession card_session;
-            px4::userland::CardService card(card_backend, card_session);
-            px4::userland::ipc::posix::PosixTunerNonceSource nonce;
-            Time time;
-            px4::userland::TunerService tuner(stream, nonce, time,
-                                              nullptr, nullptr, &stream);
-            const px4::userland::ipc::posix::EndpointConfig endpoint{
+            result = asicen::run_live_card_stream_server(
+                hardware,
                 options.runtime_dir.empty() ? nullptr : options.runtime_dir.c_str(),
-                options.instance.c_str(),
-                px4::userland::ipc::posix::kControlEndpointName};
-            auto server_result = px4::userland::ipc::posix::PosixControlServer::create(
-                endpoint, card, tuner, {}, true, asicen::profile::kUsbPresentMask,
-                &stream, asicen::profile::kReceiverCount, false);
-            if (!server_result) {
-                std::fprintf(stderr, "asicend: %s\n",
-                             px4::userland::error_string(server_result.error()));
-                result = server_result.error() == px4::userland::Error::BUSY ? 4 : 70;
-            } else {
-                auto server = std::move(server_result.value());
-                std::fprintf(stderr,
-                    "asicend ready backend=asicen-w3u3 receiver=1 system=ISDB-T "
-                    "primary=%u:%u sibling=%u:%u endpoint=%s\n",
-                    options.primary_bus, options.primary_address,
-                    options.sibling_bus, options.sibling_address,
-                    server->endpoint_path());
-                result = 0;
-                while (!stop_requested) {
-                    const auto polled = server->poll_once(px4::userland::Timeout{100U});
-                    if (!polled) {
-                        std::fprintf(stderr, "asicend poll: %s\n",
-                                     px4::userland::error_string(polled.error()));
-                        result = 70;
-                        break;
-                    }
-                }
-                const auto stopped = server->shutdown();
-                if (!stopped) {
-                    std::fprintf(stderr, "asicend shutdown: %s\n",
-                                 px4::userland::error_string(stopped.error()));
-                    result = 70;
-                }
-                server.reset();
+                options.instance.c_str(), &stop_requested);
+            const auto stopped = hardware.shutdown();
+            if (!stopped) {
+                std::fprintf(stderr, "asicend hardware cleanup failed: %s\n",
+                             px4::userland::error_string(stopped.error()));
+                result = 70;
             }
-          }
           const auto released = hardware.release();
           if (!released) {
               std::fprintf(stderr, "USB claim release failed\n");

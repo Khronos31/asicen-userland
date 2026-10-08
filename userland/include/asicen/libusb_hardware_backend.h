@@ -104,6 +104,9 @@ private:
     friend int run_card_only_server(
         LibusbW3u3Hardware&, const char*, const char*,
         const volatile std::sig_atomic_t*) noexcept;
+    friend int run_live_card_stream_server(
+        LibusbW3u3Hardware&, const char*, const char*,
+        const volatile std::sig_atomic_t*) noexcept;
     bool begin_card_operation(
         std::uint32_t timeout_ms,
         const volatile std::sig_atomic_t* stop_flag) noexcept override;
@@ -127,6 +130,7 @@ private:
         int (*cancel)(void*, libusb_transfer*) = nullptr;
         void (*free)(void*, libusb_transfer*) = nullptr;
         int (*pump_events)(void*, unsigned) = nullptr;
+        void (*interrupt_events)(void*) = nullptr;
     };
     libusb_transfer* allocate_transfer() noexcept;
     int submit_transfer(libusb_transfer*) noexcept;
@@ -135,6 +139,10 @@ private:
     void delay_ms(unsigned) override;
     bool cancelled() const override;
     bool expired() const override;
+    bool acquire_control_gate(std::chrono::steady_clock::time_point deadline,
+                              const volatile std::sig_atomic_t* stop_flag = nullptr,
+                              bool cleanup = false) noexcept;
+    void mark_cleanup_failed(px4::userland::Error error) noexcept;
     bool dsc_start(std::uint8_t) override;
     bool dsc_stop(std::uint8_t) override;
     CaptureIo bulk_read(std::uint8_t, unsigned char*, int, int*, unsigned) override;
@@ -181,6 +189,8 @@ private:
     bool card_cleanup_active_ = false;
     std::chrono::steady_clock::time_point deadline_{};
     bool deadline_active_ = false;
+    std::recursive_timed_mutex control_gate_;
+    std::atomic<bool> cleanup_io_active_{false};
     bool claimed_ = false;
     bool initialized_ = false;
     bool tuned_ = false;
@@ -192,7 +202,8 @@ private:
     bool link_snapshot_valid_ = false;
     bool link_apply_attempted_ = false;
     bool output_start_attempted_ = false;
-    bool cleanup_failed_ = false;
+    std::atomic<bool> cleanup_failed_{false};
+    std::atomic<int> cleanup_failure_error_{0};
     static constexpr std::uint8_t kNoActiveReceiver = 0xffU;
     ReceiverLaneReservation active_receiver_{};
     std::uint8_t tuned_receiver_ = kNoActiveReceiver;

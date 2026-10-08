@@ -6,6 +6,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace asicen {
@@ -35,7 +40,28 @@ struct LibusbW3u3HardwareTestPeer {
     }
 
     static void set_cleanup_failed(LibusbW3u3Hardware& hardware) {
-        hardware.cleanup_failed_ = true;
+        hardware.mark_cleanup_failed(px4::userland::Error::USB_IO);
+    }
+    static void set_gpio_snapshot(LibusbW3u3Hardware& hardware, std::uint8_t value) {
+        hardware.gpio_snapshot_ = value;
+        hardware.gpio_snapshot_valid_ = true;
+    }
+    static bool begin_card_cleanup(LibusbW3u3Hardware& hardware) {
+        return hardware.begin_card_cleanup(1000U);
+    }
+    static void end_card_cleanup(LibusbW3u3Hardware& hardware, bool success) {
+        hardware.end_card_cleanup(success);
+    }
+    static bool begin_card_operation(LibusbW3u3Hardware& hardware) {
+        return hardware.begin_card_operation(1000U, nullptr);
+    }
+    static void end_card_operation(LibusbW3u3Hardware& hardware) {
+        hardware.end_card_operation();
+    }
+    static int card_control(LibusbW3u3Hardware& hardware,
+                            const ControlTransfer& transfer,
+                            unsigned char* response) {
+        return static_cast<FrontendTransport&>(hardware).control(transfer, response);
     }
 };
 
@@ -51,6 +77,7 @@ struct ControlEvent {
     Request request{};
     std::uint16_t value = 0;
     std::uint16_t index = 0;
+    std::uint16_t timeout_ms = 0;
 };
 
 struct FakeUsb {
@@ -59,7 +86,7 @@ struct FakeUsb {
     std::array<std::array<std::uint8_t, 0x45>, 2> cf{};
     std::vector<ControlEvent> controls;
     std::vector<std::uint8_t> endpoints;
-    int submit_count = 0;
+    std::atomic<int> submit_count{0};
     int fail_submit_number = 0;
     int cancel_count = 0;
     int free_count = 0;
@@ -70,11 +97,25 @@ struct FakeUsb {
     int fail_seed_once = 0;
     bool fail_dsc_start = false;
     bool fail_cf_restore_once = false;
+    std::uint8_t gpio = 0xa5U;
+    int gpio_write_count = 0;
+    int gpio_read_count = 0;
     bool trigger_reentrant_open = false;
     Error reentrant_open_error = Error::OK;
     std::size_t control_count_at_reentrant_open = 0U;
     bool reentrant_open_added_control = false;
     std::size_t controls_at_restore = 0U;
+    std::array<libusb_transfer*, 4> submitted{};
+    std::atomic<bool> complete_inside_control{false};
+    std::atomic<unsigned> callback_count{0U};
+    std::atomic<unsigned> callback_total{0U};
+    std::atomic<unsigned> pump_count{0U};
+    bool require_callbacks_before_free = false;
+    int free_before_callbacks = 0;
+    std::mutex event_mutex;
+    std::condition_variable event_changed;
+    bool interrupted_events = false;
+    bool event_ready = false;
 
     FakeUsb() {
         controller[0x05] = 0U;
@@ -96,6 +137,7 @@ struct FakeUsb {
     static int submit_hook(void* context, libusb_transfer* transfer) {
         auto& fake = *static_cast<FakeUsb*>(context);
         ++fake.submit_count;
+        fake.submitted[static_cast<std::size_t>((fake.submit_count - 1) % 4)] = transfer;
         fake.endpoints.push_back(transfer->endpoint);
         if (fake.fail_submit_number != 0 &&
             fake.submit_count == fake.fail_submit_number) return LIBUSB_ERROR_IO;
@@ -106,18 +148,45 @@ struct FakeUsb {
         ++fake.cancel_count;
         transfer->status = LIBUSB_TRANSFER_CANCELLED;
         transfer->actual_length = 0;
-        if (transfer->callback != nullptr) transfer->callback(transfer);
+        if (transfer->callback != nullptr) {
+            transfer->callback(transfer);
+            fake.callback_total.fetch_add(1U);
+        }
         return 0;
     }
     static void free_hook(void* context, libusb_transfer* transfer) {
-        ++static_cast<FakeUsb*>(context)->free_count;
+        auto& fake = *static_cast<FakeUsb*>(context);
+        if (fake.require_callbacks_before_free && fake.callback_total.load() < 4U)
+            ++fake.free_before_callbacks;
+        ++fake.free_count;
         std::free(transfer);
     }
     static int pump_hook(void*, unsigned) { return 0; }
 
+    static int pump_wait_hook(void* context, unsigned timeout_ms) {
+        auto& fake = *static_cast<FakeUsb*>(context);
+        ++fake.pump_count;
+        std::unique_lock<std::mutex> lock(fake.event_mutex);
+        fake.event_changed.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+            return fake.interrupted_events || fake.event_ready;
+        });
+        fake.interrupted_events = false;
+        fake.event_ready = false;
+        return 0;
+    }
+
+    static void interrupt_events_hook(void* context) {
+        auto& fake = *static_cast<FakeUsb*>(context);
+        {
+            std::lock_guard<std::mutex> lock(fake.event_mutex);
+            fake.interrupted_events = true;
+        }
+        fake.event_changed.notify_all();
+    }
+
     Hooks hooks() {
         return {this, control_hook, allocate_hook, submit_hook, cancel_hook,
-                free_hook, pump_hook};
+                free_hook, pump_wait_hook, interrupt_events_hook};
     }
 
     bool is_cf_restore(const ControlTransfer& transfer) const {
@@ -125,7 +194,8 @@ struct FakeUsb {
     }
 
     int control(const ControlTransfer& transfer, unsigned char* response) {
-        controls.push_back({transfer.request, transfer.value, transfer.index});
+        controls.push_back({transfer.request, transfer.value, transfer.index,
+                            transfer.timeout_ms});
         const auto status = [&] {
             if (response != nullptr && transfer.length > 0U) response[0] = 1U;
             return static_cast<int>(transfer.length);
@@ -147,6 +217,26 @@ struct FakeUsb {
                 for (std::size_t i = 0; i < payload; ++i) {
                     const std::uint8_t reg = static_cast<std::uint8_t>(first + i);
                     response[i + 1U] = slave == 0x4aU ? controller[reg] : 0U;
+                }
+                if (complete_inside_control.exchange(false)) {
+                    libusb_transfer* pending = submitted[0];
+                    if (pending != nullptr && pending->callback != nullptr) {
+                        std::memset(pending->buffer, 0x47,
+                                    static_cast<std::size_t>(pending->length));
+                        for (std::size_t offset = 0; offset < 188U;
+                             offset += 188U)
+                            pending->buffer[offset] = 0x47U;
+                        pending->actual_length = 188;
+                        pending->status = LIBUSB_TRANSFER_COMPLETED;
+                        pending->callback(pending);
+                        callback_count.fetch_add(1U);
+                        callback_total.fetch_add(1U);
+                        {
+                            std::lock_guard<std::mutex> lock(event_mutex);
+                            event_ready = true;
+                        }
+                        event_changed.notify_all();
+                    }
                 }
                 return static_cast<int>(transfer.length);
             }
@@ -219,6 +309,19 @@ struct FakeUsb {
             case Request::DscStop:
                 ++dsc_stop_count;
                 return status();
+            case Request::Gpio: {
+                if (response == nullptr) return LIBUSB_ERROR_IO;
+                const std::uint8_t value = static_cast<std::uint8_t>(transfer.value >> 8U);
+                const std::uint8_t mask = static_cast<std::uint8_t>(transfer.value & 0xffU);
+                if (mask == 0U) {
+                    ++gpio_read_count;
+                } else {
+                    ++gpio_write_count;
+                    gpio = static_cast<std::uint8_t>((gpio & ~mask) | (value & mask));
+                }
+                response[0] = gpio;
+                return static_cast<int>(transfer.length);
+            }
             case Request::ResetChannel: {
                 const std::size_t local = static_cast<std::uint8_t>(transfer.value) == 1U ? 1U : 0U;
                 cf[local].fill(0U);
@@ -254,9 +357,9 @@ void configure(LibusbW3u3Hardware& hardware, FakeUsb& fake,
 }
 
 bool saw_dsc(const FakeUsb& fake, Request request, std::uint8_t local) {
-    return std::any_of(fake.controls.begin(), fake.controls.end(), [&](const ControlEvent& event) {
-        return event.request == request && event.value == local;
-    });
+    for (const auto& event : fake.controls)
+        if (event.request == request && event.value == local) return true;
+    return false;
 }
 
 bool has_cf_request(const FakeUsb& fake, std::size_t local, Request request) {
@@ -387,6 +490,171 @@ bool test_rejected_open_reserves_before_cleanup_state_and_quarantines() {
     return true;
 }
 
+bool test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::set_gpio_snapshot(hardware, fake.gpio);
+    fake.fail_cf_restore_once = true;
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+
+    const auto stopped = hardware.shutdown();
+
+    CHECK(!stopped.has_value());
+    CHECK(stopped.error() == Error::USB_IO);
+    CHECK(fake.dsc_stop_count > 0);
+    CHECK(fake.controls_at_restore > 0U);
+    CHECK(fake.gpio_write_count > 0);
+    CHECK(fake.gpio_read_count > 0);
+    CHECK(fake.gpio == 0xa5U);
+    return true;
+}
+
+bool test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture() {
+    FakeUsb fake;
+    fake.require_callbacks_before_free = true;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+
+    CaptureRunResult capture_result = CaptureRunResult::cancelled;
+    std::thread capture([&] {
+        capture_result = hardware.run(cancelled, discard_packets, nullptr);
+    });
+    for (unsigned attempt = 0; attempt < 100U && fake.pump_count.load() == 0U;
+         ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool pump_started = fake.pump_count.load() != 0U;
+    const bool operation_started =
+        LibusbW3u3HardwareTestPeer::begin_card_operation(hardware);
+    int control_result = LIBUSB_ERROR_IO;
+    bool bulk_progress_while_gate_held = false;
+    if (operation_started) {
+        fake.complete_inside_control.store(true);
+        std::array<unsigned char, 2> response{};
+        const ControlTransfer card_read{
+            1U, Request::I2cRead, 0x004aU, 0U, 2U, Direction::In, 500U};
+        control_result = LibusbW3u3HardwareTestPeer::card_control(
+            hardware, card_read, response.data());
+        const auto progress_deadline = std::chrono::steady_clock::now() +
+                                       std::chrono::milliseconds(250);
+        while (fake.submit_count.load() < 5 &&
+               std::chrono::steady_clock::now() < progress_deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        bulk_progress_while_gate_held = fake.submit_count.load() >= 5;
+        LibusbW3u3HardwareTestPeer::end_card_operation(hardware);
+    }
+    const bool cleanup_started = LibusbW3u3HardwareTestPeer::begin_card_cleanup(hardware);
+    if (cleanup_started) LibusbW3u3HardwareTestPeer::end_card_cleanup(hardware, false);
+    else LibusbW3u3HardwareTestPeer::set_cleanup_failed(hardware);
+    capture.join();
+
+    CHECK(pump_started);
+    CHECK(operation_started);
+    CHECK(control_result == 2);
+    CHECK(bulk_progress_while_gate_held);
+    CHECK(fake.callback_count.load() == 1U);
+    CHECK(cleanup_started);
+    CHECK(capture_result == CaptureRunResult::usb_error);
+    CHECK(fake.cancel_count == 3 || fake.cancel_count == 4);
+    CHECK(fake.free_count == 4);
+    CHECK(fake.callback_total.load() >= 4U);
+    CHECK(fake.free_before_callbacks == 0);
+    CHECK(fake.dsc_stop_count == 1);
+    CHECK(fake.controller[0x05] == 0U);
+    return true;
+}
+
+bool test_failed_card_cleanup_before_capture_worker_starts_still_drains() {
+    FakeUsb fake;
+    fake.require_callbacks_before_free = true;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::begin_card_cleanup(hardware));
+    LibusbW3u3HardwareTestPeer::end_card_cleanup(hardware, false);
+
+    CHECK(hardware.run(cancelled, discard_packets, nullptr) ==
+          CaptureRunResult::usb_error);
+    CHECK(fake.dsc_stop_count == 1);
+    CHECK(fake.cancel_count == 4);
+    CHECK(fake.free_count == 4);
+    CHECK(fake.callback_total.load() == 4U);
+    CHECK(fake.free_before_callbacks == 0);
+    CHECK(fake.controller[0x05] == 0U);
+    return true;
+}
+
+bool test_prepare_waiter_rechecks_quarantine_after_control_gate() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    CHECK(LibusbW3u3HardwareTestPeer::begin_card_cleanup(hardware));
+    const std::size_t controls_before = fake.controls.size();
+    std::atomic<bool> started{false};
+    std::atomic<bool> prepare_succeeded{false};
+    std::atomic<int> prepare_error{static_cast<int>(Error::OK)};
+    std::atomic<bool> cancelled{false};
+    std::thread waiter([&] {
+        started.store(true, std::memory_order_release);
+        const auto result = hardware.prepare(1U, System::ISDB_T, cancelled);
+        prepare_succeeded.store(result.has_value(), std::memory_order_release);
+        if (!result) prepare_error.store(static_cast<int>(result.error()),
+                                         std::memory_order_release);
+    });
+    while (!started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    LibusbW3u3HardwareTestPeer::end_card_cleanup(hardware, false);
+    waiter.join();
+
+    CHECK(!prepare_succeeded.load());
+    CHECK(prepare_error.load() == static_cast<int>(Error::USB_IO) ||
+          prepare_error.load() == static_cast<int>(Error::TIMEOUT));
+    CHECK(fake.controls.size() == controls_before);
+    CHECK(fake.submit_count.load() == 0);
+    return true;
+}
+
+bool test_satellite_slot_wait_uses_deadline_including_gate_wait() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 0U);
+    CHECK(LibusbW3u3HardwareTestPeer::begin_card_operation(hardware));
+
+    std::atomic<int> result{static_cast<int>(Error::OK)};
+    std::atomic<bool> started{false};
+    std::thread waiter([&] {
+        started.store(true, std::memory_order_release);
+        const auto selected = hardware.select_satellite_slot(0U, 0U, 100U);
+        result.store(selected ? static_cast<int>(Error::OK)
+                              : static_cast<int>(selected.error()),
+                     std::memory_order_release);
+    });
+    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+    LibusbW3u3HardwareTestPeer::end_card_operation(hardware);
+    waiter.join();
+
+    CHECK(result.load() != static_cast<int>(Error::OK));
+    std::uint16_t max_read_timeout = 0U;
+    for (const auto& event : fake.controls) {
+        if (event.request == Request::I2cRead)
+            max_read_timeout = std::max(max_read_timeout, event.timeout_ms);
+    }
+    CHECK(max_read_timeout > 0U);
+    CHECK(max_read_timeout <= 40U);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -395,5 +663,10 @@ int main() {
     if (!test_dsc_failure_stops_local0_and_restores_cf()) return 1;
     if (!test_seed_failure_stops_local0_clears_seed_and_restores_cf()) return 1;
     if (!test_rejected_open_reserves_before_cleanup_state_and_quarantines()) return 1;
+    if (!test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure()) return 1;
+    if (!test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture()) return 1;
+    if (!test_failed_card_cleanup_before_capture_worker_starts_still_drains()) return 1;
+    if (!test_prepare_waiter_rechecks_quarantine_after_control_gate()) return 1;
+    if (!test_satellite_slot_wait_uses_deadline_including_gate_wait()) return 1;
     return 0;
 }

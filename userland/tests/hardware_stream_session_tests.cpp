@@ -59,7 +59,11 @@ public:
         }
         if (result == asicen::CaptureRunResult::fatal_drain) return result;
         std::unique_lock<std::mutex> lock(mutex);
+        run_started.store(true, std::memory_order_release);
+        condition.notify_all();
         condition.wait(lock, [&] { return cancelled.load() || interrupted; });
+        if (hold_run_after_interrupt)
+            condition.wait(lock, [&] { return release_held_run; });
         return result;
     }
 
@@ -67,6 +71,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex);
             interrupted = true;
+            interrupt_seen.store(true, std::memory_order_release);
             events.push_back("interrupt");
         }
         condition.notify_all();
@@ -87,6 +92,14 @@ public:
         });
     }
 
+    void release_run() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            release_held_run = true;
+        }
+        condition.notify_all();
+    }
+
     std::mutex mutex;
     std::condition_variable condition;
     std::vector<std::string> events;
@@ -97,6 +110,10 @@ public:
     bool interrupted = false;
     bool prepare_error = false;
     bool stop_error = false;
+    bool hold_run_after_interrupt = false;
+    bool release_held_run = false;
+    std::atomic<bool> run_started{false};
+    std::atomic<bool> interrupt_seen{false};
     asicen::CaptureRunResult result = asicen::CaptureRunResult::cancelled;
 };
 
@@ -202,6 +219,49 @@ void start_precedes_attach_and_full_identity_is_required() {
     check(service.release_final(id), "final state is released after protocol flush");
     check(service.start_capture(1U, ipc::System::ISDB_T), "fresh generation can restart");
     check(service.stop_capture(1U, ipc::System::ISDB_T), "unattached attempt can stop");
+}
+
+void detach_does_not_publish_stale_final_snapshot_before_worker_join() {
+    asicen::MockTunerBackend frontend;
+    FakeSource source;
+    FakeFatal fatal;
+    source.hold_run_after_interrupt = true;
+    asicen::HardwareStreamService service(frontend, source, fatal);
+    check(service.start_capture(1U, ipc::System::ISDB_T),
+          "start capture for final-snapshot publication race");
+    const auto id = identity(18U);
+    check(service.attach(id), "attach final-snapshot publication race");
+    for (int i = 0; i < 200 && !source.run_started.load(std::memory_order_acquire); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    check(source.run_started.load(std::memory_order_acquire), "capture worker is running");
+
+    std::atomic<bool> detach_done{false};
+    std::atomic<bool> detach_ok{false};
+    std::thread detacher([&] {
+        detach_ok.store(static_cast<bool>(service.detach(id)), std::memory_order_release);
+        detach_done.store(true, std::memory_order_release);
+    });
+    for (int i = 0; i < 200 && !source.interrupt_seen.load(std::memory_order_acquire); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    check(source.interrupt_seen.load(std::memory_order_acquire),
+          "detach reached the blocked worker join");
+
+    std::array<std::uint8_t, 188> output{};
+    const auto interim_read = service.read(id, {output.data(), output.size()}, {0U});
+    check(interim_read && interim_read.value().timed_out && !interim_read.value().eof &&
+              interim_read.value().terminal == TunerStreamTerminal::none,
+          "stream read waits for the final snapshot while detach joins");
+    check(service.final_snapshot(id).error() == Error::NOT_READY,
+          "an unpublished default snapshot is never exposed");
+    check(!detach_done.load(std::memory_order_acquire), "worker join remains blocked");
+
+    source.release_run();
+    detacher.join();
+    check(detach_ok.load(std::memory_order_acquire), "detach completes after worker exits");
+    const auto final = service.final_snapshot(id);
+    check(final && final.value().counters.packets == 0U &&
+              final.value().terminal == static_cast<std::uint8_t>(TunerStreamTerminal::stopped),
+          "only the completed detach publishes the stopped final snapshot");
 }
 
 void overflow_is_sticky_and_quarantines_cleanup_failure() {
@@ -352,6 +412,7 @@ void primary_satellite_receiver_mapping_is_explicit() {
 
 int main() {
     start_precedes_attach_and_full_identity_is_required();
+    detach_does_not_publish_stale_final_snapshot_before_worker_join();
     overflow_is_sticky_and_quarantines_cleanup_failure();
     failed_prepare_attempts_cleanup_and_reports_quarantine();
     fatal_callback_drain_requests_nonzero_process_exit();
