@@ -645,3 +645,30 @@ Device probing, firmware loading through the official driver, actual tuning,
 bulk streaming and USB tracing remain unverified pending USB passthrough.
 The receiver was not moved or manipulated by this guest check. No VM restart,
 USB passthrough configuration or HA setting/service change was performed.
+
+### Receiver USB passthrough into the running CentOS guest
+
+On 2026-10-08, following the user's passthrough request, Latitude exposed
+two loader devices (`1738:5211`) at physical USB paths `1-2.1` and `1-2.2`.
+The running VM was direct QEMU 10.2.1, not a libvirt-managed domain.
+Through its existing HMP socket `/var/tmp/centos63/mon.sock`, the following
+devices were added without restarting the VM:
+
+```text
+device_add usb-ehci,id=asicen_ehci
+device_add usb-host,id=asicen_primary,bus=asicen_ehci.0,port=1,hostbus=1,hostport=2.1
+device_add usb-host,id=asicen_secondary,bus=asicen_ehci.0,port=2,hostbus=1,hostport=2.2
+```
+
+Guest ehci_hcd initialized the controller at PCI `0000:00:04.0`.
+Guest lsusb then listed both `1738:5211` devices, at bus 001 addresses 002
+and 003. Kernel logs reported ASICEN/AUSBDTV on guest ports `1-1` and `1-2`.
+QEMU reported both devices at 480 Mb/s. The official loader and runtime
+modules remained unloaded; firmware loading and receiver probing are still
+unverified. Only the receiver's two USB functions were passed through.
+
+This is live configuration for the current QEMU process, not a change to
+its startup command. Host physical-port matching avoids pinning an address
+or product ID, but firmware re-enumeration through QEMU remains untested.
+Rollback via the same monitor: `device_del asicen_primary`, then
+`device_del asicen_secondary`, then `device_del asicen_ehci`.
