@@ -9,10 +9,12 @@ the 0.1.0 release. Both USB functions have booted and responded to read-only
 queries. One terrestrial lane has tuned and locked on the attached PX-W3U3.
 The isolated official Linux environment now captures terrestrial TS; replacing
 its faulty multi-block DES routine also yielded valid PAT/PMT and decodable
-video after startup. Portable device-link transformation has been checked
-against actual USB fragments. Direct-libusb acquisition, satellite reception,
-and the portable B-CAS/recisdb path remain unverified. This is not yet a working
-four-receiver driver. See the [latest evidence](docs/reverse-engineering/transport-transform-2026-10-09.md).
+video after startup. Direct-libusb terrestrial acquisition plus the portable
+device-link transform now produces CRC-valid PAT/PMT using a caller-generated
+seed and source-backed RF gain adjustment. Startup discontinuities remain.
+Satellite reception and the portable B-CAS/recisdb path remain unverified.
+This is not yet a working four-receiver driver. See the
+[direct receive evidence](docs/reverse-engineering/direct-link-trial-2026-10-09.md).
 
 ## Build and offline tests
 
@@ -90,7 +92,8 @@ for another installation. Cold-start repeatability and the second terrestrial
 lane remain unverified. `lock` can query the demodulator separately.
 An opt-in `--shared-demod` on `init`/`terrestrial` also programs the42 original
 satellite-demod register facts; it performs no satellite RF tuning or LNB
-enablement. This combination has not produced TS on the development machine.
+enablement. Direct TS reception additionally required link preparation and
+the RF gain adjustment described in the direct receive evidence above.
 
 `capture` saves raw bulk bytes rather than validated MPEG-TS. It requires
 `--reset-state 0|1` because the original caller's reset-state default remains

@@ -1,0 +1,152 @@
+{
+  "direct-gain-repeat": {
+    "continuity_events": {
+      "0x0100": [
+        {
+          "cc": 1,
+          "expected_cc": 8,
+          "kind": "cc_discontinuity",
+          "packet": 15
+        },
+        {
+          "cc": 5,
+          "expected_cc": 4,
+          "kind": "cc_discontinuity",
+          "packet": 18
+        },
+        {
+          "cc": 7,
+          "expected_cc": 6,
+          "kind": "cc_discontinuity",
+          "packet": 19
+        },
+        {
+          "cc": 11,
+          "expected_cc": 9,
+          "kind": "cc_discontinuity",
+          "packet": 21
+        }
+      ]
+    },
+    "continuity_totals": {
+      "discontinuities": 4,
+      "discontinuity_resets": 0,
+      "duplicate_cc_conflicts": 0,
+      "duplicates": 0
+    },
+    "file_bytes": 5639624,
+    "packet_totals": {
+      "adaptation_only_packets": 59,
+      "discontinuity_indicators": 0,
+      "invalid_packets": 0,
+      "payload_packets": 29939,
+      "scrambled_packets": 28893,
+      "tei_packets": 0,
+      "valid_packets": 29998
+    },
+    "packets": 29998,
+    "psi": {
+      "pat": {
+        "incomplete_at_eof": 0,
+        "invalid": 0,
+        "sections": 28,
+        "truncated_sections": 0,
+        "unique_program_to_pmt_pid": {
+          "1024": 496,
+          "1025": 1008,
+          "1408": 8136,
+          "65520": 7408
+        },
+        "valid": 28
+      },
+      "pmt": {
+        "incomplete_by_pid": {
+          "0x01f0": 0,
+          "0x03f0": 183,
+          "0x1cf0": 0,
+          "0x1fc8": 0
+        },
+        "invalid": 0,
+        "sections": 62,
+        "truncated_by_pid": {
+          "0x01f0": 0,
+          "0x03f0": 0,
+          "0x1cf0": 0,
+          "0x1fc8": 0
+        },
+        "valid": 62
+      }
+    },
+    "sha256": "27467be43556a4babefe7b83e70bdf2412a45c52483a2413d8a55a36da584f4e"
+  },
+  "direct-gain-step": {
+    "continuity_events": {
+      "0x0100": [
+        {
+          "cc": 2,
+          "expected_cc": 6,
+          "kind": "cc_discontinuity",
+          "packet": 15
+        }
+      ],
+      "0x0160": [
+        {
+          "cc": 4,
+          "expected_cc": 2,
+          "kind": "cc_discontinuity",
+          "packet": 44
+        }
+      ]
+    },
+    "continuity_totals": {
+      "discontinuities": 2,
+      "discontinuity_resets": 0,
+      "duplicate_cc_conflicts": 0,
+      "duplicates": 0
+    },
+    "file_bytes": 9682564,
+    "packet_totals": {
+      "adaptation_only_packets": 107,
+      "discontinuity_indicators": 0,
+      "invalid_packets": 0,
+      "payload_packets": 51396,
+      "scrambled_packets": 49533,
+      "tei_packets": 0,
+      "valid_packets": 51503
+    },
+    "packets": 51503,
+    "psi": {
+      "pat": {
+        "incomplete_at_eof": 0,
+        "invalid": 0,
+        "sections": 49,
+        "truncated_sections": 0,
+        "unique_program_to_pmt_pid": {
+          "1024": 496,
+          "1025": 1008,
+          "1408": 8136,
+          "65520": 7408
+        },
+        "valid": 49
+      },
+      "pmt": {
+        "incomplete_by_pid": {
+          "0x01f0": 183,
+          "0x03f0": 0,
+          "0x1cf0": 0,
+          "0x1fc8": 0
+        },
+        "invalid": 0,
+        "sections": 113,
+        "truncated_by_pid": {
+          "0x01f0": 0,
+          "0x03f0": 0,
+          "0x1cf0": 0,
+          "0x1fc8": 0
+        },
+        "valid": 113
+      }
+    },
+    "sha256": "04732e4207469530814f044db22e1d0fdf440001a9c080a9063768986e3b7108"
+  }
+}
