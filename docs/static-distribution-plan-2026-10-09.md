@@ -1,5 +1,10 @@
 # Static distribution increment
 
+Publication-policy update: after this increment, the user authorized making
+the development repository public on 2026-10-09, before 0.1.0. The historical
+private-work constraint below describes this increment; it is not a current
+ban on source publication. Binary release gates remain unchanged.
+
 Objective: implement the missing dependency and packaging contract, retaining
 the nine-platform target matrix. Baseline:840dd31. First executable increment
 is Linux fully static commands, matching IFD build separation, reproducible

@@ -3,7 +3,8 @@
 The Linux x86_64 private candidates now contain fully static musl commands
 with libusb linked into the daemon. Separate archives provide a glibc IFD or
 a musl IFD. This is build/package validation, not a nine-platform release or
-a new hardware reception result. The repository remains private.
+a new hardware reception result. Validation ran while the repository was
+private; the user subsequently authorized public source development.
 
 ## Inputs and build separation
 
@@ -102,4 +103,5 @@ Their results are not silently transferred to these static candidates.
 Linux aarch64, macOS, Android and Windows still require their own builds and
 runtime checks. The required nine-archive matrix is unchanged; this report
 does not claim Windows support is complete in either ASICEN or px4-userland.
-No public release, version bump or repository visibility change occurred.
+No binary release or version bump occurred during validation. The subsequent
+source-publication decision does not change these validation limits.

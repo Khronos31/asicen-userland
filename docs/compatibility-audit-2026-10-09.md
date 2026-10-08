@@ -116,4 +116,5 @@ now present and verified for the two Linux x86_64 private candidates.
 The original audit changed the documented acceptance contract only; the
 linked follow-up records the subsequent Linux x86_64 implementation and
 validation. Missing platform implementations are still open. The repository
-remains private and unreleased.
+was private during the audit; the user subsequently authorized public source
+development on 2026-10-09. Binary releases remain subject to the open gates.

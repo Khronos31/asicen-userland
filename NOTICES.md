@@ -28,7 +28,8 @@ application-license tables. Its synthetic reference oracle requires local
 vendor objects only for an optional offline comparison, never for the product.
 
 recisdb-rs remains a separate downstream program; none of its source is linked
-into this project. No publication or release has been made.
+into this project. Public development source was authorized on 2026-10-09;
+no versioned binary release has been made.
 
 ## Product license and binary dependencies
 

@@ -4,8 +4,8 @@ Development of a direct-libusb userspace driver for ASICEN-based PLEX receivers,
 starting with the original PX-W3U3. Based on the protocol skeleton and evidence
 from [asicen-research](https://github.com/Khronos31/asicen-research).
 
-This repository is private during development. Public visibility is planned for
-the 0.1.0 release. **Full distribution parity remains incomplete.** Linux
+This is a public development repository. Source publication was authorized on
+2026-10-09, ahead of the planned 0.1.0 release. **Full distribution parity remains incomplete.** Linux
 x86_64 private candidates now have fully static musl commands, static libusb,
 and matching glibc/musl IFD variants. Extracted package checks and modified
 libusb source-based relinking passed; see the

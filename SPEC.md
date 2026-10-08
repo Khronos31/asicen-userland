@@ -82,8 +82,9 @@ not evidence of completion. Windows remains required for ASICEN as well.
   run smoke tests from those archives rather than unrelated build trees.
 - Keep all targets in the acceptance matrix. An unavailable build/runtime
   or unverified hardware path remains explicitly unverified, never omitted
-  or inferred from Linux x86_64 results. No release/publication is authorized
-  by this clarification.
+  or inferred from Linux x86_64 results. The user's later 2026-10-09 instruction
+  authorizes public development source before 0.1.0; it does not waive these
+  binary-release acceptance requirements.
 
 See [the compatibility audit](docs/compatibility-audit-2026-10-09.md) for the
 observed gaps and executable checks. The following reception increments
@@ -124,7 +125,9 @@ remain useful development milestones, not a replacement for this contract.
 - Work only in this repo and `/config/.tools/asicen-work/` for supporting evidence.
   Read px4-userland/recisdb-rs and supplied vendor artifacts as references.
 - Do not edit HA config, restart HA/add-ons, change production tuner/card
-  services, touch secret files, release/version-bump, or make this repo public.
+  services, touch secret files, or release/version-bump.
+- Public source development is authorized by the user's 2026-10-09 instruction,
+  superseding the initial plan to keep the repository private until 0.1.0.
 - Keep vendor binaries, firmware, TS samples and card data untracked.
   Firmware is an exception for binary distribution archives only: the user's
   2026-10-09 instruction requires it there, supplied from outside the repo,

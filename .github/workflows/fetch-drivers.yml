@@ -16,10 +16,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends file binutils kmod python3 ca-certificates
       - name: Fetch and inspect
         run: python3 scripts/fetch_drivers.py
-      - name: Upload artifact
+      - name: Upload driver metadata only
         uses: actions/upload-artifact@v4
         with:
-          name: asicen-driver-research
-          path: out/
+          name: asicen-driver-metadata
+          path: |
+            out/fetch-status.txt
+            out/analysis/inventory.txt
+            out/analysis/*.meta.txt
           if-no-files-found: warn
           retention-days: 3
