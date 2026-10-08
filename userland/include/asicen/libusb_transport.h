@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "asicen/protocol.h"
+#include "asicen/hardware_ownership.h"
 
 namespace asicen {
 
@@ -47,6 +48,7 @@ public:
     // Claims interface_number as-is. Released by close(). Repeated claims are
     // ignored; kernel drivers are never detached.
     int claim_interface(int interface_number);
+    int release_interface(int interface_number) noexcept;
 
     // Finds the active alternate setting that owns endpoint_address, claims
     // its interface, and selects the alternate setting when needed.
@@ -64,6 +66,17 @@ private:
 
     libusb_device_handle* handle_ = nullptr;
     std::vector<int> claimed_interfaces_;
+};
+
+class LibusbFunctionClaim final : public UsbFunctionClaim {
+public:
+    explicit LibusbFunctionClaim(LibusbDevice& device) : device_(device) {}
+    UsbFunctionSnapshot snapshot() const override;
+    int claim_interface0() override;
+    int release_interface0() noexcept override;
+
+private:
+    LibusbDevice& device_;
 };
 
 }  // namespace asicen

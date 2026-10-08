@@ -113,6 +113,16 @@ int LibusbDevice::claim_interface(int interface_number) {
     return interface_number;
 }
 
+int LibusbDevice::release_interface(int interface_number) noexcept {
+    if (handle_ == nullptr) return LIBUSB_ERROR_NO_DEVICE;
+    const auto it = std::find(claimed_interfaces_.begin(),
+                              claimed_interfaces_.end(), interface_number);
+    if (it == claimed_interfaces_.end()) return 0;
+    const int rc = libusb_release_interface(handle_, interface_number);
+    if (rc == 0) claimed_interfaces_.erase(it);
+    return rc;
+}
+
 bool LibusbDevice::interface_claimed(int interface_number) const {
     return std::find(claimed_interfaces_.begin(), claimed_interfaces_.end(),
                      interface_number) != claimed_interfaces_.end();
@@ -186,6 +196,65 @@ int LibusbDevice::bulk_read(std::uint8_t endpoint_address,
     }
     return libusb_bulk_transfer(handle_, endpoint_address, data, length,
                                 transferred, timeout_ms);
+}
+
+UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const {
+    UsbFunctionSnapshot result{};
+    libusb_device* dev = device_.device();
+    if (dev == nullptr) return result;
+    result.bus = libusb_get_bus_number(dev);
+    result.address = libusb_get_device_address(dev);
+    libusb_device_descriptor descriptor{};
+    if (libusb_get_device_descriptor(dev, &descriptor) != 0) return result;
+    result.vendor_id = descriptor.idVendor;
+    result.product_id = descriptor.idProduct;
+
+    std::uint8_t ports[8]{};
+    const int port_count = libusb_get_port_numbers(dev, ports,
+                                                   static_cast<int>(sizeof(ports)));
+    if (port_count > 0) result.port_path.assign(ports, ports + port_count);
+
+    libusb_config_descriptor* config = nullptr;
+    if (libusb_get_active_config_descriptor(dev, &config) != 0 || config == nullptr)
+        return result;
+    const libusb_interface_descriptor* interface0 = nullptr;
+    bool has_only_alt0 = true;
+    for (std::uint8_t i = 0; i < config->bNumInterfaces; ++i) {
+        const libusb_interface& iface = config->interface[i];
+        for (int a = 0; a < iface.num_altsetting; ++a) {
+            const auto& alt = iface.altsetting[a];
+            if (alt.bInterfaceNumber != 0) continue;
+            if (alt.bAlternateSetting == 0) interface0 = &alt;
+            else has_only_alt0 = false;
+        }
+    }
+    if (interface0 != nullptr) {
+        result.interface0_present = true;
+        // With exactly one alternate setting (alt 0), the claimed interface
+        // cannot be using a nonzero alternate without changing configuration.
+        result.active_alt0 = has_only_alt0 ? 0 : -1;
+        for (std::uint8_t e = 0; e < interface0->bNumEndpoints; ++e) {
+            if (interface0->endpoint[e].bEndpointAddress == 0x82U) {
+                result.endpoint82_in_alt0 = true;
+                result.endpoint82_bulk_in_alt0 =
+                    (interface0->endpoint[e].bmAttributes &
+                     LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK;
+            }
+        }
+    }
+    libusb_free_config_descriptor(config);
+    const int kernel = device_.kernel_driver_active(0);
+    result.kernel_driver_state_known = kernel >= 0;
+    result.interface0_kernel_driver = kernel > 0;
+    return result;
+}
+
+int LibusbFunctionClaim::claim_interface0() {
+    return device_.claim_interface(0);
+}
+
+int LibusbFunctionClaim::release_interface0() noexcept {
+    return device_.release_interface(0);
 }
 
 }  // namespace asicen

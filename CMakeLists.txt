@@ -49,6 +49,7 @@ add_library(asicen_core STATIC
   userland/src/enclosure_grouping.cpp
   userland/src/frontend_facts.cpp
   userland/src/frontend_sequence.cpp
+  userland/src/hardware_ownership.cpp
   userland/src/ipc.cpp
   userland/src/loader_firmware.cpp
   userland/src/link_seed_diagnostic.cpp
@@ -157,6 +158,13 @@ if(ASICEN_BUILD_TESTS)
   target_include_directories(asicen-product-profile-tests PRIVATE userland/include)
   target_compile_options(asicen-product-profile-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-product-profile-tests COMMAND asicen-product-profile-tests)
+
+  add_executable(asicen-hardware-ownership-tests
+    userland/tests/hardware_ownership_tests.cpp
+    userland/src/hardware_ownership.cpp)
+  target_include_directories(asicen-hardware-ownership-tests PRIVATE userland/include)
+  target_compile_options(asicen-hardware-ownership-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-hardware-ownership-tests COMMAND asicen-hardware-ownership-tests)
 
   add_executable(asicen-product-shutdown-tests
     userland/tests/product_shutdown_hooks_tests.cpp)
