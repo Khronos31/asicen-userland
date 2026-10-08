@@ -1,0 +1,296 @@
+{
+  "revision": "f1caa70",
+  "captures": {
+    "count-first": {
+      "file_bytes": 5640000,
+      "alignment": {
+        "aligned_sync_run": 30000,
+        "invalid_sync_packet_indices": [],
+        "offset": 0,
+        "packet_size": 188,
+        "packets": 30000,
+        "scrambling_control_counts": {
+          "0": 1069,
+          "1": 0,
+          "2": 20526,
+          "3": 8405
+        },
+        "tei_packet_indices": [],
+        "trailing_bytes": 0
+      },
+      "continuity_totals": {
+        "discontinuities": 0,
+        "discontinuity_resets": 0,
+        "duplicate_cc_conflicts": 0,
+        "duplicates": 0
+      },
+      "packet_totals": {
+        "adaptation_only_packets": 58,
+        "discontinuity_indicators": 0,
+        "invalid_packets": 0,
+        "payload_packets": 29942,
+        "scrambled_packets": 28931,
+        "tei_packets": 0,
+        "valid_packets": 30000
+      },
+      "sha256": "21f1518cda506aba7dfa3978070eadd8cf0644933a099ec0d5535299eb24112f",
+      "psi": {
+        "pat": {
+          "invalid": 0,
+          "sections": 28,
+          "valid": 28
+        },
+        "pmt": {
+          "invalid": 0,
+          "sections": 63,
+          "valid": 63
+        }
+      },
+      "last_continuity_event_packet_zero_based": null
+    },
+    "count-second": {
+      "file_bytes": 5640000,
+      "alignment": {
+        "aligned_sync_run": 30000,
+        "invalid_sync_packet_indices": [],
+        "offset": 0,
+        "packet_size": 188,
+        "packets": 30000,
+        "scrambling_control_counts": {
+          "0": 1073,
+          "1": 0,
+          "2": 20833,
+          "3": 8094
+        },
+        "tei_packet_indices": [],
+        "trailing_bytes": 0
+      },
+      "continuity_totals": {
+        "discontinuities": 38,
+        "discontinuity_resets": 0,
+        "duplicate_cc_conflicts": 0,
+        "duplicates": 0
+      },
+      "packet_totals": {
+        "adaptation_only_packets": 59,
+        "discontinuity_indicators": 0,
+        "invalid_packets": 0,
+        "payload_packets": 29941,
+        "scrambled_packets": 28927,
+        "tei_packets": 0,
+        "valid_packets": 30000
+      },
+      "sha256": "b9d67605422e10f4b4a97c611dfbe6919b1937edabdd82985521f8b88722107b",
+      "psi": {
+        "pat": {
+          "invalid": 0,
+          "sections": 27,
+          "valid": 27
+        },
+        "pmt": {
+          "invalid": 0,
+          "sections": 60,
+          "valid": 60
+        }
+      },
+      "last_continuity_event_packet_zero_based": 351
+    },
+    "stdout": {
+      "file_bytes": 564000,
+      "alignment": {
+        "aligned_sync_run": 3000,
+        "invalid_sync_packet_indices": [],
+        "offset": 0,
+        "packet_size": 188,
+        "packets": 3000,
+        "scrambling_control_counts": {
+          "0": 126,
+          "1": 0,
+          "2": 0,
+          "3": 2874
+        },
+        "tei_packet_indices": [],
+        "trailing_bytes": 0
+      },
+      "continuity_totals": {
+        "discontinuities": 9,
+        "discontinuity_resets": 0,
+        "duplicate_cc_conflicts": 1,
+        "duplicates": 0
+      },
+      "packet_totals": {
+        "adaptation_only_packets": 7,
+        "discontinuity_indicators": 0,
+        "invalid_packets": 0,
+        "payload_packets": 2993,
+        "scrambled_packets": 2874,
+        "tei_packets": 0,
+        "valid_packets": 3000
+      },
+      "sha256": "3ec4fbf2a100cf64712e15fd8528e44649b0d9f5e56e31b4a5bff793f5874706",
+      "psi": {
+        "pat": {
+          "invalid": 0,
+          "sections": 3,
+          "valid": 3
+        },
+        "pmt": {
+          "invalid": 0,
+          "sections": 6,
+          "valid": 6
+        }
+      },
+      "last_continuity_event_packet_zero_based": 60
+    },
+    "duration": {
+      "file_bytes": 6372824,
+      "alignment": {
+        "aligned_sync_run": 33898,
+        "invalid_sync_packet_indices": [],
+        "offset": 0,
+        "packet_size": 188,
+        "packets": 33898,
+        "scrambling_control_counts": {
+          "0": 1214,
+          "1": 0,
+          "2": 12188,
+          "3": 20496
+        },
+        "tei_packet_indices": [],
+        "trailing_bytes": 0
+      },
+      "continuity_totals": {
+        "discontinuities": 0,
+        "discontinuity_resets": 0,
+        "duplicate_cc_conflicts": 0,
+        "duplicates": 0
+      },
+      "packet_totals": {
+        "adaptation_only_packets": 67,
+        "discontinuity_indicators": 0,
+        "invalid_packets": 0,
+        "payload_packets": 33831,
+        "scrambled_packets": 32684,
+        "tei_packets": 0,
+        "valid_packets": 33898
+      },
+      "sha256": "cb2e7a1d494bcd22771b82992cfbe91fa7f30e332738dc3c9905eb074d1381de",
+      "psi": {
+        "pat": {
+          "invalid": 0,
+          "sections": 31,
+          "valid": 31
+        },
+        "pmt": {
+          "invalid": 0,
+          "sections": 70,
+          "valid": 70
+        }
+      },
+      "last_continuity_event_packet_zero_based": null
+    },
+    "interrupted": {
+      "file_bytes": 622468,
+      "alignment": {
+        "aligned_sync_run": 3311,
+        "invalid_sync_packet_indices": [],
+        "offset": 0,
+        "packet_size": 188,
+        "packets": 3311,
+        "scrambling_control_counts": {
+          "0": 112,
+          "1": 0,
+          "2": 3199,
+          "3": 0
+        },
+        "tei_packet_indices": [],
+        "trailing_bytes": 0
+      },
+      "continuity_totals": {
+        "discontinuities": 0,
+        "discontinuity_resets": 0,
+        "duplicate_cc_conflicts": 0,
+        "duplicates": 0
+      },
+      "packet_totals": {
+        "adaptation_only_packets": 7,
+        "discontinuity_indicators": 0,
+        "invalid_packets": 0,
+        "payload_packets": 3304,
+        "scrambled_packets": 3199,
+        "tei_packets": 0,
+        "valid_packets": 3311
+      },
+      "sha256": "86d204a8e562f76fe5a5538d90696ed5344126302ea22604e2b0d85c1515fab5",
+      "psi": {
+        "pat": {
+          "invalid": 0,
+          "sections": 3,
+          "valid": 3
+        },
+        "pmt": {
+          "invalid": 0,
+          "sections": 6,
+          "valid": 6
+        }
+      },
+      "last_continuity_event_packet_zero_based": null
+    }
+  },
+  "trial": {
+    "daemon_pid": 96470,
+    "second-daemon": {
+      "exit": 4,
+      "elapsed_seconds": 0.004
+    },
+    "list": {
+      "exit": 0,
+      "elapsed_seconds": 0.004
+    },
+    "unsupported-card": {
+      "exit": 3,
+      "elapsed_seconds": 0.004
+    },
+    "count-first": {
+      "exit": 0,
+      "elapsed_seconds": 4.125,
+      "output_bytes": 5640000
+    },
+    "count-second": {
+      "exit": 0,
+      "elapsed_seconds": 3.674,
+      "output_bytes": 5640000
+    },
+    "stdout": {
+      "exit": 0,
+      "elapsed_seconds": 1.318
+    },
+    "duration": {
+      "exit": 0,
+      "elapsed_seconds": 4.076
+    },
+    "daemon_sigterm_exit": 0,
+    "interrupted_client_exit": 7,
+    "daemon_exit": 0
+  },
+  "usb_audit": {
+    "lnb_mask_writes": 0,
+    "gpioex_writes": 0,
+    "dsc_start": 5,
+    "dsc_stop": 5,
+    "controller05_writes": [
+      160,
+      0,
+      160,
+      0,
+      160,
+      0,
+      160,
+      0,
+      160,
+      0
+    ],
+    "final_gpio_readback": "ff",
+    "monitor_kernel_drops": 0
+  }
+}

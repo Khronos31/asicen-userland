@@ -11,7 +11,10 @@ The isolated official Linux environment now captures terrestrial TS; replacing
 its faulty multi-block DES routine also yielded valid PAT/PMT and decodable
 video after startup. Direct-libusb terrestrial acquisition plus the portable
 device-link transform now produces CRC-valid PAT/PMT using a caller-generated
-seed and source-backed RF gain adjustment. Startup discontinuities remain.
+seed and source-backed RF gain adjustment. The px4-derived daemon/client path
+also captures real TS on receiver1/T27, including repeated finite captures,
+stdout, timed capture and SIGTERM shutdown. Some captures have startup
+continuity errors; reception quality is not yet guaranteed.
 Satellite reception and the portable B-CAS/recisdb path remain unverified.
 This is not yet a working four-receiver driver. See the
 [direct receive evidence](docs/reverse-engineering/direct-link-trial-2026-10-09.md).
@@ -26,8 +29,9 @@ cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
 
-`asicend`, `asicenctl`, and `asicen-ts` currently exercise the mock backend.
-Passing their integration tests does not demonstrate reception from hardware.
+`asicend`, `asicenctl`, and `asicen-ts` support both an isolated mock backend
+and an experimental explicit-target hardware backend. Offline tests alone do
+not demonstrate reception; see the [daemon trial](docs/reverse-engineering/daemon-ts-trial-2026-10-09.md).
 
 ## px4-compatible command workflow
 
@@ -53,10 +57,33 @@ build/asicen-ts --runtime-dir /tmp/asicen-example --instance test \
 
 The output contains synthetic null packets. Card operations and combined
 `status` return unsupported (exit3) until a card backend is attached; they do
-not report the physical card as absent. Hardware daemon mode is disabled.
+not report the physical card as absent.
 Use Ctrl-C to stop the foreground daemon. The original `--mock --socket PATH`
 research workflow remains available. The [adaptation record](docs/cli-adaptation.md)
 documents compatibility, source provenance and the hardware gates.
+
+For the experimental hardware backend, identify both current USB addresses
+and physical paths with `asicen-probe list`. Both functions must be available
+on the same host and free of another driver or VM owner. Substitute those
+observed values below; addresses change after USB re-enumeration:
+
+```sh
+build/asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT \
+  --sibling BUS:ADDR --sibling-port BUS-PORT \
+  --runtime-dir /tmp/asicen-example --instance w3u3
+build/asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
+  --receiver 1 --channel T27 --packet-count 30000 --output capture.ts
+```
+
+Hardware capture currently accepts only receiver1/T27 (557142kHz). It performs
+frontend initialization, one RF gain feedback step, acquisition and the
+device-link transform internally; the caller does not provide a seed file.
+The resulting TS can still be B25-scrambled. Card/recisdb integration, other
+channels and receivers, satellite reception and cold-start validation remain
+unfinished. Hardware `--list` enumeration is also not implemented; use the
+probe tool for USB discovery. Daemon TS quality counters are not yet measured;
+use the offline validator rather than interpreting their zero values as proof
+of an error-free recording.
 
 ## Hardware diagnostics
 

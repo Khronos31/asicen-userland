@@ -2,8 +2,27 @@
 
 Reference revision: `Khronos31/px4-userland`
 `d51c83e1d7eeb829fd61f87f6ea93ad2043b9d00` (local source inspected).
-This document records the mock-only portable CLI increment and its boundary.
-It does not claim that the disabled ASICEN hardware backend is implemented.
+This document records the portable CLI increment and its original review.
+An experimental hardware backend now passes the receiver1/T27 daemon trial
+described below; broader receiver/channel and card support remain unfinished.
+
+## Hardware increment, 2026-10-09
+
+`asicend --hardware` takes explicit `--primary`, `--primary-port`, `--sibling`
+and `--sibling-port` targets. It owns both USB functions and the enclosure lock
+before exposing the imported service. Only receiver1/T27 is enabled. The
+frontend performs shared initialization and one source-backed RF gain step;
+the capture worker prepares a fresh private link seed, transforms bulk data
+and supplies the existing px4-derived stream client through a bounded queue.
+
+Real hardware verified repeated 30,000-packet captures, stdout, duration,
+duplicate-daemon rejection and SIGTERM cleanup. Some captures retain startup
+continuity errors. Quality counters in terminal status remain unmeasured;
+offline validation is authoritative. Card operations are unsupported, and
+hardware enumeration via daemon `--list` is not implemented. The explicit
+address/path interface supersedes the proposed `--usb-path` interface below.
+The mock-only sections below describe the earlier implementation and gates,
+not the present hardware availability. See the [measured results](reverse-engineering/daemon-ts-trial-2026-10-09.md).
 
 ## Reuse decision under review
 
