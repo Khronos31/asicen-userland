@@ -13,6 +13,7 @@
 #include <cstring>
 #include <sys/random.h>
 #include <sys/resource.h>
+#include <sys/time.h>
 #include <thread>
 
 namespace asicen {

@@ -6,7 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ASICEN_ENABLE_LIBUSB "Build libusb transport/probe" ON)
+option(ASICEN_ENABLE_IFD "Build the host-libc PC/SC IFD plugin" ON)
+option(ASICEN_REQUIRE_IFD "Fail configuration if the requested IFD dependencies are missing" OFF)
 option(ASICEN_BUILD_TESTS "Build offline protocol tests" ON)
+set(ASICEN_LIBUSB_INCLUDE_DIR "" CACHE PATH "libusb include directory (overrides pkg-config)")
+set(ASICEN_LIBUSB_LIBRARY "" CACHE FILEPATH "libusb library/archive (overrides pkg-config)")
+set(ASICEN_LIBUSB_EXTRA_LIBRARIES "" CACHE STRING "Additional private libraries required by the selected libusb archive")
 
 find_package(Threads REQUIRED)
 
@@ -86,8 +91,26 @@ target_link_libraries(asicen_core PUBLIC Threads::Threads)
 target_compile_options(asicen_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 if(ASICEN_ENABLE_LIBUSB)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+  if(ASICEN_LIBUSB_INCLUDE_DIR OR ASICEN_LIBUSB_LIBRARY)
+    if(NOT ASICEN_LIBUSB_INCLUDE_DIR OR NOT ASICEN_LIBUSB_LIBRARY)
+      message(FATAL_ERROR "ASICEN_LIBUSB_INCLUDE_DIR and ASICEN_LIBUSB_LIBRARY must be set together")
+    endif()
+    if(NOT EXISTS "${ASICEN_LIBUSB_INCLUDE_DIR}/libusb.h")
+      message(FATAL_ERROR "libusb.h not found under ASICEN_LIBUSB_INCLUDE_DIR")
+    endif()
+    if(NOT EXISTS "${ASICEN_LIBUSB_LIBRARY}")
+      message(FATAL_ERROR "ASICEN_LIBUSB_LIBRARY does not exist: ${ASICEN_LIBUSB_LIBRARY}")
+    endif()
+    add_library(asicen_libusb_dependency UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(asicen_libusb_dependency PROPERTIES
+      IMPORTED_LOCATION "${ASICEN_LIBUSB_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${ASICEN_LIBUSB_INCLUDE_DIR}")
+    set(ASICEN_LIBUSB_TARGET asicen_libusb_dependency)
+  else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+    set(ASICEN_LIBUSB_TARGET PkgConfig::LIBUSB)
+  endif()
 
   add_library(asicen_libusb STATIC
     userland/src/libusb_transport.cpp
@@ -96,43 +119,56 @@ if(ASICEN_ENABLE_LIBUSB)
     userland/src/card_only_service.cpp
   )
   target_include_directories(asicen_libusb PUBLIC userland/include)
-  target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session PkgConfig::LIBUSB)
+  target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session
+    ${ASICEN_LIBUSB_TARGET} ${ASICEN_LIBUSB_EXTRA_LIBRARIES})
   target_compile_options(asicen_libusb PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 
-  pkg_check_modules(PCSCLITE QUIET IMPORTED_TARGET libpcsclite)
-  if(PCSCLITE_FOUND)
-    add_library(asicen_pcsc_ifd_core STATIC
-      third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp)
-    set_target_properties(asicen_pcsc_ifd_core PROPERTIES
-      POSITION_INDEPENDENT_CODE ON)
-    target_include_directories(asicen_pcsc_ifd_core PUBLIC
-      third_party/px4-userland/userland/include)
-    target_compile_definitions(asicen_pcsc_ifd_core PRIVATE
-      ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:")
-    target_link_libraries(asicen_pcsc_ifd_core PUBLIC asicen_px4_mock)
-    target_compile_options(asicen_pcsc_ifd_core PRIVATE
-      -Wall -Wextra -Wpedantic -Werror)
+if(UNIX)
+  add_library(asicen_pcsc_ifd_core STATIC
+    third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp)
+  set_target_properties(asicen_pcsc_ifd_core PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(asicen_pcsc_ifd_core PUBLIC
+    third_party/px4-userland/userland/include)
+  target_compile_definitions(asicen_pcsc_ifd_core PRIVATE
+    ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:")
+  target_link_libraries(asicen_pcsc_ifd_core PUBLIC asicen_px4_mock)
+  target_compile_options(asicen_pcsc_ifd_core PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
 
-    add_library(asicen-ifdhandler SHARED
-      third_party/px4-userland/userland/src/pcsc_ifd.cpp)
-    target_include_directories(asicen-ifdhandler PRIVATE
-      third_party/px4-userland/userland/include)
-    target_link_libraries(asicen-ifdhandler PRIVATE
-      asicen_pcsc_ifd_core PkgConfig::PCSCLITE)
-    target_compile_options(asicen-ifdhandler PRIVATE
+  if(ASICEN_BUILD_TESTS)
+    add_executable(asicen-ifd-prefix-tests
+      userland/tests/asicen_ifd_prefix_tests.cpp)
+    target_link_libraries(asicen-ifd-prefix-tests PRIVATE asicen_pcsc_ifd_core)
+    target_compile_options(asicen-ifd-prefix-tests PRIVATE
       -Wall -Wextra -Wpedantic -Werror)
-    set_target_properties(asicen-ifdhandler PROPERTIES OUTPUT_NAME ifd-asicen)
-    if(ASICEN_BUILD_TESTS)
-      add_executable(asicen-ifd-prefix-tests
-        userland/tests/asicen_ifd_prefix_tests.cpp)
-      target_link_libraries(asicen-ifd-prefix-tests PRIVATE asicen_pcsc_ifd_core)
-      target_compile_options(asicen-ifd-prefix-tests PRIVATE
-        -Wall -Wextra -Wpedantic -Werror)
-    endif()
-  else()
-    message(STATUS "pcsc-lite headers unavailable; skipping asicen-ifdhandler")
   endif()
 
+  if(ASICEN_ENABLE_IFD)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(PCSCLITE QUIET IMPORTED_TARGET libpcsclite)
+    endif()
+    if(PCSCLITE_FOUND)
+      add_library(asicen-ifdhandler SHARED
+        third_party/px4-userland/userland/src/pcsc_ifd.cpp)
+      target_include_directories(asicen-ifdhandler PRIVATE
+        third_party/px4-userland/userland/include)
+      target_link_libraries(asicen-ifdhandler PRIVATE
+        asicen_pcsc_ifd_core PkgConfig::PCSCLITE)
+      target_compile_options(asicen-ifdhandler PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+      set_target_properties(asicen-ifdhandler PROPERTIES OUTPUT_NAME ifd-asicen)
+    elseif(ASICEN_REQUIRE_IFD)
+      message(FATAL_ERROR "ASICEN_ENABLE_IFD=ON requires pcsc-lite development files")
+    else()
+      message(STATUS "pcsc-lite development files unavailable; skipping asicen-ifdhandler")
+    endif()
+  endif()
+endif()
+
+if(ASICEN_ENABLE_LIBUSB)
   add_executable(asicen-probe userland/tools/asicen_probe.cpp)
   target_link_libraries(asicen-probe PRIVATE asicen_libusb)
   target_compile_options(asicen-probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -360,6 +396,10 @@ if(ASICEN_BUILD_TESTS)
 
   if(UNIX)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME asicen-static-distribution-tests
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/static_distribution_tests.py)
+    set_tests_properties(asicen-static-distribution-tests PROPERTIES TIMEOUT 20)
     add_test(NAME asicen-product-cli-integration
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/product_cli_integration.py

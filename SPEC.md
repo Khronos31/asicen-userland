@@ -126,6 +126,10 @@ remain useful development milestones, not a replacement for this contract.
 - Do not edit HA config, restart HA/add-ons, change production tuner/card
   services, touch secret files, release/version-bump, or make this repo public.
 - Keep vendor binaries, firmware, TS samples and card data untracked.
+  Firmware is an exception for binary distribution archives only: the user's
+  2026-10-09 instruction requires it there, supplied from outside the repo,
+  with vendor provenance and unresolved-rights notice. Never include firmware
+  in Git or label it covered by the product's open-source license.
 - Do not change existing tests or adopt kernel modules/legacy ioctl devices.
 - No LNB voltage enablement. Target the attached PX-W3U3 only by observed port
   path/VID/PID and fresh USB addresses; never reset its parent hub.

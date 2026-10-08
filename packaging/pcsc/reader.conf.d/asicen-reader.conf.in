@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# ASICEN W3U3 pcsc-lite reader configuration template.
+# Replace every @...@ placeholder for the local pcscd installation.
+FRIENDLYNAME "ASICEN PLEX W3U3 B-CAS Reader"
+DEVICENAME   asicen-userland:runtime=@ASICEN_RUNTIME_DIR@:instance=@ASICEN_INSTANCE@:access=@ASICEN_ACCESS@
+LIBPATH      @ASICEN_IFD_LIBRARY@
+CHANNELID    0

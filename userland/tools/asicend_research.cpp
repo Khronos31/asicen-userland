@@ -5,6 +5,7 @@
 
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <poll.h>
 #include <signal.h>

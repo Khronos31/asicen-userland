@@ -5,10 +5,14 @@ starting with the original PX-W3U3. Based on the protocol skeleton and evidence
 from [asicen-research](https://github.com/Khronos31/asicen-research).
 
 This repository is private during development. Public visibility is planned for
-the 0.1.0 release. **Distribution parity is not implemented:** the current
-native development binaries depend on glibc and dynamically linked libusb;
-the nine px4-equivalent platform archives, static builds and packaging audits
-are still required. See the [compatibility audit](docs/compatibility-audit-2026-10-09.md).
+the 0.1.0 release. **Full distribution parity remains incomplete.** Linux
+x86_64 private candidates now have fully static musl commands, static libusb,
+and matching glibc/musl IFD variants. Extracted package checks and modified
+libusb source-based relinking passed; see the
+[static build evidence](docs/linux-static-validation-2026-10-09.md).
+The remaining platforms in the nine-archive contract still need their own
+builds and runtime checks. Ordinary development builds remain dynamically
+linked. See the [compatibility audit](docs/compatibility-audit-2026-10-09.md).
 Both USB functions have booted and responded to read-only
 queries. One terrestrial lane has tuned and locked on the attached PX-W3U3.
 The isolated official Linux environment now captures terrestrial TS; replacing
@@ -35,7 +39,7 @@ Requires a C++17 compiler, CMake, pkg-config, and libusb development headers.
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DASICEN_ENABLE_LIBUSB=ON
 cmake --build build --parallel 2
-ctest --test-dir build --output-on-failure
+(cd build && ctest --output-on-failure)
 ```
 
 Use Release for physical capture. In a same-source comparison on Latitude,
@@ -130,8 +134,12 @@ It changes hardware state and can affect the other function in the enclosure.
 Do not use an old USB address after re-enumeration. No automatic firmware
 download, driver detach, hub reset, or transfer retry is performed.
 
-Vendor firmware is not included. The extraction script operates on the original
-vendor `loader.ko`; vendor binaries and firmware remain locally ignored.
+Vendor firmware is excluded from Git and corresponding-source archives.
+Binary distribution packages will include an externally supplied firmware
+copy, per the user's2026-10-09 decision; redistribution rights remain
+unresolved and are stated separately in the vendor notice. The extraction
+script operates on the original vendor `loader.ko`. See [NOTICES.md](NOTICES.md)
+for the GPLv2 product license, static dependencies and firmware distinction.
 
 See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md) for provenance, observed
 USB topology, transfer results, and unresolved bring-up work.

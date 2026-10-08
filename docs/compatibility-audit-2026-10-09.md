@@ -3,6 +3,13 @@
 Verdict: **distribution compatibility is not satisfied**. Native TS and card
 success established reception on Latitude, not the required release matrix.
 
+Follow-up: the [Linux static validation](linux-static-validation-2026-10-09.md)
+establishes two private x86_64 package variants, exact-source rebuilding and
+modified-libusb relinking. The dependency observations below describe the
+original development build; they are not the dependency state of those new
+candidates. The remaining seven platform archives and target-runtime checks
+are still outstanding.
+
 Inspected ASICEN main `3a06b336f233a0f9e28716678f9b6dc237b857c7` and local
 px4-userland `3de7d512cef11756e6f033557ee49917cad2f11c`. The latter's SPEC
 10.4, `.github/workflows/build_userland.yml`, `scripts/build-linux-static.sh`
@@ -24,9 +31,9 @@ under `out/gcc-release-agent`:
 | asicen-ts | /lib64/ld-linux-x86-64.so.2 | libstdc++.so.6, libgcc_s.so.1, libc.so.6 | present |
 | libifd-asicen.so | none | libstdc++.so.6, libc.so.6 | present |
 
-Thus all three commands depend on glibc, and the daemon dynamically links
+In that baseline build, all three commands depend on glibc, and the daemon dynamically links
 libusb. `asicen_libusb` being a CMake STATIC library does not make its
-`PkgConfig::LIBUSB` dependency static. CMake currently has no equivalent to
+`PkgConfig::LIBUSB` dependency static. Baseline CMake had no equivalent to
 px4's explicit libusb archive override/static production build path.
 The IFD is expected to remain a shared plugin, but no matching musl variant
 or verified glibc 2.31 floor exists in this build evidence.
@@ -45,8 +52,8 @@ tools do not count toward this parity.
 
 | Platform archive suffix | Reference contract | ASICEN status |
 | --- | --- | --- |
-| linux-glibc-x86_64 | fully static musl commands + glibc 2.31 IFD | unmet |
-| linux-musl-x86_64 | same commands + musl IFD | unmet |
+| linux-glibc-x86_64 | fully static musl commands + glibc 2.31 IFD | private candidate build/package/mock/load checks passed; live static reception not yet checked |
+| linux-musl-x86_64 | same commands + musl IFD | private candidate build/package/mock/load checks passed; live static reception not yet checked |
 | linux-glibc-aarch64 | fully static musl commands + glibc 2.31 IFD | unmet |
 | linux-musl-aarch64 | same commands + musl IFD | unmet |
 | darwin-arm64 | system dependencies only, static libusb, PC/SC bundle | unimplemented/unverified |
@@ -59,8 +66,9 @@ The in-progress reference Windows packaging specifies a libusb DLL. ASICEN's
 explicit static-libusb requirement is stricter on that target; copying that
 package unchanged would not satisfy it. The reference's planned Phase1 excludes
 a Windows WinSCard/PCSC IFD, so one is not implied by package parity.
-The corresponding-source archive, dependency notices, relink verification
-and checksum manifest are also missing on the ASICEN side.
+The original audit also found missing corresponding-source archives,
+dependency notices, relink verification and checksum manifests. These are
+now present and verified for the two Linux x86_64 private candidates.
 
 ## CLI and runtime gaps
 
@@ -105,6 +113,7 @@ and checksum manifest are also missing on the ASICEN side.
    use with the actual candidate binaries instead of inheriting development
    binary results silently.
 
-This audit changes the documented acceptance contract only. It does not
-claim to have repaired the build, supplied missing platform implementations,
-or produced release artifacts. The repository remains private and unreleased.
+The original audit changed the documented acceptance contract only; the
+linked follow-up records the subsequent Linux x86_64 implementation and
+validation. Missing platform implementations are still open. The repository
+remains private and unreleased.
