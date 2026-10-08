@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
