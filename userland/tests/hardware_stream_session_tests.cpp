@@ -110,6 +110,40 @@ public:
     std::atomic<int> exit_code{0};
 };
 
+class ShutdownTrackingFrontend final : public TunerServiceBackend {
+public:
+    Result<void> open_receiver(std::uint8_t) noexcept override { return Result<void>::success(); }
+    Result<void> tune_terrestrial(std::uint8_t, std::uint32_t,
+                                  std::uint32_t) noexcept override {
+        return Result<void>::success();
+    }
+    Result<void> tune_satellite(std::uint8_t, std::uint32_t,
+                                std::uint32_t) noexcept override {
+        return Result<void>::success();
+    }
+    Result<bool> is_locked(std::uint8_t, ipc::System) noexcept override {
+        return Result<bool>::success(true);
+    }
+    Result<void> select_satellite_slot(std::uint8_t, std::uint8_t,
+                                       std::uint32_t) noexcept override {
+        return Result<void>::success();
+    }
+    Result<void> select_satellite_tsid(std::uint8_t, std::uint16_t,
+                                       std::uint32_t) noexcept override {
+        return Result<void>::success();
+    }
+    Result<void> close_receiver(std::uint8_t) noexcept override {
+        return Result<void>::success();
+    }
+    Result<void> shutdown() noexcept override {
+        ++shutdown_calls;
+        return shutdown_error ? Result<void>::failure(Error::NOT_READY)
+                              : Result<void>::success();
+    }
+    unsigned shutdown_calls = 0;
+    bool shutdown_error = false;
+};
+
 std::vector<std::uint8_t> packet(std::uint8_t cc) {
     std::vector<std::uint8_t> bytes(188U, 0xffU);
     bytes[0] = 0x47U;
@@ -272,7 +306,7 @@ void shutdown_cleans_source_and_is_sticky_against_restart() {
 }
 
 void shutdown_cleanup_failure_is_reported_in_final_state() {
-    asicen::MockTunerBackend frontend;
+    ShutdownTrackingFrontend frontend;
     FakeSource source;
     FakeFatal fatal;
     asicen::HardwareStreamService service(frontend, source, fatal);
@@ -281,8 +315,13 @@ void shutdown_cleanup_failure_is_reported_in_final_state() {
     check(service.attach(id), "attach shutdown failure case");
     check(service.detach(id), "detach before cleanup failure");
     source.stop_error = true;
+    frontend.shutdown_error = true;
     check(service.stop_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
           "shutdown cleanup error is returned");
+    check(service.shutdown().error() == Error::USB_IO,
+          "shutdown retains earlier stream cleanup failure");
+    check(frontend.shutdown_calls == 1U,
+          "frontend shutdown still runs after quarantined stream cleanup failure");
     const auto final = service.final_snapshot(id);
     check(final && final.value().counters.usb_errors == 1U &&
               final.value().terminal == static_cast<std::uint8_t>(

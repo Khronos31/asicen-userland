@@ -8,6 +8,14 @@ TransportCaptureDecoderV7::TransportCaptureDecoderV7(const std::uint8_t* seed,
     valid_ = derive_transport_material_v7(seed, seed_size, &material_);
 }
 
+TransportCaptureDecoderV7::~TransportCaptureDecoderV7() { clear(); }
+
+void TransportCaptureDecoderV7::clear() noexcept {
+    volatile std::uint8_t* bytes = reinterpret_cast<volatile std::uint8_t*>(&material_);
+    for (std::size_t i = 0; i < sizeof(material_); ++i) bytes[i] = 0U;
+    valid_ = false;
+}
+
 std::vector<std::uint8_t> TransportCaptureDecoderV7::push(
     const std::uint8_t* bytes, std::size_t size) {
     if (!valid_) return {};

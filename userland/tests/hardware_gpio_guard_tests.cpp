@@ -39,6 +39,12 @@ void exhaustive_gpio_value_mask_guard() {
             }
         }
     }
+    asicen::ControlTransfer read{};
+    bool skip = true;
+    check(asicen::mask_lnb_gpio_operation(asicen::make_gpio_set(0U, 0U), &read, &skip),
+          "read-only GPIO request remains allowed");
+    check(!skip && read.value == 0U,
+          "GPIO read uses zero value/mask and is not rewritten as a write");
 }
 
 void existing_startup_plans_are_guarded_before_transport() {

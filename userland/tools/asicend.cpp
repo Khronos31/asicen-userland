@@ -19,6 +19,9 @@
 #include <thread>
 
 int run_asicend_research(int argc, char** argv);
+#ifdef ASICEN_ENABLE_LIBUSB
+int run_asicend_hardware(int argc, char** argv);
+#endif
 
 namespace {
 
@@ -70,16 +73,30 @@ int acquire_enclosure_lock()
 
 void print_usage(FILE* output)
 {
+#ifdef ASICEN_ENABLE_LIBUSB
+    std::fprintf(output,
+        "usage: asicend --mock [--runtime-dir PATH] [--instance TOKEN]\n"
+        "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT\n"
+        "               --sibling BUS:ADDR --sibling-port BUS-PORT\n"
+        "       asicend --list | --list-json\n"
+        "Hardware mode owns both validated W3U3 functions; only receiver 1 / ISDB-T is supported.\n");
+#else
     std::fprintf(output,
         "usage: asicend --mock [--runtime-dir PATH] [--instance TOKEN]\n"
         "       asicend --list | --list-json\n"
-        "ASICEN hardware access is disabled in this mock-only build.\n");
+        "Hardware mode is unavailable in this libusb-OFF build.\n");
+#endif
 }
 
 int list_devices(bool json)
 {
+#ifdef ASICEN_ENABLE_LIBUSB
+    if (json) std::puts("{\"devices\":[],\"backend\":\"not-enumerated\",\"status\":\"unsupported\"}");
+    else std::puts("Device enumeration is not implemented; hardware selection requires explicit paths.");
+#else
     if (json) std::puts("{\"devices\":[],\"serial\":null,\"backend\":\"mock-only\"}");
     else std::puts("No ASICEN hardware backend is enabled (mock-only build).");
+#endif
     return 0;
 }
 
@@ -89,9 +106,19 @@ int main(int argc, char** argv)
 {
     bool has_mock = false;
     bool has_research_socket = false;
+    bool has_hardware = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--mock") == 0) has_mock = true;
         if (std::strcmp(argv[i], "--socket") == 0) has_research_socket = true;
+        if (std::strcmp(argv[i], "--hardware") == 0) has_hardware = true;
+    }
+    if (has_hardware) {
+#ifdef ASICEN_ENABLE_LIBUSB
+        return run_asicend_hardware(argc, argv);
+#else
+        std::fprintf(stderr, "hardware backend unavailable in this libusb-OFF build\n");
+        return 3;
+#endif
     }
     if (has_mock && has_research_socket) return run_asicend_research(argc, argv);
     bool mock = false;

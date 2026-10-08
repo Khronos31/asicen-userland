@@ -14,6 +14,8 @@ class TransportCaptureDecoderV7 final {
 public:
     explicit TransportCaptureDecoderV7(const std::uint8_t* seed,
                                        std::size_t seed_size);
+    ~TransportCaptureDecoderV7();
+    void clear() noexcept;
     bool valid() const { return valid_; }
     std::vector<std::uint8_t> push(const std::uint8_t* bytes, std::size_t size);
     std::uint64_t discarded_bytes() const { return framer_.discarded_bytes(); }

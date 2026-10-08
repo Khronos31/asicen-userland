@@ -49,6 +49,7 @@ target_link_libraries(asicen_hardware_session PUBLIC asicen_px4_mock Threads::Th
 target_compile_options(asicen_hardware_session PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_library(asicen_core STATIC
+  userland/src/capture_drain.cpp
   userland/src/card_mailbox.cpp
   userland/src/channel_plan.cpp
   userland/src/device_profile.cpp
@@ -82,9 +83,10 @@ if(ASICEN_ENABLE_LIBUSB)
 
   add_library(asicen_libusb STATIC
     userland/src/libusb_transport.cpp
+    userland/src/libusb_hardware_backend.cpp
   )
   target_include_directories(asicen_libusb PUBLIC userland/include)
-  target_link_libraries(asicen_libusb PUBLIC asicen_core PkgConfig::LIBUSB)
+  target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session PkgConfig::LIBUSB)
   target_compile_options(asicen_libusb PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
   add_executable(asicen-probe userland/tools/asicen_probe.cpp)
@@ -106,6 +108,12 @@ if(UNIX)
     userland/tools/asicend_research.cpp)
   target_link_libraries(asicend PRIVATE asicen_px4_mock asicen_core Threads::Threads)
   target_compile_options(asicend PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+  if(ASICEN_ENABLE_LIBUSB)
+    target_sources(asicend PRIVATE userland/tools/asicend_hardware.cpp)
+    target_compile_definitions(asicend PRIVATE ASICEN_ENABLE_LIBUSB=1)
+    target_link_libraries(asicend PRIVATE asicen_libusb)
+  endif()
 
   add_executable(asicenctl
     userland/tools/asicenctl.cpp
@@ -183,6 +191,24 @@ if(ASICEN_BUILD_TESTS)
     -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-hardware-session-tests COMMAND asicen-hardware-session-tests)
   set_tests_properties(asicen-hardware-session-tests PROPERTIES TIMEOUT 10)
+
+  add_executable(asicen-hardware-ipc-integration-tests
+    userland/tests/hardware_ipc_integration_tests.cpp)
+  target_include_directories(asicen-hardware-ipc-integration-tests PRIVATE
+    userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tests)
+  target_link_libraries(asicen-hardware-ipc-integration-tests PRIVATE asicen_hardware_session)
+  target_compile_options(asicen-hardware-ipc-integration-tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-hardware-ipc-integration-tests
+           COMMAND asicen-hardware-ipc-integration-tests)
+  set_tests_properties(asicen-hardware-ipc-integration-tests PROPERTIES TIMEOUT 10)
+
+  add_executable(asicen-capture-drain-tests userland/tests/capture_drain_tests.cpp)
+  target_include_directories(asicen-capture-drain-tests PRIVATE userland/include)
+  target_link_libraries(asicen-capture-drain-tests PRIVATE asicen_core)
+  target_compile_options(asicen-capture-drain-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-capture-drain-tests COMMAND asicen-capture-drain-tests)
+  set_tests_properties(asicen-capture-drain-tests PROPERTIES TIMEOUT 10)
 
   add_executable(asicen-hardware-gpio-guard-tests
     userland/tests/hardware_gpio_guard_tests.cpp)

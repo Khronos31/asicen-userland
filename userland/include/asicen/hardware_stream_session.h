@@ -3,6 +3,7 @@
 
 #include "px4/tuner_service.h"
 #include "px4/transport.h"
+#include "asicen/capture_drain.h"
 
 #include <atomic>
 #include <chrono>
@@ -15,15 +16,6 @@
 #include <vector>
 
 namespace asicen {
-
-enum class CaptureRunResult : std::uint8_t {
-    completed,
-    cancelled,
-    usb_error,
-    disconnected,
-    sync_error,
-    fatal_drain,
-};
 
 // A source owns the USB callback/URB storage. run() may emit only complete,
 // transformed 188-byte packets. interrupt() must wake a blocked run() without

@@ -134,26 +134,39 @@ Result<void> HardwareStreamService::shutdown() noexcept {
     std::lock_guard<std::mutex> life(lifecycle_mutex_);
     cancel_and_join();
     bool needs_stop = false;
+    bool already_quarantined = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == State::quarantined)
-            return Result<void>::failure(Error::USB_IO);
+        already_quarantined = state_ == State::quarantined;
         needs_stop = source_prepared_ && !source_stopped_;
     }
+    bool failed = already_quarantined;
+    Error first_error = Error::USB_IO;
     if (needs_stop) {
         const auto stopped = source_.stop();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!stopped) {
+            if (!failed) first_error = stopped.error();
+            failed = true;
+            source_stopped_ = true;  // attempted once; retain quarantine, avoid retry loops
             state_ = State::quarantined;
             set_terminal_locked(TunerStreamTerminal::usb_error);
             ++counters_.usb_errors;
             final_ = {counters_, static_cast<std::uint8_t>(terminal_)};
-            return Result<void>::failure(stopped.error());
+        } else {
+            source_stopped_ = true;
+            final_ = {counters_, static_cast<std::uint8_t>(terminal_)};
         }
-        source_stopped_ = true;
-        final_ = {counters_, static_cast<std::uint8_t>(terminal_)};
     }
-    return frontend_.shutdown();
+    // A failed ordinary stream cleanup still permits independent frontend
+    // shutdown work (notably safe GPIO restoration). Fatal callback-drain
+    // failures terminate inside source_.stop() before returning here.
+    const auto frontend_stopped = frontend_.shutdown();
+    if (!frontend_stopped && !failed) {
+        first_error = frontend_stopped.error();
+        failed = true;
+    }
+    return failed ? Result<void>::failure(first_error) : Result<void>::success();
 }
 
 Result<void> HardwareStreamService::start_capture(
@@ -234,6 +247,7 @@ Result<void> HardwareStreamService::stop_capture(
         const auto stopped = source_.stop();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!stopped) {
+            source_stopped_ = true;  // cleanup was attempted; the frontend still gets shutdown
             state_ = State::quarantined;
             set_terminal_locked(TunerStreamTerminal::usb_error);
             ++counters_.usb_errors;
