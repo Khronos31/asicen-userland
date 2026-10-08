@@ -844,7 +844,10 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
 // byte 0x40 bit2 by `flag`, FUSBDTV_Cmd_Reset_Channel(local, flag), write the
 // block back with all-zero 3-byte chunks skipped (as the vendor USB_CF_Write
 // does). The block contents come from the device, not a copied vendor table.
-FrontendRunResult run_filter_reset(FrontendTransport* transport, const FrontendOp& op) {
+FrontendRunResult run_filter_reset(
+    FrontendTransport* transport, const FrontendOp& op,
+    std::array<std::uint8_t, 0x45>* block_before = nullptr,
+    std::array<std::uint8_t, 0x45>* block_after = nullptr) {
     const std::uint8_t local = op.local;
     if (local > 1) {
         return FrontendRunResult::InvalidArgument;
@@ -892,11 +895,14 @@ FrontendRunResult run_filter_reset(FrontendTransport* transport, const FrontendO
             offset += chunk;
         }
 
+        if (block_before != nullptr) *block_before = block;
+
         if (op.flag == 0) {
             block[0x40] = static_cast<std::uint8_t>(block[0x40] & 0xfbU);
         } else {
             block[0x40] = static_cast<std::uint8_t>(block[0x40] | 0x04U);
         }
+        if (block_after != nullptr) *block_after = block;
     }
 
     FrontendRunResult result = run_one(make_reset_channel(local, op.flag));
@@ -984,6 +990,20 @@ FrontendRunResult run_frontend_plan(const FrontendPlan& plan,
     }
     FrontendRunReport local_report{};
     return run_plan_ops(plan, transport, report != nullptr ? report : &local_report);
+}
+
+FrontendRunResult run_filter_reset_operation(
+    FrontendTransport* transport, std::uint8_t local, std::uint8_t reset_state,
+    std::array<std::uint8_t, 0x45>* block_before,
+    std::array<std::uint8_t, 0x45>* block_after) {
+    if (transport == nullptr || local > 1 || reset_state > 1)
+        return FrontendRunResult::InvalidArgument;
+    FrontendOp op{};
+    op.kind = FrontendOpKind::FilterReset;
+    op.local = local;
+    op.block_rmw = true;
+    op.flag = reset_state;
+    return run_filter_reset(transport, op, block_before, block_after);
 }
 
 bool parse_usb_location(const std::string& text, std::uint8_t* bus,

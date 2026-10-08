@@ -193,6 +193,28 @@ bool make_cf_write(std::uint8_t local,
     return true;
 }
 
+bool cf_chunk_write_response_complete(int transferred, std::size_t payload_size) {
+    return payload_size != 0 && payload_size <= 3 &&
+           transferred == static_cast<int>(payload_size + 1U);
+}
+
+std::vector<ControlTransfer> build_cf_block_write_plan(
+    std::uint8_t local, const std::uint8_t* data, std::size_t size,
+    std::uint16_t timeout_ms) {
+    std::vector<ControlTransfer> plan;
+    if (local > 1 || data == nullptr || size != 0x45) return plan;
+    for (std::size_t offset = 0; offset < size;) {
+        const std::size_t chunk = std::min<std::size_t>(3, size - offset);
+        ControlTransfer transfer{};
+        if (!make_cf_write(local, static_cast<std::uint8_t>(offset), data + offset,
+                           chunk, &transfer, timeout_ms))
+            return {};
+        plan.push_back(transfer);
+        offset += chunk;
+    }
+    return plan;
+}
+
 std::vector<ControlTransfer> build_i2c_write_sequence(
     std::uint8_t slave,
     std::uint8_t reg,

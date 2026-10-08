@@ -490,3 +490,64 @@ CF40..44=`04 00 20 1f ff`; final GPIO76 and terrestrial b0=A9. Local build
 and17 CTests passed, including callback accounting and handoff cases.
 The next proposed independent comparison is the source-observed post-lock
 FilterReset/FilterONOFF timing; that comparison has not been performed.
+
+### Extra FilterReset/FilterONOFF timing A/B
+
+The optional `--filter-repeat before|after` diagnostic retains the existing
+setup and adds exactly one operation pair P: fresh-block
+FilterReset(local1, block_rmw1, state1), then fresh CF40 RMW OR03.
+It requires reset1/local1/queue-depth4/filter-start. Both variants check
+terrestrial lock before the variant branch and immediately after post-start
+bit3. P obeys the existing acquisition deadline. No fixed wait, Clean buffer
+substitute, additional PID-boundary setting, controller write or GPIO action
+is included. The original polling branch is conditional; this experiment
+does not assert that P is always required by the official driver.
+
+| Variant | Operation order after ordinary setup and selector-on |
+| --- | --- |
+| A (`before`) | lock, P, four submits, DSC06, bit3, lock, acquisition |
+| B (`after`) | lock, four submits, DSC06, bit3, lock, P, acquisition |
+
+Before ordinary setup the diagnostic snapshots CF00..44 (69 bytes).
+After stop/drain it writes every saved chunk, including all-zero chunks,
+and reads back all69 bytes for equality. This full-block restoration is
+specific to filter-repeat; ordinary filter-start still restores only CF40.
+
+Parent held controller05=20 throughout the paired A/B run, with T27,
+4x4096-byte transfers and5-second deadlines. Results:
+
+| Observation | A before | B after |
+| --- | --- | --- |
+| Lock before / after bit3 | A9 / A9 | A9 / A9 |
+| P result / duration | ok / 160858 us | ok / 156318 us |
+| CF40 before / after P | 07 / 07 | 0f / 0f |
+| CF41..44 before / after P | 1f ff 1f ff / same | 1f ff 1f ff / same |
+| File bytes / exit | 0 / 1 | 0 / 1 |
+| Normal handoffs / bytes | 0 / 0 | 0 / 0 |
+| Pre-stop pending / ready | 4 / 0 | 4 / 0 |
+| Callback counts Normal / StoppingDsc / CancelDrain | 0 / 0 / 4 | 0 / 0 / 4 |
+| Callback actual bytes, all phases | 0 | 0 |
+| Each terminal callback | CANCELLED, requested4096, actual0 | same |
+| Each cancel return | 0 | 0 |
+
+Logs: `evidence/raw/capture-primary-T27-filter-repeat-paired-before.txt`
+and `evidence/raw/capture-primary-T27-filter-repeat-paired-after.txt`.
+All69 CF bytes matched the original snapshot after each capture; controller
+read20 and lockA9 between runs. At final cleanup parent sent corrected
+stop07, restored controller05=00 and all69 CF bytes, and read back
+CF00..3f allzero, CF40..44=`04 00 20 1f ff`, controller05=00, GPIO76,
+terrestrial b0=A9. No LNB, satellite tune or card APDU operation ran.
+
+An initial A-only attempt also reported zero, but parent mistakenly tested
+only the last20 log lines and missed its first lock line. The wrapper
+restored state and stopped before B. The paired comparison above was rerun
+with both lock lines checked from the full logs and controller20 held
+constant. The initial log is retained separately as
+`evidence/raw/capture-primary-T27-filter-repeat-before.txt`.
+
+This pair's placement alone did not produce a received sample or nonzero
+libusb callback length in the tested state. It does not rule out other
+startup prerequisites or establish that the conditional official polling
+path has been fully reproduced. Local build and17 CTests passed, including
+A/B order, common lock checks, fresh-bit preservation, transfer-length and
+full-block restoration cases. Existing test expectations were unchanged.

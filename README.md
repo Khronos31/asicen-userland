@@ -66,5 +66,13 @@ Diagnostics use stderr when capturing. Zero-byte captures return failure.
 `--queue-depth 4` reserves four asynchronous reads before acquisition starts;
 the default depth1 uses synchronous reads. The deadline bounds acquisition,
 while cleanup waits for terminal callbacks before freeing transfer buffers.
+The experimental `--filter-start --filter-repeat before|after` A/B diagnostic
+is restricted to local1, reset-state1 and queue-depth4. It checks terrestrial
+lock, repeats the source filter-reset operation at the selected point, logs CF
+boundary bytes and elapsed time, and restores/verifies the complete original
+CF block after cleanup. It is not a default acquisition requirement; the
+source's later polling path does not establish this as a mandatory sequence.
+The controller register05 setting remains an external test condition and is
+not changed by this command.
 See [SPEC.md](SPEC.md) for the px4 CLI compatibility target and acceptance gates.
 Source attribution and component license details are in [NOTICES.md](NOTICES.md).

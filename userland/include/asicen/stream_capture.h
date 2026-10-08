@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <array>
 
 namespace asicen {
 
@@ -48,6 +49,7 @@ bool cf40_write_response_complete(int transferred);
 
 class CaptureBackend {
 public:
+    static constexpr std::size_t kCfBlockSize = 0x45;
     virtual ~CaptureBackend() = default;
     virtual bool dsc_start(std::uint8_t local) = 0;
     virtual bool dsc_stop(std::uint8_t local) = 0;
@@ -64,6 +66,22 @@ public:
         (void)local;
         (void)value;
         return false;
+    }
+    virtual bool read_cf_block(std::uint8_t local, std::uint8_t* data,
+                               std::size_t size) {
+        (void)local; (void)data; (void)size; return false;
+    }
+    virtual bool write_cf_block(std::uint8_t local, const std::uint8_t* data,
+                                std::size_t size) {
+        (void)local; (void)data; (void)size; return false;
+    }
+    virtual bool terrestrial_locked(std::uint8_t local, bool* locked,
+                                    std::chrono::steady_clock::time_point deadline) {
+        (void)local; (void)locked; (void)deadline; return false;
+    }
+    virtual bool filter_repeat_pulse(std::uint8_t local, std::uint8_t reset_state,
+                                     std::chrono::steady_clock::time_point deadline) {
+        (void)local; (void)reset_state; (void)deadline; return false;
     }
     virtual bool cancelled() const { return false; }
 };

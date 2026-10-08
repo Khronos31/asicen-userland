@@ -19,6 +19,7 @@
 // encoding used here are documented in docs/reverse-engineering/linux-abi.md
 // and were re-derived from the vendor disassembly.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -176,6 +177,10 @@ std::uint32_t terrestrial_tune_center_khz(std::uint32_t freq_khz);
 FrontendRunResult run_frontend_plan(const FrontendPlan& plan,
                                     FrontendTransport* transport,
                                     FrontendRunReport* report = nullptr);
+FrontendRunResult run_filter_reset_operation(
+    FrontendTransport* transport, std::uint8_t local, std::uint8_t reset_state,
+    std::array<std::uint8_t, 0x45>* block_before = nullptr,
+    std::array<std::uint8_t, 0x45>* block_after = nullptr);
 
 // Offline target/argument parsing used by the diagnostic tool.
 bool parse_usb_location(const std::string& text, std::uint8_t* bus, std::uint8_t* address);

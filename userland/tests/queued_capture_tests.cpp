@@ -1,5 +1,6 @@
 #include "asicen/queued_capture.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -20,13 +21,28 @@ void check(bool value, const char* message) {
 
 class Control final : public asicen::CaptureBackend {
 public:
-    explicit Control(std::vector<std::string>* trace) : trace_(trace) {}
+    explicit Control(std::vector<std::string>* trace) : trace_(trace) {
+        block.fill(0);
+        block[0] = 0x11;
+        block[0x40] = cf40;
+        block[0x44] = 0x42;
+    }
     bool start_result = true;
     bool stop_result = true;
     bool cancel = false;
     std::uint8_t cf40 = 0xa4;
     int fail_cf_write_at = 0;
     int cf_write_count = 0;
+    int cf_read_count = 0;
+    int fail_cf_read_at = 0;
+    std::array<std::uint8_t, 0x45> block{};
+    std::array<std::uint8_t, 0x45> restored_block{};
+    bool fail_repeat = false;
+    bool fail_full_block_write = false;
+    std::vector<bool> lock_results;
+    std::size_t lock_cursor = 0;
+    int full_block_writes = 0;
+    std::uint8_t pulse_cf40 = 0;
 
     bool dsc_start(std::uint8_t) override {
         trace_->push_back("dsc-start");
@@ -43,6 +59,9 @@ public:
     bool read_cf40(std::uint8_t local, std::uint8_t* value) override {
         check(local == 1 && value != nullptr, "CF40 snapshot uses local 1");
         trace_->push_back("cf-read");
+        ++cf_read_count;
+        if (cf_read_count == fail_cf_read_at) return false;
+        cf40 = block[0x40];
         *value = cf40;
         return true;
     }
@@ -53,7 +72,48 @@ public:
         // Model a possibly-partial control transfer: update state before
         // returning failure so restoration is independently verified.
         cf40 = value;
+        block[0x40] = value;
         return cf_write_count != fail_cf_write_at;
+    }
+    bool read_cf_block(std::uint8_t local, std::uint8_t* data,
+                       std::size_t size) override {
+        check(local == 1 && data != nullptr && size == block.size(),
+              "repeat block snapshot uses local 1 and full CF extent");
+        trace_->push_back("block-read");
+        std::copy(block.begin(), block.end(), data);
+        return true;
+    }
+    bool write_cf_block(std::uint8_t local, const std::uint8_t* data,
+                        std::size_t size) override {
+        check(local == 1 && data != nullptr && size == block.size(),
+              "repeat restoration writes complete CF extent");
+        trace_->push_back("block-restore");
+        ++full_block_writes;
+        if (fail_full_block_write) return false;
+        std::copy(data, data + size, block.begin());
+        restored_block = block;
+        cf40 = block[0x40];
+        return true;
+    }
+    bool terrestrial_locked(std::uint8_t local, bool* locked,
+                            std::chrono::steady_clock::time_point) override {
+        check(local == 1 && locked != nullptr, "repeat lock check uses lane 1");
+        trace_->push_back("lock");
+        const bool result = lock_cursor < lock_results.size()
+                                ? lock_results[lock_cursor++] : true;
+        *locked = result;
+        return true;
+    }
+    bool filter_repeat_pulse(std::uint8_t local, std::uint8_t reset_state,
+                             std::chrono::steady_clock::time_point) override {
+        check(local == 1 && reset_state == 1, "repeat P uses reset state 1 on lane 1");
+        trace_->push_back("P");
+        if (fail_repeat) return false;
+        block[0x40] = static_cast<std::uint8_t>(block[0x40] | 0x04U);
+        block[0x40] = static_cast<std::uint8_t>(block[0x40] | 0x03U);
+        cf40 = block[0x40];
+        pulse_cf40 = cf40;
+        return true;
     }
     bool cancelled() const override { return cancel; }
 
@@ -559,6 +619,114 @@ void queue_observation_counts_handoff_before_output_and_error_checks() {
     }
 }
 
+void filter_repeat_ab_orders_lock_reset_and_restoration() {
+    for (const auto mode : {asicen::FilterRepeat::BeforeQueue,
+                            asicen::FilterRepeat::AfterPostStartBit}) {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        control.cf40 = 0xa8;
+        control.block[0x40] = control.cf40;
+        Queue queue(&trace);
+        Output output;
+        const auto snapshot = control.block;
+        queue.events.push_back({0, asicen::CaptureIo::Ok, queue.bytes.data(), 4});
+        asicen::CaptureStats stats{};
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(4), 4, &stats, true,
+            &snapshot[0x40], nullptr, mode, 1, snapshot.data());
+        check(result == asicen::CaptureOutcome::Completed,
+              "filter-repeat A/B capture completes through ordinary lifecycle");
+        check(control.full_block_writes == 1 && control.block == snapshot &&
+                  control.restored_block == snapshot,
+              "complete original CF block including zero chunks is restored");
+        const auto find_after = [&](const char* value, std::size_t start) {
+            for (std::size_t i = start; i < trace.size(); ++i)
+                if (trace[i] == value) return i;
+            return trace.size();
+        };
+        const auto lock1 = find_after("lock", 0);
+        const auto prepare = find_after("prepare", 0);
+        const auto start = find_after("dsc-start", 0);
+        const auto postbit = find_after(
+            mode == asicen::FilterRepeat::BeforeQueue ? "cf-write:175" : "cf-write:171",
+            start + 1);
+        const auto lock2 = find_after("lock", lock1 + 1);
+        const auto pulse = find_after("P", 0);
+        const auto stop = find_after("dsc-stop", 0);
+        const auto drain = find_after("cancel-drain", 0);
+        const auto restore = find_after("block-restore", 0);
+        if (mode == asicen::FilterRepeat::BeforeQueue) {
+            check(lock1 < pulse && pulse < prepare && prepare < start &&
+                      start < postbit && postbit < lock2 && lock2 < stop,
+                  "A orders pre-start lock, P, queue, DSC, post-bit lock and stop");
+        } else {
+            check(lock1 < prepare && prepare < start && start < postbit &&
+                      postbit < lock2 && lock2 < pulse && pulse < stop,
+                  "B orders pre-start lock, queue, DSC, post-bit lock and P");
+        }
+        check(stop < drain && drain < restore,
+              "full CF restoration follows DSC stop and async drain");
+        check((control.pulse_cf40 & 0x08U) == (snapshot[0x40] & 0x08U) &&
+                  (control.pulse_cf40 & 0x07U) == 0x07U,
+              "repeat reset preserves the source selector bit before final restore");
+    }
+}
+
+void filter_repeat_failure_paths_restore_full_block() {
+    const auto run_failure = [](asicen::FilterRepeat mode,
+                                std::vector<bool> locks,
+                                bool pulse_failure, bool start_failure,
+                                bool expect_prepare, bool expect_pulse) {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        control.lock_results = std::move(locks);
+        control.fail_repeat = pulse_failure;
+        control.start_result = !start_failure;
+        Queue queue(&trace);
+        Output output;
+        const auto snapshot = control.block;
+        asicen::CaptureStats stats{};
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(), 4, &stats, true,
+            &snapshot[0x40], nullptr, mode, 1, snapshot.data());
+        check(result == asicen::CaptureOutcome::UsbFailed,
+              "filter-repeat lock, P or start failure remains an error");
+        check(control.full_block_writes == 1 && control.block == snapshot,
+              "filter-repeat failure restores the complete original block");
+        check((std::find(trace.begin(), trace.end(), "prepare") != trace.end()) ==
+                  expect_prepare,
+              "filter-repeat failure occurs on expected side of host queue setup");
+        check((std::find(trace.begin(), trace.end(), "P") != trace.end()) ==
+                  expect_pulse,
+              "filter-repeat failure invokes P only when its branch reaches it");
+    };
+
+    run_failure(asicen::FilterRepeat::BeforeQueue, {false}, false, false, false, false);
+    run_failure(asicen::FilterRepeat::BeforeQueue, {true}, true, false, false, true);
+    run_failure(asicen::FilterRepeat::BeforeQueue, {true}, false, true, true, true);
+    run_failure(asicen::FilterRepeat::AfterPostStartBit, {true, false}, false, false,
+                true, false);
+    run_failure(asicen::FilterRepeat::AfterPostStartBit, {true, true}, true, false,
+                true, true);
+
+    {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        control.fail_cf_read_at = 1;
+        control.fail_full_block_write = true;
+        Queue queue(&trace);
+        Output output;
+        const auto snapshot = control.block;
+        asicen::CaptureStats stats{};
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(), 4, &stats, true,
+            &snapshot[0x40], nullptr, asicen::FilterRepeat::BeforeQueue, 1,
+            snapshot.data());
+        check(result == asicen::CaptureOutcome::UsbFailed && stats.cf40_restore_failed,
+              "early CF40 read and full-restore failures are explicitly reported");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -580,6 +748,8 @@ int main() {
     queue_observation_accounts_callbacks_once_and_bounds_events();
     queue_observation_preserves_normal_capture_accounting();
     queue_observation_counts_handoff_before_output_and_error_checks();
+    filter_repeat_ab_orders_lock_reset_and_restoration();
+    filter_repeat_failure_paths_restore_full_block();
     std::cout << "queued capture lifecycle tests passed\n";
     return 0;
 }

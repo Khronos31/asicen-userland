@@ -9,6 +9,7 @@
 namespace asicen {
 
 enum class QueueWait : std::uint8_t { Completion, Timeout, Error };
+enum class FilterRepeat : std::uint8_t { None, BeforeQueue, AfterPostStartBit };
 
 struct QueueCompletion {
     std::size_t slot = 0;
@@ -101,6 +102,9 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
                                  std::size_t depth, CaptureStats* stats,
                                  bool filter_start = false,
                                  const std::uint8_t* original_cf40 = nullptr,
-                                 QueueObservation* observation = nullptr);
+                                 QueueObservation* observation = nullptr,
+                                 FilterRepeat filter_repeat = FilterRepeat::None,
+                                 std::uint8_t reset_state = 1,
+                                 const std::uint8_t* original_cf_block = nullptr);
 
 }  // namespace asicen

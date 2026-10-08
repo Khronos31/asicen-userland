@@ -64,6 +64,10 @@ bool make_cf_write(std::uint8_t local,
                    std::size_t size,
                    ControlTransfer* out,
                    std::uint16_t timeout_ms = 1000);
+bool cf_chunk_write_response_complete(int transferred, std::size_t payload_size);
+std::vector<ControlTransfer> build_cf_block_write_plan(
+    std::uint8_t local, const std::uint8_t* data, std::size_t size,
+    std::uint16_t timeout_ms = 1000);
 
 // Reconstructs the packetization performed by UsbDTV_u32I2C for writes.
 // mode 2/3 uses the 0x0d staging buffer + 0x0e send path.
