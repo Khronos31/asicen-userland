@@ -33,6 +33,8 @@ public:
 CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
                                  CaptureOutput* output,
                                  const CaptureRequest& request,
-                                 std::size_t depth, CaptureStats* stats);
+                                 std::size_t depth, CaptureStats* stats,
+                                 bool filter_start = false,
+                                 const std::uint8_t* original_cf40 = nullptr);
 
 }  // namespace asicen

@@ -39,7 +39,12 @@ struct CaptureRequest {
 struct CaptureStats {
     std::uint64_t bytes = 0;
     bool limit_reached = false;
+    bool cf40_restore_failed = false;
 };
+
+bool parse_cf40_read_response(int transferred, const unsigned char* response,
+                              std::uint8_t* value);
+bool cf40_write_response_complete(int transferred);
 
 class CaptureBackend {
 public:
@@ -48,6 +53,18 @@ public:
     virtual bool dsc_stop(std::uint8_t local) = 0;
     virtual CaptureIo bulk_read(std::uint8_t endpoint, unsigned char* data, int length,
                                 int* transferred, unsigned timeout_ms) = 0;
+    // Explicitly opt-in CF40 diagnostic controls. Implementations should use
+    // the recovered channel-filter protocol and require a complete transfer.
+    virtual bool read_cf40(std::uint8_t local, std::uint8_t* value) {
+        (void)local;
+        (void)value;
+        return false;
+    }
+    virtual bool write_cf40(std::uint8_t local, std::uint8_t value) {
+        (void)local;
+        (void)value;
+        return false;
+    }
     virtual bool cancelled() const { return false; }
 };
 

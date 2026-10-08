@@ -64,6 +64,7 @@ struct Arguments {
     std::uint64_t packet_count = 0;
     unsigned queue_depth = 1;
     bool have_queue_depth = false;
+    bool filter_start = false;
     bool shared_demod = false;
     bool have_timeout = false;
     unsigned timeout_ms = 20000;
@@ -99,6 +100,7 @@ void usage(const char* argv0) {
         << "         --lock-timeout-ms N (post-tune lock poll, default 3000)\n"
         << "         --reset-state 0|1 (required: fourth USB_FilterReset argument)\n"
         << "         --queue-depth 1|4 (capture only; default 1, 4 queues async reads before DSC)\n"
+        << "         --filter-start (capture only; local 1 + queue depth 4, restore CF40)\n"
         << "         --shared-demod (init/terrestrial only; also initialize satellite demod over I2C)\n"
         << "\n"
         << "Explicit-target frontend diagnostics. Every write verifies the fresh\n"
@@ -227,6 +229,8 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
             }
             out->queue_depth = static_cast<unsigned>(depth);
             out->have_queue_depth = true;
+        } else if (arg == "--filter-start") {
+            out->filter_start = true;
         } else if (arg == "--shared-demod") {
             out->shared_demod = true;
         } else if (arg == "--timeout-ms") {
@@ -513,6 +517,21 @@ public:
         return asicen::CaptureIo::Error;
     }
 
+    bool read_cf40(std::uint8_t local, std::uint8_t* value) override {
+        if (value == nullptr || local > 1) return false;
+        unsigned char response[2]{};
+        const int rc = device_->control(asicen::make_cf_read(local, 0x40, 1), response);
+        return asicen::parse_cf40_read_response(rc, response, value);
+    }
+
+    bool write_cf40(std::uint8_t local, std::uint8_t value) override {
+        if (local > 1) return false;
+        asicen::ControlTransfer transfer{};
+        if (!asicen::make_cf_write(local, 0x40, &value, 1, &transfer)) return false;
+        unsigned char response[2]{};
+        return asicen::cf40_write_response_complete(device_->control(transfer, response));
+    }
+
     bool cancelled() const override { return g_stop != 0; }
 
 private:
@@ -764,12 +783,52 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         restore_flags = true;
     }
 
+    auto finish_output = [&]() {
+        bool close_ok = true;
+        if (close_fd >= 0) {
+            if (::close(close_fd) != 0) close_ok = false;
+            close_fd = -1;
+        }
+        if (restore_flags) {
+            ::fcntl(out_fd, F_SETFL, saved_flags);
+            restore_flags = false;
+        }
+        return close_ok;
+    };
+
+    LibusbCaptureBackend backend(device);
+    std::uint8_t saved_cf40 = 0;
+    const std::uint8_t* cf40_to_restore = nullptr;
+    if (args.filter_start && cf40_to_restore == nullptr) {
+        if (!backend.read_cf40(args.local, &saved_cf40)) {
+            std::cerr << "cannot snapshot CF40 before filter-start capture\n";
+            finish_output();
+            return 1;
+        }
+        cf40_to_restore = &saved_cf40;
+    }
+
+    // Capture setup resets the CF block, so the optional diagnostic snapshots
+    // CF40 first and restores that original byte on every outcome.
+    const int setup_result = run_plan(
+        device, asicen::plan_stream_setup(args.local, args.reset_state),
+        args.timeout_ms, nullptr, nullptr);
+    if (setup_result != 0) {
+        if (args.filter_start && cf40_to_restore != nullptr &&
+            !backend.write_cf40(args.local, *cf40_to_restore)) {
+            std::cerr << "CF40 restore failed after stream setup failure\n";
+        }
+        finish_output();
+        return setup_result;
+    }
+
     std::cerr << "RAW_UNVALIDATED: link transform is not implemented; saved bytes are "
                  "raw bulk endpoint output, not validated MPEG-TS\n";
     std::cerr << "capture lane=" << static_cast<unsigned>(args.local)
               << " endpoint=0x" << std::hex << static_cast<unsigned>(endpoint)
               << std::dec << " seconds=" << args.seconds
               << " queue_depth=" << args.queue_depth;
+    if (args.filter_start) std::cerr << " filter_start=yes";
     if (args.have_packet_count) {
         std::cerr << " packet_count=" << args.packet_count;
     }
@@ -785,33 +844,28 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
     request.deadline = deadline;
     request.chunk_size = 4096;
 
-    LibusbCaptureBackend backend(device);
     PosixCaptureOutput output(out_fd, deadline);
     asicen::CaptureStats stats{};
     asicen::CaptureOutcome outcome = asicen::CaptureOutcome::InvalidArgument;
     if (args.queue_depth == 4) {
         LibusbQueuedCaptureIo queued(context, device->handle());
         outcome = asicen::run_queued_capture(&backend, &queued, &output, request,
-                                             args.queue_depth, &stats);
+                                             args.queue_depth, &stats,
+                                             args.filter_start, cf40_to_restore);
     } else {
         outcome = asicen::run_raw_capture(&backend, &output, request, &stats);
     }
 
-    bool close_ok = true;
-    if (close_fd >= 0) {
-        if (::close(close_fd) != 0) {
-            std::cerr << "output close failed: " << std::strerror(errno) << '\n';
-            close_ok = false;
-        }
-    }
-    if (restore_flags) {
-        ::fcntl(out_fd, F_SETFL, saved_flags);
-    }
+    const bool close_ok = finish_output();
+    if (!close_ok) std::cerr << "output close failed: " << std::strerror(errno) << '\n';
 
     std::cerr << "capture outcome=" << asicen::capture_outcome_name(outcome)
               << " bytes=" << stats.bytes
               << " limit_reached=" << (stats.limit_reached ? "yes" : "no")
               << " close_ok=" << (close_ok ? "yes" : "no") << '\n';
+    if (stats.cf40_restore_failed) {
+        std::cerr << "CF40 restore failed; device filter state may remain modified\n";
+    }
 
     if (outcome != asicen::CaptureOutcome::Completed || !close_ok) {
         return 1;
@@ -903,6 +957,11 @@ int main(int argc, char** argv) {
         std::cerr << "--queue-depth is only valid for capture\n";
         return 2;
     }
+    if (args.filter_start &&
+        (args.command != "capture" || args.local != 1 || args.queue_depth != 4)) {
+        std::cerr << "--filter-start requires capture on local 1 with --queue-depth 4\n";
+        return 2;
+    }
     if (args.shared_demod && args.command != "init" && args.command != "terrestrial") {
         std::cerr << "--shared-demod is only valid for init or terrestrial\n";
         return 2;
@@ -950,14 +1009,7 @@ int main(int argc, char** argv) {
         std::signal(SIGTERM, handle_signal);
         std::signal(SIGPIPE, SIG_IGN);
         if (capture_command) {
-            // Bounded raw multiplex setup (filter reset + PID boundary) before
-            // the DSC/raw capture seam.
-            result = run_plan(&device,
-                              asicen::plan_stream_setup(args.local, args.reset_state),
-                              args.timeout_ms, nullptr, nullptr);
-            if (result == 0) {
-                result = run_capture(context, &device, args);
-            }
+            result = run_capture(context, &device, args);
         } else {
             std::uint8_t last_read = 0;
             bool have_last_read = false;

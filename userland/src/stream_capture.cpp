@@ -18,6 +18,17 @@ int remaining_ms(std::chrono::steady_clock::time_point deadline) {
 
 }  // namespace
 
+bool parse_cf40_read_response(int transferred, const unsigned char* response,
+                              std::uint8_t* value) {
+    if (transferred != 2 || response == nullptr || value == nullptr) return false;
+    *value = response[1];
+    return true;
+}
+
+bool cf40_write_response_complete(int transferred) {
+    return transferred == 2;
+}
+
 CaptureOutcome run_raw_capture(CaptureBackend* backend, CaptureOutput* output,
                                const CaptureRequest& request, CaptureStats* stats) {
     if (backend == nullptr || output == nullptr || request.endpoint == 0 ||

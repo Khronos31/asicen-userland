@@ -20,16 +20,49 @@ int remaining_ms(std::chrono::steady_clock::time_point deadline) {
 CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
                                  CaptureOutput* output,
                                  const CaptureRequest& request,
-                                 std::size_t depth, CaptureStats* stats) {
+                                 std::size_t depth, CaptureStats* stats,
+                                 bool filter_start,
+                                 const std::uint8_t* initial_cf40) {
     if (stats != nullptr) *stats = {};
     if (control == nullptr || io == nullptr || output == nullptr ||
         request.endpoint == 0 || request.local > 1 || request.chunk_size == 0 ||
-        depth == 0 || depth > 4) {
+        depth == 0 || depth > 4 || (filter_start && (request.local != 1 || depth != 4))) {
         return CaptureOutcome::InvalidArgument;
     }
 
-    if (!io->prepare(request.endpoint, depth, request.chunk_size)) {
+    std::uint8_t original_cf40 = 0;
+    bool cf40_snapshotted = false;
+    bool filter_failed = false;
+    if (filter_start) {
+        if (initial_cf40 != nullptr) {
+            original_cf40 = *initial_cf40;
+            cf40_snapshotted = true;
+        } else {
+            if (!control->read_cf40(request.local, &original_cf40)) {
+                return CaptureOutcome::UsbFailed;
+            }
+            cf40_snapshotted = true;
+        }
+        std::uint8_t current_cf40 = 0;
+        // Match the source selector==1 path before starting host/device reads.
+        if (!control->read_cf40(request.local, &current_cf40) ||
+            !control->write_cf40(request.local,
+                                 static_cast<std::uint8_t>(current_cf40 | 0x03U))) {
+            filter_failed = true;
+        }
+    }
+
+    if (!filter_failed && !io->prepare(request.endpoint, depth, request.chunk_size)) {
         io->release();
+        const bool restored = !cf40_snapshotted ||
+                              control->write_cf40(request.local, original_cf40);
+        if (stats != nullptr) stats->cf40_restore_failed = !restored;
+        return CaptureOutcome::UsbFailed;
+    }
+    if (filter_failed) {
+        const bool restored = !cf40_snapshotted ||
+                              control->write_cf40(request.local, original_cf40);
+        if (stats != nullptr) stats->cf40_restore_failed = !restored;
         return CaptureOutcome::UsbFailed;
     }
 
@@ -58,7 +91,18 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         if (!dsc_started) usb_failed = true;
     }
 
-    while (dsc_started) {
+    if (dsc_started && filter_start) {
+        // Synchronous control transfers share libusb's event handling safely;
+        // async transfer/callback storage remains owned until drain below.
+        std::uint8_t current_cf40 = 0;
+        if (!control->read_cf40(request.local, &current_cf40) ||
+            !control->write_cf40(
+                request.local, static_cast<std::uint8_t>(current_cf40 | 0x08U))) {
+            filter_failed = true;
+        }
+    }
+
+    while (dsc_started && !filter_failed) {
         if (control->cancelled()) {
             cancelled = true;
             break;
@@ -121,13 +165,19 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         dsc_stopped = control->dsc_stop(request.local);
     }
     io->cancel_and_drain();
+    bool cf40_restored = true;
+    if (cf40_snapshotted) {
+        cf40_restored = control->write_cf40(request.local, original_cf40);
+    }
     io->release();
 
     if (stats != nullptr) {
         stats->bytes = total;
         stats->limit_reached = limit_reached;
+        stats->cf40_restore_failed = cf40_snapshotted && !cf40_restored;
     }
     if (dsc_attempted && !dsc_stopped) return CaptureOutcome::StopFailed;
+    if (filter_failed || !cf40_restored) return CaptureOutcome::UsbFailed;
     if (output_failed) return CaptureOutcome::OutputFailed;
     if (usb_failed) return CaptureOutcome::UsbFailed;
     if (cancelled) return CaptureOutcome::Cancelled;

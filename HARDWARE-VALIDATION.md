@@ -368,3 +368,40 @@ Parent restored controller05=00, GPIO76 and the five CF bytes; restored all
 42 satellite-demod registers and verified all42 readbacks matched the saved
 snapshot. A final terrestrial lock read remainedA9. This establishes neither
 satellite tuning nor TS output. No LNB enablement or card APDU occurred.
+
+### Raw-read prerequisites and DSC state observation
+
+Static inspection of the original open/init/stream path found no call to
+`DTV_GenEncSeed` before the first raw USB read. The normal link-data software
+transform follows that read. This does not establish the ASIC's internal
+requirements or prove that returned bytes will already be ordinary TS.
+
+Parent compared primary lane1 CF40..44 before DSC start, while started, and
+after DSC stop. All three reads returned `01 04 00 20 1f ff` (first byte is
+the wrapper reply). Start request07 and stop request06 each returned01;
+cleanup issued stop again before releasing interface0. The final terrestrial
+lock read returned `01 a9`. This measurement shows no change in those five CF
+bytes during DSC; their relationship to stream production remains unverified.
+
+### Optional CF40 filter-start capture diagnostic
+
+`asicen_frontend --filter-start --queue-depth 4 capture` is an opt-in,
+local-1-only diagnostic. It snapshots CF40 before stream setup, applies the
+source-observed selector-on bits before queue/DSC start, then reads CF40 again
+and sets the source-observed filter-start bit after DSC succeeds. It restores
+the original CF40 byte after stopping DSC and draining queued transfers on all
+capture outcomes. The option is disabled by default.
+
+Parent's5-second primary T27 trial returned zero bytes/exit1. A second trial
+combined the same post-start filter operation with controller05 candidate20;
+it also returned zero bytes/exit1. Logs:
+`evidence/raw/capture-primary-T27-post-start-filter.txt` and
+`evidence/raw/capture-primary-T27-post-start-filter-controller20.txt`.
+After the first trial CF40 read back04, confirming the diagnostic restored
+that byte; PID boundaries still reflected ordinary stream setup. Parent
+restored all five saved CF bytes after each trial. Final readbacks were
+CF40..44=`04 00 20 1f ff`, controller05=00, GPIO76 and terrestrial b0=A9.
+The source-observed filter-start order alone or combined with candidate20
+does not resolve zero-byte acquisition. Local build and17 CTests passed,
+including new ordering, restoration-failure and CF-response semantics cases.
+No satellite tuning, LNB enablement or card APDU occurred.

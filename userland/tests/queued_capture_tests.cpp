@@ -24,6 +24,9 @@ public:
     bool start_result = true;
     bool stop_result = true;
     bool cancel = false;
+    std::uint8_t cf40 = 0xa4;
+    int fail_cf_write_at = 0;
+    int cf_write_count = 0;
 
     bool dsc_start(std::uint8_t) override {
         trace_->push_back("dsc-start");
@@ -36,6 +39,21 @@ public:
     asicen::CaptureIo bulk_read(std::uint8_t, unsigned char*, int, int*,
                                 unsigned) override {
         return asicen::CaptureIo::Error;
+    }
+    bool read_cf40(std::uint8_t local, std::uint8_t* value) override {
+        check(local == 1 && value != nullptr, "CF40 snapshot uses local 1");
+        trace_->push_back("cf-read");
+        *value = cf40;
+        return true;
+    }
+    bool write_cf40(std::uint8_t local, std::uint8_t value) override {
+        check(local == 1, "CF40 write uses local 1");
+        trace_->push_back("cf-write:" + std::to_string(value));
+        ++cf_write_count;
+        // Model a possibly-partial control transfer: update state before
+        // returning failure so restoration is independently verified.
+        cf40 = value;
+        return cf_write_count != fail_cf_write_at;
     }
     bool cancelled() const override { return cancel; }
 
@@ -300,6 +318,108 @@ void prepare_failure_releases_without_starting() {
           "unsubmitted allocation releases without DSC or cancellation");
 }
 
+void filter_start_orders_rmw_and_restores_snapshot() {
+    std::vector<std::string> trace;
+    Control control(&trace);
+    Queue queue(&trace);
+    Output output;
+    queue.events.push_back({0, asicen::CaptureIo::Ok, queue.bytes.data(), 4});
+    const auto result = asicen::run_queued_capture(
+        &control, &queue, &output, request(4), 4, nullptr, true);
+    check(result == asicen::CaptureOutcome::Completed,
+          "filter-start diagnostic completes with data");
+    check(control.cf40 == 0xa4, "filter-start restores original CF40 byte");
+    const std::vector<std::string> expected{
+        "cf-read", "cf-read", "cf-write:167", "prepare", "submit0", "submit1",
+        "submit2", "submit3", "dsc-start", "cf-read", "cf-write:175",
+        "dsc-stop", "cancel-drain", "cf-write:164", "release"};
+    check(trace == expected,
+          "CF40 selector bits precede queued DSC and bit 3 follows successful start");
+}
+
+void filter_start_restores_after_dsc_start_failure() {
+    std::vector<std::string> trace;
+    Control control(&trace);
+    control.start_result = false;
+    Queue queue(&trace);
+    Output output;
+    const auto result = asicen::run_queued_capture(
+        &control, &queue, &output, request(), 4, nullptr, true);
+    check(result == asicen::CaptureOutcome::UsbFailed,
+          "filter-start DSC failure remains an error");
+    check(control.cf40 == 0xa4, "DSC start failure restores original CF40");
+    check(trace[8] == "dsc-start" && trace[9] == "dsc-stop" &&
+              trace[10] == "cancel-drain" && trace[11] == "cf-write:164" &&
+              trace[12] == "release",
+          "failed DSC start stops, drains callbacks, restores CF40, then releases");
+}
+
+void filter_start_write_failures_restore_snapshot() {
+    {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        control.fail_cf_write_at = 1;
+        Queue queue(&trace);
+        Output output;
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(), 4, nullptr, true);
+        check(result == asicen::CaptureOutcome::UsbFailed,
+              "pre-start CF40 write failure classified");
+        check(control.cf40 == 0xa4, "pre-start CF40 failure restored snapshot");
+        check(trace == std::vector<std::string>(
+                           {"cf-read", "cf-read", "cf-write:167", "cf-write:164"}),
+              "failed pre-start CF40 write restores before allocating transfers");
+    }
+    {
+        std::vector<std::string> trace;
+        Control control(&trace);
+        control.fail_cf_write_at = 2;
+        Queue queue(&trace);
+        Output output;
+        const auto result = asicen::run_queued_capture(
+            &control, &queue, &output, request(), 4, nullptr, true);
+        check(result == asicen::CaptureOutcome::UsbFailed,
+              "post-start CF40 write failure classified");
+        check(control.cf40 == 0xa4, "post-start CF40 failure restored snapshot");
+        check(trace[8] == "dsc-start" && trace[9] == "cf-read" &&
+                  trace[10] == "cf-write:175" && trace[11] == "dsc-stop" &&
+                  trace[12] == "cancel-drain" && trace[13] == "cf-write:164" &&
+                  trace[14] == "release",
+              "post-start CF40 failure stops, drains, restores, then releases");
+    }
+}
+
+void cf40_response_uses_transfer_length_not_status_byte() {
+    const unsigned char response[2] = {0x00, 0x5a};
+    std::uint8_t value = 0;
+    check(asicen::parse_cf40_read_response(2, response, &value) && value == 0x5a,
+          "CF40 read consumes payload after full transfer regardless of status byte");
+    check(!asicen::parse_cf40_read_response(1, response, &value),
+          "short CF40 read is rejected");
+    check(asicen::cf40_write_response_complete(2),
+          "CF40 write accepts complete WDM transfer regardless of first byte");
+    check(!asicen::cf40_write_response_complete(1), "short CF40 write is rejected");
+}
+
+void filter_restore_failure_is_reported() {
+    std::vector<std::string> trace;
+    Control control(&trace);
+    control.fail_cf_write_at = 3;
+    Queue queue(&trace);
+    Output output;
+    queue.events.push_back({0, asicen::CaptureIo::Ok, queue.bytes.data(), 4});
+    asicen::CaptureStats stats{};
+    const auto result = asicen::run_queued_capture(
+        &control, &queue, &output, request(4), 4, &stats, true);
+    check(result == asicen::CaptureOutcome::UsbFailed,
+          "restore failure prevents a successful capture outcome");
+    check(stats.cf40_restore_failed,
+          "capture stats preserve explicit CF40 restoration failure");
+    check(trace[11] == "dsc-stop" && trace[12] == "cancel-drain" &&
+              trace[13] == "cf-write:164" && trace[14] == "release",
+          "restoration failure still follows DSC stop and callback drain");
+}
+
 }  // namespace
 
 int main() {
@@ -313,6 +433,11 @@ int main() {
     resubmit_and_stop_failures_remain_errors();
     invalid_depth_does_not_allocate();
     prepare_failure_releases_without_starting();
+    filter_start_orders_rmw_and_restores_snapshot();
+    filter_start_restores_after_dsc_start_failure();
+    filter_start_write_failures_restore_snapshot();
+    cf40_response_uses_transfer_length_not_status_byte();
+    filter_restore_failure_is_reported();
     std::cout << "queued capture lifecycle tests passed\n";
     return 0;
 }
