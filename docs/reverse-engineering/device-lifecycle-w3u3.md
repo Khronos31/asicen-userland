@@ -71,7 +71,8 @@ The recovered code contains register tables for both demodulators and the RF dev
 `TF_DTV_Init` maps the enclosure receiver index to an internal tuner object and calls `DTV_Init`, then:
 
 - initializes the polling state
-- sets PID-filter boundary to catch-all `0x1fff..0x1fff`
+- sets PID-filter boundary values to `0x1fff` / `0x1fff`; the hardware's
+  all-PID/pass-through semantics have not been independently established
 - starts the stream thread
 
 `DTV_Init` validates the runtime VID/PID against PLEX ASICEN product IDs, performs GPIO/power/reset work, obtains a device random key, initializes encryption/decryption state, and configures frontend/stream state.

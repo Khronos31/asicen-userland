@@ -66,6 +66,11 @@ endif()
 if(ASICEN_BUILD_TESTS)
   enable_testing()
 
+  add_executable(asicen-frontend-vendor-order-tests userland/tests/frontend_vendor_order_tests.cpp)
+  target_link_libraries(asicen-frontend-vendor-order-tests PRIVATE asicen_core)
+  target_compile_options(asicen-frontend-vendor-order-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-frontend-vendor-order-tests COMMAND asicen-frontend-vendor-order-tests)
+
   add_executable(asicen-protocol-tests userland/tests/protocol_tests.cpp)
   target_link_libraries(asicen-protocol-tests PRIVATE asicen_core)
   target_compile_options(asicen-protocol-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

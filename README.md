@@ -60,8 +60,10 @@ satellite-demod register facts; it performs no satellite RF tuning or LNB
 enablement. This combination has not produced TS on the development machine.
 
 `capture` saves raw bulk bytes rather than validated MPEG-TS. It requires
-`--reset-state 0|1` because the original caller's reset-state default remains
-unresolved, together with finite `--seconds` and optional `--output PATH|-`.
+`--reset-state 0|1` as an explicit diagnostic choice, together with finite
+`--seconds` and optional `--output PATH|-`. The recovered initialized W3U3
+terrestrial caller uses state1; the option is not an electrical reset-polarity
+declaration.
 Diagnostics use stderr when capturing. Zero-byte captures return failure.
 `--queue-depth 4` reserves four asynchronous reads before acquisition starts;
 the default depth1 uses synchronous reads. The deadline bounds acquisition,
@@ -76,3 +78,8 @@ The controller register05 setting remains an external test condition and is
 not changed by this command.
 See [SPEC.md](SPEC.md) for the px4 CLI compatibility target and acceptance gates.
 Source attribution and component license details are in [NOTICES.md](NOTICES.md).
+
+See the [2026-10-08 static audit](docs/reverse-engineering/static-audit-2026-10-08.md)
+for source-ordering corrections, firmware request evidence, Windows differences,
+and the remaining limits of static analysis. These corrections are not yet a
+hardware reception claim.

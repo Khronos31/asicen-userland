@@ -307,6 +307,9 @@ FrontendRunResult run_vco_calibration(FrontendTransport* transport, const Fronte
             if (result != FrontendRunResult::Completed) {
                 return result;
             }
+            // Both adjustment branches join the same vendor settle delay
+            // (TunerControl.o .text 0x2034), including high-VCO fallback.
+            transport->delay_ms(1);
         }
     } else if (tmp < 0x02U) {
         reg6 = static_cast<std::uint8_t>(reg6 | 0x08U);
@@ -655,11 +658,8 @@ FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz) {
     append_tuner_write(&plan, 1, 0, 0x05, pll.reg5, "fc0012 reg5");
     append_tuner_write(&plan, 1, 0, 0x06, pll.reg6, "fc0012 reg6");
 
-    append_tuner_write(&plan, 1, 0, 0x0e, 0x80, "fc0012 vco arm");
-    append_tuner_write(&plan, 1, 0, 0x0e, 0x00, "fc0012 vco clear");
-    append_delay(&plan, 1);
-    append_tuner_write(&plan, 1, 0, 0x0e, 0x00, "fc0012 vco settle");
-
+    // The composite op owns the single initial 80,00,delay,00 pulse train.
+    // Emitting it here as well silently calibrated twice before feedback.
     FrontendOp vco{};
     vco.kind = FrontendOpKind::Fc0012VcoCalibrate;
     vco.local = 1;
@@ -777,13 +777,18 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
         return run_sequence(transport, build_tuner_write(local, source, reg, value),
                             nullptr, report);
     };
-    const auto demod_1c_rmw = [&](std::uint8_t and_mask, std::uint8_t or_mask) {
-        FrontendOp rmw{};
-        rmw.kind = FrontendOpKind::I2cMask;
-        rmw.transfer = make_i2c_read(0x30, 0x1c, 1, 0);
-        rmw.and_mask = and_mask;
-        rmw.or_mask = or_mask;
-        return run_i2c_mask(transport, rmw);
+    const auto demod_retry_reset = [&]() {
+        // Unlike TC_PowerTunerDemod, TC_SetFrequency reads once and uses
+        // the same saved byte for both writes (.text 0x24b7..0x2513).
+        std::uint8_t saved = 0;
+        auto r = run_sequence(transport, {make_i2c_read(0x30, 0x1c, 1, 0)},
+                              &saved, report);
+        if (r != FrontendRunResult::Completed) return r;
+        saved = static_cast<std::uint8_t>(saved | 0x30U);
+        r = demod_write(0x1c, saved);
+        if (r != FrontendRunResult::Completed) return r;
+        transport->delay_ms(10);
+        return demod_write(0x1c, static_cast<std::uint8_t>(saved & 0xefU));
     };
 
     for (int count = 0;; ++count) {
@@ -815,12 +820,7 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
         if (count == 3) {
             break;
         }
-        result = demod_1c_rmw(0xff, 0x30);
-        if (result != FrontendRunResult::Completed) {
-            return result;
-        }
-        transport->delay_ms(10);
-        result = demod_1c_rmw(0xef, 0x00);
+        result = demod_retry_reset();
         if (result != FrontendRunResult::Completed) {
             return result;
         }
