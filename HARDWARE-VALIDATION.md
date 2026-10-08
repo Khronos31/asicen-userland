@@ -607,3 +607,41 @@ b0=A9. The corrected shared table did not yield observable bulk data in
 this tested state; it remains a required implementation correction and
 does not establish whether shared initialization is unnecessary. Local
 build and17 CTests passed. No satellite tuning or card APDU occurred.
+
+### Official module load/unload in the isolated CentOS guest
+
+On2026-10-08 around21:45 JST, user provided an SSH route through Latitude
+to localhost port2263. Guest observations: hostnameDG-STK5S, CentOS6.3 Final,
+kernel`2.6.32-279.el6.x86_64`. No USB passthrough was configured.
+`/sys/bus/usb/devices` was empty and `/dev/bus/usb` absent; lsusb returned
+`unable to initialize libusb: -99`. This is not a receiver-driver failure.
+
+Parent copied the two official modules to guest
+`/tmp/asicen-driver-check-20261008/`, verified their vermagic matched the
+running kernel, and performed a USB-unconnected load/unload check:
+
+| Module | SHA-256 | Load / unload |
+| --- | --- | --- |
+| loader.ko | 10ad321dd47d93f89fde556ec8683b7a8ce0fcc74cd90e4a04308592dc9719f0 | success / success |
+| as11usbdtv.ko | a51e1278d925b6f45720f51f7b860c4523166c465721bca2792c33b62e1bb3c7 | success / success |
+
+Both vermagic values are
+`2.6.32-279.el6.x86_64 SMP mod_unload modversions`.
+Guest lsmod showed loader22890 and as11usbdtv24467, each with use count0.
+Kernel messages confirmed registration of `ASICEN_USB_LOADER` and
+`ASICEN_USB_DTV`, followed by deregistration on cleanup. A final lsmod check
+confirmed neither module remained loaded. Vendor binaries were loaded only
+as kernel modules in this explicitly supplied isolated guest, not in HAOS
+or the Latitude host kernel.
+
+An initial modprobe usbcore returned Module not found. The guest kernel
+configuration has CONFIG_USB=y; `/sys/module/usbcore` and exported
+usb_register_driver/usb_deregister symbols exist, so usbcore is built-in
+and that modprobe attempt was unnecessary. No force-load options or module
+installation into /lib/modules were used.
+
+This verifies only kernel-module initialization and cleanup compatibility.
+Device probing, firmware loading through the official driver, actual tuning,
+bulk streaming and USB tracing remain unverified pending USB passthrough.
+The receiver was not moved or manipulated by this guest check. No VM restart,
+USB passthrough configuration or HA setting/service change was performed.
