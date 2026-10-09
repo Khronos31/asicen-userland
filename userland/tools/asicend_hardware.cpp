@@ -324,6 +324,120 @@ struct LoaderIdentity {
 // NOT_FOUND (3) so the daemon can continue claiming the warm runtime.
 constexpr int kLoadFirmwareWarm = 1;
 
+// Sends the observed sibling-restoring GPIO request: vendor IN, request Gpio
+// (0x08), value 0x4040 (value 40 / mask 40), index 0, length 1. Recovered from
+// HARDWARE-VALIDATION.md: after a primary runtime boots, this re-enumerates the
+// sibling USB function as a loader so it can be provisioned independently.
+// Returns 0 when the device answers, 70 on USB error.
+int restore_sibling_loader(asicen::LibusbDevice& device) {
+    const asicen::ControlTransfer gpio_restore{
+        0U, asicen::Request::Gpio, 0x4040U, 0U, 1U,
+        asicen::Direction::In, 1000U};
+    std::uint8_t response = 0U;
+    const int rc = device.control(gpio_restore, &response);
+    if (rc != 1) {
+        std::fprintf(stderr, "firmware: sibling GPIO restore failed: %s\n",
+                     libusb_error_name(rc < 0 ? rc : LIBUSB_ERROR_OTHER));
+        return 70;
+    }
+    return 0;
+}
+
+// Pushes the verified loader image to one opened loader. Returns 0 on success,
+// 70 on any USB/kernel-driver error.
+int transfer_firmware_to_loader(asicen::LibusbDevice& device,
+                                const asicen::DeviceProfile& model,
+                                const std::vector<std::uint8_t>& firmware) {
+    const int driver = device.kernel_driver_active(0);
+    if (driver > 0) { std::fprintf(stderr, "firmware: interface 0 has a kernel driver\n"); return 70; }
+    if (driver < 0 && driver != LIBUSB_ERROR_NOT_SUPPORTED) {
+        std::fprintf(stderr, "firmware: kernel_driver_active: %s\n", libusb_error_name(driver));
+        return 70;
+    }
+    const int claim = device.claim_interface(0);
+    if (claim < 0) { std::fprintf(stderr, "firmware: claim interface 0: %s\n", libusb_error_name(claim)); return 70; }
+    const std::vector<asicen::LoaderTransfer> plan =
+        asicen::build_loader_transfer_plan(model.model_id);
+    if (plan.empty()) { std::fprintf(stderr, "firmware: no transfer plan for model\n"); return 70; }
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+        const asicen::LoaderTransfer& transfer = plan[i];
+        const bool final_transfer = (i + 1 == plan.size());
+        const int rc = device.vendor_out(transfer.request, transfer.value,
+            transfer.index, firmware.data() + transfer.blob_offset,
+            transfer.length, 1000);
+        if (rc == LIBUSB_ERROR_NO_DEVICE && final_transfer) {
+            std::fprintf(stderr, "firmware: final AC returned NO_DEVICE; acceptance ambiguous\n");
+            return 70;
+        }
+        if (rc < 0) { std::fprintf(stderr, "firmware: control transfer failed: %s\n", libusb_error_name(rc)); return 70; }
+        if (rc != transfer.length) { std::fprintf(stderr, "firmware: short transfer\n"); return 70; }
+    }
+    return 0;
+}
+
+// Find the runtime address that replaced the loader at loader.bus / a topology
+// matching loader.port_path (same bus, port path starting with the loader's
+// parent), preferring a port ending in 1. Returns NOT_FOUND when none appears.
+px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
+    libusb_context* context, std::uint8_t bus,
+    const std::vector<std::uint8_t>& loader_port_path) {
+    std::vector<std::uint8_t> parent(loader_port_path.begin(),
+                                     loader_port_path.size() > 0U
+                                         ? loader_port_path.end() - 1
+                                         : loader_port_path.end());
+    const auto is_prefix = [](const std::vector<std::uint8_t>& prefix,
+                              const std::vector<std::uint8_t>& path) {
+        return !prefix.empty() && path.size() >= prefix.size() &&
+               std::equal(prefix.begin(), prefix.end(), path.begin());
+    };
+    libusb_device** list = nullptr;
+    const ssize_t count = libusb_get_device_list(context, &list);
+    if (count < 0) return px4::userland::Result<asicen::UsbLocation>::failure(
+        px4::userland::Error::USB_IO);
+    asicen::UsbLocation primary{};
+    asicen::UsbLocation fallback{};
+    bool have_primary = false;
+    bool have_fallback = false;
+    for (ssize_t i = 0; i < count; ++i) {
+        libusb_device* d = list[i];
+        if (static_cast<std::uint8_t>(libusb_get_bus_number(d)) != bus) continue;
+        libusb_device_descriptor desc{};
+        if (libusb_get_device_descriptor(d, &desc) != 0) continue;
+        if (asicen::find_profile(desc.idVendor, desc.idProduct) == nullptr) continue;
+        std::uint8_t ports[8]{};
+        const int nports = libusb_get_port_numbers(
+            d, ports, static_cast<int>(sizeof(ports)));
+        if (nports <= 0) continue;
+        std::vector<std::uint8_t> path(ports, ports + nports);
+        const asicen::UsbLocation loc{
+            bus, static_cast<std::uint8_t>(libusb_get_device_address(d))};
+        if (is_prefix(parent, path) || is_prefix(loader_port_path, path)) {
+            if (!have_primary || (path.back() == 1U && !have_primary)) {
+                primary = loc;
+                have_primary = true;
+            }
+        } else if (!have_fallback) {
+            fallback = loc;
+            have_fallback = true;
+        }
+    }
+    libusb_free_device_list(list, 1);
+    if (have_primary)
+        return px4::userland::Result<asicen::UsbLocation>::success(primary);
+    if (have_fallback)
+        return px4::userland::Result<asicen::UsbLocation>::success(fallback);
+    return px4::userland::Result<asicen::UsbLocation>::failure(
+        px4::userland::Error::NOT_FOUND);
+}
+
+// Loads firmware into every addressed device (dual-function models expose two
+// loader functions and both must be provisioned before the runtime pair is
+// complete). A device that opens but is not a loader is a warm runtime and is
+// skipped. loader_identity receives the primary (port ending in 1) loader's
+// topology so the re-enumerated runtime can be matched to it.
+// Returns 0 when at least one loader was transferred, kLoadFirmwareWarm when all
+// addressed devices were already runtime, 2 for argument problems, 3 when a
+// device could not be resolved/opened, 70 on USB/firmware I/O failure.
 int load_loader_firmware(libusb_context* context, const Options& options,
                          const std::string& firmware_path,
                          LoaderIdentity* loader_identity) {
@@ -342,70 +456,120 @@ int load_loader_firmware(libusb_context* context, const Options& options,
             ? "fingerprint mismatch" : "unsupported model");
         return 70;
     }
-    asicen::LibusbDevice device;
-    const char* opened = nullptr;
-    if (options.file_descriptor_count != 0U) {
-        opened = device.open(context, options.file_descriptors[0]) == 0 ? "fd" : nullptr;
-    } else {
-        asicen::UsbLocation location{};
-        const auto resolved = resolve_device(context, options.usb_paths[0]);
-        if (resolved) {
-            location = resolved.value().location;
-            opened = device.open(context, location) == 0 ? "usb-path" : nullptr;
+    const std::size_t target_count = options.file_descriptor_count != 0U
+        ? options.file_descriptor_count : options.usb_path_count;
+    bool any_transferred = false;
+    bool any_warm = false;
+    // Dual-function models need a second stage: after provisioning the primary
+    // loader, the runtime asks the device (GPIO restore) to re-enumerate the
+    // sibling as a loader so it too can be provisioned independently. This
+    // mirrors the observed bring-up in HARDWARE-VALIDATION.md.
+    const bool dual_functions = target_count == 2U &&
+        options.file_descriptor_count == 0U;
+    for (std::size_t i = 0; i < target_count; ++i) {
+        asicen::LibusbDevice device;
+        const char* opened = nullptr;
+        if (options.file_descriptor_count != 0U) {
+            opened = device.open(context, options.file_descriptors[i]) == 0 ? "fd" : nullptr;
+        } else {
+            // After a GPIO sibling restore the loader re-enumerates with a
+            // fresh address; retry resolution so the fresh sibling is used.
+            const bool is_sibling_release = dual_functions && i == 1U;
+            const auto resolve_deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            px4::userland::Result<ResolvedDevice> resolved =
+                px4::userland::Result<ResolvedDevice>::failure(
+                    px4::userland::Error::NOT_FOUND);
+            while (std::chrono::steady_clock::now() < resolve_deadline) {
+                resolved = resolve_device(context, options.usb_paths[i]);
+                if (resolved) break;
+                if (!is_sibling_release) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+            if (resolved) {
+                opened = device.open(context, resolved.value().location) == 0 ? "usb-path" : nullptr;
+            }
         }
-    }
-    if (opened == nullptr) {
-        std::fprintf(stderr, "firmware: cannot resolve or open the addressed device\n");
-        return 3;  // NOT_FOUND-family: nothing was found to load
-    }
-    // Record the loader's bus and topology so the runtime can be matched after
-    // re-enumeration even when its address changes.
-    if (loader_identity != nullptr) {
-        loader_identity->bus =
-            static_cast<std::uint8_t>(libusb_get_bus_number(device.device()));
-        std::uint8_t ports[8]{};
-        const int nports = libusb_get_port_numbers(
-            device.device(), ports, static_cast<int>(sizeof(ports)));
-        if (nports > 0) loader_identity->port_path.assign(ports, ports + nports);
-    }
-
-    libusb_device_descriptor desc{};
-    if (libusb_get_device_descriptor(device.device(), &desc) != 0) {
-        std::fprintf(stderr, "firmware: descriptor read failed\n");
-        return 70;
-    }
-    const bool loader = desc.idVendor == 0x1738 &&
-        (desc.idProduct == 0x5211U || desc.idProduct == 0x5216U);
-    if (!loader) {
-        std::fprintf(stderr, "firmware: addressed device is not an ASICEN loader; treating as warm runtime\n");
-        return kLoadFirmwareWarm;
-    }
-    const int driver = device.kernel_driver_active(0);
-    if (driver > 0) { std::fprintf(stderr, "firmware: interface 0 has a kernel driver\n"); return 70; }
-    if (driver < 0 && driver != LIBUSB_ERROR_NOT_SUPPORTED) {
-        std::fprintf(stderr, "firmware: kernel_driver_active: %s\n", libusb_error_name(driver));
-        return 70;
-    }
-    const int claim = device.claim_interface(0);
-    if (claim < 0) { std::fprintf(stderr, "firmware: claim interface 0: %s\n", libusb_error_name(claim)); return 70; }
-    const std::vector<asicen::LoaderTransfer> plan =
-        asicen::build_loader_transfer_plan(model->model_id);
-    if (plan.empty()) { std::fprintf(stderr, "firmware: no transfer plan for model\n"); return 70; }
-    for (std::size_t i = 0; i < plan.size(); ++i) {
-        const asicen::LoaderTransfer& transfer = plan[i];
-        const bool final_transfer = (i + 1 == plan.size());
-        const int rc = device.vendor_out(transfer.request, transfer.value,
-            transfer.index, firmware.data() + transfer.blob_offset,
-            transfer.length, 1000);
-        if (rc == LIBUSB_ERROR_NO_DEVICE && final_transfer) {
-            std::fprintf(stderr, "firmware: final AC returned NO_DEVICE; acceptance ambiguous\n");
+        if (opened == nullptr) {
+            std::fprintf(stderr, "firmware: cannot resolve or open the addressed device\n");
+            return 3;  // NOT_FOUND-family: nothing was found to load
+        }
+        libusb_device_descriptor desc{};
+        if (libusb_get_device_descriptor(device.device(), &desc) != 0) {
+            std::fprintf(stderr, "firmware: descriptor read failed\n");
             return 70;
         }
-        if (rc < 0) { std::fprintf(stderr, "firmware: control transfer failed: %s\n", libusb_error_name(rc)); return 70; }
-        if (rc != transfer.length) { std::fprintf(stderr, "firmware: short transfer\n"); return 70; }
+        const bool loader = desc.idVendor == 0x1738 &&
+            (desc.idProduct == 0x5211U || desc.idProduct == 0x5216U);
+        if (!loader) {
+            std::fprintf(stderr, "firmware: addressed device is not an ASICEN loader; treating as warm runtime\n");
+            any_warm = true;
+            continue;
+        }
+        // Record the primary loader's topology (prefer the port ending in 1).
+        if (loader_identity != nullptr) {
+            std::uint8_t ports[8]{};
+            const int nports = libusb_get_port_numbers(
+                device.device(), ports, static_cast<int>(sizeof(ports)));
+            std::vector<std::uint8_t> path;
+            if (nports > 0) path.assign(ports, ports + nports);
+            const bool primary = !path.empty() && path.back() == 1U;
+            if (loader_identity->port_path.empty() || primary) {
+                loader_identity->bus =
+                    static_cast<std::uint8_t>(libusb_get_bus_number(device.device()));
+                loader_identity->port_path = std::move(path);
+            }
+        }
+        const int rc = transfer_firmware_to_loader(device, *model, firmware);
+        if (rc != 0) return rc;
+        any_transferred = true;
+        if (!dual_functions) continue;
+        // Stage two: after the first (primary) transfer the device resolves as
+        // a runtime. Ask it to re-enumerate the sibling as a loader, then wait
+        // for the second path to become a loader again before provisioning it.
+        // The sibling path is re-resolved by topology (not stale address).
+        if (i == 0U) {
+            // Wait for the primary runtime to appear so we can address it.
+            if (loader_identity == nullptr || loader_identity->port_path.empty()) {
+                std::fprintf(stderr, "firmware: primary topology unavailable for sibling restore\n");
+                return 70;
+            }
+            asicen::LibusbDevice primary_runtime;
+            asicen::UsbLocation runtime_loc{};
+            bool runtime_found = false;
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            while (std::chrono::steady_clock::now() < deadline) {
+                const auto candidate = resolve_runtime_at_parent(
+                    context, loader_identity->bus, loader_identity->port_path);
+                if (candidate.has_value()) {
+                    runtime_loc = candidate.value();
+                    runtime_found = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            if (!runtime_found) {
+                std::fprintf(stderr, "firmware: primary runtime did not appear for sibling restore\n");
+                return 3;
+            }
+            if (primary_runtime.open(context, runtime_loc) != 0) {
+                std::fprintf(stderr, "firmware: cannot open primary runtime for sibling restore\n");
+                return 3;
+            }
+            const int restore_rc = restore_sibling_loader(primary_runtime);
+            if (restore_rc != 0) return restore_rc;
+        }
+        // The sibling loader re-enumerates at the second --usb-path topology.
+        // Loop again; resolve_device on usb_paths[1] finds the fresh loader.
     }
-    std::fprintf(stderr, "firmware: loaded %zu loader transfers; device will re-enumerate\n", plan.size());
-    return 0;
+    if (any_transferred) {
+        std::fprintf(stderr, "firmware: loader transfer complete for %zu function(s)\n",
+                     target_count);
+        return 0;
+    }
+    if (any_warm) return kLoadFirmwareWarm;
+    return 3;
 }
 
 // After a loader transfer the device re-enumerates as a runtime. Polls until a
