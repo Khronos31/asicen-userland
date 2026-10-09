@@ -2,7 +2,7 @@ name: Build userland skeleton
 
 on:
   push:
-    branches: [main, dot/usb-model-support-0.1.0]
+    branches: [main, dot/usb-model-support-0.1.0, release/0.1.0]
   pull_request:
 
 jobs:
