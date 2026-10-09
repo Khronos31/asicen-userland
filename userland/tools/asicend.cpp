@@ -83,12 +83,18 @@ void append_usb_observation(std::string& out, unsigned int device,
     out += std::to_string(device);
     out += ",\"serial\":null,\"bus\":";
     out += std::to_string(obs.bus);
-    out += ",\"address\":null,\"port\":\"";
-    for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
-        if (k != 0U) out.push_back('.');
-        out += std::to_string(obs.port_path[k]);
+    out += ",\"address\":null,\"port\":";
+    if (obs.port_path.empty()) {
+        out += "null";
+    } else {
+        out += '"';
+        for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
+            if (k != 0U) out.push_back('.');
+            out += std::to_string(obs.port_path[k]);
+        }
+        out += '"';
     }
-    out += "\"}";
+    out += "}";
 }
 
 // Emits the px4 receiver-records list for a profile. W3U2/W3U3/V2 expose one
@@ -252,12 +258,18 @@ int list_devices_json() {
         // Flat location keys, matching px4's ungrouped entry shape.
         out += "\",\"bus\":";
         out += std::to_string(obs.bus);
-        out += ",\"address\":null,\"port\":\"";
-        for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
-            if (k != 0U) out.push_back('.');
-            out += std::to_string(obs.port_path[k]);
+        out += ",\"address\":null,\"port\":";
+        if (obs.port_path.empty()) {
+            out += "null";
+        } else {
+            out += '"';
+            for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
+                if (k != 0U) out.push_back('.');
+                out += std::to_string(obs.port_path[k]);
+            }
+            out += '"';
         }
-        out += "\"}";
+        out += "}";
     }
     out += "]}\n";
     std::fputs(out.c_str(), stdout);
@@ -275,7 +287,15 @@ int main(int argc, char** argv)
     bool hardware_requested = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
-        if (arg == "--help" || arg == "-h") { usage(stdout); return 0; }
+        if (arg == "--help" || arg == "-h") {
+            // px4 accepts --help alone only.
+            if (argc != 2) {
+                std::fprintf(stderr, "--help cannot be combined\n");
+                return 2;
+            }
+            usage(stdout);
+            return 0;
+        }
         if (arg == "--models") { models = true; continue; }
         if (arg == "--list-json") { list_json = true; continue; }
         if (arg == "--list") {
@@ -293,7 +313,7 @@ int main(int argc, char** argv)
         // stray hardware option cannot be silently ignored.
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
-            if (arg == "--help" || arg == "-h" || arg == "--models") continue;
+            if (arg == "--models") continue;
             std::fprintf(stderr, "--models cannot be combined with other arguments\n");
             return 2;
         }
@@ -302,7 +322,7 @@ int main(int argc, char** argv)
     if (list_json) {
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
-            if (arg == "--help" || arg == "-h" || arg == "--list-json") continue;
+            if (arg == "--list-json") continue;
             std::fprintf(stderr, "--list-json cannot be combined with other arguments\n");
             return 2;
         }

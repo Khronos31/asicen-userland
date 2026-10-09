@@ -145,7 +145,9 @@ def main() -> int:
                     except subprocess.TimeoutExpired:
                         daemon.kill()
                         daemon.wait()
-                if daemon.returncode != 0:
+                # Only surface a shutdown defect when the body did not already
+                # raise, so the original failure (e.g. IFD rejection) is kept.
+                if daemon.returncode != 0 and sys.exc_info()[0] is None:
                     raise AssertionError(f"mock daemon shutdown returned {daemon.returncode}")
     return 0
 

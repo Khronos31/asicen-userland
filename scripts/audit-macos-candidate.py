@@ -162,7 +162,7 @@ def verify_source_archives(root: Path, source_sha: str) -> None:
                 fail(f"corresponding-source member does not match candidate: {relative}")
 
 
-def audit_candidate(root: Path, final: bool = False, run_smoke: bool = True) -> None:
+def audit_candidate(root: Path, final: bool = False) -> None:
     if root.is_symlink() or not root.is_dir():
         fail("candidate must be a real directory")
     expected = BASE_FILES | (FINAL_FILES if final else set())
@@ -239,7 +239,7 @@ def audit_candidate_archive(path: Path, final: bool = False) -> None:
             extracted = root / "."
         else:
             fail("candidate archive does not contain the expected root layout")
-        audit_candidate(extracted, final=final, run_smoke=True)
+        audit_candidate(extracted, final=final)
 
 
 def main() -> int:
