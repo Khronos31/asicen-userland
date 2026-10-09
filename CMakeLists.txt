@@ -71,6 +71,8 @@ add_library(asicen_core STATIC
   userland/src/enclosure_lock.cpp
   userland/src/frontend_facts.cpp
   userland/src/frontend_sequence.cpp
+  userland/src/v2_frontend.cpp
+  userland/src/v2_nmi.cpp
   userland/src/hardware_gpio_guard.cpp
   userland/src/hardware_ownership.cpp
   userland/src/ipc.cpp
@@ -355,9 +357,30 @@ if(ASICEN_BUILD_TESTS)
   target_compile_options(asicen-product-profile-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-product-profile-tests COMMAND asicen-product-profile-tests)
 
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME asicen-model-cli-tests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/model_cli_tests.py $<TARGET_FILE_DIR:asicend>)
+  add_executable(asicen-legacy-frontend-profile-tests userland/tests/legacy_frontend_profile_tests.cpp)
+  target_link_libraries(asicen-legacy-frontend-profile-tests PRIVATE asicen_core)
+  target_compile_options(asicen-legacy-frontend-profile-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-legacy-frontend-profile-tests COMMAND asicen-legacy-frontend-profile-tests)
+
+  foreach(v2_test frontend nmi)
+    add_executable(asicen-v2-${v2_test}-tests userland/tests/v2_${v2_test}_tests.cpp)
+    target_link_libraries(asicen-v2-${v2_test}-tests PRIVATE asicen_core)
+    target_compile_options(asicen-v2-${v2_test}-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME asicen-v2-${v2_test}-tests COMMAND asicen-v2-${v2_test}-tests)
+  endforeach()
+
+  add_executable(asicen-model-ipc-tests userland/tests/model_ipc_tests.cpp)
+  target_link_libraries(asicen-model-ipc-tests PRIVATE asicen_core asicen_px4_mock)
+  target_compile_options(asicen-model-ipc-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-model-ipc-tests COMMAND asicen-model-ipc-tests)
+
   add_executable(asicen-hardware-ownership-tests
     userland/tests/hardware_ownership_tests.cpp
-    userland/src/hardware_ownership.cpp)
+    userland/src/hardware_ownership.cpp
+    userland/src/device_profile.cpp)
   target_include_directories(asicen-hardware-ownership-tests PRIVATE userland/include)
   target_compile_options(asicen-hardware-ownership-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-hardware-ownership-tests COMMAND asicen-hardware-ownership-tests)

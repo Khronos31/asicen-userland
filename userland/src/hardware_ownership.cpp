@@ -4,14 +4,31 @@
 namespace asicen {
 namespace {
 
-bool is_runtime_primary(const UsbFunctionSnapshot& s) {
-    return s.vendor_id == 0x0b06U && s.product_id == 0x0005U;
+bool matches_runtime(const UsbFunctionSnapshot& s, const DeviceProfile& profile) {
+    return s.vendor_id == profile.vid && s.product_id == profile.pid;
 }
 
-bool is_permitted_sibling(const UsbFunctionSnapshot& s) {
-    return (s.vendor_id == 0x0b06U && s.product_id == 0x0005U) ||
-           (s.vendor_id == 0x1738U &&
-            (s.product_id == 0x5211U || s.product_id == 0x5216U));
+bool is_permitted_sibling(const UsbFunctionSnapshot& s,
+                           const DeviceProfile& profile) {
+    if (matches_runtime(s, profile)) return true;
+    // Official W3U2/W3U3 loader INFs bind 5211; the existing W3U3 5216
+    // allowance remains reservation-only. Neither permits frontend I/O.
+    // The loader allowance reserves the sibling only. It does
+    // not permit frontend I/O on that function, or identify a different model.
+    return s.vendor_id == 0x1738U &&
+           ((profile.model_id == ModelId::W3u3 &&
+             (s.product_id == 0x5211U || s.product_id == 0x5216U)) ||
+            (profile.model_id == ModelId::W3u2 && s.product_id == 0x5211U));
+}
+
+bool known_topology(const DeviceProfile& profile) {
+    const auto* known = find_profile(profile.vid, profile.pid);
+    return known != nullptr && known->model_id == profile.model_id &&
+           known->frontend_family == profile.frontend_family &&
+           known->enclosure_receiver_count == profile.enclosure_receiver_count &&
+           known->expected_runtime_functions == profile.expected_runtime_functions &&
+           known->local_lane_count == profile.local_lane_count &&
+           known->combined_isdb_ts == profile.combined_isdb_ts;
 }
 
 bool interface_is_safe(const UsbFunctionSnapshot& s) {
@@ -36,27 +53,41 @@ bool correct_ordered_siblings(const UsbFunctionSnapshot& p,
 
 EnclosureOwnership::~EnclosureOwnership() { release(); }
 
-OwnershipError EnclosureOwnership::claim_w3u3(
-    UsbFunctionClaim& primary, UsbFunctionClaim& sibling,
+OwnershipError EnclosureOwnership::claim_profile(
+    const DeviceProfile& profile, UsbFunctionClaim& primary,
+    UsbFunctionClaim* sibling,
     const std::vector<std::uint8_t>& primary_path,
     const std::vector<std::uint8_t>& sibling_path) {
     if (release() != OwnershipError::none) return OwnershipError::release_failed;
-    if (primary_path.empty() || sibling_path.empty() ||
-        primary_path == sibling_path) {
+    if (!known_topology(profile) ||
+        (profile.expected_runtime_functions != 1U &&
+         profile.expected_runtime_functions != 2U))
+        return OwnershipError::unsupported_profile;
+    const bool paired = profile.expected_runtime_functions == 2U;
+    if (primary_path.empty() ||
+        (paired && (sibling == nullptr || sibling_path.empty() ||
+                    primary_path == sibling_path)) ||
+        (!paired && (sibling != nullptr || !sibling_path.empty()))) {
         return OwnershipError::invalid_path;
     }
 
     const UsbFunctionSnapshot p = primary.snapshot();
-    const UsbFunctionSnapshot s = sibling.snapshot();
-    if (!is_runtime_primary(p) || p.port_path != primary_path ||
-        !p.endpoint82_in_alt0 || !p.endpoint82_bulk_in_alt0) {
+    const bool required_endpoint = profile.combined_isdb_ts
+        ? p.endpoint81_in_alt0 && p.endpoint81_bulk_in_alt0
+        : p.endpoint82_in_alt0 && p.endpoint82_bulk_in_alt0;
+    if (!matches_runtime(p, profile) || p.port_path != primary_path ||
+        !required_endpoint) {
         return OwnershipError::primary_mismatch;
     }
-    if (!is_permitted_sibling(s) || s.port_path != sibling_path ||
-        p.address == s.address || !correct_ordered_siblings(p, s)) {
-        return OwnershipError::sibling_mismatch;
+    UsbFunctionSnapshot s{};
+    if (paired) {
+        s = sibling->snapshot();
+        if (!is_permitted_sibling(s, profile) || s.port_path != sibling_path ||
+            p.address == s.address || !correct_ordered_siblings(p, s)) {
+            return OwnershipError::sibling_mismatch;
+        }
     }
-    if (!interface_is_safe(p) || !interface_is_safe(s)) {
+    if (!interface_is_safe(p) || (paired && !interface_is_safe(s))) {
         return OwnershipError::interface_unavailable;
     }
 
@@ -64,13 +95,25 @@ OwnershipError EnclosureOwnership::claim_w3u3(
         return OwnershipError::primary_claim_failed;
     }
     primary_ = &primary;
-    if (sibling.claim_interface0() != 0) {
-        (void)release();
-        return OwnershipError::sibling_claim_failed;
+    if (paired) {
+        if (sibling->claim_interface0() != 0) {
+            (void)release();
+            return OwnershipError::sibling_claim_failed;
+        }
+        sibling_ = sibling;
     }
-    sibling_ = &sibling;
+    required_function_count_ = profile.expected_runtime_functions;
     primary_endpoint81_bulk_ = p.endpoint81_in_alt0 && p.endpoint81_bulk_in_alt0;
+    primary_endpoint82_bulk_ = p.endpoint82_in_alt0 && p.endpoint82_bulk_in_alt0;
     return OwnershipError::none;
+}
+
+OwnershipError EnclosureOwnership::claim_w3u3(
+    UsbFunctionClaim& primary, UsbFunctionClaim& sibling,
+    const std::vector<std::uint8_t>& primary_path,
+    const std::vector<std::uint8_t>& sibling_path) {
+    return claim_profile(*find_profile(ModelId::W3u3), primary, &sibling,
+                         primary_path, sibling_path);
 }
 
 OwnershipError EnclosureOwnership::release() noexcept {
@@ -83,7 +126,18 @@ OwnershipError EnclosureOwnership::release() noexcept {
         if (primary_->release_interface0() == 0) primary_ = nullptr;
         else result = OwnershipError::release_failed;
     }
+    if (primary_ == nullptr && sibling_ == nullptr) {
+        required_function_count_ = 0U;
+        primary_endpoint81_bulk_ = false;
+        primary_endpoint82_bulk_ = false;
+    }
     return result;
+}
+
+bool EnclosureOwnership::owns_required_functions() const noexcept {
+    return primary_ != nullptr &&
+           (required_function_count_ == 1U ||
+            (required_function_count_ == 2U && sibling_ != nullptr));
 }
 
 bool EnclosureOwnership::owns_both() const noexcept {
@@ -92,9 +146,9 @@ bool EnclosureOwnership::owns_both() const noexcept {
 
 bool EnclosureOwnership::primary_supports_bulk_endpoint(
     std::uint8_t endpoint) const noexcept {
-    if (!owns_both()) return false;
+    if (!owns_required_functions()) return false;
     if (endpoint == 0x81U) return primary_endpoint81_bulk_;
-    if (endpoint == 0x82U) return true;
+    if (endpoint == 0x82U) return primary_endpoint82_bulk_;
     return false;
 }
 

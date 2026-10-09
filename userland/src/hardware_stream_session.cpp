@@ -21,10 +21,6 @@ bool same_attachment(const TunerAttachment& a, const TunerAttachment& b) {
            a.system == b.system && a.nonce == b.nonce;
 }
 
-bool supported(std::uint8_t receiver, System system) {
-    return (receiver == 0U && system == System::ISDB_S) ||
-           (receiver == 1U && system == System::ISDB_T);
-}
 }  // namespace
 
 void ExitProcessFatal::terminate_nonzero(int code) noexcept {
@@ -47,15 +43,17 @@ HardwareStreamService::~HardwareStreamService() noexcept {
     // call stop_capture while the exact claimed handle is still owned.
 }
 
-std::uint8_t HardwareStreamService::receiver_count() const noexcept { return 4U; }
+std::uint8_t HardwareStreamService::receiver_count() const noexcept {
+    return frontend_.receiver_count();
+}
 
 bool HardwareStreamService::receiver_supports(std::uint8_t receiver,
                                               System system) const noexcept {
-    return supported(receiver, system);
+    return receiver < receiver_count() && frontend_.receiver_supports(receiver, system);
 }
 
 bool HardwareStreamService::selects_satellite_stream_before_tune() const noexcept {
-    return false;
+    return frontend_.selects_satellite_stream_before_tune();
 }
 
 bool HardwareStreamService::requires_terrestrial_lock_settle() const noexcept {
@@ -63,66 +61,66 @@ bool HardwareStreamService::requires_terrestrial_lock_settle() const noexcept {
 }
 
 Result<void> HardwareStreamService::open_receiver(std::uint8_t receiver) noexcept {
-    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver >= receiver_count()) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.open_receiver(receiver);
 }
 
 Result<void> HardwareStreamService::tune_terrestrial(
     std::uint8_t receiver, std::uint32_t frequency_khz,
     std::uint32_t timeout_ms) noexcept {
-    if (receiver != 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, System::ISDB_T)) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.tune_terrestrial(receiver, frequency_khz, timeout_ms);
 }
 
 Result<void> HardwareStreamService::tune_satellite(
     std::uint8_t receiver, std::uint32_t frequency_khz,
     std::uint32_t timeout_ms) noexcept {
-    if (receiver != 0U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, System::ISDB_S)) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.tune_satellite(receiver, frequency_khz, timeout_ms);
 }
 
 Result<bool> HardwareStreamService::is_locked(std::uint8_t receiver,
                                               System system) noexcept {
-    if (!supported(receiver, system)) return Result<bool>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, system)) return Result<bool>::failure(Error::UNSUPPORTED);
     return frontend_.is_locked(receiver, system);
 }
 
 Result<void> HardwareStreamService::select_satellite_slot(
     std::uint8_t receiver, std::uint8_t slot, std::uint32_t timeout_ms) noexcept {
-    if (receiver != 0U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, System::ISDB_S)) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.select_satellite_slot(receiver, slot, timeout_ms);
 }
 
 Result<void> HardwareStreamService::select_satellite_tsid(
     std::uint8_t receiver, std::uint16_t tsid, std::uint32_t timeout_ms) noexcept {
-    if (receiver != 0U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, System::ISDB_S)) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.select_satellite_tsid(receiver, tsid, timeout_ms);
 }
 
 Result<void> HardwareStreamService::close_receiver(std::uint8_t receiver) noexcept {
-    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver >= receiver_count()) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.close_receiver(receiver);
 }
 
 Result<void> HardwareStreamService::begin_tune_power(
     std::uint8_t receiver, System system, std::uint8_t lnb_voltage) noexcept {
-    if (!supported(receiver, system) || lnb_voltage != 0U)
+    if (!receiver_supports(receiver, system) || lnb_voltage != 0U)
         return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.begin_tune_power(receiver, system, 0U);
 }
 
 Result<void> HardwareStreamService::commit_tune_power(std::uint8_t receiver) noexcept {
-    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver >= receiver_count()) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.commit_tune_power(receiver);
 }
 
 Result<void> HardwareStreamService::rollback_tune_power(std::uint8_t receiver) noexcept {
-    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (receiver >= receiver_count()) return Result<void>::failure(Error::UNSUPPORTED);
     return frontend_.rollback_tune_power(receiver);
 }
 
 void HardwareStreamService::mark_receiver_disconnected(std::uint8_t receiver) noexcept {
-    if (receiver <= 1U) frontend_.mark_receiver_disconnected(receiver);
+    if (receiver < receiver_count()) frontend_.mark_receiver_disconnected(receiver);
     request_stop();
 }
 
@@ -176,7 +174,7 @@ Result<void> HardwareStreamService::shutdown() noexcept {
 
 Result<void> HardwareStreamService::start_capture(
     std::uint8_t receiver, System system) noexcept {
-    if (!supported(receiver, system)) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, system)) return Result<void>::failure(Error::UNSUPPORTED);
     std::lock_guard<std::mutex> life(lifecycle_mutex_);
     if (shutdown_requested_.load()) return Result<void>::failure(Error::NOT_READY);
     bool launch_failed = false;
@@ -235,7 +233,7 @@ Result<void> HardwareStreamService::start_capture(
 
 Result<void> HardwareStreamService::stop_capture(
     std::uint8_t receiver, System system) noexcept {
-    if (!supported(receiver, system)) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, system)) return Result<void>::failure(Error::UNSUPPORTED);
     std::lock_guard<std::mutex> life(lifecycle_mutex_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -267,7 +265,7 @@ Result<void> HardwareStreamService::stop_capture(
 }
 
 Result<void> HardwareStreamService::attach(const TunerAttachment& attachment) noexcept {
-    if (!supported(attachment.receiver, attachment.system) ||
+    if (!receiver_supports(attachment.receiver, attachment.system) ||
         attachment.owner_client_id == 0U || attachment.lease_id == 0U ||
         attachment.attachment_id == 0U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);

@@ -14,6 +14,14 @@
 
 namespace {
 
+static_assert(asicen::card_mailbox_submit_delay_ms(asicen::ModelId::W3u3, 5) == 100);
+static_assert(asicen::card_mailbox_submit_delay_ms(asicen::ModelId::W3u3V2, 5) == 150);
+static_assert(asicen::card_mailbox_submit_delay_ms(asicen::ModelId::W3u3V2, 9) == 150);
+static_assert(asicen::card_mailbox_submit_delay_ms(asicen::ModelId::W3u3V2, 10) == 100);
+static_assert(asicen::card_mailbox_submit_delay_ms(asicen::ModelId::W3u3V2, 70) == 100);
+static_assert(asicen::card_mailbox_submit_delay_ms(asicen::ModelId::W3u3V2, 71) == 140);
+static_assert(asicen::card_mailbox_submit_delay_ms(asicen::ModelId::W3u3V2, 255) == 140);
+
 std::uint8_t reverse_bits(std::uint8_t value);
 
 class MailboxTransport final : public asicen::FrontendTransport {

@@ -204,3 +204,18 @@ partial-request SIGTERM cleanup in both product and research daemon modes.
 All tests are offline. They do not validate USB exclusivity,
 physical reset/tune behavior, stream reception, card status, or hardware
 shutdown deadlines.
+
+
+## Model-specific topology update (0.1.0 preparation)
+
+The ASICEN-only IPC profile now permits canonical one-combined, two-split and
+four-split receiver layouts, without changing wire structures or the imported
+PX4 reference build. `asicend --mock --model MODEL` exercises each physical
+profile. Hardware LIST advertises the operational subset: one receiver for
+S3U, two for S3U2 and the primary pair of a four-receiver enclosure. The catalogue
+retains physical capacity separately. Count2 is paired with receiver-bearing
+USB mask01, not physical reservation mask03. `HardwareStreamService` delegates
+capabilities to its frontend rather than imposing a W3U3 receiver map.
+
+The implementation source and hardware-verification boundary are described in
+[model-support.md](model-support.md). No mock pass is a hardware-support claim.

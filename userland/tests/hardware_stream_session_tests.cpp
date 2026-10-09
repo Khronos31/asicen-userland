@@ -39,7 +39,7 @@ public:
         events.push_back("prepare");
         interrupted = false;
         if (prepare_error) return Result<void>::failure(Error::USB_IO);
-        prepared = receiver == 1U && system == ipc::System::ISDB_T &&
+        prepared = receiver == expected_receiver && system == expected_system &&
                    !cancelled.load();
         return prepared ? Result<void>::success()
                         : Result<void>::failure(Error::UNSUPPORTED);
@@ -106,6 +106,8 @@ public:
     std::vector<std::string> events;
     std::vector<std::vector<std::uint8_t>> chunks;
     std::size_t emitted = 0;
+    std::uint8_t expected_receiver = 1U;
+    ipc::System expected_system = ipc::System::ISDB_T;
     int stop_calls = 0;
     bool prepared = false;
     bool interrupted = false;
@@ -130,6 +132,11 @@ public:
 
 class ShutdownTrackingFrontend final : public TunerServiceBackend {
 public:
+    std::uint8_t receiver_count() const noexcept override { return 4U; }
+    bool receiver_supports(std::uint8_t receiver, ipc::System system) const noexcept override {
+        return (receiver == 0U && system == ipc::System::ISDB_S) ||
+               (receiver == 1U && system == ipc::System::ISDB_T);
+    }
     Result<void> open_receiver(std::uint8_t) noexcept override { return Result<void>::success(); }
     Result<void> tune_terrestrial(std::uint8_t, std::uint32_t,
                                   std::uint32_t) noexcept override {
@@ -390,6 +397,51 @@ void shutdown_cleanup_failure_is_reported_in_final_state() {
           "cleanup failure upgrades lifecycle stopped state into an error snapshot");
 }
 
+void model_capabilities_delegate_without_enabling_unsupported_paths() {
+    asicen::MockTunerBackend combined(1U);
+    FakeSource source;
+    FakeFatal fatal;
+    asicen::HardwareStreamService service(combined, source, fatal);
+    check(service.receiver_count() == 1U, "single-receiver count is delegated");
+    check(service.receiver_supports(0U, ipc::System::ISDB_T) &&
+          service.receiver_supports(0U, ipc::System::ISDB_S),
+          "shared receiver inherits both supported tune systems");
+    check(service.open_receiver(0U), "combined receiver can open");
+    check(service.tune_terrestrial(0U, 557142U, 1000U),
+          "terrestrial tune need not use logical receiver one");
+    check(service.tune_satellite(0U, 1049480U, 1000U),
+          "same combined receiver can tune satellite");
+    check(service.open_receiver(1U).error() == Error::UNSUPPORTED &&
+          service.start_capture(1U, ipc::System::ISDB_T).error() == Error::UNSUPPORTED,
+          "out-of-model receiver rejected before source prepare");
+    check(source.events.empty(), "unsupported mapping never prepares the source");
+    source.expected_receiver = 0U;
+    check(service.start_capture(0U, ipc::System::ISDB_T),
+          "combined terrestrial receiver reaches source with logical receiver zero");
+    check(service.stop_capture(0U, ipc::System::ISDB_T), "combined terrestrial source stops");
+    source.expected_system = ipc::System::ISDB_S;
+    check(service.start_capture(0U, ipc::System::ISDB_S),
+          "same logical receiver can select satellite source after cleanup");
+    check(service.stop_capture(0U, ipc::System::ISDB_S), "combined satellite source stops");
+
+    asicen::MockTunerBackend four;
+    FakeSource secondary_source;
+    asicen::HardwareStreamService secondary(four, secondary_source, fatal);
+    check(secondary.receiver_count() == 4U &&
+          secondary.receiver_supports(2U, ipc::System::ISDB_S) &&
+          secondary.receiver_supports(3U, ipc::System::ISDB_T),
+          "wrapper accepts additional receivers only when frontend supports them");
+    check(secondary.tune_terrestrial(3U, 557142U, 1000U) &&
+          secondary.select_satellite_slot(2U, 0U, 1000U),
+          "secondary frontend operations preserve receiver routing");
+    check(!secondary.receiver_supports(4U, ipc::System::ISDB_S),
+          "wrapper enforces delegated count boundary");
+    secondary_source.expected_receiver = 3U;
+    check(secondary.start_capture(3U, ipc::System::ISDB_T),
+          "supported secondary logical receiver reaches the selected source");
+    check(secondary.stop_capture(3U, ipc::System::ISDB_T), "secondary source stops");
+}
+
 void primary_satellite_receiver_mapping_is_explicit() {
     ShutdownTrackingFrontend frontend;
     FakeSource source;
@@ -421,6 +473,7 @@ int main() {
     shutdown_cleans_source_and_is_sticky_against_restart();
     shutdown_cleanup_failure_is_reported_in_final_state();
     primary_satellite_receiver_mapping_is_explicit();
+    model_capabilities_delegate_without_enabling_unsupported_paths();
     std::cout << "hardware stream session tests passed\n";
     return 0;
 }

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "asicen/frontend_sequence.h"
+#include "asicen/device_profile.h"
 #include "px4/card.h"
 
 #include <array>
@@ -10,14 +11,21 @@
 
 namespace asicen {
 
+// V2 Windows BDA post-submit delay (file/RVA 0x14134), in milliseconds.
+constexpr unsigned card_mailbox_submit_delay_ms(ModelId model, std::size_t length) noexcept {
+    return model == ModelId::W3u3V2 ? (length > 70U ? 140U : (length < 10U ? 150U : 100U)) : 100U;
+}
+
+
 // Source-backed W3U3 controller mailbox adapter for the upstream portable
 // CardSession. The caller owns the absolute deadline/cancellation policy via
 // FrontendTransport; this adapter never performs USB outside that transport.
 class W3u3CardMailboxHardware final : public px4::userland::CardHardware,
                                      public px4::userland::CardTime {
 public:
-    explicit W3u3CardMailboxHardware(FrontendTransport& transport) noexcept
-        : transport_(transport) {}
+    explicit W3u3CardMailboxHardware(FrontendTransport& transport,
+        ModelId model = ModelId::W3u3) noexcept
+        : transport_(transport), model_(model) {}
 
     px4::userland::Result<bool> detect_card() noexcept override;
     px4::userland::Result<void> reset_card(px4::userland::It930xCardDelay&) noexcept override;
@@ -44,6 +52,7 @@ private:
     bool interrupted() const noexcept;
 
     FrontendTransport& transport_;
+    ModelId model_;
     bool atr_pending_ = false;
     bool controller_initialized_ = false;
     bool cleanup_mode_ = false;

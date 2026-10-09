@@ -40,6 +40,7 @@ public:
 
 struct Options {
     bool hardware = false;
+    const asicen::DeviceProfile* expected_model = nullptr;
     bool have_primary = false;
     bool have_sibling = false;
     std::uint8_t primary_bus = 0;
@@ -119,6 +120,10 @@ bool parse_arguments(int argc, char** argv, Options* out) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
         if (arg == "--hardware") out->hardware = true;
+        else if (arg == "--model" && i + 1 < argc) {
+            out->expected_model = asicen::find_profile_by_model(argv[++i]);
+            if (out->expected_model == nullptr) return false;
+        }
         else if (arg == "--primary" && i + 1 < argc) {
             out->have_primary = asicen::parse_usb_location(
                 argv[++i], &out->primary_bus, &out->primary_address);
@@ -159,10 +164,10 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             out->satellite_slot = static_cast<std::uint8_t>(parsed);
         } else if (arg == "--help" || arg == "-h") {
             std::puts("usage: asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
-                      "--sibling BUS:ADDR --sibling-port BUS-PORT "
+                      "[--sibling BUS:ADDR --sibling-port BUS-PORT] [--model MODEL] "
                       "[--runtime-dir PATH] [--instance TOKEN]\n"
                       "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
-                      "--sibling BUS:ADDR --sibling-port BUS-PORT "
+                      "[--sibling BUS:ADDR --sibling-port BUS-PORT] [--model MODEL] "
                       "--probe-satellite RF_KHZ [--slot 0..7]\n"
                       "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
                       "--sibling BUS:ADDR --sibling-port BUS-PORT --probe-card\n"
@@ -172,8 +177,8 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             std::exit(0);
         } else return false;
     }
-    return out->hardware && out->have_primary && out->have_sibling &&
-           !out->primary_port.empty() && !out->sibling_port.empty() &&
+    return out->hardware && out->have_primary &&
+           !out->primary_port.empty() && (out->have_sibling == !out->sibling_port.empty()) &&
             out->runtime_dir.size() < 400U && valid_instance(out->instance) &&
            (!out->have_satellite_slot || out->probe_satellite) &&
            (!out->card_only || (!out->probe_satellite && !out->probe_card));
@@ -188,7 +193,7 @@ int run_asicend_hardware(int argc, char** argv) {
     Options options;
     if (!parse_arguments(argc, argv, &options)) {
         std::fprintf(stderr, "usage: asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
-                             "--sibling BUS:ADDR --sibling-port BUS-PORT "
+                             "[--sibling BUS:ADDR --sibling-port BUS-PORT] [--model MODEL] "
                              "[--runtime-dir PATH] [--instance TOKEN]\n");
         return 2;
     }
@@ -201,12 +206,12 @@ int run_asicend_hardware(int argc, char** argv) {
     ::signal(SIGPIPE, SIG_IGN);
     std::vector<std::uint8_t> primary_path, sibling_path;
     if (!parse_port(options.primary_port, options.primary_bus, &primary_path) ||
-        !parse_port(options.sibling_port, options.sibling_bus, &sibling_path)) {
+        (options.have_sibling && !parse_port(options.sibling_port, options.sibling_bus, &sibling_path))) {
         std::fprintf(stderr, "USB port path bus must match selected bus\n");
         return 2;
     }
-    if (primary_path == sibling_path || primary_path.back() != 1U ||
-        sibling_path.back() != 2U) {
+    if (options.have_sibling && (primary_path == sibling_path || primary_path.back() != 1U ||
+        sibling_path.back() != 2U)) {
         std::fprintf(stderr, "refusing noncanonical primary/sibling port assignment\n");
         return 2;
     }
@@ -226,10 +231,10 @@ int run_asicend_hardware(int argc, char** argv) {
         asicen::LibusbW3u3Hardware hardware(
             context, {options.primary_bus, options.primary_address},
             {options.sibling_bus, options.sibling_address},
-            primary_path, sibling_path);
+            primary_path, sibling_path, options.expected_model);
         const auto claimed = hardware.claim();
         if (!claimed) {
-            std::fprintf(stderr, "hardware topology/claim refused: %s\n",
+            std::fprintf(stderr, "hardware model/topology/claim refused (dual-function models require sibling paths): %s\n",
                          px4::userland::error_string(claimed.error()));
             result = claimed.error() == px4::userland::Error::BUSY ? 4 : 3;
         } else if (options.probe_satellite) {

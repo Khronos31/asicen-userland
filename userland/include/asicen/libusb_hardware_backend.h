@@ -10,6 +10,7 @@
 #include "asicen/stream_capture.h"
 #include "asicen/frontend_sequence.h"
 #include "asicen/satellite_tune.h"
+#include "asicen/v2_frontend.h"
 #include "asicen/card_mailbox_hardware.h"
 #include "asicen/card_operation_guard.h"
 
@@ -37,9 +38,13 @@ struct CardProbeSummary {
     std::uint16_t status_word = 0;
 };
 
-// In-process backend: primary receiver 0 is satellite and receiver 1 is
-// terrestrial. Both USB functions are claimed before frontend writes; the
-// shared frontend permits one active receiver lease/capture at a time.
+// Source-gated in-process backend. S3U exposes one combined receiver; other
+// supported models expose primary satellite0/terrestrial1. W3U2/W3U3 share
+// their frontend path, while S3U/S3U2/V2 use model-specific plans. Physical
+// enclosure capacity is in device_profile(); receiver_count() reports only
+// operational lanes. A paired model claims both functions before writes, but
+// the secondary function stays reserved and never receives frontend I/O.
+// The shared frontend permits one active receiver lease/capture at a time.
 class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
                                  public StreamCaptureSource,
                                  public CardOperationGuard,
@@ -50,11 +55,15 @@ class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
 public:
     LibusbW3u3Hardware(libusb_context* context, UsbLocation primary,
                        UsbLocation sibling, std::vector<std::uint8_t> primary_path,
-                       std::vector<std::uint8_t> sibling_path);
+                       std::vector<std::uint8_t> sibling_path,
+                       const DeviceProfile* expected_profile = nullptr);
     ~LibusbW3u3Hardware() noexcept override;
     LibusbW3u3Hardware(const LibusbW3u3Hardware&) = delete;
     LibusbW3u3Hardware& operator=(const LibusbW3u3Hardware&) = delete;
 
+    // With no expected profile, resolve it from the primary USB descriptor.
+    // An expected profile is still checked against that descriptor on claim.
+    const DeviceProfile* device_profile() const noexcept { return profile_; }
     px4::userland::Result<void> claim();
     px4::userland::Result<void> release() noexcept;
     SatelliteProbeSummary probe_satellite(
@@ -122,6 +131,7 @@ private:
     };
 
     int control(const ControlTransfer&, unsigned char*) override;
+    int control_function(std::uint8_t, const ControlTransfer&, unsigned char*);
     struct CaptureUsbHooks {
         void* context = nullptr;
         int (*control)(void*, const ControlTransfer&, unsigned char*) = nullptr;
@@ -131,6 +141,9 @@ private:
         void (*free)(void*, libusb_transfer*) = nullptr;
         int (*pump_events)(void*, unsigned) = nullptr;
         void (*interrupt_events)(void*) = nullptr;
+        int (*control_function)(void*, std::uint8_t, const ControlTransfer&, unsigned char*) = nullptr;
+        // Test-only monotonic clock; production always uses steady_clock.
+        std::chrono::steady_clock::time_point (*now)(void*) = nullptr;
     };
     libusb_transfer* allocate_transfer() noexcept;
     int submit_transfer(libusb_transfer*) noexcept;
@@ -139,6 +152,7 @@ private:
     void delay_ms(unsigned) override;
     bool cancelled() const override;
     bool expired() const override;
+    std::chrono::steady_clock::time_point steady_now() const noexcept;
     bool acquire_control_gate(std::chrono::steady_clock::time_point deadline,
                               const volatile std::sig_atomic_t* stop_flag = nullptr,
                               bool cleanup = false) noexcept;
@@ -152,6 +166,20 @@ private:
     bool write_cf_block(std::uint8_t, const std::uint8_t*, std::size_t) override;
     bool terrestrial_locked(std::uint8_t, bool*, std::chrono::steady_clock::time_point) override;
     bool snapshot_link_diagnostic() override;
+    bool runtime_model_supported() const noexcept;
+    bool uses_legacy_frontend() const noexcept;
+    bool uses_v2_frontend() const noexcept;
+    bool verify_v2_pair_roles() noexcept;
+    bool verify_v2_pair_identity() noexcept;
+    SatelliteOperationResult run_model_satellite_tune(std::uint32_t) noexcept;
+    SatelliteLockResult read_model_satellite_lock() noexcept;
+    SatelliteLockResult poll_model_satellite_lock() noexcept;
+    SatelliteTsidReadyResult wait_model_satellite_tsid(std::size_t, std::uint16_t,
+                                                       bool) noexcept;
+    SatelliteTsidSelectResult select_model_satellite_tsid(
+        std::size_t, const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>&) noexcept;
+    LegacyFrontendProfile legacy_frontend() const noexcept;
+    bool snapshot_gpio_state() noexcept;
     bool verify_device_revision() noexcept;
     PoweredControllerCheck verify_powered_controller() noexcept;
     bool apply_link_seed() override;
@@ -175,6 +203,7 @@ private:
     bool stop_capture_safely() noexcept override;
     bool restore_gpio_snapshot_safely() noexcept override;
 
+    const DeviceProfile* profile_ = nullptr;
     libusb_context* context_ = nullptr;
     LibusbDevice primary_;
     LibusbDevice sibling_;
@@ -193,6 +222,8 @@ private:
     std::atomic<bool> cleanup_io_active_{false};
     bool claimed_ = false;
     bool initialized_ = false;
+    bool v2_roles_verified_ = false;
+    bool v2_identity_verified_ = false;
     bool tuned_ = false;
     bool gain_applied_ = false;
     bool source_prepared_ = false;
@@ -212,6 +243,8 @@ private:
     const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
     bool gpio_snapshot_valid_ = false;
     std::uint8_t gpio_snapshot_ = 0;
+    bool board_power_attempted_ = false;
+    std::uint32_t tuned_frequency_khz_ = 0;
     std::array<std::uint8_t, 0x45> cf_snapshot_{};
     std::array<std::uint8_t, 16> link_seed_{};
     LinkSeedDiagnostic link_diagnostic_{};

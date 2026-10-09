@@ -335,7 +335,7 @@ bool valid_tune(const TuneRequestPayload& value) noexcept
 bool valid_receiver_count(std::uint8_t count) noexcept
 {
 #if defined(ASICEN_PROFILE_ASICEN)
-    return count == asicen::profile::kReceiverCount;
+    return asicen::profile::valid_receiver_count(count);
 #else
     return count == kSingleReceiverCount || count == kMlt3PeReceiverCount ||
            count == kW3U4ReceiverCount || count == kMlt5PeReceiverCount ||
@@ -347,8 +347,7 @@ bool valid_receiver_count(std::uint8_t count) noexcept
 std::uint8_t usb_present_mask_for(std::uint8_t count) noexcept
 {
 #if defined(ASICEN_PROFILE_ASICEN)
-    (void)count;
-    return asicen::profile::kUsbPresentMask;
+    return asicen::profile::usb_present_mask(count);
 #else
     return count == kQ3U4ReceiverCount ? kUsbPresentMask : 0x01U;
 #endif
@@ -360,8 +359,9 @@ ReceiverRecord expected_receiver_record(std::uint8_t count, std::size_t global,
 {
     const auto id = static_cast<std::uint8_t>(global);
 #if defined(ASICEN_PROFILE_ASICEN)
-    (void)count;
     (void)dual_system;
+    if (asicen::profile::is_combined_receiver(count, id))
+        return ReceiverRecord{id, 1U, 0U, System::ISDB_T_OR_S};
     const auto dev = static_cast<std::uint8_t>(
         asicen::profile::usb_function_for_receiver(id) + 1U);
     const auto local = asicen::profile::local_receiver_for(id);

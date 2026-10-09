@@ -4,6 +4,18 @@ Development of a direct-libusb userspace driver for ASICEN-based PLEX receivers,
 starting with the original PX-W3U3. Based on the protocol skeleton and evidence
 from [asicen-research](https://github.com/Khronos31/asicen-research).
 
+## USB model profiles (0.1.0 preparation)
+
+The source now distinguishes **PX-S3U, PX-S3U2, PX-W3U2, PX-W3U3 and
+PX-W3U3 V2**, rather than identifying every PID and then running W3U3 code.
+See [the model support matrix](docs/model-support.md) for exact runtime
+revision/controller restrictions, operational receiver counts, official-driver
+evidence and offline validation. New model support is **hardware-unverified**.
+Four-receiver products currently expose only their primary S/T pair; mock
+capacity or a recognized USB ID is not proof of four working hardware lanes.
+`asicend --models` prints source profile readiness without accessing USB.
+
+
 This is a public development repository. Source publication was authorized on
 2026-10-09, ahead of the planned 0.1.0 release. **Full distribution parity remains incomplete.** Linux
 x86_64 private candidates now have fully static musl commands, static libusb,
@@ -55,7 +67,9 @@ not demonstrate reception; see the [daemon trial](docs/reverse-engineering/daemo
 The portable clients and service are adapted from px4-userland, retaining its
 channel syntax, tune timeout, finite capture, output and terminal-error
 handling. ASICEN uses `--instance` because this hardware has no USB serial
-descriptor. Receivers are `0:S, 1:T, 2:S, 3:T`. Its socket directory and wire
+descriptor. The model determines the receiver map: S3U has one `0:T-or-S` receiver;
+S3U2 has `0:S, 1:T`; four-receiver physical models have two pairs, but
+the hardware backend currently exposes only the primary pair. Its socket directory and wire
 magic are separate from px4-userland.
 
 For an isolated mock trial, create a private runtime directory, run the daemon
@@ -94,8 +108,10 @@ build/asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
   --receiver 0 --channel BS01_0 --packet-count 30000 --output satellite.ts
 ```
 
-Hardware capture supports primary receiver0 satellite channels and
-receiver1/T27 (557142kHz), with one active receiver lease at a time. It performs
+The original W3U3 hardware evidence covers primary receiver0 satellite
+channels and receiver1/T27 (557142kHz), with one active receiver lease at a
+time. The source-backed model plans cover additional terrestrial channel
+frequencies; these are not new hardware acceptance results. It performs
 frontend initialization, one RF gain feedback step, acquisition and the
 device-link transform internally; the caller does not provide a seed file.
 The resulting TS can still be B25-scrambled. The hardware daemon now serves
@@ -116,8 +132,8 @@ The installed1.2.4 binary used in testing omitted the last packet on stdin;
 version1.2.4 alone does not identify whether this fix is present.
 `--card-only` remains available for offline decoding.
 See the [live capture/card evidence](docs/reverse-engineering/live-card-stream-trial-2026-10-09.md).
-Other terrestrial channels, secondary USB receivers and cold-start validation
-remain unfinished. LNB voltage changes
+Other terrestrial channels, other models, secondary USB receivers and
+cold-start hardware validation remain unfinished. LNB voltage changes
 are unsupported. Hardware `--list` enumeration is also not implemented; use the
 probe tool for USB discovery. Daemon TS quality counters are not yet measured;
 use the offline validator rather than interpreting their zero values as proof
@@ -129,7 +145,9 @@ Start with `build/asicen-probe list` and the explicit
 `build/asicen-probe --device BUS:ADDRESS describe` command. Runtime functions
 also support `high-speed` and `customer-info` read-only queries.
 
-`load-firmware` requires both `--device BUS:ADDRESS` and `--firmware PATH`.
+`load-firmware` requires `--device BUS:ADDRESS`, `--model MODEL` and
+`--firmware PATH`, with a model-matched whole-image SHA-256. V2 uses a
+different image/start address; see [firmware selection](docs/model-support.md#firmware-is-model-selected-not-just-size-checked).
 It changes hardware state and can affect the other function in the enclosure.
 Do not use an old USB address after re-enumeration. No automatic firmware
 download, driver detach, hub reset, or transfer retry is performed.
@@ -137,8 +155,9 @@ download, driver detach, hub reset, or transfer retry is performed.
 Vendor firmware is excluded from Git and corresponding-source archives.
 Binary distribution packages will include an externally supplied firmware
 copy, per the user's2026-10-09 decision; redistribution rights remain
-unresolved and are stated separately in the vendor notice. The extraction
-script operates on the original vendor `loader.ko`. See [NOTICES.md](NOTICES.md)
+unresolved and are stated separately in the vendor notice. The original extraction
+script operates on vendor `loader.ko`; the separate Windows extractor handles
+the verified V2-compatible BDA loader image. See [NOTICES.md](NOTICES.md)
 for the GPLv2 product license, static dependencies and firmware distinction.
 
 See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md) for provenance, observed

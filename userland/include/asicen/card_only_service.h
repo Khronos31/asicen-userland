@@ -52,6 +52,7 @@ private:
 
 class CardOnlyTunerBackend final : public px4::userland::TunerServiceBackend {
 public:
+    explicit CardOnlyTunerBackend(std::uint8_t count = 2U) : count_(count) {}
     std::uint8_t receiver_count() const noexcept override;
     bool receiver_supports(std::uint8_t, px4::userland::ipc::System) const noexcept override;
     px4::userland::Result<void> open_receiver(std::uint8_t) noexcept override;
@@ -66,6 +67,8 @@ public:
     px4::userland::Result<void> select_satellite_tsid(
         std::uint8_t, std::uint16_t, std::uint32_t) noexcept override;
     px4::userland::Result<void> close_receiver(std::uint8_t) noexcept override;
+private:
+    std::uint8_t count_;
 };
 
 int run_card_only_server(

@@ -176,3 +176,16 @@ The 2026-10-08 independent critic returned REVISE. Before integrating hardware:
 - Compare reuse of px4 portable IPC/client/lifecycle with extending research
   IPC before selecting an implementation; record provenance and dependencies.
 - Keep mock/CLI tests distinct from real station and actual-card evidence.
+
+
+## 0.1.0 source-supported model boundary
+
+Use [docs/model-support.md](docs/model-support.md) as the current implementation
+and evidence matrix for the five USB products. Model recognition, source-backed
+runtime support and physical validation are separate states. Unsupported
+silicon/controller revisions fail closed; they must not inherit W3U3 writes
+merely because the USB vendor is ASICEN. S3U's combined receiver remains one
+exclusive resource across terrestrial and satellite tuning. Four-receiver
+physical capacity does not imply secondary-function or simultaneous-capture
+acceptance. GPIO/LNB electrical testing is deferred to measurement; this does
+not prohibit implementing source-backed model-specific control sequences.

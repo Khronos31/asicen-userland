@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "asicen/device_profile.h"
+
 #include <cstdint>
 #include <atomic>
 #include <vector>
@@ -43,6 +45,7 @@ enum class OwnershipError : std::uint8_t {
     primary_claim_failed,
     sibling_claim_failed,
     release_failed,
+    unsupported_profile,
 };
 
 class EnclosureOwnership final {
@@ -52,18 +55,29 @@ public:
     EnclosureOwnership(const EnclosureOwnership&) = delete;
     EnclosureOwnership& operator=(const EnclosureOwnership&) = delete;
 
+    // Validate identity/topology before any claim. Single-function models must
+    // not supply a sibling; dual-function models reserve both ordered ports.
+    // This is ownership only: callers must separately gate frontend support.
+    OwnershipError claim_profile(const DeviceProfile& profile,
+                                  UsbFunctionClaim& primary,
+                                  UsbFunctionClaim* sibling,
+                                  const std::vector<std::uint8_t>& primary_path,
+                                  const std::vector<std::uint8_t>& sibling_path = {});
     OwnershipError claim_w3u3(UsbFunctionClaim& primary,
                               UsbFunctionClaim& sibling,
                               const std::vector<std::uint8_t>& primary_path,
                               const std::vector<std::uint8_t>& sibling_path);
     OwnershipError release() noexcept;
     bool owns_both() const noexcept;
+    bool owns_required_functions() const noexcept;
     bool primary_supports_bulk_endpoint(std::uint8_t endpoint) const noexcept;
 
 private:
     UsbFunctionClaim* primary_ = nullptr;
     UsbFunctionClaim* sibling_ = nullptr;
     bool primary_endpoint81_bulk_ = false;
+    bool primary_endpoint82_bulk_ = false;
+    std::uint8_t required_function_count_ = 0;
 };
 
 enum class ReceiverReservationResult : std::uint8_t {

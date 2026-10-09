@@ -73,3 +73,20 @@ must accompany its binary-package copy and state the unresolved status,
 source artifact, extracted object, byte size and SHA-256. Do not label it MIT,
 GPL, public domain or rights-cleared. This records the user's distribution
 decision without claiming permission from the vendor.
+
+## NMI / TDA2014x frontend adaptation
+
+`userland/src/v2_frontend.cpp` and `userland/src/v2_nmi.cpp` adapt portable
+parts of the GPL driver algorithms by Budi Rachmanto / AreMa Inc., from
+[`knight-rider/ptx` revision ad3dc2619787a9a38ae3c5a17137f47d9631e8e1](https://github.com/knight-rider/ptx/tree/ad3dc2619787a9a38ae3c5a17137f47d9631e8e1):
+`drivers/media/tuners/nm131.c` and `tda2014x.c`. Attribution is retained in the
+files; the adaptation is GPL-2.0-only. Source checksums are recorded in
+[the model support record](docs/model-support.md). Model-specific differences
+were cross-checked against official Windows object code by static inspection;
+no vendor executable code or application-key tables are incorporated.
+
+The separately supplied Windows loader firmware is not covered by these source
+licenses. The extraction script reads its decoding key from the user's verified
+vendor file; it embeds neither the key nor firmware. Its separate fingerprint
+and load address do not grant redistribution rights or make it interchangeable
+with the Linux firmware image.

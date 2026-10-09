@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "asicen/device_profile.h"
 #include "px4/card_service.h"
 #include "px4/tuner_service.h"
 
@@ -13,6 +14,10 @@ namespace asicen {
 
 class MockTunerBackend final : public px4::userland::TunerServiceBackend {
 public:
+    MockTunerBackend() noexcept = default;
+    explicit MockTunerBackend(const DeviceProfile& profile) noexcept;
+    // Count 1 models one shared T/S receiver; 2 and 4 use split S/T pairs.
+    explicit MockTunerBackend(std::uint8_t receiver_count) noexcept;
     std::uint8_t receiver_count() const noexcept override;
     bool receiver_supports(std::uint8_t receiver,
                            px4::userland::ipc::System system) const noexcept override;
@@ -36,6 +41,8 @@ public:
     void request_stop() noexcept override;
 
 private:
+    std::uint8_t receiver_count_ = 4U;
+    bool combined_isdb_ts_ = false;
     std::atomic<bool> stopping_{false};
 };
 

@@ -22,22 +22,34 @@ Result<void> available(const std::atomic<bool>& stopping) noexcept
 
 }  // namespace
 
+MockTunerBackend::MockTunerBackend(const DeviceProfile& device) noexcept
+    : receiver_count_(profile::valid_receiver_count(device.enclosure_receiver_count) &&
+                      device.combined_isdb_ts == (device.enclosure_receiver_count == 1U)
+                          ? device.enclosure_receiver_count : 0U),
+      combined_isdb_ts_(device.combined_isdb_ts) {}
+
+MockTunerBackend::MockTunerBackend(std::uint8_t count) noexcept
+    : receiver_count_(profile::valid_receiver_count(count) ? count : 0U),
+      combined_isdb_ts_(count == 1U) {}
+
 std::uint8_t MockTunerBackend::receiver_count() const noexcept
 {
-    return profile::kReceiverCount;
+    return receiver_count_;
 }
 
 bool MockTunerBackend::receiver_supports(std::uint8_t receiver,
                                          ipc::System system) const noexcept
 {
-    if (receiver >= profile::kReceiverCount) return false;
+    if (receiver >= receiver_count_) return false;
+    if (combined_isdb_ts_)
+        return system == ipc::System::ISDB_T || system == ipc::System::ISDB_S;
     return system == (profile::is_satellite_receiver(receiver)
                           ? ipc::System::ISDB_S : ipc::System::ISDB_T);
 }
 
 Result<void> MockTunerBackend::open_receiver(std::uint8_t receiver) noexcept
 {
-    if (receiver >= profile::kReceiverCount) return Result<void>::failure(Error::NOT_FOUND);
+    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
     return available(stopping_);
 }
 
@@ -85,7 +97,7 @@ Result<void> MockTunerBackend::select_satellite_tsid(std::uint8_t receiver,
 
 Result<void> MockTunerBackend::close_receiver(std::uint8_t receiver) noexcept
 {
-    if (receiver >= profile::kReceiverCount) return Result<void>::failure(Error::NOT_FOUND);
+    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
     return Result<void>::success();
 }
 

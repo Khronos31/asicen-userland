@@ -25,6 +25,20 @@ using px4::userland::ipc::System;
 constexpr std::size_t kQueueDepth = 4U;
 constexpr std::size_t kChunkSize = 4096U;
 constexpr std::chrono::milliseconds kDrainLimit{2000};
+SatelliteOperationResult v2_satellite_result(V2FrontendResult result) noexcept {
+    switch (result) {
+        case V2FrontendResult::Completed: return SatelliteOperationResult::Completed;
+        case V2FrontendResult::InvalidArgument:
+        case V2FrontendResult::UnsupportedChip: return SatelliteOperationResult::InvalidArgument;
+        case V2FrontendResult::ShortTransfer: return SatelliteOperationResult::ShortTransfer;
+        case V2FrontendResult::Cancelled: return SatelliteOperationResult::Cancelled;
+        case V2FrontendResult::DeadlineExceeded:
+        case V2FrontendResult::NotLocked: return SatelliteOperationResult::DeadlineExceeded;
+        case V2FrontendResult::FailedTransfer: return SatelliteOperationResult::FailedTransfer;
+    }
+    return SatelliteOperationResult::FailedTransfer;
+}
+
 Error satellite_error(SatelliteOperationResult result) noexcept {
     switch (result) {
         case SatelliteOperationResult::Completed: return Error::OK;
@@ -183,13 +197,27 @@ private:
 LibusbW3u3Hardware::LibusbW3u3Hardware(
     libusb_context* context, UsbLocation primary, UsbLocation sibling,
     std::vector<std::uint8_t> primary_path,
-    std::vector<std::uint8_t> sibling_path)
+    std::vector<std::uint8_t> sibling_path,
+    const DeviceProfile* expected_profile)
     : context_(context), primary_claim_(primary_), sibling_claim_(sibling_),
       primary_path_(std::move(primary_path)),
       sibling_path_(std::move(sibling_path)), async_(std::make_unique<AsyncState>()),
       decoder_(nullptr, 0U) {
-    if (context_ != nullptr && primary_.open(context_, primary) == 0 &&
-        sibling_.open(context_, sibling) == 0) {
+    if (expected_profile != nullptr) {
+        const auto* known = find_profile(expected_profile->vid, expected_profile->pid);
+        if (known != nullptr && known->model_id == expected_profile->model_id &&
+            known->frontend_family == expected_profile->frontend_family &&
+            known->source_supported == expected_profile->source_supported)
+            profile_ = known;
+    }
+    if (context_ != nullptr && primary_.open(context_, primary) == 0) {
+        if (expected_profile == nullptr) {
+            libusb_device_descriptor descriptor{};
+            if (libusb_get_device_descriptor(primary_.device(), &descriptor) == 0)
+                profile_ = find_profile(descriptor.idVendor, descriptor.idProduct);
+        }
+        if (profile_ != nullptr && profile_->expected_runtime_functions == 2U)
+            (void)sibling_.open(context_, sibling);
         // Handles remain open until release(), including after stream cleanup.
     }
 }
@@ -201,10 +229,16 @@ LibusbW3u3Hardware::~LibusbW3u3Hardware() noexcept {
 }
 
 Result<void> LibusbW3u3Hardware::claim() {
-    if (context_ == nullptr || !primary_.is_open() || !sibling_.is_open())
+    // Reject unsupported or mismatched families before claims, GPIO reads,
+    // revision/controller requests, or any other vendor transfer.
+    if (!runtime_model_supported()) return Result<void>::failure(Error::UNSUPPORTED);
+    if (context_ == nullptr || !primary_.is_open() ||
+        (profile_->expected_runtime_functions == 2U && !sibling_.is_open()))
         return Result<void>::failure(Error::DISCONNECTED);
-    const auto result = ownership_.claim_w3u3(primary_claim_, sibling_claim_,
-                                               primary_path_, sibling_path_);
+    const auto result = ownership_.claim_profile(
+        *profile_, primary_claim_,
+        profile_->expected_runtime_functions == 2U ? &sibling_claim_ : nullptr,
+        primary_path_, sibling_path_);
     if (result != OwnershipError::none)
         return Result<void>::failure(result == OwnershipError::primary_claim_failed ||
                                              result == OwnershipError::sibling_claim_failed
@@ -212,18 +246,19 @@ Result<void> LibusbW3u3Hardware::claim() {
                                          : Error::INVALID_ARGUMENT);
     claimed_ = true;
     if (!verify_device_revision()) {
-        std::fprintf(stderr, "asicend: bridge revision check failed\n");
+        std::fprintf(stderr, "asicend: bridge revision unavailable or unsupported (requires 11/52; 16/52 is not implemented)\n");
         (void)release();
         return Result<void>::failure(Error::UNSUPPORTED);
     }
-    const auto gpio_read = make_gpio_set(0U, 0U, 1000U);
-    std::array<unsigned char, 1> gpio_response{};
-    if (control(gpio_read, gpio_response.data()) != gpio_read.length) {
+    if (uses_v2_frontend() && !verify_v2_pair_roles()) {
+        std::fprintf(stderr, "asicend: V2 requires role0/role1 runtime functions, both revision 11/52\n");
+        (void)release();
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
+    if (!snapshot_gpio_state()) {
         (void)release();
         return Result<void>::failure(Error::USB_IO);
     }
-    gpio_snapshot_ = gpio_response[0];
-    gpio_snapshot_valid_ = true;
     return Result<void>::success();
 }
 
@@ -232,6 +267,8 @@ Result<void> LibusbW3u3Hardware::release() noexcept {
     const bool ok = result == OwnershipError::none;
     if (ok) {
         claimed_ = false;
+        v2_roles_verified_ = false;
+        v2_identity_verified_ = false;
         primary_.close();
         sibling_.close();
     }
@@ -242,7 +279,8 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
     std::uint32_t rf_khz, bool select_slot, std::size_t slot,
     const volatile std::sig_atomic_t* stop_flag) noexcept {
     SatelliteProbeSummary summary{};
-    if (!claimed_ || cleanup_failed_.load() || !is_w3u3_satellite_rf_khz(rf_khz) ||
+    if (!runtime_model_supported() || !claimed_ || cleanup_failed_.load() ||
+        !is_w3u3_satellite_rf_khz(rf_khz) ||
         (select_slot && slot >= kW3u3SatelliteTsidSlots)) {
         summary.result = SatelliteOperationResult::InvalidArgument;
         return summary;
@@ -252,7 +290,7 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
         return summary;
     }
 
-    const auto absolute_deadline = std::chrono::steady_clock::now() +
+    const auto absolute_deadline = steady_now() +
                                    std::chrono::seconds(60);
     diagnostic_stop_flag_ = stop_flag;
     deadline_ = absolute_deadline;
@@ -260,7 +298,7 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
     const auto opened = open_receiver(0U);
     if (!opened) {
         if (cancelled()) summary.result = SatelliteOperationResult::Cancelled;
-        else if (std::chrono::steady_clock::now() >= absolute_deadline)
+        else if (steady_now() >= absolute_deadline)
             summary.result = SatelliteOperationResult::DeadlineExceeded;
         else summary.result = SatelliteOperationResult::FailedTransfer;
         deadline_active_ = false;
@@ -272,7 +310,7 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
     // diagnostic's one absolute deadline for tune, lock polling and TSID I/O.
     deadline_ = absolute_deadline;
     deadline_active_ = true;
-    summary.result = run_w3u3_satellite_tune(this, rf_khz);
+    summary.result = run_model_satellite_tune(rf_khz);
     if (summary.result != SatelliteOperationResult::Completed) {
         deadline_active_ = false;
         diagnostic_stop_flag_ = nullptr;
@@ -280,17 +318,16 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
     }
 
     const auto lock_deadline = std::min(absolute_deadline,
-        std::chrono::steady_clock::now() + std::chrono::seconds(5));
+        steady_now() + std::chrono::seconds(5));
     deadline_ = lock_deadline;
-    const SatelliteLockResult lock = poll_w3u3_satellite_lock(this);
+    const SatelliteLockResult lock = poll_model_satellite_lock();
     summary.result = lock.result;
     summary.locked = lock.locked;
 
     if (summary.result == SatelliteOperationResult::Completed && summary.locked) {
         deadline_ = absolute_deadline;
-        const SatelliteTsidReadyResult list = select_slot
-            ? wait_w3u3_satellite_slot_ready(this, slot)
-            : wait_w3u3_satellite_any_ready(this);
+        const auto list = wait_model_satellite_tsid(
+            select_slot ? slot : kW3u3SatelliteTsidSlots, 0U, false);
         summary.result = list.result;
         if (list.result == SatelliteOperationResult::Completed) {
             for (const std::uint16_t tsid : list.tsids) {
@@ -298,8 +335,7 @@ SatelliteProbeSummary LibusbW3u3Hardware::probe_satellite(
                     ++summary.nonempty_tsid_slots;
             }
             if (select_slot) {
-                const auto selected = select_w3u3_satellite_tsid(
-                    this, slot, list.tsids);
+                const auto selected = select_model_satellite_tsid(slot, list.tsids);
                 summary.result = selected.result;
                 summary.selected_slot = selected.result == SatelliteOperationResult::Completed;
             }
@@ -314,18 +350,18 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(
     const volatile std::sig_atomic_t* stop_flag) noexcept {
     CardProbeSummary summary{};
     summary.error = Error::UNSUPPORTED;
-    if (!claimed_ || cleanup_failed_.load()) return summary;
+    if (!runtime_model_supported() || !claimed_ || cleanup_failed_.load()) return summary;
     if (stop_flag != nullptr && *stop_flag != 0) {
         summary.error = Error::TIMEOUT;
         return summary;
     }
 
-    const auto absolute_deadline = std::chrono::steady_clock::now() +
+    const auto absolute_deadline = steady_now() +
                                    std::chrono::seconds(30);
     diagnostic_stop_flag_ = stop_flag;
     deadline_ = absolute_deadline;
     deadline_active_ = true;
-    const auto opened = open_receiver(1U);
+    const auto opened = open_receiver(profile_->combined_isdb_ts ? 0U : 1U);
     if (!opened) {
         summary.error = opened.error();
         deadline_active_ = false;
@@ -335,7 +371,7 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(
     deadline_ = absolute_deadline;
     deadline_active_ = true;
 
-    W3u3CardMailboxHardware mailbox(*this);
+    W3u3CardMailboxHardware mailbox(*this, profile_->model_id);
     px4::userland::CardSession session(mailbox, mailbox);
     const auto atr = px4::userland::reset_and_read_card_atr(mailbox, mailbox);
     if (!atr) {
@@ -378,7 +414,7 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(
     // Cleanup gets a fresh finite budget and ignores the signal cancellation,
     // while the first operation error remains the reported result.
     diagnostic_stop_flag_ = nullptr;
-    deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    deadline_ = steady_now() + std::chrono::seconds(2);
     deadline_active_ = true;
     const auto card_cleanup = mailbox.shutdown_controller();
     if (!card_cleanup) {
@@ -390,16 +426,186 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(
     return summary;
 }
 
-std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept { return 4U; }
+bool LibusbW3u3Hardware::runtime_model_supported() const noexcept {
+    return profile_ != nullptr && profile_runtime_supported(*profile_) &&
+           (profile_->frontend_family == FrontendFamily::W3u3 ||
+            profile_->frontend_family == FrontendFamily::S3u ||
+            profile_->frontend_family == FrontendFamily::S3u2 ||
+            profile_->frontend_family == FrontendFamily::Nmi);
+}
+
+std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept {
+    // Secondary capture needs independent snapshots, routed I/O and cleanup.
+    // Do not advertise it merely because the enclosure contains four tuners.
+    return runtime_model_supported() ?
+        (profile_->combined_isdb_ts ? 1U : 2U) : 0U;
+}
 bool LibusbW3u3Hardware::receiver_supports(std::uint8_t receiver, System system) const noexcept {
-    return (receiver == 0U && system == System::ISDB_S) ||
-           (receiver == 1U && system == System::ISDB_T);
+    return runtime_model_supported() && receiver < receiver_count() &&
+           ((profile_->combined_isdb_ts &&
+             (system == System::ISDB_S || system == System::ISDB_T)) ||
+            (receiver == 0U && system == System::ISDB_S) ||
+            (receiver == 1U && system == System::ISDB_T));
 }
 bool LibusbW3u3Hardware::selects_satellite_stream_before_tune() const noexcept { return false; }
-bool LibusbW3u3Hardware::requires_terrestrial_lock_settle() const noexcept { return true; }
+bool LibusbW3u3Hardware::requires_terrestrial_lock_settle() const noexcept {
+    return runtime_model_supported() && !uses_legacy_frontend() && !uses_v2_frontend();
+}
+
+SatelliteOperationResult LibusbW3u3Hardware::run_model_satellite_tune(std::uint32_t rf) noexcept {
+    if (uses_v2_frontend()) {
+        if (!v2_identity_verified_) return SatelliteOperationResult::InvalidArgument;
+        return v2_satellite_result(tune_v2_frontend(this, {1U}, rf));
+    }
+    return uses_legacy_frontend()
+        ? run_legacy_satellite_tune(legacy_frontend(), this, rf)
+        : run_w3u3_satellite_tune(this, rf);
+}
+
+SatelliteLockResult LibusbW3u3Hardware::read_model_satellite_lock() noexcept {
+    if (uses_v2_frontend()) {
+        SatelliteLockResult result{};
+        result.result = v2_satellite_result(read_v2_frontend_lock(this, {1U}, &result.locked));
+        return result;
+    }
+    return uses_legacy_frontend()
+        ? read_legacy_satellite_lock(legacy_frontend(), this)
+        : read_w3u3_satellite_lock(this);
+}
+
+SatelliteLockResult LibusbW3u3Hardware::poll_model_satellite_lock() noexcept {
+    if (!uses_v2_frontend())
+        return uses_legacy_frontend()
+            ? poll_legacy_satellite_lock(legacy_frontend(), this)
+            : poll_w3u3_satellite_lock(this);
+    SatelliteLockResult result{};
+    for (unsigned attempt = 0; attempt < 50U; ++attempt) {
+        if (cancelled()) { result.result = SatelliteOperationResult::Cancelled; break; }
+        if (expired()) { result.result = SatelliteOperationResult::DeadlineExceeded; break; }
+        result = read_model_satellite_lock();
+        if (result.result != SatelliteOperationResult::Completed || result.locked) break;
+        delay_ms(100U);
+    }
+    return result;
+}
+
+SatelliteTsidReadyResult LibusbW3u3Hardware::wait_model_satellite_tsid(
+    std::size_t slot, std::uint16_t tsid, bool by_value) noexcept {
+    if (!uses_v2_frontend()) {
+        if (uses_legacy_frontend()) {
+            if (by_value) return wait_legacy_satellite_tsid_ready(legacy_frontend(), this, tsid);
+            return slot < kW3u3SatelliteTsidSlots
+                ? wait_legacy_satellite_slot_ready(legacy_frontend(), this, slot)
+                : wait_legacy_satellite_any_ready(legacy_frontend(), this);
+        }
+        if (by_value) return wait_w3u3_satellite_tsid_ready(this, tsid);
+        return slot < kW3u3SatelliteTsidSlots
+            ? wait_w3u3_satellite_slot_ready(this, slot) : wait_w3u3_satellite_any_ready(this);
+    }
+    SatelliteTsidReadyResult result{};
+    for (unsigned attempt = 0U; attempt < 1000U; ++attempt) {
+        if (cancelled()) { result.result = SatelliteOperationResult::Cancelled; return result; }
+        if (expired()) { result.result = SatelliteOperationResult::DeadlineExceeded; return result; }
+        result.result = v2_satellite_result(read_v2_frontend_tsids(this, {1U}, &result.tsids));
+        if (result.result != SatelliteOperationResult::Completed) return result;
+        for (std::size_t i = 0; i < result.tsids.size(); ++i) {
+            const auto value = result.tsids[i];
+            if (value != 0U && value != kW3u3SatelliteNoTsid &&
+                (by_value ? value == tsid : slot >= kW3u3SatelliteTsidSlots || i == slot)) {
+                result.slot = i;
+                return result;
+            }
+        }
+        delay_ms(10U);
+    }
+    result.result = SatelliteOperationResult::DeadlineExceeded;
+    return result;
+}
+
+SatelliteTsidSelectResult LibusbW3u3Hardware::select_model_satellite_tsid(
+    std::size_t slot, const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids) noexcept {
+    if (!uses_v2_frontend())
+        return uses_legacy_frontend()
+            ? select_legacy_satellite_tsid(legacy_frontend(), this, slot, tsids)
+            : select_w3u3_satellite_tsid(this, slot, tsids);
+    SatelliteTsidSelectResult result{};
+    if (slot >= tsids.size() || tsids[slot] == 0U || tsids[slot] == kW3u3SatelliteNoTsid)
+        return result;
+    result.result = v2_satellite_result(select_v2_frontend_tsid(this, {1U}, tsids[slot]));
+    if (result.result == SatelliteOperationResult::Completed) result.selected_tsid = tsids[slot];
+    return result;
+}
+
+bool LibusbW3u3Hardware::uses_legacy_frontend() const noexcept {
+    return profile_ != nullptr &&
+           (profile_->frontend_family == FrontendFamily::S3u ||
+            profile_->frontend_family == FrontendFamily::S3u2);
+}
+
+bool LibusbW3u3Hardware::uses_v2_frontend() const noexcept {
+    return profile_ != nullptr && profile_->frontend_family == FrontendFamily::Nmi;
+}
+
+bool LibusbW3u3Hardware::verify_v2_pair_roles() noexcept {
+    v2_roles_verified_ = false;
+    const ControlTransfer info{0U, Request::CustomerInfo, 0U, 0U,
+                               kCustomerInfoSize, Direction::In, 1000U};
+    for (std::uint8_t function = 0; function < 2U; ++function) {
+        // Revision16 follows a different identity/link branch on either
+        // function. Verify both before any shared-board startup write.
+        const ControlTransfer revision{0U, Request::SysCtrlRead, 2U, 0U, 3U,
+                                       Direction::In, 1000U};
+        std::array<std::uint8_t, 3> revision_response{};
+        if (control_function(function, revision, revision_response.data()) != revision.length ||
+            revision_response[0] != 1U || revision_response[1] != 0x11U ||
+            revision_response[2] != 0x52U) return false;
+        std::array<std::uint8_t, kCustomerInfoSize> response{};
+        if (control_function(function, info, response.data()) != info.length) return false;
+        const auto route = v2_source_route(response.data(), response.size(), 0U);
+        if (!route.valid || route.device_role != function || route.rf_master_role != 0U)
+            return false;
+    }
+    v2_roles_verified_ = true;
+    return true;
+}
+
+bool LibusbW3u3Hardware::verify_v2_pair_identity() noexcept {
+    v2_identity_verified_ = false;
+    if (!v2_roles_verified_) return false;
+    std::array<std::array<std::uint8_t, 17>, 2> identities{};
+    bool read_ok = true;
+    for (std::uint8_t function = 0; function < 2U; ++function) {
+        // The source first probes one byte, then waits before reading the
+        // opaque board identity. These are post-power, read-only operations.
+        const auto probe = make_i2c_read(0xa8U, 0xb0U, 1U, 0U, 1000U);
+        std::array<std::uint8_t, 2> response{};
+        if (control_function(function, probe, response.data()) != probe.length ||
+            response[0] != 1U) { read_ok = false; break; }
+        delay_ms(10U);
+        const auto read = make_i2c_read(0xa8U, 0xb0U, 16U, 0U, 1000U);
+        if (control_function(function, read, identities[function].data()) != read.length ||
+            identities[function][0] != 1U) { read_ok = false; break; }
+    }
+    bool same = read_ok;
+    for (std::size_t i = 1U; i < 17U; ++i)
+        same = (identities[0][i] == identities[1][i]) && same;
+    // Never retain or log the private board identifier.
+    for (auto& identity : identities) {
+        volatile std::uint8_t* bytes = identity.data();
+        for (std::size_t i = 0; i < identity.size(); ++i) bytes[i] = 0U;
+    }
+    v2_identity_verified_ = same;
+    return same;
+}
+
+LegacyFrontendProfile LibusbW3u3Hardware::legacy_frontend() const noexcept {
+    return profile_->frontend_family == FrontendFamily::S3u
+        ? LegacyFrontendProfile::S3u : LegacyFrontendProfile::S3u2;
+}
 
 Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
-    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!runtime_model_supported() || receiver >= receiver_count())
+        return Result<void>::failure(Error::UNSUPPORTED);
     const ReceiverReservationResult reservation = active_receiver_.reserve(receiver);
     const bool newly_reserved = reservation == ReceiverReservationResult::reserved;
     if (reservation == ReceiverReservationResult::busy ||
@@ -409,13 +615,14 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
         if (newly_reserved) (void)active_receiver_.release(receiver);
         return Result<void>::failure(error);
     };
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::seconds(20);
     if (!acquire_control_gate(gate_deadline)) return fail_open(Error::TIMEOUT);
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
     // Reserve before reading mutable session/cleanup state so a competing
     // receiver cannot race a capture teardown and start frontend I/O.
     if (!claimed_) return fail_open(Error::NOT_READY);
+    if (uses_v2_frontend() && !v2_roles_verified_) return fail_open(Error::UNSUPPORTED);
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return fail_open(Error::USB_IO);
     if (receiver == 0U &&
@@ -423,38 +630,63 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
         return fail_open(Error::UNSUPPORTED);
     if (initialized_) return Result<void>::success();
     if (!verify_device_revision()) {
-        std::fprintf(stderr, "asicend: bridge revision check failed\n");
+        std::fprintf(stderr, "asicend: bridge revision unavailable or unsupported (requires 11/52; 16/52 is not implemented)\n");
         return fail_open(Error::UNSUPPORTED);
     }
-    if (!snapshot_gpio_if_needed(&gpio_snapshot_valid_, &gpio_snapshot_,
-            [this](std::uint8_t* value) {
-                if (value == nullptr) return false;
-                const auto transfer = make_gpio_set(0U, 0U, 1000U);
-                std::array<unsigned char, 1> response{};
-                if (control(transfer, response.data()) != transfer.length) return false;
-                *value = response[0];
-                return true;
-            })) {
-        return fail_open(Error::USB_IO);
+    if (!snapshot_gpio_state()) return fail_open(Error::USB_IO);
+    FrontendPlan power_plan = uses_legacy_frontend()
+        ? plan_legacy_frontend_startup(legacy_frontend())
+        : uses_v2_frontend() ? plan_v2_revision11_startup_prefix() : plan_startup_subset();
+    if (uses_legacy_frontend()) {
+        const auto startup_off = plan_legacy_frontend_startup_off(legacy_frontend());
+        power_plan.insert(power_plan.end(), startup_off.begin(), startup_off.end());
     }
-    FrontendPlan power_plan = plan_startup_subset();
-    const auto power = plan_safe_power_on();
-    power_plan.insert(power_plan.end(), power.begin(), power.end());
-    const FrontendPlan init_plan = plan_terrestrial_init_with_satellite_demod();
+    const auto power = uses_legacy_frontend()
+        ? plan_legacy_frontend_power(legacy_frontend(), true)
+        : uses_v2_frontend() ? plan_v2_shared_power_on() : plan_safe_power_on();
+    if (!uses_v2_frontend() && !uses_legacy_frontend())
+        power_plan.insert(power_plan.end(), power.begin(), power.end());
+    const FrontendPlan init_plan = uses_legacy_frontend()
+        ? plan_legacy_frontend_init(legacy_frontend())
+        : uses_v2_frontend() ? FrontendPlan{} : plan_terrestrial_init_with_satellite_demod();
 
     // One deadline covers startup, the now-powered controller guard, and
     // demod initialization. Never issue controller I2C before this power
     // sequence: the device NACKs those accesses while its controller is off.
-    deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    deadline_ = steady_now() + std::chrono::seconds(20);
     deadline_active_ = true;
     PoweredControllerCheck controller_check = PoweredControllerCheck::ready;
     const PoweredInitResult result = execute_powered_init_sequence(
-        [&] { return run_frontend_plan(power_plan, this) == FrontendRunResult::Completed; },
+        [&] {
+            board_power_attempted_ = true;
+            if (run_frontend_plan(power_plan, this) != FrontendRunResult::Completed) return false;
+            if (uses_legacy_frontend()) {
+                // DTV_Init rechecks the silicon after DTV_Start's off phase.
+                return verify_device_revision() &&
+                    run_frontend_plan(plan_legacy_frontend_init_prelude(legacy_frontend()), this) ==
+                        FrontendRunResult::Completed &&
+                    run_frontend_plan(power, this) == FrontendRunResult::Completed;
+            }
+            if (!uses_v2_frontend()) return true;
+            return verify_v2_pair_identity() &&
+                run_frontend_plan(plan_v2_revision11_startup_tail(), this) ==
+                    FrontendRunResult::Completed &&
+                run_frontend_plan(power, this) == FrontendRunResult::Completed;
+        },
         [&] {
             controller_check = verify_powered_controller();
             return controller_check == PoweredControllerCheck::ready;
         },
-        [&] { return run_frontend_plan(init_plan, this) == FrontendRunResult::Completed; });
+        [&] {
+            if (!uses_v2_frontend())
+                return run_frontend_plan(init_plan, this) == FrontendRunResult::Completed;
+            // Role0 is the shared RF master for both role0/role1 frontends.
+            // Initialize T0,S0,T1,S1, while exposing only primary USB lanes.
+            for (std::uint8_t source = 0U; source < 4U; ++source)
+                if (initialize_v2_frontend(this, {source}, nullptr, 4000U) !=
+                    V2FrontendResult::Completed) return false;
+            return true;
+        });
     deadline_active_ = false;
     if (result != PoweredInitResult::completed) {
         if (result == PoweredInitResult::controller_guard_failed) {
@@ -492,14 +724,42 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(
     std::uint32_t timeout_ms) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return Result<void>::failure(Error::USB_IO);
-    if (!claimed_ || receiver != 1U || !active_receiver_.owns(receiver) ||
-        !initialized_ || frequency_khz != 557142U)
+    if (!claimed_ || !receiver_supports(receiver, System::ISDB_T) ||
+        !active_receiver_.owns(receiver) || !initialized_)
         return Result<void>::failure(Error::UNSUPPORTED);
-    if (!run_plan(plan_terrestrial_tune_full(frequency_khz, 6U), timeout_ms))
+    if (timeout_ms == 0U) return Result<void>::failure(Error::INVALID_ARGUMENT);
+    if (uses_v2_frontend()) {
+        if (!v2_identity_verified_ || v2_tune_frequency_hz({0U}, frequency_khz) == 0U)
+            return Result<void>::failure(Error::INVALID_ARGUMENT);
+        const auto until = steady_now() + std::chrono::milliseconds(timeout_ms);
+        if (!acquire_control_gate(until)) return Result<void>::failure(Error::TIMEOUT);
+        std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+        const auto previous_deadline = deadline_;
+        const bool previous_active = deadline_active_;
+        deadline_ = previous_active ? std::min(previous_deadline, until) : until;
+        deadline_active_ = true;
+        const auto result = tune_v2_frontend(this, {0U}, frequency_khz, nullptr, timeout_ms);
+        deadline_ = previous_deadline;
+        deadline_active_ = previous_active;
+        if (result != V2FrontendResult::Completed)
+            return Result<void>::failure(satellite_error(v2_satellite_result(result)));
+        tuned_ = true;
+        tuned_receiver_ = receiver;
+        tuned_system_ = System::ISDB_T;
+        tuned_frequency_khz_ = frequency_khz;
+        gain_applied_ = false;
+        return Result<void>::success();
+    }
+    const auto plan = uses_legacy_frontend()
+        ? plan_legacy_terrestrial_tune(legacy_frontend(), frequency_khz, 6U)
+        : plan_terrestrial_tune_full(frequency_khz, 6U);
+    if (plan.empty()) return Result<void>::failure(Error::INVALID_ARGUMENT);
+    if (!run_plan(plan, timeout_ms))
         return Result<void>::failure(disconnected_.load() ? Error::DISCONNECTED : Error::USB_IO);
     tuned_ = true;
     tuned_receiver_ = receiver;
     tuned_system_ = System::ISDB_T;
+    tuned_frequency_khz_ = frequency_khz;
     gain_applied_ = false;
     return Result<void>::success();
 }
@@ -510,11 +770,12 @@ Result<void> LibusbW3u3Hardware::tune_satellite(
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return Result<void>::failure(Error::USB_IO);
     std::uint32_t rf_khz = 0U;
-    if (!claimed_ || receiver != 0U || !active_receiver_.owns(receiver) ||
+    if (!claimed_ || !receiver_supports(receiver, System::ISDB_S) ||
+        !active_receiver_.owns(receiver) ||
         !initialized_ || timeout_ms == 0U ||
         !w3u3_satellite_if_to_rf_khz(frequency_khz, &rf_khz))
         return Result<void>::failure(Error::INVALID_ARGUMENT);
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::milliseconds(timeout_ms);
     if (!acquire_control_gate(gate_deadline)) return Result<void>::failure(Error::TIMEOUT);
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
@@ -525,8 +786,7 @@ Result<void> LibusbW3u3Hardware::tune_satellite(
         ? std::min(previous_deadline, selection_deadline)
         : selection_deadline;
     deadline_active_ = true;
-    const SatelliteOperationResult tuned = run_w3u3_satellite_tune(
-        this, rf_khz);
+    const SatelliteOperationResult tuned = run_model_satellite_tune(rf_khz);
     deadline_ = previous_deadline;
     deadline_active_ = previous_deadline_active;
     const Error error = satellite_error(tuned);
@@ -545,27 +805,37 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver,
     if (!active_receiver_.owns(receiver) || receiver != tuned_receiver_ ||
         system != tuned_system_ || !tuned_)
         return Result<bool>::failure(Error::UNSUPPORTED);
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::seconds(2);
     if (!acquire_control_gate(gate_deadline)) return Result<bool>::failure(Error::TIMEOUT);
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    if (uses_v2_frontend()) {
+        bool locked = false;
+        const auto result = read_v2_frontend_lock(
+            this, {static_cast<std::uint8_t>(receiver ^ 1U)}, &locked);
+        return result == V2FrontendResult::Completed
+            ? Result<bool>::success(locked)
+            : Result<bool>::failure(satellite_error(v2_satellite_result(result)));
+    }
     if (system == System::ISDB_S) {
-        const SatelliteLockResult result = read_w3u3_satellite_lock(this);
+        const SatelliteLockResult result = read_model_satellite_lock();
         if (result.result != SatelliteOperationResult::Completed)
             return Result<bool>::failure(satellite_error(result.result));
         return Result<bool>::success(result.locked);
     }
     std::uint8_t lock = 0;
     bool have = false;
-    const auto plan = plan_terrestrial_lock_read(557142U);
+    const auto plan = uses_legacy_frontend()
+        ? plan_legacy_terrestrial_lock(legacy_frontend(), tuned_frequency_khz_)
+        : plan_terrestrial_lock_read(tuned_frequency_khz_);
     FrontendRunReport report{};
     if (!run_plan(plan, 1000U, &report) || !report.have_last_read)
         return Result<bool>::failure(disconnected_.load() ? Error::DISCONNECTED : Error::USB_IO);
     lock = report.last_read;
     have = true;
     const bool locked = have && (lock & 0x0fU) == 0x09U;
-    if (locked && !gain_applied_) {
-        if (!run_plan(plan_fc0012_gain_once(1U), 1000U))
+    if (locked && !gain_applied_ && !uses_legacy_frontend() && !uses_v2_frontend()) {
+        if (!run_plan(plan_fc0012_gain_once(receiver_local(receiver)), 1000U))
             return Result<bool>::failure(Error::USB_IO);
         gain_applied_ = true;
     }
@@ -580,7 +850,7 @@ Result<void> LibusbW3u3Hardware::select_satellite_slot(
         tuned_receiver_ != receiver || tuned_system_ != System::ISDB_S ||
         !tuned_ || slot >= kW3u3SatelliteTsidSlots || timeout_ms == 0U)
         return Result<void>::failure(Error::INVALID_ARGUMENT);
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::milliseconds(timeout_ms);
     if (!acquire_control_gate(gate_deadline)) return Result<void>::failure(Error::TIMEOUT);
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
@@ -591,10 +861,10 @@ Result<void> LibusbW3u3Hardware::select_satellite_slot(
         ? std::min(previous_deadline, selection_deadline)
         : selection_deadline;
     deadline_active_ = true;
-    const auto list = wait_w3u3_satellite_slot_ready(this, slot);
+    const auto list = wait_model_satellite_tsid(slot, 0U, false);
     SatelliteOperationResult result = list.result;
     if (result == SatelliteOperationResult::Completed)
-        result = select_w3u3_satellite_tsid(this, slot, list.tsids).result;
+        result = select_model_satellite_tsid(slot, list.tsids).result;
     deadline_ = previous_deadline;
     deadline_active_ = previous_deadline_active;
     const Error error = satellite_error(result);
@@ -607,9 +877,9 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(
         return Result<void>::failure(Error::USB_IO);
     if (receiver != 0U || !active_receiver_.owns(receiver) ||
         tuned_receiver_ != receiver || tuned_system_ != System::ISDB_S ||
-        !tuned_ || timeout_ms == 0U || tsid == kW3u3SatelliteNoTsid)
+        !tuned_ || timeout_ms == 0U || tsid == 0U || tsid == kW3u3SatelliteNoTsid)
         return Result<void>::failure(Error::INVALID_ARGUMENT);
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::milliseconds(timeout_ms);
     if (!acquire_control_gate(gate_deadline)) return Result<void>::failure(Error::TIMEOUT);
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
@@ -620,10 +890,10 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(
         ? std::min(previous_deadline, selection_deadline)
         : selection_deadline;
     deadline_active_ = true;
-    const auto list = wait_w3u3_satellite_tsid_ready(this, tsid);
+    const auto list = wait_model_satellite_tsid(0U, tsid, true);
     SatelliteOperationResult result = list.result;
     if (result == SatelliteOperationResult::Completed) {
-        result = select_w3u3_satellite_tsid(this, list.slot, list.tsids).result;
+        result = select_model_satellite_tsid(list.slot, list.tsids).result;
     }
     deadline_ = previous_deadline;
     deadline_active_ = previous_deadline_active;
@@ -634,7 +904,8 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(
 Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return Result<void>::failure(Error::USB_IO);
-    if (receiver > 1U) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!runtime_model_supported() || receiver >= receiver_count())
+        return Result<void>::failure(Error::UNSUPPORTED);
     if (!active_receiver_.owns(receiver)) return Result<void>::failure(Error::NOT_FOUND);
     if (source_prepared_) return Result<void>::failure(Error::BUSY);
     tuned_ = false;
@@ -647,26 +918,26 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
                                                  std::uint8_t lnb_voltage) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return Result<void>::failure(Error::USB_IO);
-    if (receiver > 1U || !active_receiver_.owns(receiver) || lnb_voltage != 0U ||
-        (receiver == 0U && system != System::ISDB_S) ||
-        (receiver == 1U && system != System::ISDB_T))
+    if (!receiver_supports(receiver, system) ||
+        !active_receiver_.owns(receiver) || lnb_voltage != 0U)
         return Result<void>::failure(Error::UNSUPPORTED);
     // Power-on is part of the source-verified shared open sequence. This
-    // transaction hook is a no-op for both zero-voltage data paths so it
-    // cannot duplicate the GPIO writes or request satellite LNB voltage.
+    // transaction hook does not duplicate board writes. Legacy TC_SetLNB is
+    // a no-op: zero means no selectable LNB request, not measured zero volts.
+    // Actual electrical effects of the source board startup are unverified.
     return initialized_ ? Result<void>::success()
                         : Result<void>::failure(Error::NOT_READY);
 }
 Result<void> LibusbW3u3Hardware::commit_tune_power(std::uint8_t receiver) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return Result<void>::failure(Error::USB_IO);
-    return receiver <= 1U && active_receiver_.owns(receiver)
+    return runtime_model_supported() && receiver < receiver_count() && active_receiver_.owns(receiver)
         ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
 }
 Result<void> LibusbW3u3Hardware::rollback_tune_power(std::uint8_t receiver) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return Result<void>::failure(Error::USB_IO);
-    return receiver <= 1U && active_receiver_.owns(receiver)
+    return runtime_model_supported() && receiver < receiver_count() && active_receiver_.owns(receiver)
         ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
 }
 void LibusbW3u3Hardware::mark_receiver_disconnected(std::uint8_t receiver) noexcept {
@@ -677,11 +948,17 @@ void LibusbW3u3Hardware::mark_receiver_disconnected(std::uint8_t receiver) noexc
 }
 void LibusbW3u3Hardware::request_stop() noexcept { stop_requested_.store(true); interrupt(); }
 
+std::chrono::steady_clock::time_point LibusbW3u3Hardware::steady_now() const noexcept {
+    if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->now != nullptr)
+        return capture_usb_hooks_->now(capture_usb_hooks_->context);
+    return std::chrono::steady_clock::now();
+}
+
 bool LibusbW3u3Hardware::acquire_control_gate(
     std::chrono::steady_clock::time_point deadline,
     const volatile std::sig_atomic_t* stop_flag, bool cleanup) noexcept {
     for (;;) {
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = steady_now();
         if (now >= deadline) return false;
         const auto slice = std::min(deadline, now + std::chrono::milliseconds(10));
         if (control_gate_.try_lock_until(slice)) {
@@ -716,10 +993,11 @@ void LibusbW3u3Hardware::mark_cleanup_failed(Error error) noexcept {
 bool LibusbW3u3Hardware::begin_card_operation(
     std::uint32_t timeout_ms,
     const volatile std::sig_atomic_t* stop_flag) noexcept {
-    if (!claimed_ || !initialized_ || cleanup_failed_.load() || disconnected_.load() ||
+    if (!runtime_model_supported() || !claimed_ || !initialized_ ||
+        cleanup_failed_.load() || disconnected_.load() ||
         timeout_ms == 0U)
         return false;
-    const auto deadline = std::chrono::steady_clock::now() +
+    const auto deadline = steady_now() +
                           std::chrono::milliseconds(timeout_ms);
     if (!acquire_control_gate(deadline, stop_flag)) return false;
     if (cleanup_failed_.load() || disconnected_.load()) {
@@ -739,11 +1017,11 @@ void LibusbW3u3Hardware::end_card_operation() noexcept {
 }
 
 bool LibusbW3u3Hardware::begin_card_cleanup(std::uint32_t timeout_ms) noexcept {
-    if (!claimed_ || disconnected_.load() || timeout_ms == 0U) {
+    if (!runtime_model_supported() || !claimed_ || disconnected_.load() || timeout_ms == 0U) {
         mark_cleanup_failed(Error::USB_IO);
         return false;
     }
-    const auto deadline = std::chrono::steady_clock::now() +
+    const auto deadline = steady_now() +
                           std::chrono::milliseconds(timeout_ms);
     if (!acquire_control_gate(deadline, nullptr, true)) {
         mark_cleanup_failed(Error::TIMEOUT);
@@ -766,7 +1044,7 @@ void LibusbW3u3Hardware::end_card_cleanup(bool cleanup_succeeded) noexcept {
 
 Result<void> LibusbW3u3Hardware::shutdown() noexcept {
     stop_requested_.store(true);
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::seconds(10);
     if (!acquire_control_gate(gate_deadline, nullptr, true)) {
         mark_cleanup_failed(Error::TIMEOUT);
@@ -791,22 +1069,73 @@ bool LibusbW3u3Hardware::stop_capture_safely() noexcept {
     return stop().has_value();
 }
 
+bool LibusbW3u3Hardware::snapshot_gpio_state() noexcept {
+    if (!snapshot_gpio_if_needed(&gpio_snapshot_valid_, &gpio_snapshot_,
+            [this](std::uint8_t* value) {
+                const auto transfer = make_gpio_set(0U, 0U, 1000U);
+                std::array<unsigned char, 1> response{};
+                if (control(transfer, response.data()) != transfer.length) return false;
+                *value = response[0];
+                return true;
+            })) return false;
+    return true;
+}
+
 bool LibusbW3u3Hardware::restore_gpio_snapshot_safely() noexcept {
     if (disconnected_.load()) return true;  // USB writes are forbidden after loss.
-    const auto restore = make_gpio_set(gpio_snapshot_, 0xdfU, 1000U);
+    if (uses_legacy_frontend() || uses_v2_frontend()) {
+        // GPIOExGet samples physical pins, not the previous output latch.
+        // A sampled-low released line must never be restored as driven-low.
+        // Use the documented board-off sequence instead of claiming rollback
+        // to unobservable GPIOEx latch state. V2 also has a source-defined
+        // idle path which does not restore unproven GPIO20 electrical state.
+        if (!board_power_attempted_) {
+            gpio_snapshot_valid_ = false;
+            return true;
+        }
+        AtomicFlagScope cleanup_scope(cleanup_io_active_);
+        const auto previous_deadline = deadline_;
+        const bool previous_active = deadline_active_;
+        deadline_ = steady_now() + std::chrono::seconds(3);
+        deadline_active_ = true;
+        bool off = true;
+        const auto plan = uses_v2_frontend() ? plan_v2_shared_power_off()
+            : plan_legacy_frontend_power(legacy_frontend(), false);
+        // Best effort across independent board lines: a failed GPIO/Ex write
+        // must not suppress the remaining source-defined shutdown steps.
+        for (const auto& operation : plan) {
+            if (run_frontend_plan(FrontendPlan{operation}, this) !=
+                FrontendRunResult::Completed) off = false;
+        }
+        if (expired()) off = false;
+        deadline_ = previous_deadline;
+        deadline_active_ = previous_active;
+        if (off) {
+            board_power_attempted_ = false;
+            gpio_snapshot_valid_ = false;
+            initialized_ = false;
+            v2_identity_verified_ = false;
+        }
+        return off;
+    }
+    const std::uint8_t mask = 0xdfU;
+    const auto restore = make_gpio_set(gpio_snapshot_, mask, 1000U);
     std::array<unsigned char, 1> response{};
-    if (control(restore, response.data()) != restore.length) return false;
+    bool restored = control(restore, response.data()) == restore.length;
     const auto readback = make_gpio_set(0U, 0U, 1000U);
-    if (control(readback, response.data()) != readback.length ||
-        (response[0] & 0xdfU) != (gpio_snapshot_ & 0xdfU)) return false;
-    gpio_snapshot_valid_ = false;
-    return true;
+    restored = control(readback, response.data()) == readback.length &&
+               (response[0] & mask) == (gpio_snapshot_ & mask) && restored;
+    if (restored) {
+        gpio_snapshot_valid_ = false;
+        board_power_attempted_ = false;
+    }
+    return restored;
 }
 
 bool LibusbW3u3Hardware::run_plan(const FrontendPlan& plan, unsigned timeout_ms,
                                  FrontendRunReport* report) noexcept {
     if (!claimed_ || disconnected_.load() || plan.empty()) return false;
-    const auto operation_deadline = std::chrono::steady_clock::now() +
+    const auto operation_deadline = steady_now() +
                                     std::chrono::milliseconds(timeout_ms);
     if (!acquire_control_gate(operation_deadline)) return false;
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
@@ -822,9 +1151,31 @@ bool LibusbW3u3Hardware::run_plan(const FrontendPlan& plan, unsigned timeout_ms,
 }
 
 int LibusbW3u3Hardware::control(const ControlTransfer& original, unsigned char* data) {
+    return control_function(0U, original, data);
+}
+
+int LibusbW3u3Hardware::control_function(std::uint8_t function,
+                                         const ControlTransfer& original,
+                                         unsigned char* data) {
+    // Defense in depth: no unsupported profile can bypass the public entry
+    // guards through card, diagnostic, teardown or future plan dispatch.
+    if (!runtime_model_supported()) return LIBUSB_ERROR_NOT_SUPPORTED;
+    // Secondary access is limited to V2's source-backed read-only pair checks.
+    // Every frontend/card/link/capture operation still targets primary.
+    if (function > 1U || (function == 1U &&
+        (!uses_v2_frontend() || original.direction != Direction::In ||
+         !(original.request == Request::CustomerInfo ||
+           (original.request == Request::SysCtrlRead && original.value == 2U &&
+            original.index == 0U && original.length == 3U) ||
+           (original.request == Request::I2cRead && original.value == 0xb0a8U &&
+            original.index == 0U && (original.length == 2U || original.length == 17U))))))
+        return LIBUSB_ERROR_NOT_SUPPORTED;
+    if (uses_v2_frontend() && !v2_roles_verified_ &&
+        original.request != Request::SysCtrlRead && original.request != Request::CustomerInfo)
+        return LIBUSB_ERROR_ACCESS;
     const unsigned requested_timeout = original.timeout_ms == 0U
         ? 1000U : original.timeout_ms;
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
         std::chrono::milliseconds(requested_timeout);
     if (!acquire_control_gate(gate_deadline, nullptr, true))
         return LIBUSB_ERROR_TIMEOUT;
@@ -834,27 +1185,36 @@ int LibusbW3u3Hardware::control(const ControlTransfer& original, unsigned char* 
         return LIBUSB_ERROR_ACCESS;
     if (!claimed_ || disconnected_.load()) return LIBUSB_ERROR_NO_DEVICE;
     ControlTransfer transfer = original;
-    bool skip = false;
-    ControlTransfer safe{};
-    if (!mask_lnb_gpio_operation(transfer, &safe, &skip)) return LIBUSB_ERROR_ACCESS;
-    if (skip) {
-        if (data != nullptr && transfer.length > 0) data[0] = 1U;
-        return transfer.length;
+    if (!uses_legacy_frontend() && !uses_v2_frontend()) {
+        // Retain the historical W3U2/W3U3 no-selectable-LNB policy. The
+        // source-specific S3 boards require their own GPIO/GPIOEx sequence.
+        bool skip = false;
+        ControlTransfer safe{};
+        if (!mask_lnb_gpio_operation(transfer, &safe, &skip)) return LIBUSB_ERROR_ACCESS;
+        if (skip) {
+            if (data != nullptr && transfer.length > 0) data[0] = 1U;
+            return transfer.length;
+        }
+        transfer = safe;
     }
-    transfer = safe;
     if (deadline_active_) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline_ - std::chrono::steady_clock::now()).count();
+            deadline_ - steady_now()).count();
         if (left <= 0) return LIBUSB_ERROR_TIMEOUT;
         const unsigned requested = transfer.timeout_ms == 0U ? 1000U : transfer.timeout_ms;
         transfer.timeout_ms = static_cast<std::uint16_t>(
             std::min<long long>(left, requested));
     }
-    const int rc = capture_usb_hooks_ != nullptr &&
-                           capture_usb_hooks_->control != nullptr
-                       ? capture_usb_hooks_->control(capture_usb_hooks_->context,
-                                                     transfer, data)
-                       : primary_.control(transfer, data);
+    int rc = LIBUSB_ERROR_NOT_SUPPORTED;
+    if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->control_function != nullptr)
+        rc = capture_usb_hooks_->control_function(capture_usb_hooks_->context,
+                                                  function, transfer, data);
+    else if (function == 0U && capture_usb_hooks_ != nullptr &&
+             capture_usb_hooks_->control != nullptr)
+        rc = capture_usb_hooks_->control(capture_usb_hooks_->context, transfer, data);
+    else
+        rc = function == 0U ? primary_.control(transfer, data)
+                            : sibling_.control(transfer, data);
     if (rc == LIBUSB_ERROR_NO_DEVICE) disconnected_.store(true);
     return rc;
 }
@@ -863,30 +1223,32 @@ void LibusbW3u3Hardware::delay_ms(unsigned ms) {
     unsigned sleep = ms;
     if (deadline_active_) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline_ - std::chrono::steady_clock::now()).count();
+            deadline_ - steady_now()).count();
         if (left <= 0) return;
         sleep = std::min<unsigned>(sleep, static_cast<unsigned>(left));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
 }
 bool LibusbW3u3Hardware::cancelled() const {
+    if (cleanup_io_active_.load(std::memory_order_acquire)) return false;
     return (!card_cleanup_active_ && stop_requested_.load()) ||
            (diagnostic_stop_flag_ != nullptr && *diagnostic_stop_flag_ != 0);
 }
 bool LibusbW3u3Hardware::expired() const {
-    return deadline_active_ && std::chrono::steady_clock::now() >= deadline_;
+    return deadline_active_ && steady_now() >= deadline_;
 }
 
 Result<void> LibusbW3u3Hardware::prepare(
     std::uint8_t receiver, System system, const std::atomic<bool>& cancelled_flag) noexcept {
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
         return Result<void>::failure(Error::USB_IO);
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::seconds(15);
     if (!acquire_control_gate(gate_deadline, nullptr))
         return Result<void>::failure(Error::TIMEOUT);
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
-    if (!claimed_ || receiver > 1U || !active_receiver_.owns(receiver) ||
+    if (!receiver_supports(receiver, system) || !claimed_ ||
+        !active_receiver_.owns(receiver) ||
         tuned_receiver_ != receiver || tuned_system_ != system || !tuned_ ||
         source_prepared_ || stop_requested_.load())
         return Result<void>::failure(Error::UNSUPPORTED);
@@ -907,6 +1269,14 @@ Result<void> LibusbW3u3Hardware::prepare(
         return Result<void>::failure(error);
     };
     if (cancelled_flag.load()) return fail_prepare(Error::NOT_READY);
+    if (uses_legacy_frontend() && system == System::ISDB_T && !gain_applied_) {
+        // These tune wrappers establish the vendor's default cached state.
+        // Apply the model-specific one-shot once per tune, without importing
+        // W3U3's lock-settle/retry policy or starting a polling thread.
+        if (!run_plan(plan_legacy_default_gain(legacy_frontend(), true), 1000U))
+            return fail_prepare(Error::USB_IO);
+        gain_applied_ = true;
+    }
     if (!snapshot_link_diagnostic()) return fail_prepare(Error::NOT_READY);
     link_snapshot_valid_ = true;
     cf_snapshot_valid_ = read_cf_block(local, cf_snapshot_.data(), cf_snapshot_.size());
@@ -1091,7 +1461,7 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
     // Hold the same gate across DSC stop, callback drain and restoration so
     // no controller operation can enter between cleanup stages. Event/callback
     // handling never takes this gate.
-    const auto deadline = std::chrono::steady_clock::now() +
+    const auto deadline = steady_now() +
                           std::chrono::seconds(25);
     if (!acquire_control_gate(deadline, nullptr, true)) fatal_drain_exit();
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
@@ -1105,7 +1475,7 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
 
 CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(
     bool dsc_ok, bool dsc_was_attempted) noexcept {
-    const auto gate_deadline = std::chrono::steady_clock::now() +
+    const auto gate_deadline = steady_now() +
                                std::chrono::seconds(5);
     if (!acquire_control_gate(gate_deadline, nullptr, true)) {
         mark_cleanup_failed(Error::TIMEOUT);
@@ -1235,10 +1605,17 @@ bool LibusbW3u3Hardware::write_cf_block(std::uint8_t local, const std::uint8_t* 
 bool LibusbW3u3Hardware::terrestrial_locked(
     std::uint8_t local, bool* locked,
     std::chrono::steady_clock::time_point deadline) {
-    if (local != 1U || locked == nullptr || std::chrono::steady_clock::now() >= deadline)
+    if (!receiver_supports(local, System::ISDB_T) || locked == nullptr ||
+        steady_now() >= deadline)
         return false;
+    if (uses_v2_frontend())
+        return read_v2_frontend_lock(this, {0U}, locked, nullptr, 500U) ==
+               V2FrontendResult::Completed;
     FrontendRunReport report{};
-    if (!run_plan(plan_terrestrial_lock_read(557142U), 500U, &report) || !report.have_last_read)
+    const auto plan = uses_legacy_frontend()
+        ? plan_legacy_terrestrial_lock(legacy_frontend(), tuned_frequency_khz_)
+        : plan_terrestrial_lock_read(tuned_frequency_khz_);
+    if (!run_plan(plan, 500U, &report) || !report.have_last_read)
         return false;
     *locked = (report.last_read & 0x0fU) == 0x09U;
     return true;

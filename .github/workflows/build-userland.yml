@@ -2,15 +2,18 @@ name: Build userland skeleton
 
 on:
   push:
-    branches: [main]
+    branches: [main, dot/usb-model-support-0.1.0]
   pull_request:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y cmake g++ pkg-config libusb-1.0-0-dev
+      - run: sudo apt-get update && sudo apt-get install -y cmake g++ pkg-config libusb-1.0-0-dev libpcsclite-dev
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
