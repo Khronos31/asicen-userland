@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(asicen_userland VERSION 0.0.1 LANGUAGES CXX)
+project(asicen_userland VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,41 @@ set(ASICEN_LIBUSB_LIBRARY "" CACHE FILEPATH "libusb library/archive (overrides p
 set(ASICEN_LIBUSB_EXTRA_LIBRARIES "" CACHE STRING "Additional private libraries required by the selected libusb archive")
 set(ASICEN_LIBUSB_EXTRA_LINK_OPTIONS "" CACHE STRING "Additional linker options required by the selected libusb archive")
 set(ASICEN_PCSC_IFD_INCLUDE_DIR "" CACHE PATH "Build-only PC/SC IFD headers directory")
+set(ASICEN_ANDROID_NDK_ROOT_MAP "" CACHE PATH "Android NDK root to remove from compiler debug paths")
+
+if(ANDROID)
+  # Release ELFs must not retain the machine-specific source, build, or NDK
+  # roots emitted by Clang's DWARF and macro expansion.  Keep the mapped value
+  # relative so an unstripped developer build is reproducible too.
+  set(asicen_android_prefix_map_flags
+    "-fdebug-compilation-dir=."
+    "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-ffile-prefix-map=${CMAKE_BINARY_DIR}=."
+    "-fdebug-prefix-map=${CMAKE_BINARY_DIR}=."
+    "-fmacro-prefix-map=${CMAKE_BINARY_DIR}=."
+  )
+  if(ASICEN_ANDROID_NDK_ROOT_MAP)
+    list(APPEND asicen_android_prefix_map_flags
+      "-ffile-prefix-map=${ASICEN_ANDROID_NDK_ROOT_MAP}=."
+      "-fdebug-prefix-map=${ASICEN_ANDROID_NDK_ROOT_MAP}=."
+      "-fmacro-prefix-map=${ASICEN_ANDROID_NDK_ROOT_MAP}=."
+    )
+  endif()
+  add_compile_options(${asicen_android_prefix_map_flags})
+
+  # Every packaged Android ELF must pass scripts/verify-android-elf.sh before
+  # publication.  Android builds use the same hardened PIE contract as the
+  # other supported release targets.
+  add_link_options(
+    "-Wl,-z,relro"
+    "-Wl,-z,now"
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+    "-Wl,--no-undefined"
+  )
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -130,7 +165,7 @@ if(ASICEN_ENABLE_LIBUSB)
   target_compile_options(asicen_libusb PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
-if(UNIX)
+if(UNIX AND NOT ANDROID)
   add_library(asicen_pcsc_ifd_core STATIC
     third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp)
   set_target_properties(asicen_pcsc_ifd_core PROPERTIES

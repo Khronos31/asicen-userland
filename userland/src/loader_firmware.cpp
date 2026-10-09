@@ -108,7 +108,8 @@ bool loader_firmware_fingerprint(const std::uint8_t* data, std::size_t length,
     if (out == nullptr) return false;
     out->fill(0);
     if ((data == nullptr && length != 0) ||
-        length > std::numeric_limits<std::uint64_t>::max() / 8U)
+        static_cast<std::uint64_t>(length) >
+            std::numeric_limits<std::uint64_t>::max() / 8U)
         return false;
     std::array<std::uint32_t, 8> state{{
         0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
