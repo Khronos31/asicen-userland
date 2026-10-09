@@ -106,8 +106,11 @@ retained; the additional local test is listed with the other deltas below.
   prefix override; the reference test keeps the upstream `px4-userland:`
   prefix and the ASICEN driver uses `asicen-userland:` while sharing ASICEN IPC.
 - `userland/tools/px4_ts_core.cpp` and `userland/tools/px4ctl.cpp`: product
-  command naming, receiver bounds, serial-free instance routing, no-LNB guard,
-  usage and error labels under `ASICEN_PRODUCT_CLI`.
+  command naming, receiver bounds, serial-free instance routing, usage and
+  error labels under `ASICEN_PRODUCT_CLI`. On 2026-10-09 the earlier no-LNB
+  guard in `px4_ts_core.cpp` was replaced by px4-compatible `--lnb-voltage 0|15`
+  parsing. S3U/S3U2 still reject a request of 15 in the hardware backend; that
+  rejection is not in this file.
 
 The upstream service tests and applicable CLI tests are compiled without
 changing their assertions. Product-specific mapping, shutdown, worker routing,

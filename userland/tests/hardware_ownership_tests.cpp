@@ -239,9 +239,104 @@ void invalid_paths_reject_before_claim() {
     check(events.empty(), "path errors cause no claim calls");
 }
 
+void single_function_profiles_claim_only_their_runtime_identity() {
+    for (const auto model : {asicen::ModelId::S3u, asicen::ModelId::S3u2}) {
+        const auto& profile = *asicen::find_profile(model);
+        auto state = primary_snapshot();
+        state.product_id = profile.pid;
+        state.port_path = {4};  // No fictitious enclosure hub is required.
+        state.endpoint81_in_alt0 = true;
+        state.endpoint81_bulk_in_alt0 = true;
+        if (profile.combined_isdb_ts) {
+            state.endpoint82_in_alt0 = false;
+            state.endpoint82_bulk_in_alt0 = false;
+        }
+        std::vector<std::string> events;
+        FakeFunction primary(state, &events, "primary");
+        FakeFunction sibling(sibling_snapshot(), &events, "sibling");
+        asicen::EnclosureOwnership owner;
+        check(owner.claim_profile(profile, primary, &sibling, {4}, {5}) ==
+                  asicen::OwnershipError::invalid_path,
+              "single-function profile rejects a supplied sibling");
+        check(events.empty(), "single-function mismatch makes no claims");
+        check(owner.claim_profile(profile, primary, nullptr, {4}) ==
+                  asicen::OwnershipError::none,
+              "one-function profile claims without an invented sibling");
+        check(owner.owns_required_functions() && !owner.owns_both(),
+              "one claim satisfies the single-function model");
+        check(owner.primary_supports_bulk_endpoint(0x81U),
+              "S3U combined lane zero capability is measured");
+        check(owner.primary_supports_bulk_endpoint(0x82U) == !profile.combined_isdb_ts,
+              "endpoint82 is not inferred for the combined S3U");
+        check(owner.release() == asicen::OwnershipError::none,
+              "single-function release succeeds");
+        check(!owner.owns_required_functions() &&
+              !owner.primary_supports_bulk_endpoint(0x81U),
+              "release clears ownership and capabilities");
+        check(events == std::vector<std::string>{"claim-primary", "release-primary"},
+              "only the requested single interface is touched");
+    }
+}
+
+void dual_models_require_same_pid_and_source_backed_loader_identity() {
+    const auto& w3u2 = *asicen::find_profile(asicen::ModelId::W3u2);
+    auto p = primary_snapshot();
+    p.product_id = w3u2.pid;
+    auto s = sibling_snapshot();
+    s.product_id = w3u2.pid;
+    std::vector<std::string> events;
+    FakeFunction primary(p, &events, "primary");
+    FakeFunction sibling(s, &events, "sibling");
+    asicen::EnclosureOwnership owner;
+    check(owner.claim_profile(w3u2, primary, &sibling, p.port_path, s.port_path) ==
+              asicen::OwnershipError::none,
+          "W3U2 same-runtime-PID pair claims");
+    check(owner.owns_both() && owner.owns_required_functions(),
+          "both W3U2 functions stay reserved");
+    owner.release();
+    events.clear();
+    sibling.state.product_id = 0x0005U;
+    check(owner.claim_profile(w3u2, primary, &sibling, p.port_path, s.port_path) ==
+              asicen::OwnershipError::sibling_mismatch,
+          "W3U3 sibling is not accepted as a W3U2 function");
+    check(events.empty(), "cross-model sibling is rejected before claims");
+    sibling.state.vendor_id = 0x1738U;
+    sibling.state.product_id = 0x5211U;
+    check(owner.claim_profile(w3u2, primary, &sibling, p.port_path, s.port_path) ==
+              asicen::OwnershipError::none,
+          "official W3U2 loader INF5211 may be reserved");
+    owner.release();
+    events.clear();
+    sibling.state.product_id = 0x5216U;
+    check(owner.claim_profile(w3u2, primary, &sibling, p.port_path, s.port_path) ==
+              asicen::OwnershipError::sibling_mismatch,
+          "W3U3 historical5216 allowance is not broadened without W3U2 evidence");
+    check(events.empty(), "unproven loader identity causes no claim");
+}
+
+void forged_profiles_and_wrong_single_endpoint_fail_closed() {
+    auto profile = *asicen::find_profile(asicen::ModelId::S3u);
+    std::vector<std::string> events;
+    auto state = primary_snapshot();
+    state.product_id = profile.pid;
+    FakeFunction primary(state, &events, "primary");
+    asicen::EnclosureOwnership owner;
+    check(owner.claim_profile(profile, primary, nullptr, state.port_path) ==
+              asicen::OwnershipError::primary_mismatch,
+          "S3U requires actual bulk endpoint81, not W3U3 endpoint82");
+    profile.expected_runtime_functions = 2U;
+    check(owner.claim_profile(profile, primary, nullptr, state.port_path) ==
+              asicen::OwnershipError::unsupported_profile,
+          "caller cannot forge known model topology");
+    check(events.empty(), "invalid model or lane never reaches claim");
+}
+
 }  // namespace
 
 int main() {
+    single_function_profiles_claim_only_their_runtime_identity();
+    dual_models_require_same_pid_and_source_backed_loader_identity();
+    forged_profiles_and_wrong_single_endpoint_fail_closed();
     valid_runtime_claims_and_releases_in_reverse_order();
     known_loader_sibling_is_reserved_and_claimed();
     primary_endpoint81_capability_is_optional_and_measured();

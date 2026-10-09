@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: under ASICEN_PRODUCT_CLI, command names,
+// receiver bounds, serial-free instance routing, and px4-compatible
+// --lnb-voltage 0|15 parsing. That parser replaced the earlier no-LNB guard.
+// The original license notice is unchanged.
 #include "px4_ts_core.h"
 
 #include "px4/control_client.h"
@@ -330,12 +334,8 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
             have_bandwidth = true;
         } else if (option == "--lnb-voltage") {
             if (have_lnb || !parse_unsigned(value, result.lnb_voltage) ||
-                (result.lnb_voltage != 0U
-#if !defined(ASICEN_PRODUCT_CLI)
-                 && result.lnb_voltage != 15U
-#endif
-                 ))
-                return invalid("lnb-voltage is unavailable in this backend");
+                (result.lnb_voltage != 0U && result.lnb_voltage != 15U))
+                return invalid("lnb-voltage must be 0 or 15");
             have_lnb = true;
         } else if (option == "--tune-timeout-ms") {
             if (have_timeout || !parse_unsigned(value, result.tune_timeout_ms))
@@ -408,6 +408,7 @@ void print_px4_ts_usage(void* output) noexcept
                  "  --channel T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>\n"
                  "  --stream-id N | --slot 0..11   (isdb-s, exactly one)\n"
                  "  --bandwidth-hz N               (isdb-t default 6000000)\n"
+                 "  --lnb-voltage 0|15             (isdb-s; 15 is daemon-dependent)\n"
                  "  --tune-timeout-ms 100..30000  (default 10000)\n"
                  "  --output PATH|- --duration-seconds N | --packet-count N\n"
                  "  --runtime-dir PATH --group --help\n");

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: receiver-lane dispatch, and tuner, card and
+// stream cancellation before worker drain. The original license notice is unchanged.
 #include "px4/control_server.h"
 #if defined(ASICEN_PROFILE_ASICEN)
 #include "asicen/product_profile.h"

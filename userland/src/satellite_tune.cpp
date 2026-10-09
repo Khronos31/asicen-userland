@@ -188,8 +188,11 @@ bool w3u3_satellite_if_to_rf_khz(std::uint32_t if_khz,
     return true;
 }
 
-FrontendPlan plan_w3u3_satellite_tune(std::uint32_t rf_khz,
-                                      std::uint16_t initial_tsid) {
+namespace {
+
+FrontendPlan plan_satellite_tune(std::uint32_t rf_khz,
+                                  std::uint16_t initial_tsid,
+                                  std::uint8_t terrestrial_finalize) {
     std::size_t row = 0;
     if (!find_row(rf_khz, &row) ||
         (row >= 12 && initial_tsid != kW3u3SatelliteNoTsid)) {
@@ -240,7 +243,7 @@ FrontendPlan plan_w3u3_satellite_tune(std::uint32_t rf_khz,
                                         sizeof(tuner_message_4), 2),
         "satellite tuner row byte 7");
 
-    const std::uint8_t terrestrial_adapter = 0x34;
+    const std::uint8_t terrestrial_adapter = terrestrial_finalize;
     const std::uint8_t reacquire = 0x01;
     const std::uint8_t demod_23_finish = 0x4c;
     if (!append_i2c_write(&plan, 0x30, 0x0f, &terrestrial_adapter, 1, 0,
@@ -252,6 +255,38 @@ FrontendPlan plan_w3u3_satellite_tune(std::uint32_t rf_khz,
         return {};
     }
     return plan;
+}
+
+bool valid_legacy_satellite_profile(LegacyFrontendProfile profile) {
+    return profile == LegacyFrontendProfile::S3u ||
+           profile == LegacyFrontendProfile::S3u2;
+}
+
+}  // namespace
+
+FrontendPlan plan_w3u3_satellite_tune(std::uint32_t rf_khz,
+                                      std::uint16_t initial_tsid) {
+    return plan_satellite_tune(rf_khz, initial_tsid, 0x34);
+}
+
+FrontendPlan plan_legacy_satellite_tune(LegacyFrontendProfile profile,
+                                        std::uint32_t rf_khz,
+                                        std::uint16_t initial_tsid) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    // S3U TC_SetFrequency2350 writes30:0f=3c for every satellite table row.
+    // S3U2 TC_SetFrequency2830 uses34. RF rows, adapter protocol, TSID and
+    // reacquire operations are common; all satellite paths use index0/32.
+    return plan_satellite_tune(rf_khz, initial_tsid,
+                              profile == LegacyFrontendProfile::S3u ? 0x3c : 0x34);
+}
+
+SatelliteOperationResult run_legacy_satellite_tune(
+    LegacyFrontendProfile profile, FrontendTransport* transport,
+    std::uint32_t rf_khz, std::uint16_t initial_tsid, FrontendRunReport* report) {
+    if (transport == nullptr) return SatelliteOperationResult::InvalidArgument;
+    const auto plan = plan_legacy_satellite_tune(profile, rf_khz, initial_tsid);
+    if (plan.empty()) return SatelliteOperationResult::InvalidArgument;
+    return convert_result(run_frontend_plan(plan, transport, report));
 }
 
 SatelliteOperationResult run_w3u3_satellite_tune(
@@ -448,6 +483,49 @@ SatelliteTsidSelectResult select_w3u3_satellite_tsid(
     result.selected_tsid = selected;
     result.result = SatelliteOperationResult::Completed;
     return result;
+}
+
+// Source-equivalent index0 read/select operations. Explicit profile checks
+// prevent an invalid model value from becoming an implicit W3U3 alias.
+SatelliteLockResult read_legacy_satellite_lock(
+    LegacyFrontendProfile profile, FrontendTransport* transport) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    return read_w3u3_satellite_lock(transport);
+}
+SatelliteLockResult poll_legacy_satellite_lock(
+    LegacyFrontendProfile profile, FrontendTransport* transport,
+    std::size_t max_attempts, unsigned poll_interval_ms) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    return poll_w3u3_satellite_lock(transport, max_attempts, poll_interval_ms);
+}
+SatelliteTsidListResult read_legacy_satellite_tsids(
+    LegacyFrontendProfile profile, FrontendTransport* transport) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    return read_w3u3_satellite_tsids(transport);
+}
+SatelliteTsidReadyResult wait_legacy_satellite_slot_ready(
+    LegacyFrontendProfile profile, FrontendTransport* transport, std::size_t slot,
+    std::size_t max_attempts, unsigned poll_interval_ms) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    return wait_w3u3_satellite_slot_ready(transport, slot, max_attempts, poll_interval_ms);
+}
+SatelliteTsidReadyResult wait_legacy_satellite_any_ready(
+    LegacyFrontendProfile profile, FrontendTransport* transport,
+    std::size_t max_attempts, unsigned poll_interval_ms) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    return wait_w3u3_satellite_any_ready(transport, max_attempts, poll_interval_ms);
+}
+SatelliteTsidReadyResult wait_legacy_satellite_tsid_ready(
+    LegacyFrontendProfile profile, FrontendTransport* transport, std::uint16_t tsid,
+    std::size_t max_attempts, unsigned poll_interval_ms) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    return wait_w3u3_satellite_tsid_ready(transport, tsid, max_attempts, poll_interval_ms);
+}
+SatelliteTsidSelectResult select_legacy_satellite_tsid(
+    LegacyFrontendProfile profile, FrontendTransport* transport, std::size_t slot,
+    const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids) {
+    if (!valid_legacy_satellite_profile(profile)) return {};
+    return select_w3u3_satellite_tsid(transport, slot, tsids);
 }
 
 const char* satellite_operation_result_name(SatelliteOperationResult result) noexcept {

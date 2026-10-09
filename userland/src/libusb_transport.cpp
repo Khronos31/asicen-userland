@@ -1,8 +1,43 @@
 #include "asicen/libusb_transport.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 
 namespace asicen {
+
+KernelDriverState classify_kernel_driver_state(int query_result) noexcept {
+    KernelDriverState state;
+    if (query_result > 0) {
+        state.known = true;
+        state.active = true;
+    } else if (query_result == 0 || query_result == LIBUSB_ERROR_NOT_SUPPORTED) {
+        state.known = true;
+        state.active = false;
+    }
+    return state;
+}
+
+int duplicate_fd_cloexec(int fd) noexcept {
+#if defined(F_DUPFD_CLOEXEC)
+    const int cloexec_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (cloexec_fd >= 0) {
+        return cloexec_fd;
+    }
+#endif
+    const int duplicate_fd = ::dup(fd);
+    if (duplicate_fd < 0) {
+        return -1;
+    }
+#if defined(FD_CLOEXEC)
+    const int flags = fcntl(duplicate_fd, F_GETFD);
+    if (flags >= 0) {
+        (void)fcntl(duplicate_fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+#endif
+    return duplicate_fd;
+}
 
 LibusbDevice::~LibusbDevice() {
     close();
@@ -33,6 +68,30 @@ int LibusbDevice::open(libusb_context* context, UsbLocation location) {
     return result;
 }
 
+int LibusbDevice::open(libusb_context* context, int fd) {
+    close();
+
+    if (context == nullptr || fd < 0 || fcntl(fd, F_GETFD) < 0) {
+        return LIBUSB_ERROR_INVALID_PARAM;
+    }
+    const int retained = duplicate_fd_cloexec(fd);
+    if (retained < 0) {
+        return LIBUSB_ERROR_IO;
+    }
+
+    libusb_device_handle* handle = nullptr;
+    const int wrap =
+        libusb_wrap_sys_device(context, static_cast<intptr_t>(retained), &handle);
+    if (wrap != 0 || handle == nullptr) {
+        ::close(retained);
+        return wrap != 0 ? wrap : LIBUSB_ERROR_OTHER;
+    }
+
+    handle_ = handle;
+    retained_fd_ = retained;
+    return 0;
+}
+
 void LibusbDevice::close() {
     if (handle_ != nullptr) {
         for (auto it = claimed_interfaces_.rbegin();
@@ -44,6 +103,10 @@ void LibusbDevice::close() {
         handle_ = nullptr;
     } else {
         claimed_interfaces_.clear();
+    }
+    if (retained_fd_ >= 0) {
+        ::close(retained_fd_);
+        retained_fd_ = -1;
     }
 }
 
@@ -248,9 +311,10 @@ UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const {
         }
     }
     libusb_free_config_descriptor(config);
-    const int kernel = device_.kernel_driver_active(0);
-    result.kernel_driver_state_known = kernel >= 0;
-    result.interface0_kernel_driver = kernel > 0;
+    const KernelDriverState kernel =
+        classify_kernel_driver_state(device_.kernel_driver_active(0));
+    result.kernel_driver_state_known = kernel.known;
+    result.interface0_kernel_driver = kernel.active;
     return result;
 }
 

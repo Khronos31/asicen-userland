@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,12 +41,17 @@ public:
 
 struct Options {
     bool hardware = false;
+    const asicen::DeviceProfile* expected_model = nullptr;
     bool have_primary = false;
     bool have_sibling = false;
     std::uint8_t primary_bus = 0;
     std::uint8_t primary_address = 0;
     std::uint8_t sibling_bus = 0;
     std::uint8_t sibling_address = 0;
+    bool have_primary_fd = false;
+    bool have_sibling_fd = false;
+    int primary_fd = -1;
+    int sibling_fd = -1;
     std::string primary_port;
     std::string sibling_port;
     std::string runtime_dir;
@@ -119,6 +125,10 @@ bool parse_arguments(int argc, char** argv, Options* out) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
         if (arg == "--hardware") out->hardware = true;
+        else if (arg == "--model" && i + 1 < argc) {
+            out->expected_model = asicen::find_profile_by_model(argv[++i]);
+            if (out->expected_model == nullptr) return false;
+        }
         else if (arg == "--primary" && i + 1 < argc) {
             out->have_primary = asicen::parse_usb_location(
                 argv[++i], &out->primary_bus, &out->primary_address);
@@ -131,6 +141,22 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             out->primary_port = argv[++i];
         } else if (arg == "--sibling-port" && i + 1 < argc) {
             out->sibling_port = argv[++i];
+        } else if (arg == "--primary-fd" && i + 1 < argc) {
+            std::uint64_t parsed = 0;
+            if (out->have_primary_fd ||
+                !parse_unsigned_decimal(argv[++i],
+                    static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
+                    &parsed)) return false;
+            out->have_primary_fd = true;
+            out->primary_fd = static_cast<int>(parsed);
+        } else if (arg == "--sibling-fd" && i + 1 < argc) {
+            std::uint64_t parsed = 0;
+            if (out->have_sibling_fd ||
+                !parse_unsigned_decimal(argv[++i],
+                    static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
+                    &parsed)) return false;
+            out->have_sibling_fd = true;
+            out->sibling_fd = static_cast<int>(parsed);
         } else if (arg == "--runtime-dir" && i + 1 < argc) {
             out->runtime_dir = argv[++i];
         } else if (arg == "--instance" && i + 1 < argc) {
@@ -159,10 +185,12 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             out->satellite_slot = static_cast<std::uint8_t>(parsed);
         } else if (arg == "--help" || arg == "-h") {
             std::puts("usage: asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
-                      "--sibling BUS:ADDR --sibling-port BUS-PORT "
+                      "[--sibling BUS:ADDR --sibling-port BUS-PORT] [--model MODEL] "
                       "[--runtime-dir PATH] [--instance TOKEN]\n"
+                      "       asicend --hardware --primary-fd FD [--sibling-fd FD] "
+                      "[--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
                       "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
-                      "--sibling BUS:ADDR --sibling-port BUS-PORT "
+                      "[--sibling BUS:ADDR --sibling-port BUS-PORT] [--model MODEL] "
                       "--probe-satellite RF_KHZ [--slot 0..7]\n"
                       "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
                       "--sibling BUS:ADDR --sibling-port BUS-PORT --probe-card\n"
@@ -172,10 +200,20 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             std::exit(0);
         } else return false;
     }
-    return out->hardware && out->have_primary && out->have_sibling &&
-           !out->primary_port.empty() && !out->sibling_port.empty() &&
-            out->runtime_dir.size() < 400U && valid_instance(out->instance) &&
-           (!out->have_satellite_slot || out->probe_satellite) &&
+    const bool fd_mode = out->have_primary_fd || out->have_sibling_fd;
+    if (!out->hardware || out->runtime_dir.size() >= 400U ||
+        !valid_instance(out->instance)) return false;
+    if (fd_mode) {
+        if (!out->have_primary_fd || out->have_primary || out->have_sibling ||
+            !out->primary_port.empty() || !out->sibling_port.empty())
+            return false;
+        if (out->have_sibling_fd && out->primary_fd == out->sibling_fd)
+            return false;
+    } else if (!out->have_primary || out->primary_port.empty() ||
+               (out->have_sibling != !out->sibling_port.empty())) {
+        return false;
+    }
+    return (!out->have_satellite_slot || out->probe_satellite) &&
            (!out->card_only || (!out->probe_satellite && !out->probe_card));
 }
 
@@ -188,7 +226,7 @@ int run_asicend_hardware(int argc, char** argv) {
     Options options;
     if (!parse_arguments(argc, argv, &options)) {
         std::fprintf(stderr, "usage: asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT "
-                             "--sibling BUS:ADDR --sibling-port BUS-PORT "
+                             "[--sibling BUS:ADDR --sibling-port BUS-PORT] [--model MODEL] "
                              "[--runtime-dir PATH] [--instance TOKEN]\n");
         return 2;
     }
@@ -200,15 +238,17 @@ int run_asicend_hardware(int argc, char** argv) {
     ::sigaction(SIGTERM, &action, nullptr);
     ::signal(SIGPIPE, SIG_IGN);
     std::vector<std::uint8_t> primary_path, sibling_path;
-    if (!parse_port(options.primary_port, options.primary_bus, &primary_path) ||
-        !parse_port(options.sibling_port, options.sibling_bus, &sibling_path)) {
-        std::fprintf(stderr, "USB port path bus must match selected bus\n");
-        return 2;
-    }
-    if (primary_path == sibling_path || primary_path.back() != 1U ||
-        sibling_path.back() != 2U) {
-        std::fprintf(stderr, "refusing noncanonical primary/sibling port assignment\n");
-        return 2;
+    if (!options.have_primary_fd) {
+        if (!parse_port(options.primary_port, options.primary_bus, &primary_path) ||
+            (options.have_sibling && !parse_port(options.sibling_port, options.sibling_bus, &sibling_path))) {
+            std::fprintf(stderr, "USB port path bus must match selected bus\n");
+            return 2;
+        }
+        if (options.have_sibling && (primary_path == sibling_path || primary_path.back() != 1U ||
+            sibling_path.back() != 2U)) {
+            std::fprintf(stderr, "refusing noncanonical primary/sibling port assignment\n");
+            return 2;
+        }
     }
     const int lock_fd = lock_runtime();
     if (lock_fd < 0) {
@@ -223,17 +263,25 @@ int run_asicend_hardware(int argc, char** argv) {
     }
     int result = 70;
     {
-        asicen::LibusbW3u3Hardware hardware(
-            context, {options.primary_bus, options.primary_address},
-            {options.sibling_bus, options.sibling_address},
-            primary_path, sibling_path);
-        const auto claimed = hardware.claim();
+        std::unique_ptr<asicen::LibusbW3u3Hardware> hardware;
+        if (options.have_primary_fd) {
+            hardware = std::make_unique<asicen::LibusbW3u3Hardware>(
+                context, options.primary_fd,
+                options.have_sibling_fd ? options.sibling_fd : -1,
+                options.expected_model);
+        } else {
+            hardware = std::make_unique<asicen::LibusbW3u3Hardware>(
+                context, asicen::UsbLocation{options.primary_bus, options.primary_address},
+                asicen::UsbLocation{options.sibling_bus, options.sibling_address},
+                primary_path, sibling_path, options.expected_model);
+        }
+        const auto claimed = hardware->claim();
         if (!claimed) {
-            std::fprintf(stderr, "hardware topology/claim refused: %s\n",
+            std::fprintf(stderr, "hardware model/topology/claim refused (dual-function models require sibling paths): %s\n",
                          px4::userland::error_string(claimed.error()));
             result = claimed.error() == px4::userland::Error::BUSY ? 4 : 3;
         } else if (options.probe_satellite) {
-            const auto probe = hardware.probe_satellite(
+            const auto probe = hardware->probe_satellite(
                 options.satellite_rf_khz, options.have_satellite_slot,
                 options.satellite_slot, &stop_requested);
             std::fprintf(stderr,
@@ -244,18 +292,18 @@ int run_asicend_hardware(int argc, char** argv) {
                 probe.selected_slot ? 1U : 0U);
             result = probe.result == asicen::SatelliteOperationResult::Completed ? 0 :
                      probe.result == asicen::SatelliteOperationResult::Cancelled ? 130 : 70;
-            const auto stopped = hardware.shutdown();
+            const auto stopped = hardware->shutdown();
             if (!stopped) {
                 std::fprintf(stderr, "satellite-probe cleanup failed\n");
                 result = 70;
             }
-            const auto released = hardware.release();
+            const auto released = hardware->release();
             if (!released) {
                 std::fprintf(stderr, "USB claim release failed\n");
                 result = 70;
             }
         } else if (options.probe_card) {
-            const auto probe = hardware.probe_card(&stop_requested);
+            const auto probe = hardware->probe_card(&stop_requested);
             std::fprintf(stderr,
                 "card-probe status=%s atr_valid=%u atr_length=%zu "
                 "response_length=%zu sw=%04x\n",
@@ -264,12 +312,12 @@ int run_asicend_hardware(int argc, char** argv) {
                 probe.response_length, probe.status_word);
             result = probe.error == px4::userland::Error::OK ? 0 :
                      probe.error == px4::userland::Error::TIMEOUT ? 130 : 70;
-            const auto stopped = hardware.shutdown();
+            const auto stopped = hardware->shutdown();
             if (!stopped) {
                 std::fprintf(stderr, "card-probe cleanup failed\n");
                 result = 70;
             }
-            const auto released = hardware.release();
+            const auto released = hardware->release();
             if (!released) {
                 std::fprintf(stderr, "USB claim release failed\n");
                 result = 70;
@@ -278,30 +326,30 @@ int run_asicend_hardware(int argc, char** argv) {
             std::fprintf(stderr,
                 "asicend card-only mode: tuner operations are unsupported\n");
             result = asicen::run_card_only_server(
-                hardware, options.runtime_dir.c_str(), options.instance.c_str(),
+                *hardware, options.runtime_dir.c_str(), options.instance.c_str(),
                 &stop_requested);
-            const auto stopped = hardware.shutdown();
+            const auto stopped = hardware->shutdown();
             if (!stopped) {
                 std::fprintf(stderr, "card-only hardware cleanup failed\n");
                 result = 70;
             }
-            const auto released = hardware.release();
+            const auto released = hardware->release();
             if (!released) {
                 std::fprintf(stderr, "USB claim release failed\n");
                 result = 70;
             }
         } else {
             result = asicen::run_live_card_stream_server(
-                hardware,
+                *hardware,
                 options.runtime_dir.empty() ? nullptr : options.runtime_dir.c_str(),
                 options.instance.c_str(), &stop_requested);
-            const auto stopped = hardware.shutdown();
+            const auto stopped = hardware->shutdown();
             if (!stopped) {
                 std::fprintf(stderr, "asicend hardware cleanup failed: %s\n",
                              px4::userland::error_string(stopped.error()));
                 result = 70;
             }
-          const auto released = hardware.release();
+          const auto released = hardware->release();
           if (!released) {
               std::fprintf(stderr, "USB claim release failed\n");
               result = 70;

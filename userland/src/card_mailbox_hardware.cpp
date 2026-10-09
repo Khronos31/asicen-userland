@@ -295,7 +295,7 @@ Result<void> W3u3CardMailboxHardware::write_data(
     const auto submitted = write_reg(CardMailboxFacts::kCommandRegister,
                                      CardMailboxFacts::kSubmitCommand);
     if (!submitted) return submitted;
-    sleep_ms(100U);
+    sleep_ms(card_mailbox_submit_delay_ms(model_, input.size));
     return interrupted() ? Result<void>::failure(Error::TIMEOUT) : Result<void>::success();
 }
 

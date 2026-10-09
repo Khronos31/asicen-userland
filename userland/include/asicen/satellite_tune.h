@@ -97,6 +97,36 @@ SatelliteTsidSelectResult select_w3u3_satellite_tsid(
     FrontendTransport* transport, std::size_t slot,
     const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids);
 
+// S3U/S3U2 use the same 24 RF rows and index0 satellite demod32. The
+// complete tune differs only in the model-specific terrestrial0f finalizer.
+// These wrappers keep model validation explicit for lock/TSID operations too.
+FrontendPlan plan_legacy_satellite_tune(
+    LegacyFrontendProfile profile, std::uint32_t rf_khz,
+    std::uint16_t initial_tsid = kW3u3SatelliteNoTsid);
+SatelliteOperationResult run_legacy_satellite_tune(
+    LegacyFrontendProfile profile, FrontendTransport* transport,
+    std::uint32_t rf_khz, std::uint16_t initial_tsid = kW3u3SatelliteNoTsid,
+    FrontendRunReport* report = nullptr);
+SatelliteLockResult read_legacy_satellite_lock(
+    LegacyFrontendProfile profile, FrontendTransport* transport);
+SatelliteLockResult poll_legacy_satellite_lock(
+    LegacyFrontendProfile profile, FrontendTransport* transport,
+    std::size_t max_attempts = 50, unsigned poll_interval_ms = 100);
+SatelliteTsidListResult read_legacy_satellite_tsids(
+    LegacyFrontendProfile profile, FrontendTransport* transport);
+SatelliteTsidReadyResult wait_legacy_satellite_slot_ready(
+    LegacyFrontendProfile profile, FrontendTransport* transport, std::size_t slot,
+    std::size_t max_attempts = 1000, unsigned poll_interval_ms = 10);
+SatelliteTsidReadyResult wait_legacy_satellite_any_ready(
+    LegacyFrontendProfile profile, FrontendTransport* transport,
+    std::size_t max_attempts = 1000, unsigned poll_interval_ms = 10);
+SatelliteTsidReadyResult wait_legacy_satellite_tsid_ready(
+    LegacyFrontendProfile profile, FrontendTransport* transport, std::uint16_t tsid,
+    std::size_t max_attempts = 1000, unsigned poll_interval_ms = 10);
+SatelliteTsidSelectResult select_legacy_satellite_tsid(
+    LegacyFrontendProfile profile, FrontendTransport* transport, std::size_t slot,
+    const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids);
+
 const char* satellite_operation_result_name(SatelliteOperationResult result) noexcept;
 
 }  // namespace asicen

@@ -239,6 +239,8 @@ FrontendRunResult run_i2c_mask(FrontendTransport* transport, const FrontendOp& o
     if (!make_i2c_write_chunk(slave, reg, &value, 1, false, &write)) {
         return FrontendRunResult::InvalidArgument;
     }
+    if (transport->cancelled()) return FrontendRunResult::Cancelled;
+    if (transport->expired()) return FrontendRunResult::DeadlineExceeded;
     std::vector<unsigned char> write_buffer(write.length);
     rc = transport->control(write, write_buffer.data());
     if (rc < 0) {
@@ -309,6 +311,7 @@ FrontendRunResult run_vco_calibration(FrontendTransport* transport, const Fronte
             if (result != FrontendRunResult::Completed) {
                 return result;
             }
+            transport->delay_ms(1);  // shared vendor fallback tail at +0x3ee
         }
     } else if (tmp < 0x02U) {
         reg6 = static_cast<std::uint8_t>(reg6 | 0x08U);
@@ -732,7 +735,10 @@ FrontendPlan plan_terrestrial_init_with_satellite_demod() {
     return plan;
 }
 
-FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz) {
+namespace {
+
+FrontendPlan plan_fc0012_adapter(std::uint32_t freq_khz, std::uint8_t local,
+                                  bool demod_agc) {
     FrontendPlan plan;
     const Fc0012Pll pll = compute_fc0012_pll(freq_khz);
     if (!pll.valid) {
@@ -740,38 +746,287 @@ FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz) {
     }
 
     // FC0012_RSSI_Calibration (source 0).
-    append_tuner_mask(&plan, 1, 0, 0x09, 0xff, 0x10, "fc0012 rssi reg9 +0x10");
-    append_tuner_mask(&plan, 1, 0, 0x06, 0xff, 0x01, "fc0012 rssi reg6 +0x01");
+    append_tuner_mask(&plan, local, 0, 0x09, 0xff, 0x10, "fc0012 rssi reg9 +0x10");
+    append_tuner_mask(&plan, local, 0, 0x06, 0xff, 0x01, "fc0012 rssi reg6 +0x01");
     append_delay(&plan, 1);
-    append_tuner_mask(&plan, 1, 0, 0x09, 0xef, 0x00, "fc0012 rssi reg9 -0x10");
-    append_tuner_mask(&plan, 1, 0, 0x06, 0xef, 0x00, "fc0012 rssi reg6 -0x10");
+    append_tuner_mask(&plan, local, 0, 0x09, 0xef, 0x00, "fc0012 rssi reg9 -0x10");
+    append_tuner_mask(&plan, local, 0, 0x06, 0xef, 0x00, "fc0012 rssi reg6 -0x10");
 
-    append_tuner_write(&plan, 1, 0, 0x01, pll.reg1, "fc0012 reg1");
-    append_tuner_write(&plan, 1, 0, 0x02, pll.reg2, "fc0012 reg2");
-    append_tuner_write(&plan, 1, 0, 0x03, pll.reg3, "fc0012 reg3");
-    append_tuner_write(&plan, 1, 0, 0x04, pll.reg4, "fc0012 reg4");
-    append_tuner_write(&plan, 1, 0, 0x05, pll.reg5, "fc0012 reg5");
-    append_tuner_write(&plan, 1, 0, 0x06, pll.reg6, "fc0012 reg6");
+    append_tuner_write(&plan, local, 0, 0x01, pll.reg1, "fc0012 reg1");
+    append_tuner_write(&plan, local, 0, 0x02, pll.reg2, "fc0012 reg2");
+    append_tuner_write(&plan, local, 0, 0x03, pll.reg3, "fc0012 reg3");
+    append_tuner_write(&plan, local, 0, 0x04, pll.reg4, "fc0012 reg4");
+    append_tuner_write(&plan, local, 0, 0x05, pll.reg5, "fc0012 reg5");
+    append_tuner_write(&plan, local, 0, 0x06, pll.reg6, "fc0012 reg6");
 
-    append_tuner_write(&plan, 1, 0, 0x0e, 0x80, "fc0012 vco arm");
-    append_tuner_write(&plan, 1, 0, 0x0e, 0x00, "fc0012 vco clear");
-    append_delay(&plan, 1);
-    append_tuner_write(&plan, 1, 0, 0x0e, 0x00, "fc0012 vco settle");
-
+    // The composite operation owns the single unconditional pulse train.
+    // Emitting it here too used to double the source sequence.
     FrontendOp vco{};
     vco.kind = FrontendOpKind::Fc0012VcoCalibrate;
-    vco.local = 1;
+    vco.local = local;
     vco.reg6 = pll.reg6;
     vco.vco_select = pll.vco_select;
     vco.label = "fc0012 vco calibrate";
     plan.push_back(vco);
 
     // Vendor-specific demod AGC tweak on reg 0x1e (mode1 read, mode0 write).
-    if (freq_khz <= kIsdbTDemodAgcBoundaryKhz) {
+    if (demod_agc && freq_khz <= kIsdbTDemodAgcBoundaryKhz) {
         append_i2c_mask(&plan, 0x30, 0x1e, 1, 0xcf, 0x20, "demod 1e agc low");
-    } else {
+    } else if (demod_agc) {
         append_i2c_mask(&plan, 0x30, 0x1e, 1, 0xff, 0x30, "demod 1e agc high");
     }
+    return plan;
+}
+
+}  // namespace
+
+FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz) {
+    return plan_fc0012_adapter(freq_khz, 1, true);
+}
+
+namespace {
+
+bool valid_legacy_profile(LegacyFrontendProfile profile) {
+    return profile == LegacyFrontendProfile::S3u ||
+           profile == LegacyFrontendProfile::S3u2;
+}
+
+void append_plan(FrontendPlan* plan, const FrontendPlan& extra) {
+    plan->insert(plan->end(), extra.begin(), extra.end());
+}
+
+void append_demod_byte(FrontendPlan* plan, std::uint8_t slave,
+                       std::uint8_t reg, std::uint8_t value, const char* label) {
+    append_sequence(plan, build_i2c_write_sequence(slave, reg, &value, 1, 0),
+                    true, label);
+}
+
+void append_legacy_terrestrial_init(FrontendPlan* plan) {
+    // Both S3U and S3U2 TunerControl.o: values .rodata 1fc, regs 209,
+    // exactly 13 pairs. Do not add W3U3's preceding nine register writes.
+    constexpr RegisterValue pairs[] = {
+        {0x47, 0x00}, {0x75, 0x02}, {0xb0, 0xa0}, {0xb2, 0x3d},
+        {0xb3, 0x25}, {0xb4, 0x8b}, {0xb5, 0x4b}, {0xb6, 0x3f},
+        {0xb7, 0xff}, {0xb8, 0xff}, {0x22, 0x8f}, {0x5f, 0x80},
+        {0xef, 0x01},
+    };
+    for (const auto& pair : pairs)
+        append_demod_byte(plan, 0x30, pair.reg, pair.value, "legacy T demod init");
+}
+
+void append_legacy_rf_init(FrontendPlan* plan) {
+    // Hardware index0 is intentional: S3U index1 would select slave0x34.
+    for (const auto& pair : kFc0012Init)
+        append_tuner_write(plan, 0, 0, pair.reg, pair.value, "legacy RF init");
+}
+
+void append_s3u2_rf_pulse(FrontendPlan* plan) {
+    // S3U2 InitRFDevice .text 1fb9/1ff0/2013 runs this source0 pulse
+    // after BOTH source calls, including the satellite-source call.
+    for (const std::uint8_t value : {0x00, 0x10, 0x00})
+        append_tuner_write(plan, 0, 0, 0x10, value, "S3U2 RF10 pulse");
+}
+
+}  // namespace
+
+FrontendPlan plan_legacy_frontend_startup(LegacyFrontendProfile profile,
+                                          bool silicon_16_52) {
+    if (!valid_legacy_profile(profile)) return {};
+    FrontendPlan plan;
+    // DTV_Device.o DTV_Start .text15cc..16dd: complete ordinary11/52
+    // cold-start branch, not merely its final GPIO tail. The preceding
+    // revision read is checked by the caller;16/52 skips this whole prefix.
+    if (!silicon_16_52) {
+        append_gpio(&plan, 0x00, 0x40, "legacy startup GPIO40 low");
+        append_delay(&plan, 50);
+        append_gpio(&plan, 0x00, 0x08, "legacy startup GPIO08 low");
+        append_delay(&plan, 50);
+        append_gpio(&plan, 0x10, 0x10, "legacy startup GPIO10 high");
+        append_delay(&plan, 10);
+        append_gpio(&plan, 0x00, 0x10, "legacy startup GPIO10 low");
+        append_delay(&plan, 10);
+        append_gpio(&plan, 0x10, 0x10, "legacy startup GPIO10 high");
+        // No delay between the final GPIO10 assertion and GPIO04 assertion.
+        append_gpio(&plan, 0x04, 0x04, "legacy startup GPIO04 high");
+        append_delay(&plan, 10);
+        append_gpio(&plan, 0x00, 0x04, "legacy startup GPIO04 low");
+        append_delay(&plan, 10);
+        append_gpio(&plan, 0x04, 0x04, "legacy startup GPIO04 high");
+        append_delay(&plan, 10);
+        append_control(&plan, make_i2c_read(0xa8, 0x00, 1, 0), false,
+                       "legacy startup discarded probe");
+        append_delay(&plan, 10);
+        append_control(&plan, make_i2c_read(0xa8, 0xb0, 16, 0), true,
+                       "legacy startup required probe");
+    }
+    // DTV_Start .text1700/1715. Electrical meanings of the selected lines
+    // (includingGPIO20) remain hardware-unverified for these models.
+    append_gpio(&plan, 0x0f, 0xfb, "legacy startup GPIO tail");
+    if (!silicon_16_52)
+        append_gpio(&plan, 0x40, 0x40, "legacy ordinary revision GPIO40 tail");
+    return plan;
+}
+
+FrontendPlan plan_legacy_frontend_startup_off(LegacyFrontendProfile profile) {
+    if (!valid_legacy_profile(profile)) return {};
+    // DTV_Device.o DTV_Start .text1742/1758: power off index0 then index1.
+    // Preserve these source transitions separately from the final GPIO tail.
+    auto plan = plan_legacy_frontend_power(profile, false);
+    if (profile == LegacyFrontendProfile::S3u)
+        append_plan(&plan, plan_legacy_frontend_power(profile, false));
+    return plan;
+}
+
+FrontendPlan plan_legacy_frontend_init_prelude(LegacyFrontendProfile profile) {
+    if (!valid_legacy_profile(profile)) return {};
+    // DTV_Lib.o DTV_Init: S3U .text73a3..73bc; S3U2 .text7413..742c.
+    // These execute before their DTV_TunerPower(on) calls73d4/7444.
+    FrontendPlan plan;
+    append_gpio(&plan, 0x00, 0x08, "legacy DTV_Init power prelude");
+    append_delay(&plan, 50);
+    return plan;
+}
+
+FrontendPlan plan_legacy_frontend_power(LegacyFrontendProfile profile, bool on) {
+    if (!valid_legacy_profile(profile)) return {};
+    FrontendPlan plan;
+    const auto gpio = [&](std::uint8_t value, std::uint8_t mask, unsigned delay) {
+        append_gpio(&plan, value, mask, "legacy vendor power GPIO");
+        if (delay != 0) append_delay(&plan, delay);
+    };
+    const auto gpio_ex = [&](std::uint8_t value, std::uint8_t mask, unsigned delay) {
+        append_control(&plan, make_gpio_ex_set(value, mask), false,
+                       "legacy vendor power GPIOEx");
+        if (delay != 0) append_delay(&plan, delay);
+    };
+    // Complete vendor-described sequences, not safety-filtered subsets.
+    // Select these by model; do not apply W3U3 GPIO/LNB meanings to them.
+    if (profile == LegacyFrontendProfile::S3u) {
+        // S3U TC_PowerTunerDemod .text0310. TC_SetLNB0270 is a no-op;
+        // that does not establish the electrical role/polarity of GPIO20.
+        if (!on) {
+            gpio(0x08, 0x08, 50);
+        } else {
+            gpio(0x00, 0x08, 50);
+            gpio(0x44, 0x44, 50);
+            gpio(0x00, 0x44, 50);
+            gpio(0x44, 0x44, 50);
+            gpio(0x00, 0x20, 100);
+            gpio(0x20, 0x20, 100);
+        }
+        return plan;
+    }
+    // S3U2 TC_PowerTunerDemod .text0300, hardware index0 only.
+    if (!on) {
+        gpio(0x00, 0x40, 0);
+        gpio(0x80, 0x80, 0);
+        gpio_ex(0x02, 0x02, 0);
+        gpio(0x00, 0x04, 0);
+        gpio(0x20, 0x20, 0);
+        gpio_ex(0x01, 0x01, 0);
+        gpio(0x08, 0x08, 200);
+        return plan;
+    }
+    gpio(0x05, 0x05, 10);
+    gpio(0x00, 0x04, 10);
+    gpio(0x05, 0x05, 10);
+    gpio(0x00, 0x20, 10);
+    gpio(0x20, 0x20, 10);
+    gpio(0x00, 0x20, 10);
+    gpio(0x10, 0x10, 10);
+    gpio(0x00, 0x10, 10);
+    gpio(0x10, 0x10, 10);
+    gpio_ex(0x00, 0x01, 10);
+    gpio(0x40, 0x40, 10);
+    gpio(0x00, 0x40, 10);
+    gpio(0x40, 0x40, 10);
+    gpio(0x00, 0x80, 10);
+    gpio(0x80, 0x80, 10);
+    gpio(0x00, 0x80, 10);
+    gpio_ex(0x00, 0x02, 0);
+    append_control(&plan, make_i2c_read(0xa8, 0, 1, 0), false,
+                   "legacy discarded RF probe");
+    append_delay(&plan, 100);
+    return plan;
+}
+
+FrontendPlan plan_legacy_frontend_init(LegacyFrontendProfile profile) {
+    if (!valid_legacy_profile(profile)) return {};
+    FrontendPlan plan;
+    if (profile == LegacyFrontendProfile::S3u) {
+        // S3U TC_Initialise1bb0 -> InitDemod1130 -> InitRFDevice1a50.
+        append_plan(&plan, plan_demod_init_satellite());
+        append_legacy_terrestrial_init(&plan);
+        append_legacy_rf_init(&plan);
+    } else {
+        // S3U2 TC_Initialise2760 explicitly selects source0 then source1.
+        append_legacy_terrestrial_init(&plan);
+        append_legacy_rf_init(&plan);
+        append_s3u2_rf_pulse(&plan);
+        append_plan(&plan, plan_demod_init_satellite());
+        append_s3u2_rf_pulse(&plan);
+        append_demod_byte(&plan, 0x30, 0x0f, 0x34, "S3U2 init finalization");
+    }
+    return plan;
+}
+
+FrontendPlan plan_legacy_fc0012_tune(LegacyFrontendProfile profile,
+                                     std::uint32_t center_khz) {
+    if (!valid_legacy_profile(profile) || !compute_fc0012_pll(center_khz).valid)
+        return {};
+    FrontendPlan plan;
+    if (profile == LegacyFrontendProfile::S3u) {
+        // S3U Adpater_SetFreqISDBT1d70 branches on the normalized center.
+        // The overlapping first range takes precedence. This terrestrial RF
+        // band selector deliberately writes the SATELLITE demod, source1.
+        if (center_khz >= 93144U && center_khz <= 261142U)
+            append_demod_byte(&plan, 0x32, 0x14, 0x00, "S3U low RF band");
+        else if (center_khz >= 255144U && center_khz <= 767142U)
+            append_demod_byte(&plan, 0x32, 0x14, 0x20, "S3U high RF band");
+        append_plan(&plan, plan_fc0012_adapter(center_khz, 0, false));
+    } else {
+        // S3U2 adapter21b0 is instruction/relocation-identical to W3U3.
+        append_plan(&plan, plan_fc0012_adapter(center_khz, 1, true));
+    }
+    return plan;
+}
+
+FrontendPlan plan_legacy_terrestrial_tune(LegacyFrontendProfile profile,
+                                          std::uint32_t frequency_khz,
+                                          std::uint8_t bandwidth_mhz) {
+    if (!valid_legacy_profile(profile) || bandwidth_mhz != 6 ||
+        frequency_khz == 0 || frequency_khz > 999999U) return {};
+    const auto adapter = plan_legacy_fc0012_tune(
+        profile, terrestrial_tune_center_khz(frequency_khz));
+    if (adapter.empty()) return {};
+    FrontendPlan plan;
+    append_demod_byte(&plan, 0x30, 0x25, 0x00, "legacy T acquisition prefix25");
+    append_demod_byte(&plan, 0x30, 0x23, 0x4d, "legacy T acquisition prefix23");
+    append_plan(&plan, adapter);
+    append_demod_byte(&plan, 0x30, 0x0f,
+                      profile == LegacyFrontendProfile::S3u ? 0x14 : 0x34,
+                      "legacy T source finalization");
+    append_demod_byte(&plan, 0x30, 0x01, 0x40, "legacy T reacquire");
+    append_demod_byte(&plan, 0x30, 0x23, 0x4c, "legacy T acquisition complete");
+    return plan;
+}
+
+FrontendPlan plan_legacy_terrestrial_lock(LegacyFrontendProfile profile,
+                                          std::uint32_t frequency_khz) {
+    if (!valid_legacy_profile(profile) || frequency_khz > 999999U) return {};
+    return plan_terrestrial_lock_read(frequency_khz);
+}
+
+FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile,
+                                      bool source_default) {
+    if (!valid_legacy_profile(profile) || !source_default) return {};
+    if (profile == LegacyFrontendProfile::S3u)
+        return plan_fc0012_gain_once(0, 0);
+    // S3U2 Fiti_LAN_Gain1630 checks cached field+8 at1658. The default
+    // zero branch sets cached gain state+18 to8 (not needed by this stateless
+    // one-shot) and emits only tuner13=0f at176f..1789, index1/source0.
+    FrontendPlan plan;
+    append_tuner_write(&plan, 1, 0, 0x13, 0x0f, "S3U2 default gain state");
     return plan;
 }
 
@@ -887,14 +1142,7 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
         return run_sequence(transport, build_tuner_write(local, source, reg, value),
                             nullptr, report);
     };
-    const auto demod_1c_rmw = [&](std::uint8_t and_mask, std::uint8_t or_mask) {
-        FrontendOp rmw{};
-        rmw.kind = FrontendOpKind::I2cMask;
-        rmw.transfer = make_i2c_read(0x30, 0x1c, 1, 0);
-        rmw.and_mask = and_mask;
-        rmw.or_mask = or_mask;
-        return run_i2c_mask(transport, rmw);
-    };
+
 
     for (int count = 0;; ++count) {
         FrontendRunResult result = tuner_write(0x13, 0x02);  // table[ptr[0x18]=0]
@@ -925,12 +1173,19 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
         if (count == 3) {
             break;
         }
-        result = demod_1c_rmw(0xff, 0x30);
+        // TC_SetFrequency .text 0x2493..0x252a reads 1c once; its second
+        // write uses the SAME saved byte, not a second device sample.
+        std::uint8_t saved_1c = 0;
+        result = run_sequence(transport, {make_i2c_read(0x30, 0x1c, 1, 0)},
+                              &saved_1c, report);
+        if (result != FrontendRunResult::Completed) return result;
+        saved_1c = static_cast<std::uint8_t>(saved_1c | 0x30U);
+        result = demod_write(0x1c, saved_1c);
         if (result != FrontendRunResult::Completed) {
             return result;
         }
         transport->delay_ms(10);
-        result = demod_1c_rmw(0xef, 0x00);
+        result = demod_write(0x1c, static_cast<std::uint8_t>(saved_1c & 0xefU));
         if (result != FrontendRunResult::Completed) {
             return result;
         }

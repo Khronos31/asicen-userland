@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "asicen/device_profile.h"
 #include "px4/card_service.h"
 #include "px4/tuner_service.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -13,6 +15,10 @@ namespace asicen {
 
 class MockTunerBackend final : public px4::userland::TunerServiceBackend {
 public:
+    MockTunerBackend() noexcept = default;
+    explicit MockTunerBackend(const DeviceProfile& profile) noexcept;
+    // Count 1 models one shared T/S receiver; 2 and 4 use split S/T pairs.
+    explicit MockTunerBackend(std::uint8_t receiver_count) noexcept;
     std::uint8_t receiver_count() const noexcept override;
     bool receiver_supports(std::uint8_t receiver,
                            px4::userland::ipc::System system) const noexcept override;
@@ -28,6 +34,14 @@ public:
     px4::userland::Result<void> select_satellite_tsid(std::uint8_t receiver,
         std::uint16_t tsid, std::uint32_t timeout_ms) noexcept override;
     px4::userland::Result<void> close_receiver(std::uint8_t receiver) noexcept override;
+    px4::userland::Result<void> begin_tune_power(std::uint8_t receiver,
+        px4::userland::ipc::System system, std::uint8_t lnb_voltage) noexcept override;
+    px4::userland::Result<void> commit_tune_power(std::uint8_t receiver) noexcept override;
+    px4::userland::Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override;
+    // Synthetic state for offline contract checks only. This is neither a
+    // hardware capability claim nor a measured output voltage.
+    px4::userland::Result<std::uint8_t> simulated_lnb_voltage(
+        std::uint8_t receiver) const noexcept;
     px4::userland::Result<void> start_capture(std::uint8_t receiver,
         px4::userland::ipc::System system) noexcept override;
     px4::userland::Result<void> stop_capture(std::uint8_t receiver,
@@ -36,7 +50,17 @@ public:
     void request_stop() noexcept override;
 
 private:
+    struct PowerState final {
+        std::uint8_t voltage = 0U;
+        std::uint8_t previous = 0U;
+        std::uint8_t requested = 0U;
+        bool pending = false;
+    };
+    std::uint8_t receiver_count_ = 4U;
+    bool combined_isdb_ts_ = false;
     std::atomic<bool> stopping_{false};
+    mutable std::mutex power_mutex_;
+    std::array<PowerState, 4U> power_{};
 };
 
 class MockTunerStream final : public px4::userland::TunerStreamControl {

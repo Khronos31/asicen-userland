@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: build-time IFD device-name prefix override.
+// The original license notice is unchanged.
 #include "px4/pcsc_ifd_adapter.h"
 
 #include "px4/control_client.h"

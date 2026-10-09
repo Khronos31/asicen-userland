@@ -128,6 +128,53 @@ std::uint8_t fc0012_init_value(std::size_t index);
 // Pure FC0012 PLL computation for a terrestrial RF center frequency in kHz.
 Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz);
 
+// Original single-function products have distinct board and tune wrappers.
+// These APIs are pure source descriptions. Complete vendor power plans include
+// GPIO20 and (S3U2) GPIOEx writes whose electrical effects remain hardware-
+// unverified. They are NOT safe-no-LNB subsets; use model-specific ownership,
+// restoration and runtime controller checks before executing them.
+enum class LegacyFrontendProfile : std::uint8_t { S3u, S3u2 };
+
+// Source DTV_Start board sequence AFTER a separate silicon-revision check.
+// Ordinary11/52 includes the complete GPIO cold prefix and A8 probes before
+// its final GPIO tail. The16/52 branch skips that prefix and finalGPIO40.
+// Probe bytes are internal only; never print or persist identity material.
+FrontendPlan plan_legacy_frontend_startup(LegacyFrontendProfile profile,
+                                          bool silicon_16_52 = false);
+// DTV_Start calls TC_PowerTunerDemod(off) for hardware indexes0 and1 after
+// its GPIO tail. S3U acts twice; S3U2's index1 call is a no-op. In particular
+// S3U2 must release GPIOEx01/02 high here before power-on drives them low.
+FrontendPlan plan_legacy_frontend_startup_off(LegacyFrontendProfile profile);
+// DTV_Init's board-power prelude, AFTER DTV_Start's GPIO tail and BEFORE
+// TC_PowerTunerDemod(on). Both models clear GPIO08 and wait50ms here.
+// Keep this separate from the isolated TC power sequence: S3U repeats its
+// own GPIO08 clear, while S3U2 relies on this preceding DTV_Init operation.
+FrontendPlan plan_legacy_frontend_init_prelude(LegacyFrontendProfile profile);
+// Shared physical power sequence (TC_PowerTunerDemod, hardware index0).
+FrontendPlan plan_legacy_frontend_power(LegacyFrontendProfile profile, bool on);
+// Shared physical init, always hardware index0. S3U: S42,T13,RF21.
+// S3U2: T13,RF21,RF10 pulse,S42,RF10 pulse,T0f=34.
+FrontendPlan plan_legacy_frontend_init(LegacyFrontendProfile profile);
+// Adapter only, center frequency already normalized. S3U includes its S-demod
+// band write and omits the W3U3/S3U2 terrestrial-demod AGC tail.
+FrontendPlan plan_legacy_fc0012_tune(LegacyFrontendProfile profile,
+                                     std::uint32_t center_khz);
+// Complete T prefix, one adapter acquisition and model-specific tail. No
+// W3U3 LNA/GPIO01 operation or retry/reinit loop is added. Bandwidth6 only.
+FrontendPlan plan_legacy_terrestrial_tune(LegacyFrontendProfile profile,
+                                          std::uint32_t frequency_khz,
+                                          std::uint8_t bandwidth_mhz);
+FrontendPlan plan_legacy_terrestrial_lock(LegacyFrontendProfile profile,
+                                          std::uint32_t frequency_khz);
+
+// One bounded gain step for our default tune state. The caller must affirm
+// source_default: the official DTV_SetTunerFreq clears cached field+8 before
+// tuning. S3U2's zero-field branch writes13=0f; its nondefault cached-state
+// feedback is deliberately not implemented by this API. S3U uses its shared
+// feedback algorithm at hardware index0. No periodic worker is started.
+FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile,
+                                      bool source_default);
+
 // Planning. Invalid arguments produce an empty plan (callers treat that as a
 // usage error before touching USB).
 

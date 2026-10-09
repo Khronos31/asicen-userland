@@ -24,12 +24,14 @@ Acceptance:
    shared plugins and are separately audited.
 3. Candidate packaging includes three commands, correct licensing/notices,
    exact dependency source and rebuild/relink instructions, checksums and
-   explicitly supplied firmware. Firmware is never committed or embedded in
-   tracked source/generated C++/GitHub workflow logs. Hash/size are metadata.
+   explicitly supplied firmware. Hash/size are metadata. On 2026-10-09 the user
+   later directed the Linux loader blob into Git so GitHub-hosted runners can
+   bundle it. Corresponding-source archives and `git archive` still omit
+   `firmware/`. Workflow logs must not dump the blob.
 4. Firmware is a separate vendor component, not MIT/GPL licensed by this
    project. The user explicitly chose redistribution on2026-10-09 with rights
    unresolved. Record this accurately; don't label rights cleared or add a
-   new approval gate. Packaging is local/private; publication remains at0.1.0.
+   new approval gate. Release-candidate archives are produced on runners.
 5. No MIT relabeling of inherited GPL code. Retain GPL-2.0-only px4 and
    GPL-2.0-or-later frontend notices, combined GPLv2 product license and
    libusb LGPL source/relink materials.

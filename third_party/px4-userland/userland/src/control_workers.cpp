@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: receiver-to-USB-function lane split under
+// ASICEN_PROFILE_ASICEN. The reference split remains when that macro is absent.
+// The original license notice is unchanged.
 #include "control_workers.h"
 #if defined(ASICEN_PROFILE_ASICEN)
 #include "asicen/product_profile.h"

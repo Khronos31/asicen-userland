@@ -159,7 +159,7 @@ void W3u3CardProtocolSession::request_stop() noexcept {
 }
 
 std::uint8_t CardOnlyTunerBackend::receiver_count() const noexcept {
-    return px4::userland::ipc::kReceiverCount;
+    return count_;
 }
 
 bool CardOnlyTunerBackend::receiver_supports(
@@ -204,16 +204,19 @@ int run_card_only_server(
     LibusbW3u3Hardware& hardware, const char* runtime_directory,
     const char* instance, const volatile std::sig_atomic_t* stop_requested) noexcept {
     hardware.diagnostic_stop_flag_ = stop_requested;
-    const auto opened = hardware.open_receiver(1U);
+    const auto* device_profile = hardware.device_profile();
+    if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) return 3;
+    const std::uint8_t initial_receiver = device_profile->combined_isdb_ts ? 0U : 1U;
+    const auto opened = hardware.open_receiver(initial_receiver);
     hardware.diagnostic_stop_flag_ = nullptr;
     if (!opened) return opened.error() == Error::UNSUPPORTED ? 3 : 70;
 
-    W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware));
+    W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware), device_profile->model_id);
     W3u3CardServiceBackend card_backend(mailbox, hardware, stop_requested);
     px4::userland::CardSession raw_session(mailbox, mailbox);
     W3u3CardProtocolSession card_session(raw_session, hardware, stop_requested);
     px4::userland::CardService card(card_backend, card_session);
-    CardOnlyTunerBackend tuner_backend;
+    CardOnlyTunerBackend tuner_backend(hardware.receiver_count());
     px4::userland::ipc::posix::PosixTunerNonceSource nonce;
     CardOnlyTime time;
     px4::userland::TunerService tuner(tuner_backend, nonce, time);
@@ -222,16 +225,16 @@ int run_card_only_server(
             ? runtime_directory : nullptr,
         instance, px4::userland::ipc::posix::kControlEndpointName};
     auto created = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card, tuner, {}, true, profile::kUsbPresentMask,
-        nullptr, profile::kReceiverCount, false);
+        endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
+        nullptr, hardware.receiver_count(), device_profile->combined_isdb_ts);
     if (!created) {
         (void)card.shutdown();
         return created.error() == Error::BUSY ? 4 : 70;
     }
 
     auto server = std::move(created.value());
-    std::fprintf(stderr, "asicend ready backend=asicen-w3u3-card-only "
-                         "tuner=unsupported endpoint=%s\n", server->endpoint_path());
+    std::fprintf(stderr, "asicend ready backend=asicen-libusb-card-only model=%s "
+                         "tuner=unsupported endpoint=%s\n", device_profile->model_key, server->endpoint_path());
     while (stop_requested == nullptr || *stop_requested == 0) {
         const auto polled = server->poll_once(px4::userland::Timeout{100U});
         if (!polled) {
@@ -254,13 +257,16 @@ int run_live_card_stream_server(
     // Initialize shared bridge/demod state once, then release the temporary
     // frontend lease. Card traffic does not retain receiver 1 ownership.
     hardware.diagnostic_stop_flag_ = stop_requested;
-    const auto opened = hardware.open_receiver(1U);
+    const auto* device_profile = hardware.device_profile();
+    if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) return 3;
+    const std::uint8_t initial_receiver = device_profile->combined_isdb_ts ? 0U : 1U;
+    const auto opened = hardware.open_receiver(initial_receiver);
     hardware.diagnostic_stop_flag_ = nullptr;
     if (!opened) return opened.error() == Error::UNSUPPORTED ? 3 : 70;
-    const auto closed = hardware.close_receiver(1U);
+    const auto closed = hardware.close_receiver(initial_receiver);
     if (!closed) return 70;
 
-    W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware));
+    W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware), device_profile->model_id);
     W3u3CardServiceBackend card_backend(mailbox, hardware, stop_requested);
     px4::userland::CardSession raw_session(mailbox, mailbox);
     W3u3CardProtocolSession card_session(raw_session, hardware, stop_requested);
@@ -277,8 +283,8 @@ int run_live_card_stream_server(
             ? runtime_directory : nullptr,
         instance, px4::userland::ipc::posix::kControlEndpointName};
     auto created = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card, tuner, {}, true, profile::kUsbPresentMask,
-        &stream, profile::kReceiverCount, false);
+        endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
+        &stream, hardware.receiver_count(), device_profile->combined_isdb_ts);
     if (!created) {
         (void)card.shutdown();
         (void)stream.shutdown();
@@ -286,8 +292,9 @@ int run_live_card_stream_server(
     }
 
     auto server = std::move(created.value());
-    std::fprintf(stderr, "asicend ready backend=asicen-w3u3-live-card-stream "
-                         "receiver=0/1 endpoint=%s\n", server->endpoint_path());
+    std::fprintf(stderr, "asicend ready backend=asicen-libusb-live-card-stream model=%s "
+                         "receivers=%u endpoint=%s\n", device_profile->model_key,
+                         static_cast<unsigned>(hardware.receiver_count()), server->endpoint_path());
     int result = 0;
     while (stop_requested == nullptr || *stop_requested == 0) {
         const auto polled = server->poll_once(px4::userland::Timeout{100U});

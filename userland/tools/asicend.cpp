@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/product_profile.h"
+#include "asicen/device_profile.h"
 #include "asicen/px4_mock_backend.h"
 #include "asicen/enclosure_lock.h"
 #include "px4/control_server.h"
@@ -64,17 +65,41 @@ void print_usage(FILE* output)
 {
 #ifdef ASICEN_ENABLE_LIBUSB
     std::fprintf(output,
-        "usage: asicend --mock [--runtime-dir PATH] [--instance TOKEN]\n"
+        "usage: asicend --mock [--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
         "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT\n"
-        "               --sibling BUS:ADDR --sibling-port BUS-PORT\n"
-        "       asicend --list | --list-json\n"
-        "Hardware mode owns both validated W3U3 functions; only receiver 1 / ISDB-T is supported.\n");
+        "               [--sibling BUS:ADDR --sibling-port BUS-PORT]\n"
+        "       asicend --hardware --primary-fd FD [--sibling-fd FD]\n"
+        "       asicend --list | --list-json | --models\n"
+        "Hardware mode uses source-guarded model dispatch; see --models and model-support.md.\n");
 #else
     std::fprintf(output,
-        "usage: asicend --mock [--runtime-dir PATH] [--instance TOKEN]\n"
-        "       asicend --list | --list-json\n"
+        "usage: asicend --mock [--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
+        "       asicend --list | --list-json | --models\n"
         "Hardware mode is unavailable in this libusb-OFF build.\n");
 #endif
+}
+
+int list_models()
+{
+    for (std::size_t i = 0; i < asicen::profile_count(); ++i) {
+        const auto& p = asicen::profiles()[i];
+        // These are source capabilities, independent of this build's USB
+        // support. The legacy S3 setters provide no verified power control;
+        // mock ON/OFF simulation must not advertise physical S3 support.
+        const bool lnb_control = p.model_id == asicen::ModelId::W3u2 ||
+                                 p.model_id == asicen::ModelId::W3u3 ||
+                                 p.model_id == asicen::ModelId::W3u3V2;
+        std::printf("%s vid_pid=%04x:%04x model=\"%s\" capacity=%u functions=%u family=%s runtime=%s "
+                    "lnb_control=%s lnb_15v_request=%s lnb_validation=pending\n",
+            p.model_key, p.vid, p.pid, p.model,
+            static_cast<unsigned>(p.enclosure_receiver_count),
+            static_cast<unsigned>(p.expected_runtime_functions),
+            asicen::frontend_family_name(p.frontend_family),
+            asicen::profile_runtime_supported(p) ? "source-backed-experimental" : "not-enabled",
+            lnb_control ? "source-backed-software" : "external-unconfirmed",
+            lnb_control ? "supported" : "unsupported");
+    }
+    return 0;
 }
 
 int list_devices(bool json)
@@ -113,12 +138,20 @@ int main(int argc, char** argv)
     bool mock = false;
     bool list = false;
     bool list_json = false;
+    bool models = false;
+    const asicen::DeviceProfile* selected_model = asicen::find_profile(asicen::ModelId::W3u3);
     std::string runtime_directory;
     std::string instance = "default";
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
         if (arg == "--help" || arg == "-h") { print_usage(stdout); return 0; }
         if (arg == "--mock") { mock = true; continue; }
+        if (arg == "--models") { models = true; continue; }
+        if (arg == "--model" && i + 1 < argc) {
+            selected_model = asicen::find_profile_by_model(argv[++i]);
+            if (selected_model == nullptr) { std::fprintf(stderr, "unknown ASICEN model\n"); return 2; }
+            continue;
+        }
         if (arg == "--list") { list = true; continue; }
         if (arg == "--list-json") { list_json = true; continue; }
         if ((arg == "--runtime-dir" || arg == "--instance") && i + 1 < argc) {
@@ -134,6 +167,7 @@ int main(int argc, char** argv)
         print_usage(stderr);
         return 2;
     }
+    if (models) return list_models();
     if (list || list_json) return list_devices(list_json);
     if (!mock) {
         std::fprintf(stderr, "hardware backend disabled; pass --mock for the isolated mock service\n");
@@ -149,7 +183,7 @@ int main(int argc, char** argv)
         return 4;
     }
 
-    asicen::MockTunerBackend tuner_backend;
+    asicen::MockTunerBackend tuner_backend(*selected_model);
     asicen::MockTunerStream stream;
     asicen::UnsupportedCardBackend card_backend;
     asicen::UnsupportedCardSession card_session;
@@ -163,8 +197,8 @@ int main(int argc, char** argv)
         instance.c_str(), px4::userland::ipc::posix::kControlEndpointName};
     auto server = px4::userland::ipc::posix::PosixControlServer::create(
         endpoint, card_service, tuner_service, {}, true,
-        asicen::profile::kUsbPresentMask, &stream,
-        asicen::profile::kReceiverCount, false);
+        asicen::profile::usb_present_mask(selected_model->enclosure_receiver_count), &stream,
+        selected_model->enclosure_receiver_count, selected_model->combined_isdb_ts);
     if (!server) {
         std::fprintf(stderr, "asicend: %s\n", px4::userland::error_string(server.error()));
         ::close(enclosure_lock);
@@ -177,7 +211,8 @@ int main(int argc, char** argv)
     ::sigaction(SIGINT, &action, nullptr);
     ::sigaction(SIGTERM, &action, nullptr);
     ::signal(SIGPIPE, SIG_IGN);
-    std::fprintf(stderr, "asicend ready backend=mock-only serial=none receivers=4 endpoint=%s\n",
+    std::fprintf(stderr, "asicend ready backend=mock-only model=%s serial=none receivers=%u endpoint=%s\n",
+                 selected_model->model_key, static_cast<unsigned>(selected_model->enclosure_receiver_count),
                  server.value()->endpoint_path());
     px4::userland::Error loop_error = px4::userland::Error::OK;
     while (!stop_requested) {

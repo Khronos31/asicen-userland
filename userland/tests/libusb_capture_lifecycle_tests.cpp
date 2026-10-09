@@ -10,6 +10,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <map>
+#include <tuple>
 #include <thread>
 #include <vector>
 
@@ -20,20 +22,52 @@ struct LibusbW3u3HardwareTestPeer {
 
     static void configure(LibusbW3u3Hardware& hardware, const Hooks* hooks,
                           std::uint8_t receiver) {
+        if (hardware.profile_ == nullptr)
+            hardware.profile_ = find_profile(ModelId::W3u3);
         hardware.capture_usb_hooks_ = hooks;
         hardware.claimed_ = true;
         hardware.initialized_ = true;
         hardware.tuned_ = true;
         hardware.tuned_receiver_ = receiver;
+        hardware.tuned_frequency_khz_ = 557142U;
         hardware.tuned_system_ = receiver == 0U
                                      ? px4::userland::ipc::System::ISDB_S
                                      : px4::userland::ipc::System::ISDB_T;
         (void)hardware.active_receiver_.reserve(receiver);
     }
 
+    static bool verify_v2_roles(LibusbW3u3Hardware& hardware) {
+        return hardware.verify_v2_pair_roles();
+    }
+    static bool v2_identity_verified(const LibusbW3u3Hardware& hardware) {
+        return hardware.v2_identity_verified_;
+    }
+    static bool claim_fixture(LibusbW3u3Hardware& hardware,
+                              UsbFunctionClaim& primary, UsbFunctionClaim* sibling) {
+        const auto* profile = hardware.profile_;
+        return profile != nullptr && hardware.ownership_.claim_profile(
+            *profile, primary, sibling, {1U, 2U, 1U},
+            sibling == nullptr ? std::vector<std::uint8_t>{}
+                               : std::vector<std::uint8_t>{1U, 2U, 2U}) == OwnershipError::none;
+    }
+    static void require_initialization(LibusbW3u3Hardware& hardware) {
+        hardware.initialized_ = false;
+        hardware.tuned_ = false;
+    }
+    static bool gain_applied(const LibusbW3u3Hardware& hardware) {
+        return hardware.gain_applied_;
+    }
+    static bool gpio_snapshot_valid(const LibusbW3u3Hardware& hardware) {
+        return hardware.gpio_snapshot_valid_ || hardware.board_power_attempted_;
+    }
+    static void install_hooks_only(LibusbW3u3Hardware& hardware, const Hooks* hooks) {
+        hardware.capture_usb_hooks_ = hooks;
+        hardware.claimed_ = true;
+    }
     static void mark_tuned(LibusbW3u3Hardware& hardware, std::uint8_t receiver) {
         hardware.tuned_ = true;
         hardware.tuned_receiver_ = receiver;
+        hardware.tuned_frequency_khz_ = 557142U;
         hardware.tuned_system_ = receiver == 0U
                                      ? px4::userland::ipc::System::ISDB_S
                                      : px4::userland::ipc::System::ISDB_T;
@@ -81,11 +115,32 @@ struct ControlEvent {
     std::chrono::steady_clock::time_point at{};
 };
 
+class FakeFunction final : public UsbFunctionClaim {
+public:
+    UsbFunctionSnapshot state{};
+    UsbFunctionSnapshot snapshot() const override { return state; }
+    int claim_interface0() override { return 0; }
+    int release_interface0() noexcept override { return 0; }
+};
+
 struct FakeUsb {
     LibusbW3u3Hardware* hardware = nullptr;
+    FakeFunction primary;
+    FakeFunction sibling;
     std::array<std::uint8_t, 256> controller{};
     std::array<std::array<std::uint8_t, 0x45>, 2> cf{};
     std::vector<ControlEvent> controls;
+    std::vector<std::uint8_t> control_functions;
+    std::uint8_t current_function = 0U;
+    std::array<std::uint8_t, 2> role_fields{{0U, 0x80U}};
+    bool identity_mismatch = false;
+    bool v2_locked = true;
+    bool v2_calibration_ready = true;
+    using V2Key = std::tuple<std::uint8_t, bool, std::uint16_t>;
+    std::map<V2Key, std::uint32_t> v2_registers;
+    std::array<std::uint8_t, 64> v2_staged{};
+    std::uint16_t v2_selected_reg = 0;
+    bool v2_selected_tuner = false;
     std::vector<std::uint8_t> endpoints;
     std::atomic<int> submit_count{0};
     int fail_submit_number = 0;
@@ -99,6 +154,13 @@ struct FakeUsb {
     bool fail_dsc_start = false;
     bool fail_cf_restore_once = false;
     std::uint8_t gpio = 0xa5U;
+    std::uint8_t gpio_ex = 0xa3U;
+    std::uint8_t revision = 0x11U;
+    std::uint8_t sibling_revision = 0x11U;
+    int gpio_ex_write_count = 0;
+    int gpio_ex_read_count = 0;
+    bool fail_gpio_ex_off_once = false;
+    std::uint8_t gpio_ex_external_low = 0U;
     int gpio_write_count = 0;
     int gpio_read_count = 0;
     bool trigger_reentrant_open = false;
@@ -119,6 +181,12 @@ struct FakeUsb {
     bool event_ready = false;
 
     FakeUsb() {
+        for (auto slave : {0x20U, 0x24U, 0x28U, 0x2cU})
+            v2_registers[{static_cast<std::uint8_t>(slave), true, 0x3fcU}] = 0x12000U;
+        for (auto slave : {0x22U, 0x26U, 0x2aU, 0x2eU})
+            v2_registers[{static_cast<std::uint8_t>(slave), true, 0x21U}] = 0x40U;
+        v2_registers[{0x22U, false, 0xceU}] = 0x40U;
+        v2_registers[{0x22U, false, 0xcfU}] = 0x10U;
         controller[0x05] = 0U;
         controller[0x09] = 0x1eU;
         for (std::size_t local = 0; local < cf.size(); ++local) {
@@ -131,6 +199,15 @@ struct FakeUsb {
     static int control_hook(void* context, const ControlTransfer& transfer,
                             unsigned char* response) {
         return static_cast<FakeUsb*>(context)->control(transfer, response);
+    }
+    static int control_function_hook(void* context, std::uint8_t function,
+                                     const ControlTransfer& transfer,
+                                     unsigned char* response) {
+        auto& fake = *static_cast<FakeUsb*>(context);
+        fake.current_function = function;
+        const int result = fake.control(transfer, response);
+        fake.current_function = 0U;
+        return result;
     }
     static libusb_transfer* allocate_hook(void*) {
         return static_cast<libusb_transfer*>(std::calloc(1U, sizeof(libusb_transfer)));
@@ -197,15 +274,77 @@ struct FakeUsb {
     int control(const ControlTransfer& transfer, unsigned char* response) {
         controls.push_back({transfer.request, transfer.value, transfer.index,
                             transfer.timeout_ms, std::chrono::steady_clock::now()});
+        control_functions.push_back(current_function);
         const auto status = [&] {
             if (response != nullptr && transfer.length > 0U) response[0] = 1U;
             return static_cast<int>(transfer.length);
         };
         switch (transfer.request) {
+            case Request::CustomerInfo:
+                if (response == nullptr || transfer.length != kCustomerInfoSize)
+                    return LIBUSB_ERROR_IO;
+                std::fill_n(response, transfer.length, 0U);
+                response[0] = 1U;
+                response[3] = 0x06U;
+                response[4] = 0x0bU;
+                response[5] = 0x06U;
+                response[57] = role_fields[current_function];
+                return transfer.length;
+            case Request::I2cBufferFill: {
+                const auto offset = transfer.value & 0xffU;
+                const std::uint8_t bytes[] = {static_cast<std::uint8_t>(transfer.value >> 8U),
+                    static_cast<std::uint8_t>(transfer.index),
+                    static_cast<std::uint8_t>(transfer.index >> 8U)};
+                for (unsigned i = 0; i < transfer.length - 1U; ++i)
+                    v2_staged.at(offset + i) = bytes[i];
+                return status();
+            }
+            case Request::I2cBufferSend: {
+                const auto slave = static_cast<std::uint8_t>(transfer.value);
+                const auto size = transfer.length - 1U;
+                if (v2_staged[0] == 0xfeU && size >= 2U) {
+                    v2_selected_tuner = true;
+                    if (v2_staged[1] == 0xceU && size >= 4U) {
+                        v2_selected_reg = static_cast<std::uint16_t>(
+                            (v2_staged[2] << 8U) | v2_staged[3]);
+                        if (size > 4U) {
+                            std::uint32_t value = 0U;
+                            for (unsigned i = 4U; i < size; ++i)
+                                value |= static_cast<std::uint32_t>(v2_staged[i]) << (8U * (i - 4U));
+                            v2_registers[{slave, true, v2_selected_reg}] = value;
+                        }
+                    } else if (v2_staged[1] == 0xa8U && size >= 3U) {
+                        v2_selected_reg = v2_staged[2];
+                        if (size == 4U) v2_registers[{slave, true, v2_selected_reg}] = v2_staged[3];
+                    }
+                } else {
+                    v2_selected_tuner = false;
+                    v2_selected_reg = v2_staged[0];
+                    if (size == 2U) v2_registers[{slave, false, v2_selected_reg}] = v2_staged[1];
+                }
+                return status();
+            }
+            case Request::I2cReadNoWait: {
+                if (response == nullptr || transfer.length == 0U) return LIBUSB_ERROR_IO;
+                response[0] = 1U;
+                const auto slave = static_cast<std::uint8_t>(transfer.value);
+                auto value = v2_registers[{slave, v2_selected_tuner, v2_selected_reg}];
+                if (v2_selected_tuner && (slave & 2U) &&
+                    (v2_selected_reg == 0x11U || v2_selected_reg == 0x15U))
+                    value = v2_calibration_ready ? value | 0x10U : value & ~0x10U;
+                if (!v2_selected_tuner) {
+                    if (v2_selected_reg == 0xb0U) value = v2_locked ? 0xa8U : 0U;
+                    if (v2_selected_reg == 0x80U) value = v2_locked ? 0U : 8U;
+                    if (v2_selected_reg == 0xc3U) value = v2_locked ? 0U : 0x10U;
+                }
+                for (unsigned i = 1U; i < transfer.length; ++i)
+                    response[i] = static_cast<std::uint8_t>(value >> (8U * (i - 1U)));
+                return transfer.length;
+            }
             case Request::SysCtrlRead:
                 if (response != nullptr && transfer.length >= 3U) {
                     response[0] = 1U;
-                    response[1] = 0x11U;
+                    response[1] = current_function == 0U ? revision : sibling_revision;
                     response[2] = 0x52U;
                 }
                 return static_cast<int>(transfer.length);
@@ -217,7 +356,10 @@ struct FakeUsb {
                 const std::size_t payload = transfer.length - 1U;
                 for (std::size_t i = 0; i < payload; ++i) {
                     const std::uint8_t reg = static_cast<std::uint8_t>(first + i);
-                    response[i + 1U] = slave == 0x4aU ? controller[reg] : 0U;
+                    response[i + 1U] = slave == 0x4aU ? controller[reg] :
+                        slave == 0xa8U && first == 0xb0U
+                            ? static_cast<std::uint8_t>(0x50U + i +
+                                (identity_mismatch && current_function == 1U ? 1U : 0U)) : 0U;
                 }
                 if (complete_inside_control.exchange(false)) {
                     libusb_transfer* pending = submitted[0];
@@ -310,10 +452,14 @@ struct FakeUsb {
             case Request::DscStop:
                 ++dsc_stop_count;
                 return status();
+            case Request::GpioRead:
+                if (response == nullptr) return LIBUSB_ERROR_IO;
+                response[0] = gpio;
+                return static_cast<int>(transfer.length);
             case Request::Gpio: {
                 if (response == nullptr) return LIBUSB_ERROR_IO;
-                const std::uint8_t value = static_cast<std::uint8_t>(transfer.value >> 8U);
-                const std::uint8_t mask = static_cast<std::uint8_t>(transfer.value & 0xffU);
+                const std::uint8_t value = static_cast<std::uint8_t>(transfer.value & 0xffU);
+                const std::uint8_t mask = static_cast<std::uint8_t>(transfer.value >> 8U);
                 if (mask == 0U) {
                     ++gpio_read_count;
                 } else {
@@ -321,6 +467,24 @@ struct FakeUsb {
                     gpio = static_cast<std::uint8_t>((gpio & ~mask) | (value & mask));
                 }
                 response[0] = gpio;
+                return static_cast<int>(transfer.length);
+            }
+            case Request::GpioExGet:
+                ++gpio_ex_read_count;
+                if (response == nullptr) return LIBUSB_ERROR_IO;
+                response[0] = static_cast<std::uint8_t>(gpio_ex & ~gpio_ex_external_low);
+                return static_cast<int>(transfer.length);
+            case Request::GpioExSet: {
+                ++gpio_ex_write_count;
+                if (fail_gpio_ex_off_once && transfer.value == setup_word(0x02U, 0x02U)) {
+                    fail_gpio_ex_off_once = false;
+                    return LIBUSB_ERROR_IO;
+                }
+                const auto value = static_cast<std::uint8_t>(transfer.value);
+                const auto mask = static_cast<std::uint8_t>(transfer.value >> 8U);
+                gpio_ex = static_cast<std::uint8_t>((gpio_ex & ~mask) | (value & mask));
+                if (response == nullptr) return LIBUSB_ERROR_IO;
+                response[0] = gpio_ex;
                 return static_cast<int>(transfer.length);
             }
             case Request::ResetChannel: {
@@ -355,6 +519,28 @@ void configure(LibusbW3u3Hardware& hardware, FakeUsb& fake,
     fake.hardware = &hardware;
     fake.save_initial_cf();
     LibusbW3u3HardwareTestPeer::configure(hardware, &hooks, receiver);
+    const auto* profile = hardware.device_profile();
+    if (profile->model_id == ModelId::W3u3V2)
+        hooks.control_function = FakeUsb::control_function_hook;
+    UsbFunctionSnapshot snapshot{};
+    snapshot.vendor_id = profile->vid;
+    snapshot.product_id = profile->pid;
+    snapshot.bus = 1U;
+    snapshot.address = 4U;
+    snapshot.port_path = {1U, 2U, 1U};
+    snapshot.interface0_present = true;
+    snapshot.kernel_driver_state_known = true;
+    snapshot.active_alt0 = 0;
+    snapshot.endpoint81_in_alt0 = snapshot.endpoint81_bulk_in_alt0 = true;
+    snapshot.endpoint82_in_alt0 = snapshot.endpoint82_bulk_in_alt0 = true;
+    fake.primary.state = snapshot;
+    snapshot.address = 5U;
+    snapshot.port_path = {1U, 2U, 2U};
+    fake.sibling.state = snapshot;
+    if (!LibusbW3u3HardwareTestPeer::claim_fixture(
+            hardware, fake.primary,
+            profile->expected_runtime_functions == 2U ? &fake.sibling : nullptr))
+        std::abort();
 }
 
 bool saw_dsc(const FakeUsb& fake, Request request, std::uint8_t local) {
@@ -378,9 +564,13 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition() {
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
     Hooks hooks{};
     configure(hardware, fake, hooks, 0U);
+    CHECK(hardware.begin_tune_power(0U, System::ISDB_S, 15U).has_value());
+    CHECK(hardware.commit_tune_power(0U).has_value());
+    CHECK((fake.gpio & 0x20U) == 0U);
 
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK((fake.gpio & 0x20U) == 0U);
     CHECK(fake.submit_count == 4);
     CHECK(std::all_of(fake.endpoints.begin(), fake.endpoints.end(),
                       [](std::uint8_t endpoint) { return endpoint == 0x81U; }));
@@ -398,7 +588,9 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition() {
     CHECK(fake.cancel_count == 4);
     CHECK(fake.free_count == 4);
     CHECK(fake.cf[0] == fake.initial_cf(0U));
+    CHECK((fake.gpio & 0x20U) == 0U); // STOP_STREAM retains committed lease power.
     CHECK(hardware.close_receiver(0U).has_value());
+    CHECK((fake.gpio & 0x20U) != 0U);
     CHECK(hardware.open_receiver(1U).has_value());
     LibusbW3u3HardwareTestPeer::mark_tuned(hardware, 1U);
 
@@ -625,64 +817,484 @@ bool test_prepare_waiter_rechecks_quarantine_after_control_gate() {
 }
 
 bool test_satellite_slot_wait_uses_deadline_including_gate_wait() {
+    struct GateWaitClock {
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        unsigned elapsed_ms = 0U;
+        unsigned reads = 0U;
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool gate_wait_entered = false;
+        bool advance_allowed = false;
+        std::vector<ControlTransfer> controls;
+
+        static std::chrono::steady_clock::time_point now(void* context) {
+            auto& clock = *static_cast<GateWaitClock*>(context);
+            std::unique_lock<std::mutex> lock(clock.mutex);
+            // The first read establishes the operation's absolute deadline.
+            // Pause its first gate attempt until the test chooses whether to
+            // release the gate or let the deadline expire while still held.
+            if (clock.reads++ == 0U) return clock.start;
+            clock.gate_wait_entered = true;
+            clock.changed.notify_one();
+            clock.changed.wait(lock, [&] { return clock.advance_allowed; });
+            return clock.start + std::chrono::milliseconds(clock.elapsed_ms);
+        }
+
+        static int control(void* context, const ControlTransfer& transfer,
+                           unsigned char*) {
+            auto& clock = *static_cast<GateWaitClock*>(context);
+            clock.controls.push_back(transfer);
+            // Stop at the first USB request: only its remaining timeout budget
+            // matters here, not TSID polling or real wall-clock delays.
+            return LIBUSB_ERROR_TIMEOUT;
+        }
+    };
+
+    for (const unsigned elapsed_ms : {70U, 100U, 125U}) {
+        FakeUsb fake;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 0U);
+        CHECK(LibusbW3u3HardwareTestPeer::begin_card_operation(hardware));
+
+        GateWaitClock clock;
+        clock.elapsed_ms = elapsed_ms;
+        hooks = {};
+        hooks.context = &clock;
+        hooks.now = GateWaitClock::now;
+        hooks.control = GateWaitClock::control;
+        Error result = Error::OK;
+        std::thread waiter([&] {
+            const auto selected = hardware.select_satellite_slot(0U, 0U, 100U);
+            result = selected ? Error::OK : selected.error();
+        });
+        {
+            std::unique_lock<std::mutex> lock(clock.mutex);
+            clock.changed.wait(lock, [&] { return clock.gate_wait_entered; });
+        }
+        const bool expired_while_held = elapsed_ms >= 100U;
+        if (!expired_while_held)
+            LibusbW3u3HardwareTestPeer::end_card_operation(hardware);
+        {
+            std::lock_guard<std::mutex> lock(clock.mutex);
+            clock.advance_allowed = true;
+        }
+        clock.changed.notify_one();
+        waiter.join();
+        if (expired_while_held)
+            LibusbW3u3HardwareTestPeer::end_card_operation(hardware);
+        hooks = fake.hooks();
+
+        if (expired_while_held) {
+            CHECK(result == Error::TIMEOUT);
+            CHECK(clock.controls.empty());
+        } else {
+            CHECK(result == Error::USB_IO);  // Deliberate fake transfer failure.
+            CHECK(clock.controls.size() == 1U);
+            CHECK(clock.controls.front().request == Request::I2cRead);
+            CHECK(clock.controls.front().timeout_ms == 30U);
+        }
+    }
+    return true;
+}
+
+bool saw_gpio_mask(const FakeUsb& fake, std::uint8_t mask) {
+    return std::any_of(fake.controls.begin(), fake.controls.end(),
+        [mask](const ControlEvent& event) {
+            return event.request == Request::Gpio &&
+                   (static_cast<std::uint8_t>(event.value >> 8U) & mask) != 0U;
+        });
+}
+
+bool saw_demod_write(const FakeUsb& fake, std::uint8_t reg, std::uint8_t value) {
+    return std::any_of(fake.controls.begin(), fake.controls.end(),
+        [reg, value](const ControlEvent& event) {
+            return (event.request == Request::I2cWrite ||
+                    event.request == Request::I2cWriteNoStop) &&
+                   event.value == static_cast<std::uint16_t>((reg << 8U) | 0x30U) &&
+                   static_cast<std::uint8_t>(event.index) == value;
+        });
+}
+
+bool test_unsupported_models_fail_before_any_usb_io() {
     FakeUsb fake;
-    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks = fake.hooks();
+    LibusbW3u3Hardware unknown(nullptr, {}, {}, {}, {});
+    LibusbW3u3HardwareTestPeer::install_hooks_only(unknown, &hooks);
+    CHECK(unknown.device_profile() == nullptr);
+    CHECK(unknown.receiver_count() == 0U);
+    CHECK(unknown.claim().error() == Error::UNSUPPORTED);
+    CHECK(unknown.open_receiver(0U).error() == Error::UNSUPPORTED);
+    const auto* v2_profile = find_profile(ModelId::W3u3V2);
+    LibusbW3u3Hardware v2(nullptr, {}, {}, {}, {}, v2_profile);
+    LibusbW3u3HardwareTestPeer::install_hooks_only(v2, &hooks);
+    CHECK(v2.device_profile() == v2_profile && v2.receiver_count() == 2U);
+    CHECK(v2.receiver_supports(0U, System::ISDB_S));
+    CHECK(v2.claim().error() == Error::DISCONNECTED);
+    CHECK(v2.open_receiver(0U).error() == Error::UNSUPPORTED);
+    std::array<unsigned char, 1> data{};
+    const ControlTransfer write{0U, Request::Gpio, 0x00ffU, 0U, 1U,
+                                Direction::In, 100U};
+    CHECK(LibusbW3u3HardwareTestPeer::card_control(v2, write, data.data()) ==
+          LIBUSB_ERROR_ACCESS);
+    CHECK(fake.controls.empty() && fake.submit_count == 0);
+    return true;
+}
+
+bool test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    CHECK(hardware.device_profile()->enclosure_receiver_count == 4U);
+    CHECK(hardware.receiver_count() == 2U);
+    CHECK(hardware.receiver_supports(0U, System::ISDB_S));
+    CHECK(hardware.receiver_supports(1U, System::ISDB_T));
+    CHECK(!hardware.receiver_supports(2U, System::ISDB_S));
+    CHECK(!hardware.receiver_supports(3U, System::ISDB_T));
+    CHECK(hardware.open_receiver(2U).error() == Error::UNSUPPORTED);
+    CHECK(fake.controls.empty());
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(saw_gpio_mask(fake, 0x20U)); // Explicit OFF initialization is allowed.
+    CHECK((fake.gpio & 0x20U) != 0U);
+    for (const auto& control : fake.controls)
+        if (control.request == Request::Gpio && (control.value & 0x2000U) != 0U)
+            CHECK((control.value & 0x20U) != 0U); // Never enable at startup.
+    CHECK(fake.gpio_ex_write_count == 0);
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.shutdown().has_value());
+    CHECK(fake.cf[1] == fake.initial_cf(1U));
+    CHECK(fake.gpio == 0xa5U);
+    return true;
+}
+
+bool test_s3u_combined_receiver_uses_lane0_for_both_systems() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::S3u));
     Hooks hooks{};
     configure(hardware, fake, hooks, 0U);
-    CHECK(LibusbW3u3HardwareTestPeer::begin_card_operation(hardware));
+    CHECK(hardware.receiver_count() == 1U);
+    CHECK(hardware.receiver_supports(0U, System::ISDB_T));
+    CHECK(hardware.receiver_supports(0U, System::ISDB_S));
+    CHECK(!hardware.receiver_supports(1U, System::ISDB_T));
+    CHECK(!hardware.requires_terrestrial_lock_settle());
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(0U).has_value());
+    CHECK(saw_gpio_mask(fake, 0x20U));
+    CHECK(fake.gpio_ex_write_count == 0);
+    CHECK(hardware.begin_tune_power(0U, System::ISDB_T, 0U).has_value());
+    CHECK(hardware.begin_tune_power(0U, System::ISDB_S, 15U).error() == Error::UNSUPPORTED);
+    CHECK(hardware.tune_terrestrial(0U, 557142U, 3000U).has_value());
+    CHECK(saw_demod_write(fake, 0x0fU, 0x14U));
+    CHECK(!LibusbW3u3HardwareTestPeer::gain_applied(hardware));
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(0U, System::ISDB_T, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::gain_applied(hardware));
+    CHECK(saw_dsc(fake, Request::DscStart, 0U));
+    CHECK(hardware.stop().has_value());
+    CHECK(fake.cf[0] == fake.initial_cf(0U));
+    CHECK(!has_cf_request(fake, 1U, Request::ChannelFilterWrite));
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::gain_applied(hardware));
+    CHECK(saw_demod_write(fake, 0x0fU, 0x3cU));
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(hardware.stop().has_value());
+    CHECK(std::all_of(fake.endpoints.begin(), fake.endpoints.end(),
+                     [](std::uint8_t endpoint) { return endpoint == 0x81U; }));
+    CHECK(hardware.shutdown().has_value());
+    CHECK((fake.gpio & 0x08U) != 0U);
+    CHECK(!LibusbW3u3HardwareTestPeer::gpio_snapshot_valid(hardware));
+    return true;
+}
 
-    std::atomic<int> result{static_cast<int>(Error::OK)};
-    std::atomic<bool> started{false};
-    std::chrono::steady_clock::time_point invoke_at{};
-    std::chrono::steady_clock::time_point release_at{};
-    std::chrono::steady_clock::time_point done_at{};
-    std::thread waiter([&] {
-        invoke_at = std::chrono::steady_clock::now();
-        started.store(true, std::memory_order_release);
-        const auto selected = hardware.select_satellite_slot(0U, 0U, 100U);
-        result.store(selected ? static_cast<int>(Error::OK)
-                              : static_cast<int>(selected.error()),
-                     std::memory_order_release);
-        done_at = std::chrono::steady_clock::now();
-    });
-    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
-    std::this_thread::sleep_for(std::chrono::milliseconds(70));
-    release_at = std::chrono::steady_clock::now();
-    LibusbW3u3HardwareTestPeer::end_card_operation(hardware);
-    waiter.join();
+bool test_s3u2_powers_off_gpioex_and_retains_single_capture_lease() {
+    FakeUsb fake;
+    fake.gpio_ex_external_low = 0x01U;  // A released pin need not read high.
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::S3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    CHECK(hardware.receiver_count() == 2U);
+    CHECK(!hardware.receiver_supports(0U, System::ISDB_T));
+    CHECK(hardware.receiver_supports(1U, System::ISDB_T));
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK((fake.gpio & 0x08U) == 0U);  // DTV_Init prelude clears board sleep.
+    const auto prelude = std::find_if(fake.controls.begin(), fake.controls.end(),
+        [](const ControlEvent& event) {
+            return event.request == Request::Gpio && event.value == setup_word(0U, 0x08U);
+        });
+    CHECK(prelude != fake.controls.end());
+    const auto powered_guard = std::find_if(fake.controls.begin(), fake.controls.end(),
+        [](const ControlEvent& event) {
+            return event.request == Request::I2cRead && event.value == 0x094aU;
+        });
+    CHECK(powered_guard != fake.controls.end() && prelude < powered_guard);
+    CHECK(saw_gpio_mask(fake, 0x20U));
+    CHECK(fake.gpio_ex_read_count == 0 && fake.gpio_ex_write_count == 4);
+    CHECK(fake.gpio_ex == 0xa0U);
+    CHECK(hardware.open_receiver(0U).error() == Error::BUSY);
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.open_receiver(0U).has_value());
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(saw_demod_write(fake, 0x0fU, 0x34U));
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(hardware.stop().has_value());
+    CHECK(fake.cf[0] == fake.initial_cf(0U) && fake.cf[1] == fake.initial_cf(1U));
+    CHECK(hardware.shutdown().has_value());
+    CHECK((fake.gpio & 0xecU) == 0xa8U && fake.gpio_ex == 0xa3U);
+    CHECK(!LibusbW3u3HardwareTestPeer::gpio_snapshot_valid(hardware));
+    return true;
+}
 
-    CHECK(result.load() != static_cast<int>(Error::OK));
-    std::uint16_t max_read_timeout = 0U;
-    for (const auto& event : fake.controls) {
-        if (event.request == Request::I2cRead)
-            max_read_timeout = std::max(max_read_timeout, event.timeout_ms);
+bool test_legacy_controller_guard_runs_board_off_sequence() {
+    FakeUsb fake;
+    fake.controller[0x09U] = 0x02U;  // Not the supported controller type0f.
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::S3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).error() == Error::UNSUPPORTED);
+    CHECK(fake.gpio_ex_write_count == 6);
+    CHECK((fake.gpio & 0xecU) == 0xa8U && fake.gpio_ex == 0xa3U);
+    CHECK(!saw_demod_write(fake, 0x0fU, 0x34U));
+    CHECK(!LibusbW3u3HardwareTestPeer::gpio_snapshot_valid(hardware));
+    return true;
+}
+
+bool test_legacy_gpioex_off_failure_is_visible_and_quarantines() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::S3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).has_value());
+    fake.fail_gpio_ex_off_once = true;
+    CHECK(hardware.shutdown().error() == Error::USB_IO);
+    CHECK((fake.gpio & 0xecU) == 0xa8U && fake.gpio_ex == 0xa1U);
+    CHECK(LibusbW3u3HardwareTestPeer::gpio_snapshot_valid(hardware));
+    const auto before = fake.controls.size();
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).error() == Error::USB_IO);
+    CHECK(fake.controls.size() == before);
+    return true;
+}
+
+bool test_legacy_capture_cleanup_failure_still_powers_off_gpioex() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::S3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    fake.fail_cf_restore_once = true;
+    CHECK(hardware.shutdown().error() == Error::USB_IO);
+    CHECK(fake.cancel_count == 4 && fake.free_count == 4);
+    CHECK((fake.gpio & 0xecU) == 0xa8U && fake.gpio_ex == 0xa3U);
+    CHECK(fake.controls_at_restore > 0U);
+    return true;
+}
+
+bool test_legacy_gain_runs_once_per_terrestrial_tune() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::S3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    const auto plan = plan_legacy_default_gain(LegacyFrontendProfile::S3u2, true);
+    CHECK(!plan.empty());
+    const auto transfer = plan.front().transfer;
+    const auto count_gain = [&] {
+        return std::count_if(fake.controls.begin(), fake.controls.end(),
+            [&](const ControlEvent& event) {
+                return event.request == transfer.request && event.value == transfer.value &&
+                       event.index == transfer.index;
+            });
+    };
+    const auto before = count_gain();
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(count_gain() == before + 1);
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(count_gain() == before + 1);
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.tune_terrestrial(1U, 563142U, 3000U).has_value());
+    const auto before_retuned = count_gain();
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(count_gain() == before_retuned + 1);
+    CHECK(hardware.stop().has_value());
+    return true;
+}
+
+bool test_all_source_terrestrial_channels_and_invalid_requests() {
+    for (const auto model : {ModelId::S3u, ModelId::S3u2, ModelId::W3u2, ModelId::W3u3}) {
+        FakeUsb fake;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(model));
+        Hooks hooks{};
+        const std::uint8_t receiver = model == ModelId::S3u ? 0U : 1U;
+        configure(hardware, fake, hooks, receiver);
+        for (const std::uint32_t frequency : {473142U, 557142U, 707142U, 767142U})
+            CHECK(hardware.tune_terrestrial(receiver, frequency, 3000U).has_value());
+        const auto before = fake.controls.size();
+        CHECK(hardware.tune_terrestrial(receiver, 0U, 3000U).error() == Error::INVALID_ARGUMENT);
+        CHECK(hardware.tune_terrestrial(receiver, 0xffffffffU, 3000U).error() == Error::INVALID_ARGUMENT);
+        CHECK(hardware.tune_terrestrial(receiver, 473142U, 0U).error() == Error::INVALID_ARGUMENT);
+        CHECK(fake.controls.size() == before);
     }
-    if (max_read_timeout == 0U || max_read_timeout > 40U) {
-        std::fprintf(stderr, "deadline diag result=%d call-signal-to-release-ms=%lld release-to-return-ms=%lld controls=%zu first-control-timeout-ms=%u first-control-after-release-ms=%lld\n",
-                     result.load(),
-                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(release_at - invoke_at).count()),
-                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(done_at - release_at).count()),
-                     fake.controls.size(),
-                     fake.controls.empty() ? 0U : fake.controls.front().timeout_ms,
-                     fake.controls.empty() ? -1LL : static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(fake.controls.front().at - release_at).count()));
+    return true;
+}
+
+bool test_v2_master_routing_tune_capture_and_tsid() {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3V2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    CHECK(hardware.receiver_count() == 2U && hardware.device_profile()->enclosure_receiver_count == 4U);
+    CHECK(LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::v2_identity_verified(hardware));
+    CHECK((fake.gpio & 0x20U) == 0U); // Active-high V2 must start OFF.
+    for (const auto& control : fake.controls)
+        if (control.request == Request::Gpio && (control.value & 0x2000U) != 0U)
+            CHECK((control.value & 0x20U) == 0U);
+    CHECK(!hardware.requires_terrestrial_lock_settle());
+    CHECK(hardware.tune_terrestrial(1U, 473142U, 3000U).has_value());
+    CHECK(hardware.is_locked(1U, System::ISDB_T).value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(fake.controller[0x05U] == 0xa0U);
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.open_receiver(0U).has_value());
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(hardware.is_locked(0U, System::ISDB_S).value());
+    CHECK(hardware.select_satellite_slot(0U, 0U, 1000U).has_value());
+    CHECK((fake.v2_registers[FakeUsb::V2Key{0x22U, false, 0x8fU}] == 0x40U));
+    CHECK((fake.v2_registers[FakeUsb::V2Key{0x22U, false, 0x90U}] == 0x10U));
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.shutdown().has_value());
+    CHECK((fake.gpio & 0x48U) == 0x48U && fake.gpio_ex_write_count == 0);
+    CHECK(fake.cf[0] == fake.initial_cf(0U) && fake.cf[1] == fake.initial_cf(1U));
+    CHECK(fake.controller[0x05U] == 0U);
+    for (std::size_t i = 0; i < fake.controls.size(); ++i) {
+        if (fake.control_functions[i] == 0U) continue;
+        CHECK(fake.controls[i].request == Request::CustomerInfo ||
+              fake.controls[i].request == Request::SysCtrlRead ||
+              (fake.controls[i].request == Request::I2cRead && fake.controls[i].value == 0xb0a8U));
     }
-    CHECK(max_read_timeout > 0U);
-    CHECK(max_read_timeout <= 40U);
+    CHECK(std::count(fake.endpoints.begin(), fake.endpoints.end(), 0x81U) == 4);
+    CHECK(std::count(fake.endpoints.begin(), fake.endpoints.end(), 0x82U) == 4);
+    return true;
+}
+
+bool test_v2_identity_mismatch_powers_off_before_rf_or_link_writes() {
+    FakeUsb fake;
+    fake.identity_mismatch = true;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3V2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    CHECK(LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(!hardware.open_receiver(1U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::v2_identity_verified(hardware));
+    CHECK((fake.gpio & 0x48U) == 0x48U && fake.seed_write_count == 0 && fake.submit_count == 0);
+    CHECK(std::none_of(fake.controls.begin(), fake.controls.end(), [](const ControlEvent& event) {
+        return event.request == Request::I2cBufferFill || event.request == Request::I2cBufferSend;
+    }));
+    return true;
+}
+
+bool test_v2_duplicate_roles_and_revision16_fail_before_board_writes() {
+    FakeUsb fake;
+    fake.role_fields[1] = 0U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3V2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    CHECK(!LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).error() == Error::UNSUPPORTED);
+    CHECK(fake.gpio_write_count == 0 && fake.seed_write_count == 0);
+    fake.role_fields[1] = 0x80U;
+    fake.sibling_revision = 0x16U;
+    CHECK(!LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
+    CHECK(fake.gpio_write_count == 0 && fake.seed_write_count == 0);
+    fake.sibling_revision = 0x11U;
+    CHECK(LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
+    fake.revision = 0x16U;
+    CHECK(hardware.open_receiver(1U).error() == Error::UNSUPPORTED);
+    CHECK(fake.gpio_write_count == 0 && fake.seed_write_count == 0);
+    return true;
+}
+
+bool test_legacy_revision_guard_precedes_any_board_write() {
+    FakeUsb fake;
+    fake.revision = 0x16U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::S3u));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 0U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(0U).error() == Error::UNSUPPORTED);
+    CHECK(fake.gpio_write_count == 0 && fake.gpio_ex_write_count == 0);
+    CHECK(fake.controls.size() == 1U && fake.controls[0].request == Request::SysCtrlRead);
     return true;
 }
 
 }  // namespace
 
 int main() {
-    if (!test_primary_prepare_stop_and_receiver1_reacquisition()) return 1;
-    if (!test_partial_submit_rolls_back_local0_and_releases_lane()) return 1;
-    if (!test_dsc_failure_stops_local0_and_restores_cf()) return 1;
-    if (!test_seed_failure_stops_local0_clears_seed_and_restores_cf()) return 1;
-    if (!test_rejected_open_reserves_before_cleanup_state_and_quarantines()) return 1;
-    if (!test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure()) return 1;
-    if (!test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture()) return 1;
-    if (!test_failed_card_cleanup_before_capture_worker_starts_still_drains()) return 1;
-    if (!test_prepare_waiter_rechecks_quarantine_after_control_gate()) return 1;
-    if (!test_satellite_slot_wait_uses_deadline_including_gate_wait()) return 1;
+    struct TestCase {
+        const char* name;
+        bool (*run)();
+    };
+    const TestCase tests[] = {
+        {"test_unsupported_models_fail_before_any_usb_io", test_unsupported_models_fail_before_any_usb_io},
+        {"test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity", test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity},
+        {"test_s3u_combined_receiver_uses_lane0_for_both_systems", test_s3u_combined_receiver_uses_lane0_for_both_systems},
+        {"test_s3u2_powers_off_gpioex_and_retains_single_capture_lease", test_s3u2_powers_off_gpioex_and_retains_single_capture_lease},
+        {"test_legacy_controller_guard_runs_board_off_sequence", test_legacy_controller_guard_runs_board_off_sequence},
+        {"test_legacy_gpioex_off_failure_is_visible_and_quarantines", test_legacy_gpioex_off_failure_is_visible_and_quarantines},
+        {"test_legacy_revision_guard_precedes_any_board_write", test_legacy_revision_guard_precedes_any_board_write},
+        {"test_legacy_capture_cleanup_failure_still_powers_off_gpioex", test_legacy_capture_cleanup_failure_still_powers_off_gpioex},
+        {"test_legacy_gain_runs_once_per_terrestrial_tune", test_legacy_gain_runs_once_per_terrestrial_tune},
+        {"test_all_source_terrestrial_channels_and_invalid_requests", test_all_source_terrestrial_channels_and_invalid_requests},
+        {"test_v2_master_routing_tune_capture_and_tsid", test_v2_master_routing_tune_capture_and_tsid},
+        {"test_v2_identity_mismatch_powers_off_before_rf_or_link_writes", test_v2_identity_mismatch_powers_off_before_rf_or_link_writes},
+        {"test_v2_duplicate_roles_and_revision16_fail_before_board_writes", test_v2_duplicate_roles_and_revision16_fail_before_board_writes},
+        {"test_primary_prepare_stop_and_receiver1_reacquisition", test_primary_prepare_stop_and_receiver1_reacquisition},
+        {"test_partial_submit_rolls_back_local0_and_releases_lane", test_partial_submit_rolls_back_local0_and_releases_lane},
+        {"test_dsc_failure_stops_local0_and_restores_cf", test_dsc_failure_stops_local0_and_restores_cf},
+        {"test_seed_failure_stops_local0_clears_seed_and_restores_cf", test_seed_failure_stops_local0_clears_seed_and_restores_cf},
+        {"test_rejected_open_reserves_before_cleanup_state_and_quarantines", test_rejected_open_reserves_before_cleanup_state_and_quarantines},
+        {"test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure", test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure},
+        {"test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture", test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture},
+        {"test_failed_card_cleanup_before_capture_worker_starts_still_drains", test_failed_card_cleanup_before_capture_worker_starts_still_drains},
+        {"test_prepare_waiter_rechecks_quarantine_after_control_gate", test_prepare_waiter_rechecks_quarantine_after_control_gate},
+        {"test_satellite_slot_wait_uses_deadline_including_gate_wait", test_satellite_slot_wait_uses_deadline_including_gate_wait},
+    };
+    for (const auto& test : tests) {
+        std::fprintf(stderr, "[ RUN      ] %s\n", test.name);
+        std::fflush(stderr);
+        const auto start = std::chrono::steady_clock::now();
+        const bool passed = test.run();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        std::fprintf(stderr, "[ %s ] %s (%lld ms)\n",
+                     passed ? "      OK" : "  FAILED", test.name,
+                     static_cast<long long>(elapsed_ms));
+        std::fflush(stderr);
+        if (!passed) return 1;
+    }
     return 0;
 }

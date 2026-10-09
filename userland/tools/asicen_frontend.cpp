@@ -465,9 +465,10 @@ int verify_target(asicen::LibusbDevice* device, const Arguments& args,
         std::cerr << "selected device is not a supported ASICEN runtime device\n";
         return 1;
     }
-    // The recovered frontend facts are specific to the original PX-W3U3.
-    if (desc.idVendor != 0x0b06 || desc.idProduct != 0x0005) {
-        std::cerr << "refusing: frontend diagnostics are only verified for 0b06:0005\n";
+    // These diagnostics use the shared W3U2/W3U3 source profile, not arbitrary ASICEN IDs.
+    if (!asicen::profile_runtime_supported(**profile) ||
+        (*profile)->frontend_family != asicen::FrontendFamily::W3u3) {
+        std::cerr << "refusing: this model needs its own frontend diagnostic profile\n";
         return 1;
     }
     const std::string actual_port = port_path(raw);

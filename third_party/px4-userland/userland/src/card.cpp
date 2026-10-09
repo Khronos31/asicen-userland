@@ -7,6 +7,9 @@
 // winusb/src/WinSCard_PX4/bcas_atr.hpp.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: initialize_with_atr() validation, and
+// It930xCardHardware is omitted under ASICEN_PROFILE_ASICEN or
+// PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION. The 2026-09-03 notice above is unchanged.
 #include "px4/card.h"
 
 #include <algorithm>

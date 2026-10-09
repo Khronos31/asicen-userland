@@ -51,7 +51,7 @@ keep their notices. recisdb is a separate executable, never linked here.
 
 | Command | Compatible behavior | ASICEN difference |
 | --- | --- | --- |
-| `asicend` | `--runtime-dir`, `--instance`, listing, foreground lifecycle | USB topology identity; no invented serial; LNB enable unsupported |
+| `asicend` | `--runtime-dir`, `--instance`, listing, foreground lifecycle | USB topology identity; no invented serial; model-specific LNB capability |
 | `asicenctl` | `list`, `status`, `card-status`, `card-atr`, `card-reset`, `card-apdu`; formatting/error conventions | Unimplemented card operations explicitly fail; never fabricate ATR |
 | `asicen-ts` | channel/frequency/slot, duration/count, file/stdout, terminal counters and exit codes | Four receiver map `0:S,1:T,2:S,3:T`; unavailable receivers fail |
 
@@ -189,8 +189,10 @@ The copied `src/ipc.cpp`, `src/posix_ipc.cpp`, `src/control_server.cpp`,
 profile and/or shutdown-hook deltas. `include/px4/card_service.h` adds default
 no-op stop notifications for cancellable card backend/session calls. The
 copied `tools/px4ctl.cpp` and `tools/px4_ts_core.cpp` add product-specific
-identity validation, help/error labels, receiver bounds, and the no-LNB
-product CLI guard; default reference-profile behavior remains compiled without
+identity validation, help/error labels and receiver bounds. The former no-LNB
+product CLI guard is removed: `--lnb-voltage 0|15` uses the same parsing and
+tune IPC field as px4, while the selected hardware model determines support.
+See [LNB operation](lnb-control.md). Default reference-profile behavior remains compiled without
 `ASICEN_PRODUCT_CLI`. These deltas are isolated behind profile/CLI macros
 where applicable. The local mock backends and product tool entry points live
 under `userland/`; the upstream checkout was not changed.
@@ -204,3 +206,18 @@ partial-request SIGTERM cleanup in both product and research daemon modes.
 All tests are offline. They do not validate USB exclusivity,
 physical reset/tune behavior, stream reception, card status, or hardware
 shutdown deadlines.
+
+
+## Model-specific topology update (0.1.0 preparation)
+
+The ASICEN-only IPC profile now permits canonical one-combined, two-split and
+four-split receiver layouts, without changing wire structures or the imported
+PX4 reference build. `asicend --mock --model MODEL` exercises each physical
+profile. Hardware LIST advertises the operational subset: one receiver for
+S3U, two for S3U2 and the primary pair of a four-receiver enclosure. The catalogue
+retains physical capacity separately. Count2 is paired with receiver-bearing
+USB mask01, not physical reservation mask03. `HardwareStreamService` delegates
+capabilities to its frontend rather than imposing a W3U3 receiver map.
+
+The implementation source and hardware-verification boundary are described in
+[model-support.md](model-support.md). No mock pass is a hardware-support claim.

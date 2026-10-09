@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(asicen_userland VERSION 0.0.1 LANGUAGES CXX)
+project(asicen_userland VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,41 @@ set(ASICEN_LIBUSB_LIBRARY "" CACHE FILEPATH "libusb library/archive (overrides p
 set(ASICEN_LIBUSB_EXTRA_LIBRARIES "" CACHE STRING "Additional private libraries required by the selected libusb archive")
 set(ASICEN_LIBUSB_EXTRA_LINK_OPTIONS "" CACHE STRING "Additional linker options required by the selected libusb archive")
 set(ASICEN_PCSC_IFD_INCLUDE_DIR "" CACHE PATH "Build-only PC/SC IFD headers directory")
+set(ASICEN_ANDROID_NDK_ROOT_MAP "" CACHE PATH "Android NDK root to remove from compiler debug paths")
+
+if(ANDROID)
+  # Release ELFs must not retain the machine-specific source, build, or NDK
+  # roots emitted by Clang's DWARF and macro expansion.  Keep the mapped value
+  # relative so an unstripped developer build is reproducible too.
+  set(asicen_android_prefix_map_flags
+    "-fdebug-compilation-dir=."
+    "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-ffile-prefix-map=${CMAKE_BINARY_DIR}=."
+    "-fdebug-prefix-map=${CMAKE_BINARY_DIR}=."
+    "-fmacro-prefix-map=${CMAKE_BINARY_DIR}=."
+  )
+  if(ASICEN_ANDROID_NDK_ROOT_MAP)
+    list(APPEND asicen_android_prefix_map_flags
+      "-ffile-prefix-map=${ASICEN_ANDROID_NDK_ROOT_MAP}=."
+      "-fdebug-prefix-map=${ASICEN_ANDROID_NDK_ROOT_MAP}=."
+      "-fmacro-prefix-map=${ASICEN_ANDROID_NDK_ROOT_MAP}=."
+    )
+  endif()
+  add_compile_options(${asicen_android_prefix_map_flags})
+
+  # Every packaged Android ELF must pass scripts/verify-android-elf.sh before
+  # publication.  Android builds use the same hardened PIE contract as the
+  # other supported release targets.
+  add_link_options(
+    "-Wl,-z,relro"
+    "-Wl,-z,now"
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+    "-Wl,--no-undefined"
+  )
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -71,6 +106,8 @@ add_library(asicen_core STATIC
   userland/src/enclosure_lock.cpp
   userland/src/frontend_facts.cpp
   userland/src/frontend_sequence.cpp
+  userland/src/v2_frontend.cpp
+  userland/src/v2_nmi.cpp
   userland/src/hardware_gpio_guard.cpp
   userland/src/hardware_ownership.cpp
   userland/src/ipc.cpp
@@ -128,7 +165,7 @@ if(ASICEN_ENABLE_LIBUSB)
   target_compile_options(asicen_libusb PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
-if(UNIX)
+if(UNIX AND NOT ANDROID)
   add_library(asicen_pcsc_ifd_core STATIC
     third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp)
   set_target_properties(asicen_pcsc_ifd_core PROPERTIES
@@ -355,9 +392,43 @@ if(ASICEN_BUILD_TESTS)
   target_compile_options(asicen-product-profile-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-product-profile-tests COMMAND asicen-product-profile-tests)
 
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME asicen-model-cli-tests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/model_cli_tests.py $<TARGET_FILE_DIR:asicend>)
+  if(ASICEN_ENABLE_LIBUSB)
+    add_test(NAME asicen-fd-cli-tests
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/fd_cli_tests.py $<TARGET_FILE_DIR:asicend>)
+  endif()
+  add_executable(asicen-legacy-frontend-profile-tests userland/tests/legacy_frontend_profile_tests.cpp)
+  target_link_libraries(asicen-legacy-frontend-profile-tests PRIVATE asicen_core)
+  target_compile_options(asicen-legacy-frontend-profile-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-legacy-frontend-profile-tests COMMAND asicen-legacy-frontend-profile-tests)
+
+  foreach(v2_test frontend nmi)
+    add_executable(asicen-v2-${v2_test}-tests userland/tests/v2_${v2_test}_tests.cpp)
+    target_link_libraries(asicen-v2-${v2_test}-tests PRIVATE asicen_core)
+    target_compile_options(asicen-v2-${v2_test}-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME asicen-v2-${v2_test}-tests COMMAND asicen-v2-${v2_test}-tests)
+  endforeach()
+
+  add_executable(asicen-model-ipc-tests userland/tests/model_ipc_tests.cpp)
+  target_link_libraries(asicen-model-ipc-tests PRIVATE asicen_core asicen_px4_mock)
+  target_compile_options(asicen-model-ipc-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-model-ipc-tests COMMAND asicen-model-ipc-tests)
+
+  add_executable(asicen-product-lnb-tests
+    userland/tests/product_lnb_tests.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+  target_include_directories(asicen-product-lnb-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
+  target_compile_definitions(asicen-product-lnb-tests PRIVATE ASICEN_PRODUCT_CLI=1)
+  target_link_libraries(asicen-product-lnb-tests PRIVATE asicen_core asicen_px4_mock)
+  target_compile_options(asicen-product-lnb-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-product-lnb-tests COMMAND asicen-product-lnb-tests)
+
   add_executable(asicen-hardware-ownership-tests
     userland/tests/hardware_ownership_tests.cpp
-    userland/src/hardware_ownership.cpp)
+    userland/src/hardware_ownership.cpp
+    userland/src/device_profile.cpp)
   target_include_directories(asicen-hardware-ownership-tests PRIVATE userland/include)
   target_compile_options(asicen-hardware-ownership-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-hardware-ownership-tests COMMAND asicen-hardware-ownership-tests)
@@ -370,7 +441,23 @@ if(ASICEN_BUILD_TESTS)
       -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME asicen-libusb-capture-lifecycle-tests
       COMMAND asicen-libusb-capture-lifecycle-tests)
-    set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 20)
+    # All model lifecycles include real board/tuner delays: roughly 20 seconds
+    # together on macOS CI. This suite limit leaves scheduling headroom without
+    # changing any backend operation's deadline.
+    set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 60)
+
+    add_executable(asicen-libusb-lnb-lifecycle-tests userland/tests/libusb_lnb_lifecycle_tests.cpp)
+    target_link_libraries(asicen-libusb-lnb-lifecycle-tests PRIVATE asicen_libusb)
+    target_compile_options(asicen-libusb-lnb-lifecycle-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME asicen-libusb-lnb-lifecycle-tests COMMAND asicen-libusb-lnb-lifecycle-tests)
+    set_tests_properties(asicen-libusb-lnb-lifecycle-tests PROPERTIES TIMEOUT 15)
+
+    add_executable(asicen-libusb-fd-tests
+      userland/tests/libusb_fd_tests.cpp)
+    target_link_libraries(asicen-libusb-fd-tests PRIVATE asicen_libusb)
+    target_compile_options(asicen-libusb-fd-tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME asicen-libusb-fd-tests COMMAND asicen-libusb-fd-tests)
   endif()
 
   add_executable(asicen-enclosure-lock-tests

@@ -23,6 +23,7 @@ struct Arguments {
     asicen::UsbLocation location{};
     std::string firmware;
     bool have_firmware = false;
+    const asicen::DeviceProfile* firmware_model = nullptr;
 };
 
 void usage(const char* argv0) {
@@ -34,7 +35,7 @@ void usage(const char* argv0) {
         << "  " << argv0 << " --device BUS:ADDRESS customer-info\n"
         << "  " << argv0 << " --device BUS:ADDRESS random-key\n"
         << "  " << argv0
-        << " --device BUS:ADDRESS --firmware PATH load-firmware\n";
+        << " --device BUS:ADDRESS --model MODEL --firmware PATH load-firmware\n";
 }
 
 bool parse_u8(const std::string& value, std::uint8_t* out) {
@@ -67,6 +68,10 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
                 return false;
             }
             out->have_device = true;
+        } else if (arg == "--model") {
+            if (++i >= argc) return false;
+            out->firmware_model = asicen::find_profile_by_model(argv[i]);
+            if (out->firmware_model == nullptr) return false;
         } else if (arg == "--firmware") {
             if (++i >= argc) {
                 return false;
@@ -85,7 +90,7 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
         }
     }
 
-    if (out->command == "load-firmware" && !out->have_firmware) {
+    if (out->command == "load-firmware" && (!out->have_firmware || out->firmware_model == nullptr)) {
         return false;
     }
     return out->command == "list" || out->have_device;
@@ -143,6 +148,8 @@ int list_devices(libusb_context* context) {
 
         if (profile != nullptr) {
             std::cout << " model=\"" << profile->model << "\""
+                      << " runtime=" << (asicen::profile_runtime_supported(*profile)
+                          ? "source-backed-experimental" : "not-enabled")
                       << " enclosure_receivers=" << static_cast<unsigned>(profile->enclosure_receiver_count)
                       << " expected_functions=" << static_cast<unsigned>(profile->expected_runtime_functions)
                       << " local_lanes=" << static_cast<unsigned>(profile->local_lane_count)
@@ -383,7 +390,7 @@ bool loader_interface_ready(libusb_device* device) {
 }
 
 int load_firmware(asicen::LibusbDevice* device,
-                  const std::vector<std::uint8_t>& firmware) {
+                  const std::vector<std::uint8_t>& firmware, asicen::ModelId model) {
     libusb_device* raw = device->device();
     if (raw == nullptr) {
         std::cerr << "selected device is not available\n";
@@ -397,7 +404,7 @@ int load_firmware(asicen::LibusbDevice* device,
                   << libusb_error_name(desc_rc) << '\n';
         return 1;
     }
-    if (!is_loader(desc)) {
+    if (!is_loader(desc) || (model == asicen::ModelId::W3u3V2 && desc.idProduct != 0x5211U)) {
         std::cerr << "selected device is not an ASICEN firmware loader\n";
         return 1;
     }
@@ -424,7 +431,7 @@ int load_firmware(asicen::LibusbDevice* device,
     }
 
     const std::vector<asicen::LoaderTransfer> plan =
-        asicen::build_loader_transfer_plan();
+        asicen::build_loader_transfer_plan(model);
     for (std::size_t i = 0; i < plan.size(); ++i) {
         const asicen::LoaderTransfer& transfer = plan[i];
         const bool final_transfer = (i + 1 == plan.size());
@@ -478,7 +485,7 @@ int main(int argc, char** argv) {
     std::vector<std::uint8_t> firmware;
     if (args.command == "load-firmware") {
         const asicen::LoaderFirmwareRead read =
-            asicen::read_loader_firmware_file(args.firmware, &firmware);
+            asicen::read_verified_loader_firmware_file(args.firmware, args.firmware_model->model_id, &firmware);
         if (read == asicen::LoaderFirmwareRead::OpenFailed) {
             std::cerr << "cannot read firmware: " << args.firmware << '\n';
             return 1;
@@ -488,6 +495,12 @@ int main(int argc, char** argv) {
                       << asicen::kLoaderFirmwareBlobSize << " bytes\n";
             return 1;
         }
+        if (read != asicen::LoaderFirmwareRead::Ok) {
+            std::cerr << "firmware rejected: model applicability or SHA-256 fingerprint mismatch\n";
+            return 1;
+        }
+        std::cerr << "verified firmware for " << args.firmware_model->model
+                  << "; runtime identity must be rechecked after re-enumeration\n";
     }
 
     libusb_context* context = nullptr;
@@ -515,7 +528,7 @@ int main(int argc, char** argv) {
 
     int result = 1;
     if (args.command == "load-firmware") {
-        result = load_firmware(&device, firmware);
+        result = load_firmware(&device, firmware, args.firmware_model->model_id);
     } else if (args.command == "describe") {
         result = describe_device(device.device());
     } else {

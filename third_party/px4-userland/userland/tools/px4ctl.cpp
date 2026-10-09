@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: under ASICEN_PRODUCT_CLI, command names,
+// receiver bounds, serial-free instance routing, usage text and error labels.
+// The original license notice is unchanged.
 #include "px4/control_client.h"
 #include "px4ctl_format.h"
 

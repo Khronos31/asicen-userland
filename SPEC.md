@@ -134,8 +134,11 @@ remain useful development milestones, not a replacement for this contract.
   with vendor provenance and unresolved-rights notice. Never include firmware
   in Git or label it covered by the product's open-source license.
 - Do not change existing tests or adopt kernel modules/legacy ioctl devices.
-- No LNB voltage enablement. Target the attached PX-W3U3 only by observed port
-  path/VID/PID and fresh USB addresses; never reset its parent hub.
+- LNB electrical testing is deferred until measurement with a physical tester.
+  The 2026-10-09 LNB request authorizes implementation and offline regression
+  tests; it does not authorize physical power tests. Hardware work, when
+  separately requested, targets observed port path/VID/PID and fresh USB
+  addresses; never reset the parent hub.
 - Stop each hardware increment on unproven or failed setup/status; do not hide
   missing frontend or decryption logic behind mock output.
 - Source rollback: preserve starting commit `3b6939a`; work is isolated here.
@@ -176,3 +179,22 @@ The 2026-10-08 independent critic returned REVISE. Before integrating hardware:
 - Compare reuse of px4 portable IPC/client/lifecycle with extending research
   IPC before selecting an implementation; record provenance and dependencies.
 - Keep mock/CLI tests distinct from real station and actual-card evidence.
+
+
+## 0.1.0 source-supported model boundary
+
+Use [docs/model-support.md](docs/model-support.md) as the current implementation
+and evidence matrix for the five USB products. Model recognition, source-backed
+runtime support and physical validation are separate states. Unsupported
+silicon/controller revisions fail closed; they must not inherit W3U3 writes
+merely because the USB vendor is ASICEN. S3U's combined receiver remains one
+exclusive resource across terrestrial and satellite tuning. Four-receiver
+physical capacity does not imply secondary-function or simultaneous-capture
+acceptance. GPIO/LNB electrical testing is deferred to measurement; this does
+not prohibit implementing source-backed model-specific control sequences.
+
+LNB requests follow px4-userland's `--lnb-voltage 0|15` ISDB-S interface.
+Current software switching is source-backed for W3U2/W3U3/V2 only. S3U/S3U2
+physical power support is established, but their recovered setters are no-ops:
+`15` must return UNSUPPORTED and `0` must not claim measured power OFF.
+See [the LNB contract](docs/lnb-control.md) and its static evidence.
