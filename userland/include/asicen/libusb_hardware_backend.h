@@ -20,6 +20,7 @@
 #include <csignal>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 namespace asicen {
 
@@ -186,6 +187,14 @@ private:
         std::size_t, const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>&) noexcept;
     LegacyFrontendProfile legacy_frontend() const noexcept;
     bool snapshot_gpio_state() noexcept;
+    bool supports_lnb_control() const noexcept;
+    px4::userland::Result<void> set_lnb_power(bool on, bool cleanup) noexcept;
+    px4::userland::Result<void> clear_lnb_power() noexcept;
+    px4::userland::Result<void> check_v2_lnb_feedback() noexcept;
+    bool poll_v2_lnb_feedback_if_due() noexcept;
+    bool start_lnb_monitor() noexcept;
+    void stop_lnb_monitor() noexcept;
+    void monitor_lnb_power() noexcept;
     bool verify_device_revision() noexcept;
     PoweredControllerCheck verify_powered_controller() noexcept;
     bool apply_link_seed() override;
@@ -251,6 +260,25 @@ private:
     bool gpio_snapshot_valid_ = false;
     std::uint8_t gpio_snapshot_ = 0;
     bool board_power_attempted_ = false;
+    // LNB ownership is distinct from board-power snapshots: close/shutdown
+    // must never restore an initially powered antenna feed. All fields below
+    // are protected by control_gate_. Only set_lnb_power may bypass the
+    // model-specific LNB mask on ordinary frontend plans.
+    bool lnb_gpio_io_active_ = false;
+    bool lnb_fault_latched_ = false;
+    bool lnb_feedback_active_ = false;
+    bool lnb_power_transition_active_ = false;
+    std::chrono::steady_clock::time_point lnb_feedback_checked_at_{};
+    std::atomic<bool> lnb_monitor_stop_{false};
+    std::mutex lnb_monitor_mutex_;
+    std::thread lnb_monitor_;
+    bool lnb_state_known_ = false;
+    bool lnb_on_ = false;
+    bool lnb_cleanup_required_ = false;
+    bool lnb_transaction_active_ = false;
+    bool lnb_previous_on_ = false;
+    bool lnb_requested_on_ = false;
+    std::uint8_t lnb_transaction_receiver_ = kNoActiveReceiver;
     std::uint32_t tuned_frequency_khz_ = 0;
     std::array<std::uint8_t, 0x45> cf_snapshot_{};
     std::array<std::uint8_t, 16> link_seed_{};

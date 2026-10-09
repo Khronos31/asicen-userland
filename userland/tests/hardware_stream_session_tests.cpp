@@ -160,6 +160,27 @@ public:
     Result<void> close_receiver(std::uint8_t) noexcept override {
         return Result<void>::success();
     }
+    Result<void> begin_tune_power(std::uint8_t receiver, ipc::System system,
+                                  std::uint8_t voltage) noexcept override {
+        ++power_calls;
+        power_receiver = receiver;
+        power_system = system;
+        power_voltage = voltage;
+        return power_error == Error::OK ? Result<void>::success()
+                                       : Result<void>::failure(power_error);
+    }
+    Result<void> commit_tune_power(std::uint8_t receiver) noexcept override {
+        ++commit_calls;
+        power_receiver = receiver;
+        return power_error == Error::OK ? Result<void>::success()
+                                       : Result<void>::failure(power_error);
+    }
+    Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override {
+        ++rollback_calls;
+        power_receiver = receiver;
+        return power_error == Error::OK ? Result<void>::success()
+                                       : Result<void>::failure(power_error);
+    }
     Result<void> shutdown() noexcept override {
         ++shutdown_calls;
         return shutdown_error ? Result<void>::failure(Error::NOT_READY)
@@ -167,6 +188,13 @@ public:
     }
     unsigned shutdown_calls = 0;
     bool shutdown_error = false;
+    unsigned power_calls = 0;
+    unsigned commit_calls = 0;
+    unsigned rollback_calls = 0;
+    std::uint8_t power_receiver = 0xffU;
+    ipc::System power_system = ipc::System::ISDB_T;
+    std::uint8_t power_voltage = 0xffU;
+    Error power_error = Error::OK;
 };
 
 std::vector<std::uint8_t> packet(std::uint8_t cc) {
@@ -461,6 +489,46 @@ void primary_satellite_receiver_mapping_is_explicit() {
           "satellite TSID selection cannot route onto local one");
 }
 
+void lnb_requests_delegate_exact_values_and_errors() {
+    ShutdownTrackingFrontend frontend;
+    FakeSource source;
+    FakeFatal fatal;
+    asicen::HardwareStreamService service(frontend, source, fatal);
+    for (const std::uint8_t voltage : {15U, 0U}) {
+        check(service.begin_tune_power(0U, ipc::System::ISDB_S, voltage),
+              "valid satellite LNB request delegates to frontend");
+        check(frontend.power_receiver == 0U &&
+              frontend.power_system == ipc::System::ISDB_S &&
+              frontend.power_voltage == voltage,
+              "wrapper preserves ON/OFF and receiver/system exactly");
+        check(service.commit_tune_power(0U), "LNB commit delegates");
+        check(service.rollback_tune_power(0U), "LNB rollback delegates");
+    }
+    check(frontend.power_calls == 2U && frontend.commit_calls == 2U &&
+          frontend.rollback_calls == 2U, "each valid request is forwarded exactly once");
+    for (const auto error : {Error::UNSUPPORTED, Error::USB_IO, Error::DISCONNECTED,
+                            Error::NOT_READY, Error::TIMEOUT}) {
+        frontend.power_error = error;
+        check(service.begin_tune_power(0U, ipc::System::ISDB_S, 15U).error() == error &&
+              service.commit_tune_power(0U).error() == error &&
+              service.rollback_tune_power(0U).error() == error,
+              "frontend denial and hardware/cleanup errors cannot become success");
+    }
+    const auto calls = frontend.power_calls;
+    check(service.begin_tune_power(1U, ipc::System::ISDB_T, 15U).error() ==
+              Error::INVALID_ARGUMENT &&
+          service.begin_tune_power(0U, ipc::System::ISDB_S, 13U).error() ==
+              Error::INVALID_ARGUMENT,
+          "invalid voltage and terrestrial ON fail before frontend access");
+    check(service.begin_tune_power(2U, ipc::System::ISDB_S, 15U).error() ==
+              Error::UNSUPPORTED &&
+          service.begin_tune_power(0U, ipc::System::ISDB_T, 0U).error() ==
+              Error::UNSUPPORTED,
+          "wrong receiver/system cannot reach LNB controls");
+    check(frontend.power_calls == calls && source.events.empty(),
+          "rejected power requests perform no frontend or capture operation");
+}
+
 }  // namespace
 
 int main() {
@@ -473,6 +541,7 @@ int main() {
     shutdown_cleans_source_and_is_sticky_against_restart();
     shutdown_cleanup_failure_is_reported_in_final_state();
     primary_satellite_receiver_mapping_is_explicit();
+    lnb_requests_delegate_exact_values_and_errors();
     model_capabilities_delegate_without_enabling_unsupported_paths();
     std::cout << "hardware stream session tests passed\n";
     return 0;

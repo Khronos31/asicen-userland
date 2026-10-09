@@ -26,6 +26,7 @@ enum class Request : std::uint8_t {
     CustomerInfo = 0x0c,
     I2cBufferFill = 0x0d,
     I2cBufferSend = 0x0e,
+    GpioRead = 0x0f,
     GpioExSet = 0x10,
     GpioExGet = 0x11,
     ResetEncryptionChip = 0x12,

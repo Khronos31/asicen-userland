@@ -452,6 +452,10 @@ struct FakeUsb {
             case Request::DscStop:
                 ++dsc_stop_count;
                 return status();
+            case Request::GpioRead:
+                if (response == nullptr) return LIBUSB_ERROR_IO;
+                response[0] = gpio;
+                return static_cast<int>(transfer.length);
             case Request::Gpio: {
                 if (response == nullptr) return LIBUSB_ERROR_IO;
                 const std::uint8_t value = static_cast<std::uint8_t>(transfer.value & 0xffU);
@@ -560,9 +564,13 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition() {
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
     Hooks hooks{};
     configure(hardware, fake, hooks, 0U);
+    CHECK(hardware.begin_tune_power(0U, System::ISDB_S, 15U).has_value());
+    CHECK(hardware.commit_tune_power(0U).has_value());
+    CHECK((fake.gpio & 0x20U) == 0U);
 
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK((fake.gpio & 0x20U) == 0U);
     CHECK(fake.submit_count == 4);
     CHECK(std::all_of(fake.endpoints.begin(), fake.endpoints.end(),
                       [](std::uint8_t endpoint) { return endpoint == 0x81U; }));
@@ -580,7 +588,9 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition() {
     CHECK(fake.cancel_count == 4);
     CHECK(fake.free_count == 4);
     CHECK(fake.cf[0] == fake.initial_cf(0U));
+    CHECK((fake.gpio & 0x20U) == 0U); // STOP_STREAM retains committed lease power.
     CHECK(hardware.close_receiver(0U).has_value());
+    CHECK((fake.gpio & 0x20U) != 0U);
     CHECK(hardware.open_receiver(1U).has_value());
     LibusbW3u3HardwareTestPeer::mark_tuned(hardware, 1U);
 
@@ -946,7 +956,11 @@ bool test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity() {
     CHECK(fake.controls.empty());
     LibusbW3u3HardwareTestPeer::require_initialization(hardware);
     CHECK(hardware.open_receiver(1U).has_value());
-    CHECK(!saw_gpio_mask(fake, 0x20U));
+    CHECK(saw_gpio_mask(fake, 0x20U)); // Explicit OFF initialization is allowed.
+    CHECK((fake.gpio & 0x20U) != 0U);
+    for (const auto& control : fake.controls)
+        if (control.request == Request::Gpio && (control.value & 0x2000U) != 0U)
+            CHECK((control.value & 0x20U) != 0U); // Never enable at startup.
     CHECK(fake.gpio_ex_write_count == 0);
     CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
     std::atomic<bool> cancelled{false};
@@ -1150,6 +1164,10 @@ bool test_v2_master_routing_tune_capture_and_tsid() {
     LibusbW3u3HardwareTestPeer::require_initialization(hardware);
     CHECK(hardware.open_receiver(1U).has_value());
     CHECK(LibusbW3u3HardwareTestPeer::v2_identity_verified(hardware));
+    CHECK((fake.gpio & 0x20U) == 0U); // Active-high V2 must start OFF.
+    for (const auto& control : fake.controls)
+        if (control.request == Request::Gpio && (control.value & 0x2000U) != 0U)
+            CHECK((control.value & 0x20U) == 0U);
     CHECK(!hardware.requires_terrestrial_lock_settle());
     CHECK(hardware.tune_terrestrial(1U, 473142U, 3000U).has_value());
     CHECK(hardware.is_locked(1U, System::ISDB_T).value());

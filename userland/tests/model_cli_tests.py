@@ -24,6 +24,13 @@ for key, pid, count in [('s3u', '0001', 1), ('s3u2', '0003', 2),
     row = next((r for r in rows if r.startswith(key + ' ')), '')
     check(f'vid_pid=0b06:{pid}' in row and f'capacity={count}' in row, row)
     check('family=' in row and 'runtime=' in row, row)
+    if key in ('s3u', 's3u2'):
+        check('lnb_control=external-unconfirmed' in row and
+              'lnb_15v_request=unsupported' in row, row)
+    else:
+        check('lnb_control=source-backed-software' in row and
+              'lnb_15v_request=supported' in row, row)
+    check('lnb_validation=pending' in row, row)
 check('verified' not in catalog.stdout, 'catalog must not imply hardware validation')
 check(run('asicend', '--mock', '--model', 'not-an-asicen').returncode == 2,
       'unknown mock model must fail before a server is created')
