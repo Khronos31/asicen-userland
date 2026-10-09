@@ -124,17 +124,18 @@ successful writes alone are not proof of re-enumeration or receiver readiness.
 
 ```sh
 build/asicend --models
-build/asicend --mock --model s3u --runtime-dir /tmp/asicen-s3u --instance test
+build/asicend-mock --model s3u --runtime-dir /tmp/asicen-s3u --instance test
 ```
 
-The model catalogue does not access USB. Mock operation exercises topology and
-IPC only; its synthetic packets prove nothing about a physical receiver.
-Hardware identifies the actual descriptor and cross-checks optional --model.
-Single-function models omit sibling arguments; paired models require both paths.
+The model catalogue does not access USB. The `asicend-mock` offline service
+exercises topology and IPC only; its synthetic packets prove nothing about a
+physical receiver. Hardware identifies the actual descriptor and cross-checks
+optional --model. Single-function models omit the sibling --usb-path; paired
+models require both.
 
 ```sh
-build/asicend --hardware --model s3u2 --primary BUS:ADDR --primary-port BUS-PORT --instance s3u2
-build/asicend --hardware --model w3u2 --primary BUS:ADDR --primary-port BUS-PORT --sibling BUS:ADDR --sibling-port BUS-PORT --instance w3u2
+build/asicend --model s3u2 --usb-path BUS:ADDRESS --instance s3u2
+build/asicend --model w3u2 --usb-path BUS:ADDRESS --usb-path BUS:ADDRESS --instance w3u2
 ```
 
 The diagnostic asicen-frontend tool retains its original W3U2/W3U3 plan surface;

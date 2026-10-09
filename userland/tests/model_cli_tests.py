@@ -32,9 +32,9 @@ for key, pid, count in [('s3u', '0001', 1), ('s3u2', '0003', 2),
               'lnb_15v_request=supported' in row, row)
     check('lnb_validation=pending' in row, row)
 check('verified' not in catalog.stdout, 'catalog must not imply hardware validation')
-check(run('asicend', '--mock', '--model', 'not-an-asicen').returncode == 2,
+check(run('asicend-mock', '--model', 'not-an-asicen').returncode == 2,
       'unknown mock model must fail before a server is created')
-check(run('asicend', '--hardware', '--model', 'not-an-asicen').returncode in (2, 3),
+check(run('asicend', '--model', 'not-an-asicen').returncode in (2, 3),
       'unknown hardware model must fail before device access')
 if (build / 'asicen-probe').exists():
     with tempfile.TemporaryDirectory() as directory:

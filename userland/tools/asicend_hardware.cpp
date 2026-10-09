@@ -43,7 +43,6 @@ public:
 };
 
 struct Options {
-    bool hardware = false;
     const asicen::DeviceProfile* expected_model = nullptr;
     std::array<std::string, 2U> usb_paths;
     std::size_t usb_path_count = 0U;
@@ -126,8 +125,7 @@ bool valid_instance(const std::string& value) {
 bool parse_arguments(int argc, char** argv, Options* out) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
-        if (arg == "--hardware") out->hardware = true;
-        else if (arg == "--model" && i + 1 < argc) {
+        if (arg == "--model" && i + 1 < argc) {
             out->expected_model = asicen::find_profile_by_model(argv[++i]);
             if (out->expected_model == nullptr) return false;
         }
@@ -187,32 +185,32 @@ bool parse_arguments(int argc, char** argv, Options* out) {
             if (value.empty()) return false;
             out->firmware_path = value;
         } else if (arg == "--help" || arg == "-h") {
-            std::puts("usage: asicend --hardware --usb-path BUS:ADDRESS|BUS-PORT "
+            std::puts("usage: asicend --usb-path BUS:ADDRESS|BUS-PORT "
                       "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
                       "                 [--runtime-dir PATH] [--instance TOKEN] "
                       "[--group] [--allow-lnb-power] [--firmware PATH]\n"
-                      "       asicend --hardware --fd FD [--fd FD] [--model MODEL]\n"
+                      "       asicend --fd FD [--fd FD] [--model MODEL]\n"
                       "                 [--runtime-dir PATH] [--instance TOKEN] "
                       "[--group] [--allow-lnb-power] [--firmware PATH]\n"
-                      "       asicend --hardware --usb-path BUS:ADDRESS|BUS-PORT "
+                      "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
                       "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
                       "                 --probe-satellite RF_KHZ [--slot 0..7]\n"
-                      "       asicend --hardware --usb-path BUS:ADDRESS|BUS-PORT "
+                      "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
                       "[--usb-path BUS:ADDRESS|BUS-PORT] --model MODEL --probe-card\n"
-                      "       asicend --hardware --usb-path BUS:ADDRESS|BUS-PORT "
+                      "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
                       "[--usb-path BUS:ADDRESS|BUS-PORT] --model MODEL --card-only "
                       "[--runtime-dir PATH] [--instance TOKEN]\n"
                       "  --usb-path   native topology; up to two values, primary first then\n"
                       "               sibling. Each value is BUS:ADDRESS or BUS-PORT.\n"
                       "  --fd         granted USB descriptors; up to two, primary first.\n"
                       "  --allow-lnb-power  permit explicit ISDB-S 15 V requests; default off\n"
-                      "  --firmware   loader image; loaded by --hardware before claiming\n");
+                      "  --firmware   loader image; loaded before claiming\n");
             std::exit(0);
         } else return false;
     }
     const bool fd_mode = out->file_descriptor_count != 0U;
     const bool path_mode = out->usb_path_count != 0U;
-    if (!out->hardware || out->runtime_dir.size() >= 400U ||
+    if (out->runtime_dir.size() >= 400U ||
         !valid_instance(out->instance)) return false;
     if (fd_mode == path_mode) return false;
     return (!out->have_satellite_slot || out->probe_satellite) &&
@@ -407,10 +405,10 @@ px4::userland::Result<asicen::UsbLocation> wait_for_runtime(
 int run_asicend_hardware(int argc, char** argv) {
     Options options;
     if (!parse_arguments(argc, argv, &options)) {
-        std::fprintf(stderr, "usage: asicend --hardware --usb-path BUS:ADDRESS|BUS-PORT "
+        std::fprintf(stderr, "usage: asicend --usb-path BUS:ADDRESS|BUS-PORT "
                              "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL] [--runtime-dir PATH] "
                              "[--instance TOKEN] [--group] [--allow-lnb-power] [--firmware PATH]\n"
-                             "       asicend --hardware --fd FD [--fd FD] [--model MODEL] "
+                             "       asicend --fd FD [--fd FD] [--model MODEL] "
                              "[--runtime-dir PATH] [--instance TOKEN] [--group] "
                              "[--allow-lnb-power] [--firmware PATH]\n");
         return 2;

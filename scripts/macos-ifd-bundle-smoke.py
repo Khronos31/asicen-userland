@@ -84,7 +84,7 @@ def main() -> int:
         proxy_thread.start()
         with (root / "daemon.log").open("wb") as log:
             daemon = subprocess.Popen(
-                [str(daemon_binary), "--mock", "--runtime-dir", str(runtime),
+                [str(daemon_binary), "--runtime-dir", str(runtime),
                  "--instance", instance], stdout=subprocess.DEVNULL, stderr=log)
             try:
                 deadline = time.monotonic() + 3

@@ -64,7 +64,7 @@ S3U / S3U2 / W3U2 / W3U3 用の Linux ローダは `firmware/asicen-loader.bin`�
 
 PX-W3U3 V2 用の別イメージ（詳細は [docs/model-support.md](docs/model-support.md)）は、このファイルとは別物で、リポジトリには入っていません。
 
-ファームウェアの転送は `asicend --hardware --firmware PATH` で行います（ローダ状態のデバイスへ転送し、runtime の再列挙を待ちます。既に runtime の場合は転送をスキップします）。`--model` を併せて指定してください。開発用の `asicen-probe load-firmware` も引き続き利用できます。
+ファームウェアの転送は `asicend --usb-path ... --firmware PATH` で行います（ローダ状態のデバイスへ転送し、runtime の再列挙を待ちます。既に runtime の場合は転送をスキップします）。`--model` を併せて指定してください。開発用の `asicen-probe load-firmware` も引き続き利用できます。
 
 ### 実行時ライブラリ
 
@@ -98,11 +98,11 @@ sudo udevadm control --reload-rules
 
 ### モックでの実行
 
-実機を使わずに動作を確認できます。モックが出力する TS は合成の null パケットです（実カードの動作ではありません）。
+実機を使わずに動作を確認できます。モックが出力する TS は合成の null パケットです（実カードの動作ではありません）。モックは開発用の `asicend-mock` バイナリです（配布物には含まれません）。
 
 ```sh
 mkdir -m 700 /tmp/asicen-example
-asicend --mock --runtime-dir /tmp/asicen-example --instance test
+asicend-mock --runtime-dir /tmp/asicen-example --instance test
 asicenctl --runtime-dir /tmp/asicen-example --instance test list
 asicen-ts --runtime-dir /tmp/asicen-example --instance test \
   --receiver 1 --channel T27 --packet-count 100 --output mock.ts
@@ -113,7 +113,7 @@ asicen-ts --runtime-dir /tmp/asicen-example --instance test \
 接続機器は `asicend --list-json` で確認します（USB 接続を挿し直すとアドレスが変わります。再現には `--usb-path BUS-PORT` 形式を使います）。
 
 ```sh
-asicend --hardware --usb-path 1-2.1 --usb-path 1-2.2 \
+asicend --usb-path 1-2.1 --usb-path 1-2.2 \
   --runtime-dir /tmp/asicen-example --instance w3u3
 asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
   --receiver 1 --channel T27 --packet-count 30000 --output capture.ts

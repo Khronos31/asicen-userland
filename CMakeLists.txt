@@ -277,9 +277,8 @@ if(UNIX)
   target_compile_options(asicen-transform PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
   add_executable(asicend
-    userland/tools/asicend.cpp
-    userland/tools/asicend_research.cpp)
-  target_link_libraries(asicend PRIVATE asicen_px4_mock asicen_core Threads::Threads)
+    userland/tools/asicend.cpp)
+  target_link_libraries(asicend PRIVATE asicen_core Threads::Threads)
   target_compile_options(asicend PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
   if(ASICEN_ENABLE_LIBUSB)
@@ -287,6 +286,14 @@ if(UNIX)
     target_compile_definitions(asicend PRIVATE ASICEN_ENABLE_LIBUSB=1)
     target_link_libraries(asicend PRIVATE asicen_libusb)
   endif()
+
+  # asicend-mock: offline mock/research service, separate from the real
+  # hardware daemon. Not part of the distributed product.
+  add_executable(asicend-mock
+    userland/tools/asicend_mock.cpp
+    userland/tools/asicend_research.cpp)
+  target_link_libraries(asicend-mock PRIVATE asicen_px4_mock asicen_core Threads::Threads)
+  target_compile_options(asicend-mock PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
   add_executable(asicenctl
     userland/tools/asicenctl.cpp
@@ -561,7 +568,7 @@ if(ASICEN_BUILD_TESTS)
     add_test(NAME asicen-product-cli-integration
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/product_cli_integration.py
-        $<TARGET_FILE:asicend> $<TARGET_FILE:asicenctl> $<TARGET_FILE:asicen-ts>)
+        $<TARGET_FILE:asicend-mock> $<TARGET_FILE:asicenctl> $<TARGET_FILE:asicen-ts>)
     set_tests_properties(asicen-product-cli-integration PROPERTIES TIMEOUT 15)
   endif()
 
@@ -688,7 +695,7 @@ if(ASICEN_BUILD_TESTS)
       NAME asicen-mock-integration
       COMMAND bash
         ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/mock_integration.sh
-        $<TARGET_FILE:asicend>
+        $<TARGET_FILE:asicend-mock>
         $<TARGET_FILE:asicen-ts>
     )
   endif()

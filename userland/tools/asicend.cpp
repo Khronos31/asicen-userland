@@ -1,93 +1,52 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+// asicend: real-hardware daemon.  Mirrors px4d: native (--usb-path) or fd
+// modes are selected by their options, and read-only discovery uses
+// --list-json.  The isolated mock service lives in the separate asicend-mock
+// binary; this binary never runs a mock backend.
 #include "asicen/product_profile.h"
 #include "asicen/device_profile.h"
-#include "asicen/px4_mock_backend.h"
-#include "asicen/enclosure_lock.h"
 #include "asicen/enclosure_grouping.h"
-#include "px4/control_server.h"
-#include "px4/posix_tuner_nonce.h"
 #ifdef ASICEN_ENABLE_LIBUSB
 #include <libusb.h>
 #endif
 
-#include <signal.h>
-#include <unistd.h>
-
-#include <chrono>
-#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <thread>
 #include <vector>
 
-int run_asicend_research(int argc, char** argv);
 #ifdef ASICEN_ENABLE_LIBUSB
 int run_asicend_hardware(int argc, char** argv);
 #endif
 
 namespace {
 
-volatile sig_atomic_t stop_requested = 0;
-
-void signal_handler(int) { stop_requested = 1; }
-
-class MockTime final : public px4::userland::TunerServiceTime {
-public:
-    std::uint64_t monotonic_ms() noexcept override
-    {
-        return static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
-    }
-    void sleep_ms(std::uint32_t ms) noexcept override
-    { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
-};
-
-bool valid_instance(const std::string& value)
-{
-    if (value.empty() || value.size() > 80U || value == "." || value == "..") return false;
-    const bool serial_shaped = (value.size() == 14U || value.size() == 15U) &&
-        std::all_of(value.begin(), value.end(), [](unsigned char c) {
-            return c >= '0' && c <= '9';
-        });
-    if (serial_shaped) return false;
-    for (const unsigned char c : value) {
-        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
-            (c >= 'a' && c <= 'z') || c == '_' || c == '-' || c == '.') continue;
-        return false;
-    }
-    return true;
-}
-
-int acquire_enclosure_lock()
-{
-    return asicen::acquire_enclosure_lock("/tmp/asicen-userland-enclosure.lock");
-}
-
-void print_usage(FILE* output)
+void usage(FILE* output)
 {
 #ifdef ASICEN_ENABLE_LIBUSB
     std::fprintf(output,
-        "usage: asicend --mock [--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
-        "                 [--group] [--allow-lnb-power]\n"
-        "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT\n"
-        "               [--sibling BUS:ADDR --sibling-port BUS-PORT]\n"
-        "               [--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
-        "               [--group] [--allow-lnb-power]\n"
-        "       asicend --hardware --primary-fd FD [--sibling-fd FD]\n"
-        "               [--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
-        "               [--group] [--allow-lnb-power]\n"
-        "       asicend --list | --list-json | --models\n"
-        "Hardware mode uses source-guarded model dispatch; see --models and model-support.md.\n");
+        "usage: asicend --list-json\n"
+        "       asicend --models\n"
+        "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
+        "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
+        "                 [--runtime-dir PATH] [--instance TOKEN] "
+        "[--group] [--allow-lnb-power] [--firmware PATH]\n"
+        "       asicend --fd FD [--fd FD] [--model MODEL]\n"
+        "                 [--runtime-dir PATH] [--instance TOKEN] "
+        "[--group] [--allow-lnb-power] [--firmware PATH]\n"
+        "  --usb-path   native topology; up to two values, primary first then\n"
+        "               sibling. Each value is BUS:ADDRESS or BUS-PORT.\n"
+        "  --fd         granted USB descriptors; up to two, primary first.\n"
+        "  --allow-lnb-power  permit explicit ISDB-S 15 V requests; default off\n"
+        "  --firmware   loader image; loaded before claiming\n"
+        "  --models     list supported source-backed models and exit\n"
+        "  --list-json  read-only enumeration and exit\n");
 #else
     std::fprintf(output,
-        "usage: asicend --mock [--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
-        "                 [--group] [--allow-lnb-power]\n"
-        "       asicend --list | --list-json | --models\n"
-        "Hardware mode is unavailable in this libusb-OFF build.\n");
+        "usage: asicend --models | --list-json\n"
+        "The hardware backend is unavailable in this libusb-OFF build.\n");
 #endif
 }
 
@@ -114,7 +73,6 @@ int list_models()
     return 0;
 }
 
-#ifdef ASICEN_ENABLE_LIBUSB
 // Formats one observed USB function as a compact JSON object using the px4
 // device-observation schema (serial is absent on ASICEN, so it stays null).
 void append_usb_observation(std::string& out,
@@ -160,15 +118,9 @@ void append_receivers(std::string& out, const asicen::DeviceProfile& profile) {
         out += "}";
     }
 }
-#endif
 
-int list_devices(bool json)
-{
 #ifdef ASICEN_ENABLE_LIBUSB
-    if (!json) {
-        std::puts("Device enumeration is not implemented; hardware selection requires explicit paths.");
-        return 0;
-    }
+int list_devices_json() {
     libusb_context* context = nullptr;
     if (libusb_init(&context) != 0) {
         std::fprintf(stderr, "libusb_init failed\n");
@@ -285,26 +237,41 @@ int list_devices(bool json)
     std::fputs(out.c_str(), stdout);
     libusb_exit(context);
     return 0;
-#else
-    if (json) std::puts("{\"enclosures\":[],\"ungrouped_usb_devices\":[]}");
-    else std::puts("No ASICEN hardware backend is enabled (mock-only build).");
-    return 0;
-#endif
 }
+#endif
 
 }  // namespace
 
 int main(int argc, char** argv)
 {
-    bool has_mock = false;
-    bool has_research_socket = false;
-    bool has_hardware = false;
+    bool list_json = false;
+    bool models = false;
+    bool hardware_requested = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--mock") == 0) has_mock = true;
-        if (std::strcmp(argv[i], "--socket") == 0) has_research_socket = true;
-        if (std::strcmp(argv[i], "--hardware") == 0) has_hardware = true;
+        const std::string arg(argv[i]);
+        if (arg == "--help" || arg == "-h") { usage(stdout); return 0; }
+        if (arg == "--models") { models = true; continue; }
+        if (arg == "--list-json") { list_json = true; continue; }
+        if (arg == "--list") {
+            // px4 keeps a text --list; asicend has no text enumeration yet.
+            std::fprintf(stderr, "--list is not implemented; use --list-json\n");
+            return 2;
+        }
+        if (arg == "--usb-path" || arg == "--fd" || arg == "--firmware" ||
+            arg == "--runtime-dir" || arg == "--instance" ||
+            arg == "--model" || arg == "--group" || arg == "--allow-lnb-power")
+            hardware_requested = true;
     }
-    if (has_hardware) {
+    if (models) return list_models();
+    if (list_json) {
+#ifdef ASICEN_ENABLE_LIBUSB
+        return list_devices_json();
+#else
+        std::puts("{\"enclosures\":[],\"ungrouped_usb_devices\":[]}");
+        return 0;
+#endif
+    }
+    if (hardware_requested) {
 #ifdef ASICEN_ENABLE_LIBUSB
         return run_asicend_hardware(argc, argv);
 #else
@@ -312,105 +279,6 @@ int main(int argc, char** argv)
         return 3;
 #endif
     }
-    if (has_mock && has_research_socket) return run_asicend_research(argc, argv);
-    bool mock = false;
-    bool list = false;
-    bool list_json = false;
-    bool models = false;
-    bool allow_lnb_power = false;
-    bool group = false;
-    const asicen::DeviceProfile* selected_model = asicen::find_profile(asicen::ModelId::W3u3);
-    std::string runtime_directory;
-    std::string instance = "default";
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg(argv[i]);
-        if (arg == "--help" || arg == "-h") { print_usage(stdout); return 0; }
-        if (arg == "--mock") { mock = true; continue; }
-        if (arg == "--models") { models = true; continue; }
-        if (arg == "--allow-lnb-power") { allow_lnb_power = true; continue; }
-        if (arg == "--group") { group = true; continue; }
-        if (arg == "--model" && i + 1 < argc) {
-            selected_model = asicen::find_profile_by_model(argv[++i]);
-            if (selected_model == nullptr) { std::fprintf(stderr, "unknown ASICEN model\n"); return 2; }
-            continue;
-        }
-        if (arg == "--list") { list = true; continue; }
-        if (arg == "--list-json") { list_json = true; continue; }
-        if ((arg == "--runtime-dir" || arg == "--instance") && i + 1 < argc) {
-            const std::string value(argv[++i]);
-            if (arg == "--runtime-dir") runtime_directory = value;
-            else instance = value;
-            continue;
-        }
-        if (arg == "--usb-path" && i + 1 < argc) {
-            std::fprintf(stderr, "USB topology selection requires the disabled hardware backend\n");
-            return 3;
-        }
-        print_usage(stderr);
-        return 2;
-    }
-    if (models) return list_models();
-    if (list || list_json) return list_devices(list_json);
-    if (!mock) {
-        std::fprintf(stderr, "hardware backend disabled; pass --mock for the isolated mock service\n");
-        return 3;
-    }
-    if (!valid_instance(instance) || runtime_directory.size() >= 400U) {
-        std::fprintf(stderr, "invalid runtime directory or instance token\n");
-        return 2;
-    }
-    const int enclosure_lock = acquire_enclosure_lock();
-    if (enclosure_lock < 0) {
-        std::fprintf(stderr, "ASICEN enclosure is already owned or lock path is unsafe\n");
-        return 4;
-    }
-
-    asicen::MockTunerBackend tuner_backend(*selected_model);
-    tuner_backend.set_allow_lnb_power(allow_lnb_power);
-    asicen::MockTunerStream stream;
-    asicen::UnsupportedCardBackend card_backend;
-    asicen::UnsupportedCardSession card_session;
-    px4::userland::CardService card_service(card_backend, card_session);
-    px4::userland::ipc::posix::PosixTunerNonceSource nonce_source;
-    MockTime time;
-    px4::userland::TunerService tuner_service(
-        tuner_backend, nonce_source, time, nullptr, nullptr, &stream);
-    const px4::userland::ipc::posix::EndpointConfig endpoint{
-        runtime_directory.empty() ? nullptr : runtime_directory.c_str(),
-        instance.c_str(), px4::userland::ipc::posix::kControlEndpointName,
-        group ? px4::userland::ipc::posix::EndpointAccess::shared_group
-              : px4::userland::ipc::posix::EndpointAccess::private_user};
-    auto server = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card_service, tuner_service, {}, true,
-        asicen::profile::usb_present_mask(selected_model->enclosure_receiver_count), &stream,
-        selected_model->enclosure_receiver_count, selected_model->combined_isdb_ts);
-    if (!server) {
-        std::fprintf(stderr, "asicend: %s\n", px4::userland::error_string(server.error()));
-        ::close(enclosure_lock);
-        return server.error() == px4::userland::Error::BUSY ? 4 : 70;
-    }
-
-    struct sigaction action{};
-    action.sa_handler = signal_handler;
-    sigemptyset(&action.sa_mask);
-    ::sigaction(SIGINT, &action, nullptr);
-    ::sigaction(SIGTERM, &action, nullptr);
-    ::signal(SIGPIPE, SIG_IGN);
-    std::fprintf(stderr, "asicend ready backend=mock-only model=%s serial=none receivers=%u endpoint=%s\n",
-                 selected_model->model_key, static_cast<unsigned>(selected_model->enclosure_receiver_count),
-                 server.value()->endpoint_path());
-    px4::userland::Error loop_error = px4::userland::Error::OK;
-    while (!stop_requested) {
-        const auto polled = server.value()->poll_once(px4::userland::Timeout{100U});
-        if (!polled) { loop_error = polled.error(); break; }
-    }
-    const auto stopped = server.value()->shutdown();
-    if (!stopped && loop_error == px4::userland::Error::OK) loop_error = stopped.error();
-    server.value().reset();
-    ::close(enclosure_lock);
-    if (loop_error != px4::userland::Error::OK) {
-        std::fprintf(stderr, "asicend shutdown: %s\n", px4::userland::error_string(loop_error));
-        return 70;
-    }
-    return 0;
+    usage(stderr);
+    return 2;
 }

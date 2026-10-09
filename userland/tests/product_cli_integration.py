@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
     endpoint = endpoint_dir / "control.sock"
     log = open(root / "daemon.log", "wb")
     daemon = subprocess.Popen(
-        [str(DAEMON), "--mock", "--runtime-dir", str(runtime),
+        [str(DAEMON), "--runtime-dir", str(runtime),
          "--instance", instance], stdout=subprocess.DEVNULL, stderr=log)
     children = [daemon]
     logs = [log]
@@ -113,13 +113,13 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
         assert b"stream packets" in stdout_capture.stderr
 
         # A duplicate instance/runtime must not remove the owner's socket.
-        duplicate = run(str(DAEMON), "--mock", "--runtime-dir", str(runtime),
+        duplicate = run(str(DAEMON), "--runtime-dir", str(runtime),
                         "--instance", instance, capture_output=True, timeout=3)
         assert duplicate.returncode != 0
         assert endpoint.is_socket(), "duplicate daemon removed the live endpoint"
 
         # The legacy research mode must also fail safely on the owned path.
-        legacy = run(str(DAEMON), "--mock", "--socket", str(endpoint),
+        legacy = run(str(DAEMON), "--socket", str(endpoint),
                      capture_output=True, timeout=3)
         assert legacy.returncode != 0
         assert endpoint.is_socket(), "research daemon unlinked product endpoint"
@@ -171,7 +171,7 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
         research_socket = root / "research.sock"
         research_log = open(root / "research.log", "wb")
         research = subprocess.Popen(
-            [str(DAEMON), "--mock", "--socket", str(research_socket)],
+            [str(DAEMON), "--socket", str(research_socket)],
             stdout=subprocess.DEVNULL, stderr=research_log)
         children.append(research)
         logs.append(research_log)
@@ -190,7 +190,7 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
         research_socket = root / "research-slow.sock"
         research_log = open(root / "research-slow.log", "wb")
         research = subprocess.Popen(
-            [str(DAEMON), "--mock", "--socket", str(research_socket)],
+            [str(DAEMON), "--socket", str(research_socket)],
             stdout=subprocess.DEVNULL, stderr=research_log)
         children.append(research)
         logs.append(research_log)
@@ -224,7 +224,7 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
             model_log = open(root / (model + ".log"), "wb")
             logs.append(model_log)
             model_daemon = subprocess.Popen(
-                [str(DAEMON), "--mock", "--model", model, "--allow-lnb-power",
+                [str(DAEMON), "--model", model, "--allow-lnb-power",
                  "--runtime-dir", str(runtime),
                  "--instance", model_instance], stdout=subprocess.DEVNULL, stderr=model_log)
             children.append(model_daemon)
@@ -249,7 +249,7 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
         denied_log = open(root / "lnb-denied.log", "wb")
         logs.append(denied_log)
         denied_daemon = subprocess.Popen(
-            [str(DAEMON), "--mock", "--model", "w3u3", "--runtime-dir", str(runtime),
+            [str(DAEMON), "--model", "w3u3", "--runtime-dir", str(runtime),
              "--instance", denied_instance], stdout=subprocess.DEVNULL, stderr=denied_log)
         children.append(denied_daemon)
         wait_socket(denied_endpoint, denied_daemon)

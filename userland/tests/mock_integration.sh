@@ -17,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$daemon" --mock --socket "$sock" > /dev/null 2>"$log" &
+"$daemon" --socket "$sock" > /dev/null 2>"$log" &
 pid=$!
 
 for _ in $(seq 1 100); do

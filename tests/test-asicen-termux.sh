@@ -140,7 +140,7 @@ expect_reject '--help combined with arguments' --help --usb-device "$usb_primary
 : > "$log"
 : > "$fd_log"
 run_launcher --usb-device "$usb_primary"
-assert_argv 'single-device' --hardware --fd 7
+assert_argv 'single-device' --fd 7
 assert_fd_open "--fd=$usb_primary" 'single-device'
 
 # Paired model: the first device is the primary and the second the sibling, and
@@ -149,7 +149,7 @@ assert_fd_open "--fd=$usb_primary" 'single-device'
 : > "$fd_log"
 run_launcher --usb-device "$usb_primary" --usb-device "$usb_sibling" \
     --model w3u3 --runtime-dir "$runtime" --instance termux.one --firmware "$firmware"
-assert_argv 'paired' --hardware --fd 7 --fd 8 \
+assert_argv 'paired' --fd 7 --fd 8 \
     --model w3u3 --runtime-dir "$runtime" --instance termux.one --firmware "$firmware"
 assert_fd_open "--fd=$usb_primary" 'paired primary'
 assert_fd_open "--fd=$usb_sibling" 'paired sibling'
@@ -158,6 +158,6 @@ assert_fd_open "--fd=$usb_sibling" 'paired sibling'
 : > "$log"
 : > "$fd_log"
 run_launcher --usb-device "$usb_primary" --usb-device "$usb_sibling"
-assert_argv 'paired without options' --hardware --fd 7 --fd 8
+assert_argv 'paired without options' --fd 7 --fd 8
 
 printf '%s\n' 'asicen-termux offline tests: PASS'

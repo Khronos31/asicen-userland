@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hardware-free asicend --hardware usb-path/fd argument contract checks.
+"""Hardware-free asicend usb-path/fd argument contract checks.
 
 Every case here fails during argument parsing, before the enclosure lock,
 libusb_init, or any USB access.
@@ -22,7 +22,7 @@ def check(condition, message):
 
 
 def rejects(*args):
-    result = run('--hardware', *args)
+    result = run(*args)
     check(result.returncode == 2,
           f'expected argument rejection for {args!r}, got {result.returncode}: '
           f'{result.stderr}')

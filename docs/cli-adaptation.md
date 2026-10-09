@@ -63,7 +63,9 @@ Do not claim `--device BASE_SERIAL` compatibility.
 
 Retain the existing explicit `--mock --socket PATH` research workflow and
 its tests without silently changing its framing; it must remain isolated
-from the hardware backend. The new product IPC uses its own runtime directory
+from the hardware backend. (Since the 0.1.0 CLI alignment, this research
+service and the isolated mock live in the separate `asicend-mock` binary;
+`asicend` itself is the hardware-only daemon.) The new product IPC uses its own runtime directory
 `asicen-userland` and magic, with a documented local adaptation for receiver
 descriptors and USB-present mask (two USB functions, two receivers each).
 px4 wire-protocol compatibility is not promised by CLI compatibility.

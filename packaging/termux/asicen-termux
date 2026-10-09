@@ -38,8 +38,8 @@ case "$script_path" in
     *[!A-Za-z0-9_./-]*) fail 'launcher callback path contains unsafe shell characters' ;;
 esac
 
-# Replace this process with asicend, prefixing the granted FDs with --hardware
-# and forwarding only the options that were actually requested.
+# Replace this process with asicend, forwarding only the options that were
+# actually requested. The granted FDs become --fd values.
 exec_asicend()
 {
     launcher_directory=$(CDPATH='' cd -- "$(dirname -- "$script_path")" && pwd -P) ||
@@ -49,7 +49,6 @@ exec_asicend()
         asicend=$(command -v asicend 2>/dev/null) ||
             fail 'asicend was not found beside the launcher or in PATH'
     fi
-    set -- --hardware "$@"
     if [ -n "${ASICEN_TERMUX_MODEL-}" ]; then
         set -- "$@" --model "$ASICEN_TERMUX_MODEL"
     fi

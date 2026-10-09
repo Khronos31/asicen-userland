@@ -202,21 +202,18 @@ void handle_client(int fd,
 }
 
 bool parse_args(int argc, char** argv, std::string* socket_path) {
-    bool mock = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--mock") {
-            mock = true;
-        } else if (arg == "--socket" && i + 1 < argc) {
+        if (arg == "--socket" && i + 1 < argc) {
             *socket_path = argv[++i];
         } else if (arg == "-h" || arg == "--help") {
-            std::cout << "usage: asicend --mock --socket PATH\n";
+            std::cout << "usage: asicend-mock --socket PATH\n";
             std::exit(0);
         } else {
             return false;
         }
     }
-    return mock && !socket_path->empty();
+    return !socket_path->empty();
 }
 
 }  // namespace
@@ -224,7 +221,7 @@ bool parse_args(int argc, char** argv, std::string* socket_path) {
 int run_asicend_research(int argc, char** argv) {
     std::string socket_path;
     if (!parse_args(argc, argv, &socket_path)) {
-        std::cerr << "usage: asicend --mock --socket PATH\n";
+        std::cerr << "usage: asicend-mock --socket PATH\n";
         return 2;
     }
     if (socket_path.size() >= sizeof(sockaddr_un{}.sun_path)) {
