@@ -104,7 +104,7 @@ jobs:
             -v "$RUNNER_TEMP/work:/work" \
             -w /src alpine:3.22 sh -euxc '
               apk add --no-cache cmake samurai gcc g++ make pkgconf python3 binutils \
-                tar gzip bzip2 curl linux-headers coreutils;
+                tar gzip bzip2 curl linux-headers coreutils pcsc-lite-dev;
               if ! command -v ninja >/dev/null 2>&1; then
                 ln -sf "$(command -v samu)" /usr/local/bin/ninja;
               fi
@@ -196,7 +196,7 @@ jobs:
             https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
           echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$libusb" | sha256sum -c -
           out="$RUNNER_TEMP/android"
-          mkdir -p "$out/commands" "$out/evidence" "$out/package"
+          mkdir -p "$out/commands" "$out/package"
           sh scripts/build-android.sh --abi "$ABI" \
             --output "$out/commands" \
             --evidence "$out/evidence" \
