@@ -360,6 +360,10 @@ if(ASICEN_BUILD_TESTS)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME asicen-model-cli-tests
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/model_cli_tests.py $<TARGET_FILE_DIR:asicend>)
+  if(ASICEN_ENABLE_LIBUSB)
+    add_test(NAME asicen-fd-cli-tests
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/fd_cli_tests.py $<TARGET_FILE_DIR:asicend>)
+  endif()
   add_executable(asicen-legacy-frontend-profile-tests userland/tests/legacy_frontend_profile_tests.cpp)
   target_link_libraries(asicen-legacy-frontend-profile-tests PRIVATE asicen_core)
   target_compile_options(asicen-legacy-frontend-profile-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -397,6 +401,13 @@ if(ASICEN_BUILD_TESTS)
     # together on macOS CI. This suite limit leaves scheduling headroom without
     # changing any backend operation's deadline.
     set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 60)
+
+    add_executable(asicen-libusb-fd-tests
+      userland/tests/libusb_fd_tests.cpp)
+    target_link_libraries(asicen-libusb-fd-tests PRIVATE asicen_libusb)
+    target_compile_options(asicen-libusb-fd-tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME asicen-libusb-fd-tests COMMAND asicen-libusb-fd-tests)
   endif()
 
   add_executable(asicen-enclosure-lock-tests

@@ -1,0 +1,177 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Open ASICEN USB device(s) with termux-usb and hand the granted file
+# descriptors to asicend. Single-function models take one --usb-device; paired
+# models take two (primary first, sibling second).
+set -eu
+
+usage()
+{
+    printf '%s\n' \
+        'usage: asicen-termux --usb-device PATH [--usb-device PATH]' \
+        '                      [--firmware PATH] [--model MODEL]' \
+        '                      [--runtime-dir PATH] [--instance TOKEN]' \
+        '' \
+        'Pass --usb-device once for a single-function model and twice for a' \
+        'paired model (primary then sibling).'
+}
+
+fail()
+{
+    printf 'asicen-termux: %s\n' "$1" >&2
+    exit 2
+}
+
+script_path=$0
+case "$script_path" in
+    /*) ;;
+    *)
+        script_path=$(CDPATH='' cd -- "$(dirname -- "$script_path")" && pwd -P)/$(basename -- "$script_path") ||
+            fail 'cannot resolve launcher path'
+        ;;
+esac
+case "$script_path" in
+    /*) ;;
+    *) fail 'launcher callback path is not an absolute path' ;;
+esac
+case "$script_path" in
+    *[!A-Za-z0-9_./-]*) fail 'launcher callback path contains unsafe shell characters' ;;
+esac
+
+# Replace this process with asicend, prefixing the granted FDs with --hardware
+# and forwarding only the options that were actually requested.
+exec_asicend()
+{
+    launcher_directory=$(CDPATH='' cd -- "$(dirname -- "$script_path")" && pwd -P) ||
+        fail 'cannot resolve asicend directory'
+    asicend=$launcher_directory/asicend
+    if [ ! -x "$asicend" ]; then
+        asicend=$(command -v asicend 2>/dev/null) ||
+            fail 'asicend was not found beside the launcher or in PATH'
+    fi
+    set -- --hardware "$@"
+    if [ -n "${ASICEN_TERMUX_MODEL-}" ]; then
+        set -- "$@" --model "$ASICEN_TERMUX_MODEL"
+    fi
+    if [ -n "${ASICEN_TERMUX_RUNTIME_DIR-}" ]; then
+        set -- "$@" --runtime-dir "$ASICEN_TERMUX_RUNTIME_DIR"
+    fi
+    if [ -n "${ASICEN_TERMUX_INSTANCE-}" ]; then
+        set -- "$@" --instance "$ASICEN_TERMUX_INSTANCE"
+    fi
+    if [ -n "${ASICEN_TERMUX_FIRMWARE-}" ]; then
+        set -- "$@" --firmware "$ASICEN_TERMUX_FIRMWARE"
+    fi
+    unset ASICEN_TERMUX_STAGE ASICEN_TERMUX_USB2 ASICEN_TERMUX_FIRMWARE \
+        ASICEN_TERMUX_MODEL ASICEN_TERMUX_RUNTIME_DIR ASICEN_TERMUX_INSTANCE \
+        ASICEN_TERMUX_FD1
+    exec "$asicend" "$@"
+}
+
+valid_fd()
+{
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -e "/proc/self/fd/$1" ]
+}
+
+stage=${ASICEN_TERMUX_STAGE-0}
+case "$stage" in
+0)
+    usb_device_count=0
+    usb_device_1=
+    usb_device_2=
+    firmware=
+    model=
+    instance=
+    runtime_dir=
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help)
+                [ "$#" -eq 1 ] || fail '--help cannot be combined with other arguments'
+                usage
+                exit 0
+                ;;
+            --usb-device)
+                [ "$#" -ge 2 ] || fail '--usb-device requires a path'
+                [ -n "$2" ] || fail '--usb-device path must not be empty'
+                usb_device_count=$((usb_device_count + 1))
+                case "$usb_device_count" in
+                    1) usb_device_1=$2 ;;
+                    2) usb_device_2=$2 ;;
+                    *) fail '--usb-device must be specified once or twice' ;;
+                esac
+                shift 2
+                ;;
+            --firmware)
+                [ "$#" -ge 2 ] || fail '--firmware requires a path'
+                [ -z "$firmware" ] || fail '--firmware must be specified once'
+                [ -n "$2" ] || fail '--firmware path must not be empty'
+                firmware=$2
+                shift 2
+                ;;
+            --model)
+                [ "$#" -ge 2 ] || fail '--model requires a model'
+                [ -z "$model" ] || fail '--model must be specified once'
+                [ -n "$2" ] || fail '--model must not be empty'
+                model=$2
+                shift 2
+                ;;
+            --runtime-dir)
+                [ "$#" -ge 2 ] || fail '--runtime-dir requires a path'
+                [ -z "$runtime_dir" ] || fail '--runtime-dir must be specified once'
+                [ -n "$2" ] || fail '--runtime-dir must not be empty'
+                runtime_dir=$2
+                shift 2
+                ;;
+            --instance)
+                [ "$#" -ge 2 ] || fail '--instance requires a token'
+                [ -z "$instance" ] || fail '--instance must be specified once'
+                [ -n "$2" ] || fail '--instance must not be empty'
+                instance=$2
+                shift 2
+                ;;
+            --allow-lnb-power) fail '--allow-lnb-power is not supported' ;;
+            --fd|--fd=*) fail '--fd is not accepted; use --usb-device' ;;
+            --usb-device=*) fail '--usb-device requires a separate path argument' ;;
+            --firmware=*|--model=*|--instance=*|--runtime-dir=*) fail 'options require separate arguments' ;;
+            *) fail "unknown argument: $1" ;;
+        esac
+    done
+    [ "$usb_device_count" -ge 1 ] || fail '--usb-device must be specified once or twice'
+    command -v termux-usb >/dev/null 2>&1 || fail 'termux-usb was not found in PATH'
+
+    export ASICEN_TERMUX_STAGE=1
+    export ASICEN_TERMUX_USB2="$usb_device_2"
+    export ASICEN_TERMUX_FIRMWARE="$firmware"
+    export ASICEN_TERMUX_MODEL="$model"
+    export ASICEN_TERMUX_RUNTIME_DIR="$runtime_dir"
+    export ASICEN_TERMUX_INSTANCE="$instance"
+    unset TERMUX_EXPORT_FD TERMUX_USB_FD
+    exec termux-usb -e "$script_path" "$usb_device_1"
+    ;;
+1)
+    [ "$#" -eq 1 ] || fail 'first termux-usb callback did not provide exactly one FD'
+    valid_fd "$1" || fail 'first termux-usb callback provided a missing or invalid FD'
+    if [ -z "${ASICEN_TERMUX_USB2-}" ]; then
+        exec_asicend --primary-fd "$1"
+    fi
+    export ASICEN_TERMUX_FD1="$1"
+    export ASICEN_TERMUX_STAGE=2
+    exec termux-usb -e "$script_path" "$ASICEN_TERMUX_USB2"
+    ;;
+2)
+    [ "$#" -eq 1 ] || fail 'second termux-usb callback did not provide exactly one FD'
+    valid_fd "${ASICEN_TERMUX_FD1-}" || fail 'first USB FD is no longer open'
+    valid_fd "$1" || fail 'second termux-usb callback provided a missing or invalid FD'
+    fd1=$ASICEN_TERMUX_FD1
+    fd2=$1
+    fd1_target=$(readlink "/proc/self/fd/$fd1" 2>/dev/null) || fail 'cannot inspect first USB FD'
+    fd2_target=$(readlink "/proc/self/fd/$fd2" 2>/dev/null) || fail 'cannot inspect second USB FD'
+    [ "$fd1" != "$fd2" ] || fail 'termux-usb returned the same FD twice'
+    [ "$fd1_target" != "$fd2_target" ] || fail 'termux-usb returned the same open device twice'
+    exec_asicend --primary-fd "$fd1" --sibling-fd "$fd2"
+    ;;
+*) fail 'invalid internal launcher stage' ;;
+esac

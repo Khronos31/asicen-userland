@@ -57,6 +57,12 @@ public:
                        UsbLocation sibling, std::vector<std::uint8_t> primary_path,
                        std::vector<std::uint8_t> sibling_path,
                        const DeviceProfile* expected_profile = nullptr);
+    // Android/Termux entry point. primary_fd is required and sibling_fd is -1
+    // for single-function models. The caller's fds are never closed; the
+    // LibusbDevice duplicates them for the wrapped handle's lifetime. A fd
+    // count that disagrees with the descriptor-resolved profile fails claim().
+    LibusbW3u3Hardware(libusb_context* context, int primary_fd, int sibling_fd,
+                       const DeviceProfile* expected_profile = nullptr);
     ~LibusbW3u3Hardware() noexcept override;
     LibusbW3u3Hardware(const LibusbW3u3Hardware&) = delete;
     LibusbW3u3Hardware& operator=(const LibusbW3u3Hardware&) = delete;
@@ -222,6 +228,7 @@ private:
     std::atomic<bool> cleanup_io_active_{false};
     bool claimed_ = false;
     bool initialized_ = false;
+    bool fd_function_mismatch_ = false;
     bool v2_roles_verified_ = false;
     bool v2_identity_verified_ = false;
     bool tuned_ = false;

@@ -54,6 +54,16 @@ Error satellite_error(SatelliteOperationResult result) noexcept {
 
 std::uint8_t receiver_local(std::uint8_t receiver) noexcept { return receiver; }
 
+std::vector<std::uint8_t> device_port_path(libusb_device* device) {
+    std::vector<std::uint8_t> path;
+    if (device == nullptr) return path;
+    std::uint8_t ports[8]{};
+    const int count =
+        libusb_get_port_numbers(device, ports, static_cast<int>(sizeof(ports)));
+    if (count > 0) path.assign(ports, ports + count);
+    return path;
+}
+
 [[noreturn]] void fatal_drain_exit() {
     const rlimit no_core{0, 0};
     (void)::setrlimit(RLIMIT_CORE, &no_core);
@@ -222,6 +232,37 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(
     }
 }
 
+LibusbW3u3Hardware::LibusbW3u3Hardware(
+    libusb_context* context, int primary_fd, int sibling_fd,
+    const DeviceProfile* expected_profile)
+    : context_(context), primary_claim_(primary_), sibling_claim_(sibling_),
+      async_(std::make_unique<AsyncState>()), decoder_(nullptr, 0U) {
+    if (expected_profile != nullptr) {
+        const auto* known = find_profile(expected_profile->vid, expected_profile->pid);
+        if (known != nullptr && known->model_id == expected_profile->model_id &&
+            known->frontend_family == expected_profile->frontend_family &&
+            known->source_supported == expected_profile->source_supported)
+            profile_ = known;
+    }
+    if (context_ == nullptr || primary_.open(context_, primary_fd) != 0) return;
+    if (expected_profile == nullptr) {
+        libusb_device_descriptor descriptor{};
+        if (libusb_get_device_descriptor(primary_.device(), &descriptor) == 0)
+            profile_ = find_profile(descriptor.idVendor, descriptor.idProduct);
+    }
+    // The wrapped handle's port path is the caller-selected topology; it is
+    // passed to the existing path-based claim unchanged.
+    primary_path_ = device_port_path(primary_.device());
+    if (profile_ == nullptr) return;
+    const bool paired = profile_->expected_runtime_functions == 2U;
+    if (paired != (sibling_fd >= 0)) {
+        fd_function_mismatch_ = true;
+        return;
+    }
+    if (paired && sibling_.open(context_, sibling_fd) == 0)
+        sibling_path_ = device_port_path(sibling_.device());
+}
+
 LibusbW3u3Hardware::~LibusbW3u3Hardware() noexcept {
     // Destruction is only reached after normal shutdown. Never issue frontend
     // cleanup writes here because the USB address could already have changed.
@@ -231,6 +272,8 @@ LibusbW3u3Hardware::~LibusbW3u3Hardware() noexcept {
 Result<void> LibusbW3u3Hardware::claim() {
     // Reject unsupported or mismatched families before claims, GPIO reads,
     // revision/controller requests, or any other vendor transfer.
+    if (fd_function_mismatch_)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     if (!runtime_model_supported()) return Result<void>::failure(Error::UNSUPPORTED);
     if (context_ == nullptr || !primary_.is_open() ||
         (profile_->expected_runtime_functions == 2U && !sibling_.is_open()))

@@ -67,7 +67,8 @@ void print_usage(FILE* output)
     std::fprintf(output,
         "usage: asicend --mock [--model MODEL] [--runtime-dir PATH] [--instance TOKEN]\n"
         "       asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT\n"
-        "               --sibling BUS:ADDR --sibling-port BUS-PORT\n"
+        "               [--sibling BUS:ADDR --sibling-port BUS-PORT]\n"
+        "       asicend --hardware --primary-fd FD [--sibling-fd FD]\n"
         "       asicend --list | --list-json | --models\n"
         "Hardware mode uses source-guarded model dispatch; see --models and model-support.md.\n");
 #else

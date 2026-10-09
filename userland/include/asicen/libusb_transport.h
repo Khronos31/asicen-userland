@@ -15,6 +15,20 @@ struct UsbLocation {
     std::uint8_t address = 0;
 };
 
+// Result of observing libusb_kernel_driver_active(). Android's libusb returns
+// LIBUSB_ERROR_NOT_SUPPORTED, which means the state is known and no kernel
+// driver is bound. Other negative results leave the state unknown.
+struct KernelDriverState {
+    bool known = false;
+    bool active = false;
+};
+
+KernelDriverState classify_kernel_driver_state(int query_result) noexcept;
+
+// Duplicates fd with FD_CLOEXEC for libusb_wrap_sys_device retention. The
+// caller's fd is never closed. Returns the duplicate or a negative value.
+int duplicate_fd_cloexec(int fd) noexcept;
+
 class LibusbDevice final {
 public:
     LibusbDevice() = default;
@@ -24,6 +38,11 @@ public:
     LibusbDevice& operator=(const LibusbDevice&) = delete;
 
     int open(libusb_context* context, UsbLocation location);
+
+    // Opens an already-granted USB fd (Termux/Android). fd is validated and
+    // duplicated; the duplicate backs the wrapped handle and is closed by
+    // close(). The caller's fd is never closed on any path.
+    int open(libusb_context* context, int fd);
     void close();
 
     bool is_open() const;
@@ -65,6 +84,7 @@ private:
     bool interface_claimed(int interface_number) const;
 
     libusb_device_handle* handle_ = nullptr;
+    int retained_fd_ = -1;
     std::vector<int> claimed_interfaces_;
 };
 
