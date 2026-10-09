@@ -71,7 +71,7 @@ jobs:
       - name: Upload macOS candidate
         uses: actions/upload-artifact@v4
         with:
-          name: asicen-userland-0.1.0-darwin-arm64
+          name: rc-darwin-arm64
           path: ${{ runner.temp }}/asicen-userland-0.1.0-darwin-arm64.tar.gz
           if-no-files-found: error
           retention-days: 3
@@ -161,7 +161,7 @@ jobs:
       - name: Upload Linux candidates
         uses: actions/upload-artifact@v4
         with:
-          name: asicen-linux-${{ matrix.arch }}
+          name: rc-linux-${{ matrix.arch }}
           path: ${{ runner.temp }}/work/asicen-userland-0.1.0-linux-*-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           retention-days: 3
@@ -210,7 +210,122 @@ jobs:
       - name: Upload Android candidate
         uses: actions/upload-artifact@v4
         with:
-          name: asicen-userland-0.1.0-android-${{ matrix.abi }}
+          name: rc-android-${{ matrix.abi }}
           path: ${{ runner.temp }}/android/package/asicen-userland-0.1.0-android-${{ matrix.abi }}.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  source-archive:
+    name: Corresponding source archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the firmware-free source archive
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\n' < VERSION)"
+          out="$RUNNER_TEMP/asicen-userland-$version-source.tar.gz"
+          sh scripts/make-linux-source-snapshot.sh --output "$out"
+          if tar -tzf "$out" | grep -E '(^|/)firmware/|asicen-loader\.bin'; then
+            echo 'firmware leaked into corresponding source' >&2
+            exit 1
+          fi
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-source
+          path: ${{ runner.temp }}/asicen-userland-*-source.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  static-start-x86_64:
+    name: Downloaded static x86_64 executable start checks
+    needs: linux-candidates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rc-linux-x86_64
+          path: ${{ runner.temp }}/downloaded
+      - name: Start the exact downloaded static executables
+        run: |
+          set -euo pipefail
+          for archive in "$RUNNER_TEMP"/downloaded/*.tar.gz; do
+            extract="$RUNNER_TEMP/extract-$(basename "$archive" .tar.gz)"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            root=$(find "$extract" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+            for program in asicend asicen-ts asicenctl; do "$root/bin/$program" --help; done
+          done
+
+  static-start-aarch64:
+    name: Downloaded static aarch64 executable start checks
+    needs: linux-candidates
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rc-linux-aarch64
+          path: ${{ runner.temp }}/downloaded
+      - name: Start the exact downloaded static executables
+        run: |
+          set -euo pipefail
+          for archive in "$RUNNER_TEMP"/downloaded/*.tar.gz; do
+            extract="$RUNNER_TEMP/extract-$(basename "$archive" .tar.gz)"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            root=$(find "$extract" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+            for program in asicend asicen-ts asicenctl; do "$root/bin/$program" --help; done
+          done
+
+  release-candidate:
+    name: Assemble release-candidate artifact
+    needs: [build, macos-arm64-intermediate, linux-candidates, android-candidates, source-archive, static-start-x86_64, static-start-aarch64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rc-*
+          merge-multiple: true
+          path: release-candidate
+      - name: Verify the px4 v0.1.10 archive set and write SHA256SUMS
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\n' < VERSION)"
+          python3 - "$version" <<'PY'
+          from pathlib import Path
+          import sys
+          version = sys.argv[1]
+          expected = {
+              f"asicen-userland-{version}-linux-glibc-x86_64.tar.gz",
+              f"asicen-userland-{version}-linux-musl-x86_64.tar.gz",
+              f"asicen-userland-{version}-linux-glibc-aarch64.tar.gz",
+              f"asicen-userland-{version}-linux-musl-aarch64.tar.gz",
+              f"asicen-userland-{version}-darwin-arm64.tar.gz",
+              f"asicen-userland-{version}-android-aarch64.tar.gz",
+              f"asicen-userland-{version}-android-armv7a.tar.gz",
+              f"asicen-userland-{version}-android-x86_64.tar.gz",
+              f"asicen-userland-{version}-source.tar.gz",
+          }
+          actual = {path.name for path in Path("release-candidate").iterdir() if path.is_file()}
+          if actual != expected:
+              raise SystemExit(f"exact archive set required: expected={sorted(expected)} actual={sorted(actual)}")
+          PY
+          cd release-candidate
+          sha256sum asicen-userland-"$version"-*.tar.gz > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          if tar -tzf "asicen-userland-$version-source.tar.gz" | grep -E '(^|/)firmware/|asicen-loader\.bin'; then
+            echo 'firmware leaked into the source archive' >&2
+            exit 1
+          fi
+      - name: Upload the release-candidate set
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate
+          path: release-candidate
           if-no-files-found: error
           retention-days: 3
