@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hardware-free asicend --hardware fd/bus:addr argument contract checks.
+"""Hardware-free asicend --hardware usb-path/fd argument contract checks.
 
 Every case here fails during argument parsing, before the enclosure lock,
 libusb_init, or any USB access.
@@ -30,21 +30,23 @@ def rejects(*args):
           f'argument rejection for {args!r} must not reach libusb_init')
 
 
-# bus:addr and fd selectors cannot be mixed in either order.
-rejects('--primary', '1:2', '--primary-port', '1-2', '--primary-fd', '3')
-rejects('--primary', '1:2', '--sibling', '1:3', '--primary-fd', '3',
-        '--sibling-port', '1-4')
-rejects('--primary-fd', '3', '--primary', '1:2', '--primary-port', '1-2')
-rejects('--primary-fd', '3', '--sibling-port', '1-4', '--primary-port', '1-2')
+# --usb-path and --fd cannot be mixed.
+rejects('--usb-path', '1:2', '--fd', '3')
+rejects('--fd', '3', '--usb-path', '1:2', '--usb-path', '1:3')
 
-# The same number cannot describe both functions.
-rejects('--primary-fd', '5', '--sibling-fd', '5')
+# A selector is required; exactly one selector family.
+rejects('--model', 'w3u3')
+rejects('--fd')
 
-# A fd selector must be present, numeric, and non-negative.
-rejects('--primary-fd')
-rejects('--sibling-fd', '5', '--model', 's3u')
-rejects('--primary-fd', 'not-a-number')
-rejects('--primary-fd', '-1')
-rejects('--primary-fd', '3', '--primary-fd', '4')
+# --usb-path must be a valid BUS:ADDRESS or BUS-PORT value at most two distinct.
+rejects('--usb-path', 'not-a-location')
+rejects('--usb-path', '1:2', '--usb-path', '1:2')
+rejects('--usb-path', '1-2-3')
+rejects('--usb-path', '1:256')
+
+# --fd values are numeric, distinct, and at most two.
+rejects('--fd', 'not-a-number')
+rejects('--fd', '-1')
+rejects('--fd', '5', '--fd', '5')
 
 print('fd CLI checks passed (no hardware access)')

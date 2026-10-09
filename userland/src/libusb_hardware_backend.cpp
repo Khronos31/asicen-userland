@@ -1204,6 +1204,8 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
         return Result<void>::failure(Error::UNSUPPORTED);
     if (lnb_voltage != 0U && !supports_lnb_control())
         return Result<void>::failure(Error::UNSUPPORTED);
+    if (lnb_voltage == 15U && !allow_lnb_power_)
+        return Result<void>::failure(Error::UNSUPPORTED);
     const auto until = steady_now() + std::chrono::seconds(3);
     if (!acquire_control_gate(until))
         return Result<void>::failure(disconnected_.load() ? Error::DISCONNECTED :

@@ -42,6 +42,10 @@ public:
     // hardware capability claim nor a measured output voltage.
     px4::userland::Result<std::uint8_t> simulated_lnb_voltage(
         std::uint8_t receiver) const noexcept;
+    // px4-compatible 15 V gate. Mirrors the --allow-lnb-power daemon flag;
+    // default true keeps direct backend tests unchanged.
+    void set_allow_lnb_power(bool allow) noexcept { allow_lnb_power_ = allow; }
+    bool allow_lnb_power() const noexcept { return allow_lnb_power_; }
     px4::userland::Result<void> start_capture(std::uint8_t receiver,
         px4::userland::ipc::System system) noexcept override;
     px4::userland::Result<void> stop_capture(std::uint8_t receiver,
@@ -58,6 +62,7 @@ private:
     };
     std::uint8_t receiver_count_ = 4U;
     bool combined_isdb_ts_ = false;
+    bool allow_lnb_power_ = true;
     std::atomic<bool> stopping_{false};
     mutable std::mutex power_mutex_;
     std::array<PowerState, 4U> power_{};

@@ -73,10 +73,12 @@ private:
 
 int run_card_only_server(
     LibusbW3u3Hardware& hardware, const char* runtime_directory,
-    const char* instance, const volatile std::sig_atomic_t* stop_requested) noexcept;
+    const char* instance, bool group,
+    const volatile std::sig_atomic_t* stop_requested) noexcept;
 
 int run_live_card_stream_server(
     LibusbW3u3Hardware& hardware, const char* runtime_directory,
-    const char* instance, const volatile std::sig_atomic_t* stop_requested) noexcept;
+    const char* instance, bool group,
+    const volatile std::sig_atomic_t* stop_requested) noexcept;
 
 }  // namespace asicen

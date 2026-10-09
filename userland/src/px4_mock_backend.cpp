@@ -111,6 +111,8 @@ Result<void> MockTunerBackend::begin_tune_power(std::uint8_t receiver,
         (lnb_voltage != 0U && lnb_voltage != 15U) ||
         (system == ipc::System::ISDB_T && lnb_voltage != 0U))
         return Result<void>::failure(Error::INVALID_ARGUMENT);
+    if (lnb_voltage == 15U && !allow_lnb_power_)
+        return Result<void>::failure(Error::UNSUPPORTED);
     std::lock_guard<std::mutex> lock(power_mutex_);
     if (stopping_.load()) return Result<void>::failure(Error::NOT_READY);
     auto& power = power_[receiver];

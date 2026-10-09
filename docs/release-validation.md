@@ -59,9 +59,9 @@ USB 転送の成功や GPIO の読み戻しを、端子電圧の合格にしな�
 
 ### 短時間の回帰
 
-`asicend --list` によるハードウェア列挙は未実装なので、発見は `asicen-probe list` を使う。アドレスは挿し直すと変わる。
+接続確認は `asicend --list-json` を使う。アドレスは挿し直すと変わるので、再現性のために `--usb-path BUS-PORT` 形式を使う。
 
-1. 候補の `asicend --hardware` で起動する。USB 機能が 2 つの W3U2 / W3U3 / V2 は primary と sibling を指定する。USB 機能が 1 つの S3U / S3U2 は primary だけを指定する。
+1. 候補の `asicend --hardware --usb-path BUS:ADDRESS|BUS-PORT`（または Termux では `--fd FD [--fd FD]`）で起動する。USB 機能が 2 つの W3U2 / W3U3 / V2 は primary と sibling を指定する。USB 機能が 1 つの S3U / S3U2 は primary だけを指定する。
 2. 地デジを有限長で受信する。4 チューナー機の露出は primary の receiver 1。S3U は receiver 0 の地デジ側。S3U2 は receiver 1。
 3. 衛星を `--lnb-voltage 0` で有限長受信する。4 チューナー機と S3U2 は receiver 0。S3U は receiver 0 を地デジと排他で使う。
 4. 同時ストリームは 1 本のままにする。sibling 側の受信や 4 本同時は、この手順の合格条件にしない。

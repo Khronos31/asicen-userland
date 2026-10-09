@@ -55,7 +55,7 @@ done
 previous=
 for argument do
     case "$previous" in
-        --primary-fd|--sibling-fd)
+        --fd)
             if [ -e "/proc/self/fd/$argument" ]; then
                 printf '%s=%s\n' "$previous" "$(readlink "/proc/self/fd/$argument")" \
                     >> "$FAKE_ASICEND_FD_LOG"
@@ -135,13 +135,13 @@ expect_reject '--usb-device= form' --usb-device="$usb_primary"
 expect_reject 'duplicate --model' --usb-device "$usb_primary" --model w3u3 --model s3u
 expect_reject '--help combined with arguments' --help --usb-device "$usb_primary"
 
-# Single-function model: one device becomes --primary-fd only, and the exact
+# Single-function model: one device becomes a single --fd only, and the exact
 # fd termux-usb granted stays open for asicend.
 : > "$log"
 : > "$fd_log"
 run_launcher --usb-device "$usb_primary"
-assert_argv 'single-device' --hardware --primary-fd 7
-assert_fd_open "--primary-fd=$usb_primary" 'single-device'
+assert_argv 'single-device' --hardware --fd 7
+assert_fd_open "--fd=$usb_primary" 'single-device'
 
 # Paired model: the first device is the primary and the second the sibling, and
 # optional arguments are forwarded only when requested.
@@ -149,15 +149,15 @@ assert_fd_open "--primary-fd=$usb_primary" 'single-device'
 : > "$fd_log"
 run_launcher --usb-device "$usb_primary" --usb-device "$usb_sibling" \
     --model w3u3 --runtime-dir "$runtime" --instance termux.one --firmware "$firmware"
-assert_argv 'paired' --hardware --primary-fd 7 --sibling-fd 8 \
+assert_argv 'paired' --hardware --fd 7 --fd 8 \
     --model w3u3 --runtime-dir "$runtime" --instance termux.one --firmware "$firmware"
-assert_fd_open "--primary-fd=$usb_primary" 'paired primary'
-assert_fd_open "--sibling-fd=$usb_sibling" 'paired sibling'
+assert_fd_open "--fd=$usb_primary" 'paired primary'
+assert_fd_open "--fd=$usb_sibling" 'paired sibling'
 
 # Optional arguments are absent from argv when they are not requested.
 : > "$log"
 : > "$fd_log"
 run_launcher --usb-device "$usb_primary" --usb-device "$usb_sibling"
-assert_argv 'paired without options' --hardware --primary-fd 7 --sibling-fd 8
+assert_argv 'paired without options' --hardware --fd 7 --fd 8
 
 printf '%s\n' 'asicen-termux offline tests: PASS'

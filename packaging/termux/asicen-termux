@@ -155,7 +155,7 @@ case "$stage" in
     [ "$#" -eq 1 ] || fail 'first termux-usb callback did not provide exactly one FD'
     valid_fd "$1" || fail 'first termux-usb callback provided a missing or invalid FD'
     if [ -z "${ASICEN_TERMUX_USB2-}" ]; then
-        exec_asicend --primary-fd "$1"
+        exec_asicend --fd "$1"
     fi
     export ASICEN_TERMUX_FD1="$1"
     export ASICEN_TERMUX_STAGE=2
@@ -171,7 +171,7 @@ case "$stage" in
     fd2_target=$(readlink "/proc/self/fd/$fd2" 2>/dev/null) || fail 'cannot inspect second USB FD'
     [ "$fd1" != "$fd2" ] || fail 'termux-usb returned the same FD twice'
     [ "$fd1_target" != "$fd2_target" ] || fail 'termux-usb returned the same open device twice'
-    exec_asicend --primary-fd "$fd1" --sibling-fd "$fd2"
+    exec_asicend --fd "$fd1" --fd "$fd2"
     ;;
 *) fail 'invalid internal launcher stage' ;;
 esac

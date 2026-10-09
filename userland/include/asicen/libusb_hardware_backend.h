@@ -105,6 +105,13 @@ public:
     void request_card_stop() noexcept override { request_stop(); }
     px4::userland::Result<void> shutdown() noexcept override;
 
+    // px4-compatible 15 V gate. The daemon passes whether the user granted
+    // --allow-lnb-power; the backend still requires model LNB control, so only
+    // models with verified source-backed GPIO report UNSUPPORTED-free requests.
+    // The default keeps standalone backend callers (tests, probes) unchanged.
+    void set_allow_lnb_power(bool allow) noexcept { allow_lnb_power_ = allow; }
+    bool allow_lnb_power() const noexcept { return allow_lnb_power_; }
+
     px4::userland::Result<void> prepare(
         std::uint8_t, px4::userland::ipc::System,
         const std::atomic<bool>& cancelled) noexcept override;
@@ -118,10 +125,10 @@ private:
     friend struct LibusbW3u3HardwareTestPeer;
 
     friend int run_card_only_server(
-        LibusbW3u3Hardware&, const char*, const char*,
+        LibusbW3u3Hardware&, const char*, const char*, bool,
         const volatile std::sig_atomic_t*) noexcept;
     friend int run_live_card_stream_server(
-        LibusbW3u3Hardware&, const char*, const char*,
+        LibusbW3u3Hardware&, const char*, const char*, bool,
         const volatile std::sig_atomic_t*) noexcept;
     bool begin_card_operation(
         std::uint32_t timeout_ms,
@@ -230,6 +237,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> disconnected_{false};
     std::atomic<bool> capture_interrupted_{false};
+    bool allow_lnb_power_ = true;
     bool card_cleanup_active_ = false;
     std::chrono::steady_clock::time_point deadline_{};
     bool deadline_active_ = false;

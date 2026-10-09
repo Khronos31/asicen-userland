@@ -202,7 +202,8 @@ Result<void> CardOnlyTunerBackend::close_receiver(std::uint8_t) noexcept {
 
 int run_card_only_server(
     LibusbW3u3Hardware& hardware, const char* runtime_directory,
-    const char* instance, const volatile std::sig_atomic_t* stop_requested) noexcept {
+    const char* instance, bool group,
+    const volatile std::sig_atomic_t* stop_requested) noexcept {
     hardware.diagnostic_stop_flag_ = stop_requested;
     const auto* device_profile = hardware.device_profile();
     if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) return 3;
@@ -223,7 +224,9 @@ int run_card_only_server(
     const px4::userland::ipc::posix::EndpointConfig endpoint{
         runtime_directory != nullptr && runtime_directory[0] != '\0'
             ? runtime_directory : nullptr,
-        instance, px4::userland::ipc::posix::kControlEndpointName};
+        instance, px4::userland::ipc::posix::kControlEndpointName,
+        group ? px4::userland::ipc::posix::EndpointAccess::shared_group
+              : px4::userland::ipc::posix::EndpointAccess::private_user};
     auto created = px4::userland::ipc::posix::PosixControlServer::create(
         endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
         nullptr, hardware.receiver_count(), device_profile->combined_isdb_ts);
@@ -253,7 +256,8 @@ int run_card_only_server(
 
 int run_live_card_stream_server(
     LibusbW3u3Hardware& hardware, const char* runtime_directory,
-    const char* instance, const volatile std::sig_atomic_t* stop_requested) noexcept {
+    const char* instance, bool group,
+    const volatile std::sig_atomic_t* stop_requested) noexcept {
     // Initialize shared bridge/demod state once, then release the temporary
     // frontend lease. Card traffic does not retain receiver 1 ownership.
     hardware.diagnostic_stop_flag_ = stop_requested;
@@ -281,7 +285,9 @@ int run_live_card_stream_server(
     const px4::userland::ipc::posix::EndpointConfig endpoint{
         runtime_directory != nullptr && runtime_directory[0] != '\0'
             ? runtime_directory : nullptr,
-        instance, px4::userland::ipc::posix::kControlEndpointName};
+        instance, px4::userland::ipc::posix::kControlEndpointName,
+        group ? px4::userland::ipc::posix::EndpointAccess::shared_group
+              : px4::userland::ipc::posix::EndpointAccess::private_user};
     auto created = px4::userland::ipc::posix::PosixControlServer::create(
         endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
         &stream, hardware.receiver_count(), device_profile->combined_isdb_ts);

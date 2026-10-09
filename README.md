@@ -64,7 +64,7 @@ S3U / S3U2 / W3U2 / W3U3 用の Linux ローダは `firmware/asicen-loader.bin`�
 
 PX-W3U3 V2 用の別イメージ（詳細は [docs/model-support.md](docs/model-support.md)）は、このファイルとは別物で、リポジトリには入っていません。
 
-ファームウェアの転送には `asicen-probe load-firmware` コマンドを使用します（`--device`、`--model`、`--firmware` を指定）。常駐デーモンの `asicend` は `--firmware` オプションを受け付けません。
+ファームウェアの転送は `asicend --hardware --firmware PATH` で行います（ローダ状態のデバイスへ転送し、runtime の再列挙を待ちます。既に runtime の場合は転送をスキップします）。`--model` を併せて指定してください。開発用の `asicen-probe load-firmware` も引き続き利用できます。
 
 ### 実行時ライブラリ
 
@@ -110,11 +110,10 @@ asicen-ts --runtime-dir /tmp/asicen-example --instance test \
 
 ### 実機ハードウェアでの実行
 
-デバイスのアドレスは `asicen-probe list` で確認します（USB 接続を挿し直すとアドレスが変わります）。
+接続機器は `asicend --list-json` で確認します（USB 接続を挿し直すとアドレスが変わります。再現には `--usb-path BUS-PORT` 形式を使います）。
 
 ```sh
-asicend --hardware --primary BUS:ADDR --primary-port BUS-PORT \
-  --sibling BUS:ADDR --sibling-port BUS-PORT \
+asicend --hardware --usb-path 1-2.1 --usb-path 1-2.2 \
   --runtime-dir /tmp/asicen-example --instance w3u3
 asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
   --receiver 1 --channel T27 --packet-count 30000 --output capture.ts
@@ -122,8 +121,7 @@ asicen-ts --runtime-dir /tmp/asicen-example --instance w3u3 \
   --receiver 0 --channel BS01_0 --lnb-voltage 0 --packet-count 30000 --output satellite.ts
 ```
 
-USB 機能が 1 つの PX-S3U と PX-S3U2 では `--sibling` および `--sibling-port` を付けません。USB 機能が 2 つの PX-W3U2、PX-W3U3、PX-W3U3 V2 では sibling の指定が必要です。
-なお、`--primary-fd` および `--sibling-fd` は Termux 用のオプションであり、`BUS:ADDR` やポート指定と同時に使うことはできません。
+USB 機能が 1 つの PX-S3U と PX-S3U2 では `--usb-path` を 1 つだけ指定します。USB 機能が 2 つの PX-W3U2、PX-W3U3、PX-W3U3 V2 では primary（先）と sibling（後）の 2 つを指定します。Termux ではランチャーが `--fd` を渡します。
 
 ### Android (Termux) での実行
 
@@ -188,7 +186,7 @@ DEVICENAME asicen-userland:runtime=/tmp/asicen-example:instance=w3u3:access=user
 - **公開される受信部**: 機種ごとの割り当ては上の表のとおりです。4 チューナー機で公開しているのは primary の 2 系統だけです。
 - **対応ハードウェア revision**: 実行時に対応している内部経路はブリッジ revision 11 / ASIC type 0f / version 7 のみです。revision 16 は未実装のため起動前に失敗します。すべての個体がこの revision に該当するとは限りません。
 - **TS 品質カウンタ**: デーモンが出力する TS 品質カウンタは未計測です。値が 0 であっても「無誤りで受信できた証明」とはみなせません。
-- **ハードウェアの列挙**: ハードウェアに対する `asicend --list` による列挙機能は未実装です。接続機器の検出には `asicen-probe list` を使用してください。
+- **ハードウェアの列挙**: 接続機器の確認は `asicend --list-json` を使います。`--list`（テキスト形式）は未実装です。
 - **過去の受信記録と本配布物の位置づけ**: 過去の開発ビルドにおいて、PX-W3U3 の primary 受信部（receiver 1 の T27、receiver 0 の BS01_0）を受信し、内蔵カード経由の B25 復号まで成功した記録があります。ただし、これは過去の開発ビルドでの記録であり、今回の 0.1.0 配布候補バイナリの実機検証を証明するものではありません。
 
 ## ソースからのビルド

@@ -214,16 +214,18 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
             slow_research_client.wait()
         research_log.close()
 
-        # The same upstream LNB contract is simulated for every model. These
-        # are synthetic null-packet captures, not evidence of physical output
-        # voltage or reception on any of the model-specific hardware paths.
+        # The same upstream LNB contract is simulated for every model when the
+        # daemon grants --allow-lnb-power. These are synthetic null-packet
+        # captures, not evidence of physical output voltage or reception on any
+        # of the model-specific hardware paths.
         for model in ("s3u", "s3u2", "w3u2", "w3u3", "w3u3-v2"):
             model_instance = "lnb-" + model
             model_endpoint = runtime / "asicen-userland" / model_instance / "control.sock"
             model_log = open(root / (model + ".log"), "wb")
             logs.append(model_log)
             model_daemon = subprocess.Popen(
-                [str(DAEMON), "--mock", "--model", model, "--runtime-dir", str(runtime),
+                [str(DAEMON), "--mock", "--model", model, "--allow-lnb-power",
+                 "--runtime-dir", str(runtime),
                  "--instance", model_instance], stdout=subprocess.DEVNULL, stderr=model_log)
             children.append(model_daemon)
             wait_socket(model_endpoint, model_daemon)
@@ -239,6 +241,31 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
             model_daemon.send_signal(signal.SIGTERM)
             assert model_daemon.wait(timeout=2) == 0
             assert not model_endpoint.exists()
+
+        # Without --allow-lnb-power the mock daemon refuses the 15 V request,
+        # matching px4's default-off safety gate. Zero volts stays accepted.
+        denied_instance = "lnb-denied"
+        denied_endpoint = runtime / "asicen-userland" / denied_instance / "control.sock"
+        denied_log = open(root / "lnb-denied.log", "wb")
+        logs.append(denied_log)
+        denied_daemon = subprocess.Popen(
+            [str(DAEMON), "--mock", "--model", "w3u3", "--runtime-dir", str(runtime),
+             "--instance", denied_instance], stdout=subprocess.DEVNULL, stderr=denied_log)
+        children.append(denied_daemon)
+        wait_socket(denied_endpoint, denied_daemon)
+        denied_on = run(str(TS), "--runtime-dir", str(runtime), "--instance",
+                        denied_instance, "--receiver", "0", "--channel", "BS01_0",
+                        "--lnb-voltage", "15", "--packet-count", "3", "--output", "-",
+                        capture_output=True)
+        assert denied_on.returncode == 3 and b"UNSUPPORTED" in denied_on.stderr
+        denied_off = run(str(TS), "--runtime-dir", str(runtime), "--instance",
+                         denied_instance, "--receiver", "0", "--channel", "BS01_0",
+                         "--lnb-voltage", "0", "--packet-count", "3", "--output", "-",
+                         capture_output=True)
+        assert denied_off.returncode == 0 and len(denied_off.stdout) == 3 * 188
+        denied_daemon.send_signal(signal.SIGTERM)
+        assert denied_daemon.wait(timeout=2) == 0
+        assert not denied_endpoint.exists()
     finally:
         for child in children:
             if child.poll() is None:
