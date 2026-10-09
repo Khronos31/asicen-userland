@@ -113,11 +113,12 @@ python3 scripts/extract-windows-loader-firmware.py /path/to/HDTV_PX_W3U3_Loader.
 build/asicen-probe --device BUS:ADDR --model w3u3-v2 --firmware /private/asicen-v2.bin load-firmware
 ```
 
-The extractor requires Python's cryptography package. Firmware remains outside
-Git. Recheck actual runtime PID and physical path after upload; successful writes
-alone are not proof of re-enumeration or receiver readiness. The pre-existing
-binary packaging contract supplies the original Linux image; V2's additional
-external image must be handled explicitly rather than relabeling that file.
+The extractor requires Python's cryptography package. The Linux loader image is
+checked out at `firmware/asicen-loader.bin` so runners can put that exact file
+into distribution archives. Corresponding-source archives still omit it.
+Redistribution rights remain unresolved. The V2 image is not that file and is
+not in the repository. Recheck actual runtime PID and physical path after upload;
+successful writes alone are not proof of re-enumeration or receiver readiness.
 
 ## CLI and offline use
 

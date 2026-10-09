@@ -1,0 +1,3 @@
+firmware/ export-ignore
+firmware/** export-ignore
+firmware/asicen-loader.bin binary

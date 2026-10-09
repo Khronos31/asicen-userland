@@ -20,6 +20,15 @@ ABI_INFO = {
     "armv7a": "/system/bin/linker",
     "x86_64": "/system/bin/linker64",
 }
+FIRMWARE_SHA256 = "b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8"
+FIRMWARE_NOTICE = (
+    "Vendor component: PLEX loader firmware, distributed separately from this project's license.\n"
+    "Source artifact SHA-256: 11a84eaef0157ac08c0b4128aa622a625e8914a28c59ef06e76378ee6094c5de\n"
+    "Original loader object: loader.ko, SHA-256 10ad321dd47d93f89fde556ec8683b7a8ce0fcc74cd90e4a04308592dc9719f0\n"
+    f"Extracted component: FirmBin, 16384 bytes, SHA-256 {FIRMWARE_SHA256}\n"
+    "Redistribution rights: unresolved. Inclusion reflects the user's explicit candidate-distribution choice and does not assert that rights are cleared.\n"
+    "This file is not relicensed under GPL, MIT, public domain, or this project's terms.\n"
+)
 
 
 def fail(message: str) -> None:
@@ -65,8 +74,9 @@ def rebuild_instructions(abi: str) -> str:
     return (
         "# Rebuild this Android command archive\n\n"
         f"These commands were built for Android API 24 with a static libusb 1.0.30\n"
-        f"and the toolchain's static libc++, targeting ABI {abi}. No firmware is\n"
-        "included. Requires the Android NDK r27, a C/C++ compiler with autotools\n"
+        f"and the toolchain's static libc++, targeting ABI {abi}. The archive also\n"
+        "contains firmware/asicen-loader.bin, copied from the pinned checkout file.\n"
+        "Requires the Android NDK r27, a C/C++ compiler with autotools\n"
         "for the host, CMake, Ninja, GNU make, curl, and Python 3.\n\n"
         "    export ANDROID_NDK_HOME=/path/to/android-ndk-r27\n"
         "    sh scripts/build-android.sh --abi " + abi + " --output ../android-" + abi + "\n\n"
@@ -74,7 +84,8 @@ def rebuild_instructions(abi: str) -> str:
         "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf) or supplied\n"
         "with --libusb-archive. Each command must then pass\n"
         "scripts/verify-android-elf.sh with its interpreter and saved architecture.\n"
-        "Firmware is a separate vendor input and is never part of this archive.\n"
+        "Pass --firmware firmware/asicen-loader.bin when packaging. That file is the\n"
+        "Linux loader for S3U, S3U2, W3U2, and W3U3. Redistribution rights are unresolved.\n"
     )
 
 
@@ -117,11 +128,29 @@ def verify_archive(archive_path: Path, abi: str) -> None:
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if result.returncode != 0:
                 fail(f"verify-android-elf.sh rejected bin/{name}: {result.stderr.strip()}")
+        firmware = unpacked / "firmware/asicen-loader.bin"
+        notice = unpacked / "licenses/VENDOR-FIRMWARE-NOTICE.txt"
+        if firmware.is_symlink() or not firmware.is_file():
+            fail("archive does not contain firmware/asicen-loader.bin")
+        if digest(firmware) != FIRMWARE_SHA256:
+            fail("archive firmware does not match the pinned loader")
+        if notice.is_symlink() or not notice.is_file() or FIRMWARE_SHA256 not in notice.read_text(encoding="utf-8"):
+            fail("archive vendor firmware notice is missing")
+
+
+def checked_firmware(path: Path) -> Path:
+    if path.is_symlink() or not path.is_file():
+        fail("firmware must be a regular non-symlink file")
+    resolved = path.resolve(strict=True)
+    if resolved.stat().st_size != 16384 or digest(resolved) != FIRMWARE_SHA256:
+        fail("firmware does not match the pinned Linux loader")
+    return resolved
 
 
 def assemble(commands: Path, libusb_archive: Path, ndk: Path, output_dir: Path,
-             abi: str) -> Path:
+             abi: str, firmware: Path) -> Path:
     validate_inputs(commands, libusb_archive, ndk, abi)
+    firmware = checked_firmware(firmware)
     output_dir.mkdir(parents=True, exist_ok=True)
     if output_dir.is_symlink() or not output_dir.is_dir():
         fail("output directory must be a real directory")
@@ -147,6 +176,10 @@ def assemble(commands: Path, libusb_archive: Path, ndk: Path, output_dir: Path,
         (stage / "licenses/libusb-COPYING").write_bytes(libusb_copying(libusb_archive))
         shutil.copyfile(ndk / "NOTICE", stage / "licenses/ndk-NOTICE")
         shutil.copyfile(ndk / "source.properties", stage / "licenses/ndk-source.properties")
+        (stage / "firmware").mkdir()
+        shutil.copyfile(firmware, stage / "firmware/asicen-loader.bin")
+        (stage / "licenses/VENDOR-FIRMWARE-NOTICE.txt").write_text(
+            FIRMWARE_NOTICE, encoding="utf-8")
         (stage / "REBUILD.md").write_text(rebuild_instructions(abi), encoding="utf-8")
         (stage / "BUILD-METADATA.txt").write_text(
             f"Archive: asicen-userland {VERSION} Android {abi}; private candidate, not a release.\n"
@@ -154,7 +187,8 @@ def assemble(commands: Path, libusb_archive: Path, ndk: Path, output_dir: Path,
             f"Android ABI: {abi}\n"
             f"Interpreter: {ABI_INFO[abi]}\n"
             f"libusb: 1.0.30 static\n"
-            "Firmware: excluded\n",
+            f"Firmware SHA-256: {FIRMWARE_SHA256}\n"
+            "Firmware redistribution rights: unresolved\n",
             encoding="utf-8")
         for path in stage.rglob("*"):
             if path.is_file():
@@ -176,12 +210,14 @@ def main() -> int:
     parser.add_argument("--commands", required=True, type=Path)
     parser.add_argument("--libusb-archive", required=True, type=Path)
     parser.add_argument("--ndk", required=True, type=Path)
+    parser.add_argument("--firmware", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
         archive = assemble(args.commands.resolve(strict=True),
                            args.libusb_archive.resolve(strict=True),
-                           args.ndk.resolve(strict=True), args.output, args.abi)
+                           args.ndk.resolve(strict=True), args.output, args.abi,
+                           args.firmware)
     except (ValueError, OSError, subprocess.CalledProcessError,
             tarfile.TarError) as exc:
         print(f"package failed: {exc}", file=sys.stderr)

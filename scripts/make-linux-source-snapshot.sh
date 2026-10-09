@@ -43,15 +43,21 @@ EOF
 while IFS= read -r path; do
     [ -e "$root/$path" ] || { printf 'explicit source path missing: %s\n' "$path" >&2; exit 1; }
 done < "$work/explicit-paths"
+: > "$work/path-lines.keep"
 while IFS= read -r path; do
     case "$path" in
-        firmware/*|*/firmware/*|.git/*|*/.git/*|secrets.yaml|*/secrets.yaml|.storage/*|*/.storage/*|.ssh/*|*/.ssh/*|*.pcap|*.ts)
+        firmware/*|*/firmware/*)
+            # Checked out for distribution packaging. Corresponding source omits it.
+            continue ;;
+        .git/*|*/.git/*|secrets.yaml|*/secrets.yaml|.storage/*|*/.storage/*|.ssh/*|*/.ssh/*|*.pcap|*.ts)
             printf 'excluded/private material is indexed for the source snapshot: %s\n' "$path" >&2
             exit 1 ;;
     esac
+    printf '%s\n' "$path" >> "$work/path-lines.keep"
 done < "$work/path-lines"
+tr '\n' '\0' < "$work/path-lines.keep" > "$work/paths.keep.nul"
 cat "$work/explicit-paths" | tr '\n' '\0' > "$work/explicit-paths.nul"
-cat "$work/paths.unsorted" "$work/explicit-paths.nul" | sort -zu > "$work/paths"
+cat "$work/paths.keep.nul" "$work/explicit-paths.nul" | sort -zu > "$work/paths"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
     --no-recursion --null -C "$root" --files-from="$work/paths" \
     -cf "$work/snapshot.tar"
