@@ -393,7 +393,10 @@ if(ASICEN_BUILD_TESTS)
       -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME asicen-libusb-capture-lifecycle-tests
       COMMAND asicen-libusb-capture-lifecycle-tests)
-    set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 20)
+    # All model lifecycles include real board/tuner delays: roughly 20 seconds
+    # together on macOS CI. This suite limit leaves scheduling headroom without
+    # changing any backend operation's deadline.
+    set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 60)
   endif()
 
   add_executable(asicen-enclosure-lock-tests
