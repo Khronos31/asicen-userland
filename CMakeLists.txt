@@ -698,5 +698,19 @@ if(ASICEN_BUILD_TESTS)
         $<TARGET_FILE:asicend-mock>
         $<TARGET_FILE:asicen-ts>
     )
+
+    # IFD bundle proxy smoke: exercises the packaged IFD plugin against the
+    # mock daemon over the IPC proxy. Requires both the IFD handler target
+    # (built when PC/SC headers are available) and asicend-mock.
+    if(TARGET asicen-ifdhandler AND TARGET asicend-mock)
+      add_test(
+        NAME asicen-ifd-bundle-smoke
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/macos-ifd-bundle-smoke.py
+          $<TARGET_FILE:asicen-ifdhandler>
+          $<TARGET_FILE:asicend-mock>
+      )
+      set_tests_properties(asicen-ifd-bundle-smoke PROPERTIES TIMEOUT 30)
+    endif()
   endif()
 endif()

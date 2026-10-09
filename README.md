@@ -64,7 +64,7 @@ S3U / S3U2 / W3U2 / W3U3 用の Linux ローダは `firmware/asicen-loader.bin`�
 
 PX-W3U3 V2 用の別イメージ（詳細は [docs/model-support.md](docs/model-support.md)）は、このファイルとは別物で、リポジトリには入っていません。
 
-ファームウェアの転送は `asicend --usb-path ... --firmware PATH` で行います（ローダ状態のデバイスへ転送し、runtime の再列挙を待ちます。既に runtime の場合は転送をスキップします）。`--model` を併せて指定してください。開発用の `asicen-probe load-firmware` も引き続き利用できます。
+ファームウェアの転送は `asicend --usb-path ... --model MODEL --firmware PATH` で行います（ローダ状態のデバイスへ転送し、runtime の再列挙を待ってから起動します。既に runtime の場合は転送をスキップします）。`--fd` で与える Termux では再列挙に追随できないため、転送と起動を分けて行います（転送後に runtime の fd を再取得して `--firmware` なしで起動）。開発用の `asicen-probe load-firmware` も引き続き利用できます。
 
 ### 実行時ライブラリ
 
@@ -132,7 +132,7 @@ asicen-termux --usb-device /dev/bus/usb/001/004 \
   --runtime-dir /tmp/asicen-example --instance tuner
 ```
 
-USB 機能が 2 つの機種では、`--usb-device` を primary、sibling の順で 2 回指定します。`asicend` は `--firmware` 引数を受け付けないため、起動コマンドに `--firmware` は付けません。
+USB 機能が 2 つの機種では、`--usb-device` を primary、sibling の順で 2 回指定します。ローダ状態からの起動時は、まず別途ファームウェアを転送してから runtime を起動してください（`--fd` は再列挙に追随しないため、転送と起動を分けます）。
 
 ## 受信部とチャンネル
 

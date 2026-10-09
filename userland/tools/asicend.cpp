@@ -73,11 +73,15 @@ int list_models()
     return 0;
 }
 
-// Formats one observed USB function as a compact JSON object using the px4
-// device-observation schema (serial is absent on ASICEN, so it stays null).
-void append_usb_observation(std::string& out,
+#ifdef ASICEN_ENABLE_LIBUSB
+// Formats one observed USB function as a compact JSON object matching px4's
+// device-observation entries: device number, serial (null on ASICEN), and the
+// flat bus/address/port location keys.
+void append_usb_observation(std::string& out, unsigned int device,
                             const asicen::UsbFunctionObservation& obs) {
-    out += "{\"serial\":null,\"bus\":";
+    out += "{\"device\":";
+    out += std::to_string(device);
+    out += ",\"serial\":null,\"bus\":";
     out += std::to_string(obs.bus);
     out += ",\"address\":null,\"port\":\"";
     for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
@@ -102,9 +106,11 @@ void append_receivers(std::string& out, const asicen::DeviceProfile& profile) {
         first = false;
         const std::uint8_t function = receiver / 2U;
         const std::uint8_t lane = receiver % 2U;
+        // px4 uses ISDB-T/S for a receiver that accepts either system
+        // (S3U's combined frontend); W3U-family lanes are ISDB-S then ISDB-T.
         const char* system = profile.combined_isdb_ts
-            ? "isdb-t"
-            : (lane == 0U ? "isdb-s" : "isdb-t");
+            ? "ISDB-T/S"
+            : (lane == 0U ? "ISDB-S" : "ISDB-T");
         out += "{\"receiver\":";
         out += std::to_string(receiver);
         out += ",\"device\":";
@@ -119,7 +125,6 @@ void append_receivers(std::string& out, const asicen::DeviceProfile& profile) {
     }
 }
 
-#ifdef ASICEN_ENABLE_LIBUSB
 int list_devices_json() {
     libusb_context* context = nullptr;
     if (libusb_init(&context) != 0) {
@@ -192,16 +197,31 @@ int list_devices_json() {
             std::snprintf(buf, sizeof(buf), "%04x:%04x",
                           static_cast<unsigned>(primary.vid),
                           static_cast<unsigned>(primary.pid));
+            // px4's serial_unique reports whether this identity is unambiguous.
+            // ASICEN has no USB serial, so it is only unique when at most one
+            // ready enclosure of this model/pair is observed.
+            const bool serial_unique = pairs.size() == 1U;
             out += "{\"serial\":null,\"model\":";
             out += '"';
             out += profile.model;
             out += '"';
             out += ",\"usb\":\"";
             out += buf;
-            out += "\",\"status\":\"ready\",\"serial_unique\":true,\"devices\":[";
-            append_usb_observation(out, primary);
+            out += "\",\"status\":\"ready\",\"serial_unique\":";
+            out += serial_unique ? "true" : "false";
+            out += ",\"devices\":[";
+            // device 1 is the canonical primary (port path ends in .1); the
+            // sibling follows. pair.first/second order is enumeration order,
+            // not canonical topology, so order explicitly here.
+            const bool first_is_primary =
+                !primary.port_path.empty() && primary.port_path.back() == 1U;
+            const asicen::UsbFunctionObservation& device1 =
+                first_is_primary ? primary : sibling;
+            const asicen::UsbFunctionObservation& device2 =
+                first_is_primary ? sibling : primary;
+            append_usb_observation(out, 1U, device1);
             out.push_back(',');
-            append_usb_observation(out, sibling);
+            append_usb_observation(out, 2U, device2);
             out += "],\"candidates\":[],\"receivers\":[";
             append_receivers(out, profile);
             out += "]}";
@@ -229,9 +249,15 @@ int list_devices_json() {
         out += buf;
         out += "\",\"status\":\"";
         out += p != nullptr ? "ready" : "loader";
-        out += "\",";
-        append_usb_observation(out, obs);
-        out += "}";
+        // Flat location keys, matching px4's ungrouped entry shape.
+        out += "\",\"bus\":";
+        out += std::to_string(obs.bus);
+        out += ",\"address\":null,\"port\":\"";
+        for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
+            if (k != 0U) out.push_back('.');
+            out += std::to_string(obs.port_path[k]);
+        }
+        out += "\"}";
     }
     out += "]}\n";
     std::fputs(out.c_str(), stdout);
@@ -262,8 +288,24 @@ int main(int argc, char** argv)
             arg == "--model" || arg == "--group" || arg == "--allow-lnb-power")
             hardware_requested = true;
     }
-    if (models) return list_models();
+    if (models) {
+        // px4 requires --list/--list-json alone; keep --models alone too so a
+        // stray hardware option cannot be silently ignored.
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg(argv[i]);
+            if (arg == "--help" || arg == "-h" || arg == "--models") continue;
+            std::fprintf(stderr, "--models cannot be combined with other arguments\n");
+            return 2;
+        }
+        return list_models();
+    }
     if (list_json) {
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg(argv[i]);
+            if (arg == "--help" || arg == "-h" || arg == "--list-json") continue;
+            std::fprintf(stderr, "--list-json cannot be combined with other arguments\n");
+            return 2;
+        }
 #ifdef ASICEN_ENABLE_LIBUSB
         return list_devices_json();
 #else
