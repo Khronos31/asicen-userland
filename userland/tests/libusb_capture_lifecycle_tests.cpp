@@ -1236,28 +1236,47 @@ bool test_legacy_revision_guard_precedes_any_board_write() {
 }  // namespace
 
 int main() {
-    if (!test_unsupported_models_fail_before_any_usb_io()) return 1;
-    if (!test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity()) return 1;
-    if (!test_s3u_combined_receiver_uses_lane0_for_both_systems()) return 1;
-    if (!test_s3u2_powers_off_gpioex_and_retains_single_capture_lease()) return 1;
-    if (!test_legacy_controller_guard_runs_board_off_sequence()) return 1;
-    if (!test_legacy_gpioex_off_failure_is_visible_and_quarantines()) return 1;
-    if (!test_legacy_revision_guard_precedes_any_board_write()) return 1;
-    if (!test_legacy_capture_cleanup_failure_still_powers_off_gpioex()) return 1;
-    if (!test_legacy_gain_runs_once_per_terrestrial_tune()) return 1;
-    if (!test_all_source_terrestrial_channels_and_invalid_requests()) return 1;
-    if (!test_v2_master_routing_tune_capture_and_tsid()) return 1;
-    if (!test_v2_identity_mismatch_powers_off_before_rf_or_link_writes()) return 1;
-    if (!test_v2_duplicate_roles_and_revision16_fail_before_board_writes()) return 1;
-    if (!test_primary_prepare_stop_and_receiver1_reacquisition()) return 1;
-    if (!test_partial_submit_rolls_back_local0_and_releases_lane()) return 1;
-    if (!test_dsc_failure_stops_local0_and_restores_cf()) return 1;
-    if (!test_seed_failure_stops_local0_clears_seed_and_restores_cf()) return 1;
-    if (!test_rejected_open_reserves_before_cleanup_state_and_quarantines()) return 1;
-    if (!test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure()) return 1;
-    if (!test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture()) return 1;
-    if (!test_failed_card_cleanup_before_capture_worker_starts_still_drains()) return 1;
-    if (!test_prepare_waiter_rechecks_quarantine_after_control_gate()) return 1;
-    if (!test_satellite_slot_wait_uses_deadline_including_gate_wait()) return 1;
+    struct TestCase {
+        const char* name;
+        bool (*run)();
+    };
+    const TestCase tests[] = {
+        {"test_unsupported_models_fail_before_any_usb_io", test_unsupported_models_fail_before_any_usb_io},
+        {"test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity", test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity},
+        {"test_s3u_combined_receiver_uses_lane0_for_both_systems", test_s3u_combined_receiver_uses_lane0_for_both_systems},
+        {"test_s3u2_powers_off_gpioex_and_retains_single_capture_lease", test_s3u2_powers_off_gpioex_and_retains_single_capture_lease},
+        {"test_legacy_controller_guard_runs_board_off_sequence", test_legacy_controller_guard_runs_board_off_sequence},
+        {"test_legacy_gpioex_off_failure_is_visible_and_quarantines", test_legacy_gpioex_off_failure_is_visible_and_quarantines},
+        {"test_legacy_revision_guard_precedes_any_board_write", test_legacy_revision_guard_precedes_any_board_write},
+        {"test_legacy_capture_cleanup_failure_still_powers_off_gpioex", test_legacy_capture_cleanup_failure_still_powers_off_gpioex},
+        {"test_legacy_gain_runs_once_per_terrestrial_tune", test_legacy_gain_runs_once_per_terrestrial_tune},
+        {"test_all_source_terrestrial_channels_and_invalid_requests", test_all_source_terrestrial_channels_and_invalid_requests},
+        {"test_v2_master_routing_tune_capture_and_tsid", test_v2_master_routing_tune_capture_and_tsid},
+        {"test_v2_identity_mismatch_powers_off_before_rf_or_link_writes", test_v2_identity_mismatch_powers_off_before_rf_or_link_writes},
+        {"test_v2_duplicate_roles_and_revision16_fail_before_board_writes", test_v2_duplicate_roles_and_revision16_fail_before_board_writes},
+        {"test_primary_prepare_stop_and_receiver1_reacquisition", test_primary_prepare_stop_and_receiver1_reacquisition},
+        {"test_partial_submit_rolls_back_local0_and_releases_lane", test_partial_submit_rolls_back_local0_and_releases_lane},
+        {"test_dsc_failure_stops_local0_and_restores_cf", test_dsc_failure_stops_local0_and_restores_cf},
+        {"test_seed_failure_stops_local0_clears_seed_and_restores_cf", test_seed_failure_stops_local0_clears_seed_and_restores_cf},
+        {"test_rejected_open_reserves_before_cleanup_state_and_quarantines", test_rejected_open_reserves_before_cleanup_state_and_quarantines},
+        {"test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure", test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure},
+        {"test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture", test_card_control_can_deliver_bulk_callback_and_failed_cleanup_stops_capture},
+        {"test_failed_card_cleanup_before_capture_worker_starts_still_drains", test_failed_card_cleanup_before_capture_worker_starts_still_drains},
+        {"test_prepare_waiter_rechecks_quarantine_after_control_gate", test_prepare_waiter_rechecks_quarantine_after_control_gate},
+        {"test_satellite_slot_wait_uses_deadline_including_gate_wait", test_satellite_slot_wait_uses_deadline_including_gate_wait},
+    };
+    for (const auto& test : tests) {
+        std::fprintf(stderr, "[ RUN      ] %s\n", test.name);
+        std::fflush(stderr);
+        const auto start = std::chrono::steady_clock::now();
+        const bool passed = test.run();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        std::fprintf(stderr, "[ %s ] %s (%lld ms)\n",
+                     passed ? "      OK" : "  FAILED", test.name,
+                     static_cast<long long>(elapsed_ms));
+        std::fflush(stderr);
+        if (!passed) return 1;
+    }
     return 0;
 }
