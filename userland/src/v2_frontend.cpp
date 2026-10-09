@@ -6,8 +6,10 @@
 // SHA256 fd35d5a07754627d8bea839c21cc041bcd389cbaf04f0be398faf6240a264adf
 // https://github.com/knight-rider/ptx/blob/ad3dc2619787a9a38ae3c5a17137f47d9631e8e1/drivers/media/tuners/tda2014x.c
 // SHA256 283d92324eab103d6071e7a1937ac7f1a8ce2ebac759833eb21b7a936d25a3af
-// Both sources declare MODULE_LICENSE("GPL"). Preserve the GPLv2 product
-// license and attribution when distributing this derived implementation.
+// Both sources declare MODULE_LICENSE("GPL"). That string is metadata, not a
+// GPL version or a separate license document; none was found for these two
+// drivers. This derived file is distributed as GPL-2.0-only with the product.
+// Preserve the attribution above.
 //
 // V2-specific facts independently checked against official x64 BDA SYS
 // SHA256 5c7174d62eef7d704f44904ac1336261135a1edfccd2776e5e1c45ce7088f0f2.

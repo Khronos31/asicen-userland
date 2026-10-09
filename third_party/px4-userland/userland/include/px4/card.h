@@ -7,6 +7,9 @@
 // winusb/src/WinSCard_PX4/bcas_atr.hpp.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: CardSession::initialize_with_atr() validates
+// an ATR profile before T=1 negotiation. The 2026-09-03 px4-userland notice above
+// is unchanged.
 #ifndef PX4_USERLAND_CARD_H
 #define PX4_USERLAND_CARD_H
 

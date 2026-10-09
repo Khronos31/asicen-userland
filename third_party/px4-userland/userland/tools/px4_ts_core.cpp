@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: under ASICEN_PRODUCT_CLI, command names,
+// receiver bounds, serial-free instance routing, and px4-compatible
+// --lnb-voltage 0|15 parsing. That parser replaced the earlier no-LNB guard.
+// The original license notice is unchanged.
 #include "px4_ts_core.h"
 
 #include "px4/control_client.h"

@@ -197,6 +197,8 @@ jobs:
           echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$libusb" | sha256sum -c -
           out="$RUNNER_TEMP/android"
           mkdir -p "$out/commands" "$out/package"
+          sh scripts/make-linux-source-snapshot.sh \
+            --output "$RUNNER_TEMP/asicen-userland-source.tar.gz"
           sh scripts/build-android.sh --abi "$ABI" \
             --output "$out/commands" \
             --evidence "$out/evidence" \
@@ -206,7 +208,11 @@ jobs:
             --libusb-archive "$libusb" \
             --ndk "$ANDROID_NDK_HOME" \
             --firmware firmware/asicen-loader.bin \
+            --source-archive "$RUNNER_TEMP/asicen-userland-source.tar.gz" \
             --output "$out/package"
+          if [ "$ABI" = x86_64 ]; then
+            sh scripts/test-android-libusb-relink.sh --abi x86_64 --libusb-archive "$libusb"
+          fi
       - name: Upload Android candidate
         uses: actions/upload-artifact@v4
         with:

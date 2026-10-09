@@ -6,6 +6,8 @@
 // winusb/src/DriverHost_PX4/smart_card.cpp.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: adds checks for initialize_with_atr().
+// Upstream assertions are unchanged. The 2026-09-03 notice above is unchanged.
 #include "px4/card.h"
 
 #include <algorithm>

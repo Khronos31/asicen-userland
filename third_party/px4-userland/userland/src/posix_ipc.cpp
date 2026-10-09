@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: under ASICEN_PROFILE_ASICEN, runtime-path
+// and product-instance checks differ from px4-userland d51c83e1.
+// The original license notice is unchanged.
 #include "px4/posix_ipc.h"
 #if defined(ASICEN_PROFILE_ASICEN)
 #include "asicen/product_profile.h"

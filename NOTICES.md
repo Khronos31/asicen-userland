@@ -1,5 +1,24 @@
 # Source provenance
 
+## Default license scope
+
+The combined product is GPL version 2. A file that carries its own license
+notice keeps that notice. Where a file in this repository has no more specific
+notice, it is part of the GPL-2.0-only product work. These locations are
+specific:
+
+- `third_party/px4-userland/` is GPL-2.0-only, from px4-userland `d51c83e1`.
+  Local changes are marked in the modified files and in `UPSTREAM.md`.
+- The FC0012 tuner implementation is GPL-2.0-or-later.
+- `userland/src/v2_frontend.cpp` and `userland/src/v2_nmi.cpp` are the
+  GPL-2.0-only adaptation described below. Upstream did not state a version.
+- libusb 1.0.30, when unpacked for a build, stays LGPL-2.1-or-later.
+- `firmware/` is a vendor component and is not covered by this project's GPL.
+- `distribution/licenses/` holds upstream license texts for the toolchains.
+
+This scope is a statement of which notice applies. It is not a clearance
+opinion, and it does not relicense a file that already has its own notice.
+
 `userland/src/frontend_sequence.cpp` and its header declare
 `GPL-2.0-or-later`. The FC0012 algorithm follows Linux v6.6
 [`drivers/media/tuners/fc0012.c`](https://github.com/torvalds/linux/blob/v6.6/drivers/media/tuners/fc0012.c),
@@ -60,28 +79,46 @@ and [GCC 10.2.0](https://github.com/gcc-mirror/gcc/tree/releases/gcc-10.2.0).
 
 ## Vendor firmware in binary packages
 
-On 2026-10-09 the user explicitly selected firmware inclusion in distribution
-archives while keeping it out of Git. The repository contains extraction and
-packaging code plus metadata, not the vendor firmware payload. The firmware
-is supplied externally to candidate packaging and is excluded from the
-corresponding-source archive.
+On 2026-10-09 the user selected inclusion of the Linux loader image in binary
+distribution archives, and later the same day directed that image into Git so
+GitHub-hosted runners can copy it. The file is `firmware/asicen-loader.bin`
+(16384 bytes, SHA-256
+`b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`).
+Corresponding-source archives and `git archive` omit `firmware/`.
 
 The firmware is a separate vendor component: this project's GPL license and
 any licenses on newly written packaging code do not grant rights to it.
 Redistribution rights have not been established. A vendor-component notice
 must accompany its binary-package copy and state the unresolved status,
 source artifact, extracted object, byte size and SHA-256. Do not label it MIT,
-GPL, public domain or rights-cleared. This records the user's distribution
-decision without claiming permission from the vendor.
+GPL, public domain or rights-cleared.
+
+The PLEX Linux driver ZIP's `loader.ko` and `as11usbdtv.ko` carry
+`license=GPL` module metadata. The 64-bit loader
+(SHA-256 `10ad321dd47d93f89fde556ec8683b7a8ce0fcc74cd90e4a04308592dc9719f0`)
+embeds this FirmBin at file offset `0x1b00`. DWARF names the metadata at
+`devMgr.c:119` and FirmBin at `firmbin.c:3`. That evidence does not decide
+whether the extracted firmware is a GPL work or is outside the GPL. The
+inspected official Linux and Windows packages do not contain an explicit
+firmware redistribution permission. This project's GPL notice cannot grant
+that permission.
 
 ## NMI / TDA2014x frontend adaptation
 
 `userland/src/v2_frontend.cpp` and `userland/src/v2_nmi.cpp` adapt portable
-parts of the GPL driver algorithms by Budi Rachmanto / AreMa Inc., from
+parts of driver algorithms by Budi Rachmanto / AreMa Inc., from
 [`knight-rider/ptx` revision ad3dc2619787a9a38ae3c5a17137f47d9631e8e1](https://github.com/knight-rider/ptx/tree/ad3dc2619787a9a38ae3c5a17137f47d9631e8e1):
-`drivers/media/tuners/nm131.c` and `tda2014x.c`. Attribution is retained in the
-files; the adaptation is GPL-2.0-only. Source checksums are recorded in
-[the model support record](docs/model-support.md). Model-specific differences
+`drivers/media/tuners/nm131.c` and `tda2014x.c`. Those two files carry a
+copyright line and `MODULE_LICENSE("GPL")`. No SPDX identifier, no GPL version,
+and no separate license document for those drivers was found in that revision.
+The repository's recpt1 `COPYING` is not a license for them. Linux's
+[module-license rules](https://docs.kernel.org/process/license-rules.html#module-license)
+say `MODULE_LICENSE` is not a substitute for the source license. Attribution
+and the source checksums are kept in the local files and in
+[the model support record](docs/model-support.md). The local adaptation is
+distributed as GPL-2.0-only, which is this product's license and the stricter
+reading of an unspecified GPL version. That is not a finding that upstream
+named GPL-2.0-only. Asking upstream remains open. Model-specific differences
 were cross-checked against official Windows object code by static inspection;
 no vendor executable code or application-key tables are incorporated.
 

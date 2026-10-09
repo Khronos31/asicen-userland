@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-09: default no-op stop notifications, and the
+// native CardSession adapter is omitted when PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION
+// is set. The original license notice is unchanged.
 #ifndef PX4_USERLAND_CARD_SERVICE_H
 #define PX4_USERLAND_CARD_SERVICE_H
 

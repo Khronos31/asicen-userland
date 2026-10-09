@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Common PLL and register initialization adapted from nm131.c:
 // Copyright (C) Budi Rachmanto, AreMa Inc. <info@are.ma>.
+// nm131.c declares MODULE_LICENSE("GPL") and does not state a GPL version.
 // Per-family ISDB-T differences independently transcribed from documented
 // register operations in the official V2 driver. See v2-nmi-families.md.
 #include "asicen/v2_nmi.h"
