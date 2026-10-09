@@ -40,8 +40,11 @@ must not be blindly written back as an exact restoration.
 GPIO/LNB electrical verification is deferred until measurement with a physical
 tester. This is **not an implementation prohibition**. Model-specific official
 board initialization includes its real GPIO/GPIOEx sequence. Do not substitute
-W3U3's GPIO meanings for S3U/S3U2. Selectable LNB voltage remains unsupported;
-board initialization is not a measurement or guarantee of antenna voltage.
+W3U3's GPIO meanings for S3U/S3U2. The LNB extension implements source-backed
+0/15-V requests for W3U2/W3U3/V2; S3U/S3U2 reject software-enable requests
+because their recovered official setters do not perform I/O. Board
+initialization is not a measurement or guarantee of antenna voltage.
+See [LNB operation and limitations](lnb-control.md).
 
 ## Why these are separate implementations
 

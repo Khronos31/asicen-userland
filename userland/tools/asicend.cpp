@@ -83,12 +83,21 @@ int list_models()
 {
     for (std::size_t i = 0; i < asicen::profile_count(); ++i) {
         const auto& p = asicen::profiles()[i];
-        std::printf("%s vid_pid=%04x:%04x model=\"%s\" capacity=%u functions=%u family=%s runtime=%s\n",
+        // These are source capabilities, independent of this build's USB
+        // support. The legacy S3 setters provide no verified power control;
+        // mock ON/OFF simulation must not advertise physical S3 support.
+        const bool lnb_control = p.model_id == asicen::ModelId::W3u2 ||
+                                 p.model_id == asicen::ModelId::W3u3 ||
+                                 p.model_id == asicen::ModelId::W3u3V2;
+        std::printf("%s vid_pid=%04x:%04x model=\"%s\" capacity=%u functions=%u family=%s runtime=%s "
+                    "lnb_control=%s lnb_15v_request=%s lnb_validation=pending\n",
             p.model_key, p.vid, p.pid, p.model,
             static_cast<unsigned>(p.enclosure_receiver_count),
             static_cast<unsigned>(p.expected_runtime_functions),
             asicen::frontend_family_name(p.frontend_family),
-            asicen::profile_runtime_supported(p) ? "source-backed-experimental" : "not-enabled");
+            asicen::profile_runtime_supported(p) ? "source-backed-experimental" : "not-enabled",
+            lnb_control ? "source-backed-software" : "external-unconfirmed",
+            lnb_control ? "supported" : "unsupported");
     }
     return 0;
 }

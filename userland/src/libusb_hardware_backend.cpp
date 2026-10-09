@@ -25,6 +25,48 @@ using px4::userland::ipc::System;
 constexpr std::size_t kQueueDepth = 4U;
 constexpr std::size_t kChunkSize = 4096U;
 constexpr std::chrono::milliseconds kDrainLimit{2000};
+// TC_SetLNB for original W3U2/W3U3 is active-low GPIO20. The V2
+// Windows LNBONOFF path is active-high on that same bit; its verified
+// primary role owns the control. S3U/S3U2 vendor setters are no-ops until
+// an independent, model-specific software control is established.
+struct LnbGpioControl {
+    bool supported = false;
+    std::uint8_t mask = 0U;
+    std::uint8_t on_value = 0U;
+    std::uint8_t off_value = 0U;
+};
+LnbGpioControl lnb_gpio_control(const DeviceProfile* profile) noexcept {
+    if (profile == nullptr || !profile_runtime_supported(*profile)) return {};
+    switch (profile->model_id) {
+        case ModelId::W3u2:
+        case ModelId::W3u3: return {true, 0x20U, 0U, 0x20U};
+        case ModelId::W3u3V2: return {true, 0x20U, 0x20U, 0U};
+        case ModelId::S3u:
+        case ModelId::S3u2: return {};
+    }
+    return {};
+}
+
+class DeadlineScope {
+public:
+    DeadlineScope(std::chrono::steady_clock::time_point& deadline, bool& active,
+                  std::chrono::steady_clock::time_point until) noexcept
+        : deadline_(deadline), active_(active), previous_(deadline),
+          previously_active_(active) {
+        deadline_ = until;
+        active_ = true;
+    }
+    ~DeadlineScope() {
+        deadline_ = previous_;
+        active_ = previously_active_;
+    }
+private:
+    std::chrono::steady_clock::time_point& deadline_;
+    bool& active_;
+    std::chrono::steady_clock::time_point previous_;
+    bool previously_active_;
+};
+
 SatelliteOperationResult v2_satellite_result(V2FrontendResult result) noexcept {
     switch (result) {
         case V2FrontendResult::Completed: return SatelliteOperationResult::Completed;
@@ -264,8 +306,9 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(
 }
 
 LibusbW3u3Hardware::~LibusbW3u3Hardware() noexcept {
-    // Destruction is only reached after normal shutdown. Never issue frontend
-    // cleanup writes here because the USB address could already have changed.
+    // Final cleanup only uses the already-owned handles; a disconnected
+    // bridge is terminal and is never reopened by release().
+    stop_lnb_monitor();
     (void)release();
 }
 
@@ -306,6 +349,11 @@ Result<void> LibusbW3u3Hardware::claim() {
 }
 
 Result<void> LibusbW3u3Hardware::release() noexcept {
+    stop_lnb_monitor();
+    if (claimed_ && (lnb_cleanup_required_ || lnb_on_ || lnb_transaction_active_)) {
+        const auto stopped = shutdown();
+        if (!stopped && !disconnected_.load()) return stopped;
+    }
     const OwnershipError result = ownership_.release();
     const bool ok = result == OwnershipError::none;
     if (ok) {
@@ -677,6 +725,16 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept {
         return fail_open(Error::UNSUPPORTED);
     }
     if (!snapshot_gpio_state()) return fail_open(Error::USB_IO);
+    // Establish OFF before startup. In particular V2's source default GPIO
+    // pattern contains its active-high LNB bit. Generic plans are masked
+    // below so neither startup nor later snapshot restoration can enable it.
+    if (supports_lnb_control()) {
+        const auto off = set_lnb_power(false, false);
+        if (!off) {
+            (void)clear_lnb_power();
+            return fail_open(off.error());
+        }
+    }
     FrontendPlan power_plan = uses_legacy_frontend()
         ? plan_legacy_frontend_startup(legacy_frontend())
         : uses_v2_frontend() ? plan_v2_revision11_startup_prefix() : plan_startup_subset();
@@ -945,43 +1003,285 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(
                               : Result<void>::failure(error);
 }
 Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept {
-    if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
-        return Result<void>::failure(Error::USB_IO);
     if (!runtime_model_supported() || receiver >= receiver_count())
         return Result<void>::failure(Error::UNSUPPORTED);
+    const auto until = steady_now() + std::chrono::seconds(3);
+    if (!acquire_control_gate(until, nullptr, true)) {
+        mark_cleanup_failed(Error::TIMEOUT);
+        return Result<void>::failure(Error::TIMEOUT);
+    }
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
     if (!active_receiver_.owns(receiver)) return Result<void>::failure(Error::NOT_FOUND);
-    if (source_prepared_) return Result<void>::failure(Error::BUSY);
+    if (source_prepared_ && !cleanup_failed_.load())
+        return Result<void>::failure(Error::BUSY);
+    // Independent LNB cleanup is still attempted after another cleanup stage
+    // quarantines the receiver. Never release its lease with uncertain power.
+    const auto off = clear_lnb_power();
+    if (!off) return off;
+    if (cleanup_failed_.load()) return Result<void>::failure(Error::USB_IO);
     tuned_ = false;
     tuned_receiver_ = kNoActiveReceiver;
     gain_applied_ = false;
     (void)active_receiver_.release(receiver);
     return Result<void>::success();
 }
+
+bool LibusbW3u3Hardware::supports_lnb_control() const noexcept {
+    return lnb_gpio_control(profile_).supported;
+}
+
+Result<void> LibusbW3u3Hardware::set_lnb_power(bool on, bool cleanup) noexcept {
+    const auto spec = lnb_gpio_control(profile_);
+    if (on && lnb_fault_latched_) return Result<void>::failure(Error::PROTOCOL_ERROR);
+    if (!spec.supported)
+        return on ? Result<void>::failure(Error::UNSUPPORTED) : Result<void>::success();
+    auto until = steady_now() + std::chrono::seconds(2);
+    if (!cleanup && deadline_active_) until = std::min(until, deadline_);
+    if (!acquire_control_gate(until, nullptr, cleanup))
+        return Result<void>::failure(disconnected_.load() ? Error::DISCONNECTED :
+            stop_requested_.load() && !cleanup ? Error::NOT_READY : Error::TIMEOUT);
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    if (!claimed_) return Result<void>::failure(Error::NOT_READY);
+    if (disconnected_.load()) return Result<void>::failure(Error::DISCONNECTED);
+    if (!cleanup && cleanup_failed_.load()) return Result<void>::failure(Error::USB_IO);
+    if (uses_v2_frontend() && !v2_roles_verified_)
+        return Result<void>::failure(Error::UNSUPPORTED);
+    DeadlineScope deadline(deadline_, deadline_active_, until);
+    // Cleanup may outlive the cancelled/expired tune and must get a fresh,
+    // bounded budget. It is allowed even after capture/controller cleanup fails.
+    const bool previous_cleanup = cleanup_io_active_.load();
+    const bool previous_transition = lnb_power_transition_active_;
+    if (cleanup) cleanup_io_active_.store(true);
+    const auto finish = [&](Error error) {
+        lnb_power_transition_active_ = previous_transition;
+        if (cleanup) cleanup_io_active_.store(previous_cleanup);
+        return error == Error::OK ? Result<void>::success() : Result<void>::failure(error);
+    };
+    if (on && !cleanup) {
+        if (!initialized_) return finish(Error::NOT_READY);
+        const auto ready = verify_powered_controller();
+        if (ready != PoweredControllerCheck::ready)
+            return finish(disconnected_.load() ? Error::DISCONNECTED :
+                ready == PoweredControllerCheck::output_busy ? Error::BUSY :
+                ready == PoweredControllerCheck::unsupported_type ? Error::UNSUPPORTED :
+                expired() ? Error::TIMEOUT : Error::USB_IO);
+    }
+    if (!cleanup && cancelled()) return finish(Error::NOT_READY);
+    lnb_power_transition_active_ = true;
+    const auto transfer = make_gpio_set(on ? spec.on_value : spec.off_value,
+                                        spec.mask, on && uses_v2_frontend() ? 100U : 1000U);
+    std::array<unsigned char, 1> response{};
+    // A failed/short write can already have changed the physical pin.
+    lnb_cleanup_required_ = true;
+    lnb_state_known_ = false;
+    lnb_gpio_io_active_ = true;
+    const int written = control(transfer, response.data());
+    lnb_gpio_io_active_ = false;
+    if (written != transfer.length)
+        return finish(disconnected_.load() ? Error::DISCONNECTED :
+                      expired() ? Error::TIMEOUT : Error::USB_IO);
+    if (on && uses_v2_frontend()) delay_ms(20U);
+    const auto readback = uses_v2_frontend()
+        ? ControlTransfer{0U, Request::GpioRead, 0U, 0U, 1U, Direction::In,
+                          static_cast<std::uint16_t>(on ? 100U : 1000U)}
+        : make_gpio_set(0U, 0U, 1000U);
+    if (control(readback, response.data()) != readback.length)
+        return finish(disconnected_.load() ? Error::DISCONNECTED :
+                      expired() ? Error::TIMEOUT : Error::USB_IO);
+    const auto wanted = on ? spec.on_value : spec.off_value;
+    if ((response[0] & spec.mask) != (wanted & spec.mask))
+        return finish(Error::PROTOCOL_ERROR);
+    if (on && uses_v2_frontend() && (response[0] & 0x80U) == 0U) {
+        // The vendor's digital protection condition is GPIO20 high and
+        // GPIO80 low. Its electrical meaning is not inferred here.
+        lnb_fault_latched_ = true;
+        return finish(Error::PROTOCOL_ERROR);
+    }
+    lnb_on_ = on;
+    lnb_state_known_ = true;
+    lnb_cleanup_required_ = on;
+    lnb_feedback_checked_at_ = steady_now();
+    if (!cleanup && cancelled()) return finish(Error::NOT_READY);
+    if (on && uses_v2_frontend() && !start_lnb_monitor())
+        return finish(Error::INTERNAL);
+    return finish(Error::OK);
+}
+
+Result<void> LibusbW3u3Hardware::check_v2_lnb_feedback() noexcept {
+    if (!uses_v2_frontend() || !lnb_on_) return Result<void>::success();
+    // These GPIO-only controls do not alter the staged I2C buffer, so a
+    // gate-owning frontend/card operation can cooperatively check feedback.
+    lnb_feedback_active_ = true;
+    DeadlineScope deadline(deadline_, deadline_active_,
+                           steady_now() + std::chrono::seconds(2));
+    const auto read = ControlTransfer{0U, Request::GpioRead, 0U, 0U, 1U,
+                                      Direction::In, 100U};
+    std::array<unsigned char, 1> response{};
+    const int result = control(read, response.data());
+    lnb_feedback_checked_at_ = steady_now();
+    if (result == read.length && (response[0] & 0xa0U) == 0xa0U) {
+        lnb_feedback_active_ = false;
+        return Result<void>::success();
+    }
+    const Error failure = disconnected_.load() ? Error::DISCONNECTED :
+        result != read.length ? Error::USB_IO : Error::PROTOCOL_ERROR;
+    // Fail closed on a protection indication or uncertain feedback. Latch
+    // the fault so an in-flight retune can never rollback into ON again.
+    lnb_fault_latched_ = true;
+    (void)clear_lnb_power();
+    lnb_feedback_active_ = false;
+    mark_cleanup_failed(failure);
+    return Result<void>::failure(failure);
+}
+
+bool LibusbW3u3Hardware::poll_v2_lnb_feedback_if_due() noexcept {
+    if (!uses_v2_frontend() || !lnb_on_ || lnb_feedback_active_ ||
+        lnb_power_transition_active_ || disconnected_.load() ||
+        steady_now() - lnb_feedback_checked_at_ < std::chrono::milliseconds(100))
+        return true;
+    return check_v2_lnb_feedback().has_value();
+}
+
+bool LibusbW3u3Hardware::start_lnb_monitor() noexcept {
+    std::lock_guard<std::mutex> life(lnb_monitor_mutex_);
+    if (lnb_monitor_stop_.load() || stop_requested_.load()) return false;
+    if (lnb_monitor_.joinable()) return true;
+    try {
+        lnb_monitor_ = std::thread(&LibusbW3u3Hardware::monitor_lnb_power, this);
+    } catch (...) { return false; }
+    return true;
+}
+
+void LibusbW3u3Hardware::stop_lnb_monitor() noexcept {
+    std::lock_guard<std::mutex> life(lnb_monitor_mutex_);
+    lnb_monitor_stop_.store(true);
+    if (lnb_monitor_.joinable()) lnb_monitor_.join();
+}
+
+void LibusbW3u3Hardware::monitor_lnb_power() noexcept {
+    // Source V2 checks every 100 ms, including idle tuned leases. The same
+    // gate serializes feedback with card, frontend and capture controller I/O.
+    while (!lnb_monitor_stop_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (lnb_monitor_stop_.load()) break;
+        while (!control_gate_.try_lock_for(std::chrono::milliseconds(10)))
+            if (lnb_monitor_stop_.load()) return;
+        std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+        if (lnb_monitor_stop_.load()) break;
+        if (!lnb_on_ || disconnected_.load()) continue;
+        DeadlineScope deadline(deadline_, deadline_active_,
+                               steady_now() + std::chrono::seconds(2));
+        (void)check_v2_lnb_feedback();
+    }
+}
+
+Result<void> LibusbW3u3Hardware::clear_lnb_power() noexcept {
+    // Caller holds the control gate; a disconnected bridge is terminal and
+    // must never receive a guessed recovery write.
+    if (disconnected_.load()) {
+        lnb_on_ = false;
+        lnb_state_known_ = false;
+        lnb_cleanup_required_ = false;
+        lnb_transaction_active_ = false;
+        lnb_transaction_receiver_ = kNoActiveReceiver;
+        return Result<void>::success();
+    }
+    if (lnb_cleanup_required_ || lnb_on_) {
+        const auto off = set_lnb_power(false, true);
+        if (!off) { mark_cleanup_failed(off.error()); return off; }
+    }
+    lnb_transaction_active_ = false;
+    lnb_transaction_receiver_ = kNoActiveReceiver;
+    return Result<void>::success();
+}
+
 Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System system,
                                                  std::uint8_t lnb_voltage) noexcept {
-    if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
-        return Result<void>::failure(Error::USB_IO);
+    if (lnb_voltage != 0U && lnb_voltage != 15U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     if (!receiver_supports(receiver, system) ||
-        !active_receiver_.owns(receiver) || lnb_voltage != 0U)
+        (lnb_voltage != 0U && system != System::ISDB_S))
         return Result<void>::failure(Error::UNSUPPORTED);
-    // Power-on is part of the source-verified shared open sequence. This
-    // transaction hook does not duplicate board writes. Legacy TC_SetLNB is
-    // a no-op: zero means no selectable LNB request, not measured zero volts.
-    // Actual electrical effects of the source board startup are unverified.
-    return initialized_ ? Result<void>::success()
-                        : Result<void>::failure(Error::NOT_READY);
+    if (lnb_voltage != 0U && !supports_lnb_control())
+        return Result<void>::failure(Error::UNSUPPORTED);
+    const auto until = steady_now() + std::chrono::seconds(3);
+    if (!acquire_control_gate(until))
+        return Result<void>::failure(disconnected_.load() ? Error::DISCONNECTED :
+            cleanup_failed_.load() ? Error::USB_IO :
+            stop_requested_.load() ? Error::NOT_READY : Error::TIMEOUT);
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    if (!active_receiver_.owns(receiver)) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!initialized_ || !claimed_) return Result<void>::failure(Error::NOT_READY);
+    if (source_prepared_ || lnb_transaction_active_) return Result<void>::failure(Error::BUSY);
+    DeadlineScope deadline(deadline_, deadline_active_, until);
+    lnb_previous_on_ = lnb_state_known_ && lnb_on_;
+    lnb_requested_on_ = lnb_voltage == 15U;
+    lnb_transaction_active_ = true;
+    lnb_transaction_receiver_ = receiver;
+    // As in px4, a 0-V retune retains the previous committed feed until the
+    // new tune succeeds; failed retunes can therefore restore the old state.
+    Result<void> prepared = Result<void>::success();
+    if (lnb_requested_on_ || !lnb_previous_on_)
+        prepared = set_lnb_power(lnb_requested_on_, false);
+    if (!prepared) {
+        const Error primary = prepared.error();
+        if (lnb_cleanup_required_ && !disconnected_.load()) {
+            const auto restored = set_lnb_power(lnb_fault_latched_ ? false : lnb_previous_on_, true);
+            if (!restored) {
+                mark_cleanup_failed(restored.error());
+                (void)clear_lnb_power();
+            }
+        }
+        if (lnb_fault_latched_) mark_cleanup_failed(primary);
+        lnb_transaction_active_ = false;
+        lnb_transaction_receiver_ = kNoActiveReceiver;
+        return Result<void>::failure(primary);
+    }
+    return Result<void>::success();
 }
+
 Result<void> LibusbW3u3Hardware::commit_tune_power(std::uint8_t receiver) noexcept {
-    if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
-        return Result<void>::failure(Error::USB_IO);
-    return runtime_model_supported() && receiver < receiver_count() && active_receiver_.owns(receiver)
-        ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
+    const auto until = steady_now() + std::chrono::seconds(3);
+    if (!acquire_control_gate(until))
+        return Result<void>::failure(disconnected_.load() ? Error::DISCONNECTED :
+            cleanup_failed_.load() ? Error::USB_IO :
+            stop_requested_.load() ? Error::NOT_READY : Error::TIMEOUT);
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    if (!active_receiver_.owns(receiver) || !lnb_transaction_active_ ||
+        lnb_transaction_receiver_ != receiver)
+        return Result<void>::failure(Error::NOT_READY);
+    DeadlineScope deadline(deadline_, deadline_active_, until);
+    if (!lnb_requested_on_ && lnb_on_) {
+        const auto off = set_lnb_power(false, false);
+        if (!off) return off;  // The service will pair this with rollback.
+    }
+    lnb_transaction_active_ = false;
+    lnb_transaction_receiver_ = kNoActiveReceiver;
+    return Result<void>::success();
 }
+
 Result<void> LibusbW3u3Hardware::rollback_tune_power(std::uint8_t receiver) noexcept {
-    if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load()))
-        return Result<void>::failure(Error::USB_IO);
-    return runtime_model_supported() && receiver < receiver_count() && active_receiver_.owns(receiver)
-        ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
+    const auto until = steady_now() + std::chrono::seconds(3);
+    if (!acquire_control_gate(until, nullptr, true)) {
+        mark_cleanup_failed(Error::TIMEOUT);
+        return Result<void>::failure(Error::TIMEOUT);
+    }
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    if (!active_receiver_.owns(receiver)) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!lnb_transaction_active_) return Result<void>::success();
+    if (lnb_transaction_receiver_ != receiver) return Result<void>::failure(Error::UNSUPPORTED);
+    if (disconnected_.load()) return clear_lnb_power();
+    if (!lnb_state_known_ || lnb_on_ != lnb_previous_on_ || lnb_fault_latched_) {
+        const auto restored = set_lnb_power(lnb_fault_latched_ ? false : lnb_previous_on_, true);
+        if (!restored) {
+            mark_cleanup_failed(restored.error());
+            (void)clear_lnb_power();
+            return restored;
+        }
+    }
+    lnb_transaction_active_ = false;
+    lnb_transaction_receiver_ = kNoActiveReceiver;
+    return Result<void>::success();
 }
 void LibusbW3u3Hardware::mark_receiver_disconnected(std::uint8_t receiver) noexcept {
     if (receiver <= 1U) {
@@ -1087,6 +1387,7 @@ void LibusbW3u3Hardware::end_card_cleanup(bool cleanup_succeeded) noexcept {
 
 Result<void> LibusbW3u3Hardware::shutdown() noexcept {
     stop_requested_.store(true);
+    stop_lnb_monitor();
     const auto gate_deadline = steady_now() +
                                std::chrono::seconds(10);
     if (!acquire_control_gate(gate_deadline, nullptr, true)) {
@@ -1097,6 +1398,9 @@ Result<void> LibusbW3u3Hardware::shutdown() noexcept {
     AtomicFlagScope cleanup_scope(cleanup_io_active_);
     const bool needs_stop = source_prepared_ || cf_snapshot_valid_ ||
                             link_snapshot_valid_ || (async_ && async_->prepared);
+    // OFF is independent of controller/CF restoration and receives its own
+    // cleanup budget even when a previous step has quarantined the backend.
+    (void)clear_lnb_power();
     if (!attempt_hardware_shutdown_cleanup(*this, needs_stop, gpio_snapshot_valid_))
         mark_cleanup_failed(Error::USB_IO);
     if (!cleanup_failed_.load(std::memory_order_acquire))
@@ -1227,18 +1531,36 @@ int LibusbW3u3Hardware::control_function(std::uint8_t function,
         !card_cleanup_active_ && !cleanup_io_active_.load(std::memory_order_acquire))
         return LIBUSB_ERROR_ACCESS;
     if (!claimed_ || disconnected_.load()) return LIBUSB_ERROR_NO_DEVICE;
+    if (!poll_v2_lnb_feedback_if_due())
+        return disconnected_.load() ? LIBUSB_ERROR_NO_DEVICE : LIBUSB_ERROR_IO;
     ControlTransfer transfer = original;
-    if (!uses_legacy_frontend() && !uses_v2_frontend()) {
-        // Retain the historical W3U2/W3U3 no-selectable-LNB policy. The
-        // source-specific S3 boards require their own GPIO/GPIOEx sequence.
-        bool skip = false;
-        ControlTransfer safe{};
-        if (!mask_lnb_gpio_operation(transfer, &safe, &skip)) return LIBUSB_ERROR_ACCESS;
-        if (skip) {
-            if (data != nullptr && transfer.length > 0) data[0] = 1U;
-            return transfer.length;
+    if (uses_v2_frontend() && lnb_on_ && !lnb_feedback_active_ &&
+        !lnb_power_transition_active_) {
+        // Do not let one normal USB request monopolize the bridge beyond the
+        // source watchdog cadence. A timeout fails the operation normally.
+        transfer.timeout_ms = static_cast<std::uint16_t>(
+            std::min<unsigned>(100U, requested_timeout));
+    }
+    const auto lnb = lnb_gpio_control(profile_);
+    const bool exact_lnb_write = function == 0U && lnb_gpio_io_active_ &&
+        transfer.request == Request::Gpio && transfer.direction == Direction::In &&
+        transfer.index == 0U && transfer.length == 1U &&
+        (transfer.value == setup_word(lnb.on_value, lnb.mask) ||
+         transfer.value == setup_word(lnb.off_value, lnb.mask));
+    if ((!uses_legacy_frontend() && !uses_v2_frontend()) || lnb.supported) {
+        // Only the narrow, gate-held LNB transaction may address bit20.
+        // Retain the original W3 GPIOEx prohibition and mask startup/restore
+        // plans for V2 as well; S3 board reset lines have different meanings.
+        if (!exact_lnb_write) {
+            bool skip = false;
+            ControlTransfer safe{};
+            if (!mask_lnb_gpio_operation(transfer, &safe, &skip)) return LIBUSB_ERROR_ACCESS;
+            if (skip) {
+                if (data != nullptr && transfer.length > 0) data[0] = 1U;
+                return transfer.length;
+            }
+            transfer = safe;
         }
-        transfer = safe;
     }
     if (deadline_active_) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1259,18 +1581,25 @@ int LibusbW3u3Hardware::control_function(std::uint8_t function,
         rc = function == 0U ? primary_.control(transfer, data)
                             : sibling_.control(transfer, data);
     if (rc == LIBUSB_ERROR_NO_DEVICE) disconnected_.store(true);
+    if (rc >= 0 && !poll_v2_lnb_feedback_if_due())
+        return disconnected_.load() ? LIBUSB_ERROR_NO_DEVICE : LIBUSB_ERROR_IO;
     return rc;
 }
 void LibusbW3u3Hardware::delay_ms(unsigned ms) {
-    if (cancelled()) return;
-    unsigned sleep = ms;
-    if (deadline_active_) {
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline_ - steady_now()).count();
-        if (left <= 0) return;
-        sleep = std::min<unsigned>(sleep, static_cast<unsigned>(left));
+    const auto until = steady_now() + std::chrono::milliseconds(ms);
+    for (;;) {
+        if (cancelled() || !poll_v2_lnb_feedback_if_due()) return;
+        auto end = deadline_active_ ? std::min(until, deadline_) : until;
+        if (uses_v2_frontend() && lnb_on_ && !lnb_power_transition_active_)
+            end = std::min(end, steady_now() + std::chrono::milliseconds(100));
+        const auto now = steady_now();
+        if (end <= now) return;
+        std::this_thread::sleep_for(end - now);
+        if (steady_now() >= until) {
+            (void)poll_v2_lnb_feedback_if_due();
+            return;
+        }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
 }
 bool LibusbW3u3Hardware::cancelled() const {
     if (cleanup_io_active_.load(std::memory_order_acquire)) return false;

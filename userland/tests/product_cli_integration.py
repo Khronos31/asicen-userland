@@ -75,6 +75,21 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
                       capture_output=True)
         assert invalid.returncode == 2, invalid.returncode
 
+        help_text = run(str(TS), "--help", capture_output=True, text=True)
+        assert help_text.returncode == 0 and "--lnb-voltage 0|15" in help_text.stdout
+        for value in ("13", "18", "256", "-1", "on", "15V"):
+            invalid_lnb = run(str(TS), "--runtime-dir", str(runtime), "--instance",
+                              instance, "--receiver", "0", "--channel", "BS01_0",
+                              "--lnb-voltage", value, "--packet-count", "1",
+                              capture_output=True)
+            assert invalid_lnb.returncode == 2, (value, invalid_lnb.stderr)
+        for value in ("0", "15"):
+            terrestrial_lnb = run(str(TS), "--runtime-dir", str(runtime), "--instance",
+                                  instance, "--receiver", "1", "--channel", "T27",
+                                  "--lnb-voltage", value, "--packet-count", "1",
+                                  capture_output=True)
+            assert terrestrial_lnb.returncode == 2, terrestrial_lnb.stderr
+
         capture = root / "capture.ts"
         finite = run(str(TS), "--runtime-dir", str(runtime), "--instance",
                      instance, "--receiver", "1", "--channel", "T27",
@@ -198,6 +213,32 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
             slow_research_client.kill()
             slow_research_client.wait()
         research_log.close()
+
+        # The same upstream LNB contract is simulated for every model. These
+        # are synthetic null-packet captures, not evidence of physical output
+        # voltage or reception on any of the model-specific hardware paths.
+        for model in ("s3u", "s3u2", "w3u2", "w3u3", "w3u3-v2"):
+            model_instance = "lnb-" + model
+            model_endpoint = runtime / "asicen-userland" / model_instance / "control.sock"
+            model_log = open(root / (model + ".log"), "wb")
+            logs.append(model_log)
+            model_daemon = subprocess.Popen(
+                [str(DAEMON), "--mock", "--model", model, "--runtime-dir", str(runtime),
+                 "--instance", model_instance], stdout=subprocess.DEVNULL, stderr=model_log)
+            children.append(model_daemon)
+            wait_socket(model_endpoint, model_daemon)
+            for lnb_args in ([], ["--lnb-voltage", "15"], ["--lnb-voltage", "0"]):
+                satellite = run(str(TS), "--runtime-dir", str(runtime), "--instance",
+                                model_instance, "--receiver", "0", "--channel", "BS01_0",
+                                *lnb_args, "--packet-count", "3", "--output", "-",
+                                capture_output=True)
+                assert satellite.returncode == 0, (model, lnb_args, satellite.stderr)
+                assert len(satellite.stdout) == 3 * 188
+                assert all(satellite.stdout[offset:offset + 3] == b"\x47\x1f\xff"
+                           for offset in range(0, len(satellite.stdout), 188))
+            model_daemon.send_signal(signal.SIGTERM)
+            assert model_daemon.wait(timeout=2) == 0
+            assert not model_endpoint.exists()
     finally:
         for child in children:
             if child.poll() is None:

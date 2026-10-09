@@ -416,6 +416,15 @@ if(ASICEN_BUILD_TESTS)
   target_compile_options(asicen-model-ipc-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME asicen-model-ipc-tests COMMAND asicen-model-ipc-tests)
 
+  add_executable(asicen-product-lnb-tests
+    userland/tests/product_lnb_tests.cpp
+    ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+  target_include_directories(asicen-product-lnb-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
+  target_compile_definitions(asicen-product-lnb-tests PRIVATE ASICEN_PRODUCT_CLI=1)
+  target_link_libraries(asicen-product-lnb-tests PRIVATE asicen_core asicen_px4_mock)
+  target_compile_options(asicen-product-lnb-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME asicen-product-lnb-tests COMMAND asicen-product-lnb-tests)
+
   add_executable(asicen-hardware-ownership-tests
     userland/tests/hardware_ownership_tests.cpp
     userland/src/hardware_ownership.cpp
@@ -436,6 +445,12 @@ if(ASICEN_BUILD_TESTS)
     # together on macOS CI. This suite limit leaves scheduling headroom without
     # changing any backend operation's deadline.
     set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 60)
+
+    add_executable(asicen-libusb-lnb-lifecycle-tests userland/tests/libusb_lnb_lifecycle_tests.cpp)
+    target_link_libraries(asicen-libusb-lnb-lifecycle-tests PRIVATE asicen_libusb)
+    target_compile_options(asicen-libusb-lnb-lifecycle-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME asicen-libusb-lnb-lifecycle-tests COMMAND asicen-libusb-lnb-lifecycle-tests)
+    set_tests_properties(asicen-libusb-lnb-lifecycle-tests PROPERTIES TIMEOUT 15)
 
     add_executable(asicen-libusb-fd-tests
       userland/tests/libusb_fd_tests.cpp)

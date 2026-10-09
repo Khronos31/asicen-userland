@@ -15,6 +15,13 @@ Four-receiver products currently expose only their primary S/T pair; mock
 capacity or a recognized USB ID is not proof of four working hardware lanes.
 `asicend --models` prints source profile readiness without accessing USB.
 
+LNB requests use the px4-compatible `asicen-ts --lnb-voltage 0|15` option
+(ISDB-S only, default `0`). Software switching is source-backed for W3U2,
+W3U3 and W3U3 V2; S3U/S3U2 have physical LNB power support but no recovered
+software switching operation, so their hardware backend rejects `15`.
+See [LNB operation and limitations](docs/lnb-control.md). Electrical validation
+with a meter remains outstanding for all newly implemented switching paths.
+
 
 This is a public development repository. Source publication was authorized on
 2026-10-09, ahead of the planned 0.1.0 release. **Full distribution parity remains incomplete.** Linux
@@ -133,8 +140,9 @@ version1.2.4 alone does not identify whether this fix is present.
 `--card-only` remains available for offline decoding.
 See the [live capture/card evidence](docs/reverse-engineering/live-card-stream-trial-2026-10-09.md).
 Other terrestrial channels, other models, secondary USB receivers and
-cold-start hardware validation remain unfinished. LNB voltage changes
-are unsupported. Hardware `--list` enumeration is also not implemented; use the
+cold-start hardware validation remain unfinished. Software LNB control is
+implemented for W3U2/W3U3/V2 but remains electrically unverified; S3U/S3U2
+software enablement remains unsupported. Hardware `--list` enumeration is also not implemented; use the
 probe tool for USB discovery. Daemon TS quality counters are not yet measured;
 use the offline validator rather than interpreting their zero values as proof
 of an error-free recording.

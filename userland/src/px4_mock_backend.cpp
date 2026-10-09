@@ -98,7 +98,63 @@ Result<void> MockTunerBackend::select_satellite_tsid(std::uint8_t receiver,
 Result<void> MockTunerBackend::close_receiver(std::uint8_t receiver) noexcept
 {
     if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    power_[receiver] = {};
     return Result<void>::success();
+}
+
+Result<void> MockTunerBackend::begin_tune_power(std::uint8_t receiver,
+    ipc::System system, std::uint8_t lnb_voltage) noexcept
+{
+    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    if (!receiver_supports(receiver, system) ||
+        (lnb_voltage != 0U && lnb_voltage != 15U) ||
+        (system == ipc::System::ISDB_T && lnb_voltage != 0U))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    if (stopping_.load()) return Result<void>::failure(Error::NOT_READY);
+    auto& power = power_[receiver];
+    if (power.pending) return Result<void>::failure(Error::BUSY);
+    power.previous = power.voltage;
+    power.requested = lnb_voltage;
+    power.pending = true;
+    // Match the service transaction: power needed for acquisition comes on
+    // before tuning; an existing request is removed only after tune success.
+    if (lnb_voltage == 15U) power.voltage = 15U;
+    return Result<void>::success();
+}
+
+Result<void> MockTunerBackend::commit_tune_power(std::uint8_t receiver) noexcept
+{
+    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    auto& power = power_[receiver];
+    if (power.pending) {
+        power.voltage = power.requested;
+        power.pending = false;
+    }
+    return Result<void>::success();
+}
+
+Result<void> MockTunerBackend::rollback_tune_power(std::uint8_t receiver) noexcept
+{
+    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    auto& power = power_[receiver];
+    if (power.pending) {
+        power.voltage = power.previous;
+        power.pending = false;
+    }
+    return Result<void>::success();
+}
+
+Result<std::uint8_t> MockTunerBackend::simulated_lnb_voltage(
+    std::uint8_t receiver) const noexcept
+{
+    if (receiver >= receiver_count_)
+        return Result<std::uint8_t>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    return Result<std::uint8_t>::success(power_[receiver].voltage);
 }
 
 Result<void> MockTunerBackend::start_capture(std::uint8_t receiver,
@@ -118,6 +174,8 @@ Result<void> MockTunerBackend::stop_capture(std::uint8_t receiver,
 Result<void> MockTunerBackend::shutdown() noexcept
 {
     stopping_.store(true);
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    power_ = {};
     return Result<void>::success();
 }
 

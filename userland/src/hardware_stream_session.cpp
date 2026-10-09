@@ -104,9 +104,14 @@ Result<void> HardwareStreamService::close_receiver(std::uint8_t receiver) noexce
 
 Result<void> HardwareStreamService::begin_tune_power(
     std::uint8_t receiver, System system, std::uint8_t lnb_voltage) noexcept {
-    if (!receiver_supports(receiver, system) || lnb_voltage != 0U)
+    if (!receiver_supports(receiver, system))
         return Result<void>::failure(Error::UNSUPPORTED);
-    return frontend_.begin_tune_power(receiver, system, 0U);
+    if ((lnb_voltage != 0U && lnb_voltage != 15U) ||
+        (system == System::ISDB_T && lnb_voltage != 0U))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    // LNB support is a model-specific frontend decision. Preserve its failure
+    // and the exact request rather than converting an ON request into OFF.
+    return frontend_.begin_tune_power(receiver, system, lnb_voltage);
 }
 
 Result<void> HardwareStreamService::commit_tune_power(std::uint8_t receiver) noexcept {
