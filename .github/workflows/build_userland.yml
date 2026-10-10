@@ -68,6 +68,9 @@ jobs:
             apk add --no-cache bash git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
             # The bind mount retains the runner UID; trust only this checkout.
             git config --global --add safe.directory /src;
+            # libusb 1.0.28 checks usbfs before honoring no-discovery FD mode.
+            # Empty bus fixture only: no device nodes, mounts, or USB access.
+            mkdir -p /dev/bus/usb/001;
             cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON;
             cmake --build build-userland;
             ctest --test-dir build-userland --output-on-failure;
@@ -139,6 +142,9 @@ jobs:
             apk add --no-cache bash git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
             # The bind mount retains the runner UID; trust only this checkout.
             git config --global --add safe.directory /src;
+            # libusb 1.0.28 checks usbfs before honoring no-discovery FD mode.
+            # Empty bus fixture only: no device nodes, mounts, or USB access.
+            mkdir -p /dev/bus/usb/001;
             cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON;
             cmake --build build-userland;
             ctest --test-dir build-userland --output-on-failure;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "asicen/libusb_transport.h"
 
-#if defined(__linux__) || defined(__ANDROID__)
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -235,7 +235,7 @@ KernelDriverState classify_kernel_driver_state(int query_result) noexcept
 
 int duplicate_fd_cloexec(int fd) noexcept
 {
-#if !defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32)
     (void)fd;
     return -1;
 #else

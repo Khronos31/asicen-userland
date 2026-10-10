@@ -81,6 +81,12 @@ bool test_provider_errors_and_policy(const char* known_image)
 #else
     CHECK(check_rejected(FirmwareProvider(runtime.path().u8string(), ModelId::W3u3),
                          Error::INTERNAL));
+    const auto directory_link = runtime.path() / "directory-link";
+    std::error_code link_error;
+    std::filesystem::create_directory_symlink(runtime.path(), directory_link, link_error);
+    CHECK(!link_error);
+    CHECK(check_rejected(FirmwareProvider(directory_link.u8string(), ModelId::W3u3),
+                         Error::INTERNAL));
 #endif
     const std::string missing = (runtime.path() / "missing").u8string();
     CHECK(check_rejected(FirmwareProvider(missing, ModelId::W3u3), Error::NOT_FOUND));

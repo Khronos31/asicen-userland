@@ -170,7 +170,9 @@ class StaticDistributionAuditTests(unittest.TestCase):
             if arguments[1] == "-d":
                 return "Shared library: [libc.musl-x86_64.so.1]\n"
             return ""
-        with mock.patch.object(audit, "run", side_effect=output):
+        with mock.patch.object(audit, "readelf_path", return_value="readelf"), \
+                mock.patch.object(audit, "nm_path", return_value="nm"), \
+                mock.patch.object(audit, "run", side_effect=output):
             with self.assertRaisesRegex(audit.AuditError, "ELF machine"):
                 audit.audit_linux(Path("ifd.so"), "ifd/asicen-userland-ifd.so", platform="linux-musl-aarch64",
                                   shared=True, require_libusb=False, reject_build_id=False)

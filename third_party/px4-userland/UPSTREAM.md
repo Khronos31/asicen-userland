@@ -217,6 +217,20 @@ ASICEN's explicit ModelId chooses its verified loader size/hash; there is no
 IT930x scatter interpretation. The fingerprint research wrapper shares the SHA
 class. Product loading can finish validation before any USB initialization.
 
+CI exposed one necessary non-hardware portability correction to the copied
+provider I/O: libc++ filebuf can turn a failed fread into EOF, so a directory
+was reported as rejected firmware rather than INTERNAL. The ASICEN provider
+uses 512-byte stdio reads with an explicit ferror check and scoped fclose;
+Windows retains strict UTF-8 conversion and wide-path opening. Open failure,
+read failure, size/hash rejection and immutable image contracts are unchanged.
+The directory and directory-symlink regressions retain INTERNAL/CLI exit 70.
+This is a documented shared-code defect correction, not a hardware exemption.
+
+Likewise, duplicate_fd_cloexec outside this subset now implements its generic
+POSIX ownership/CLOEXEC contract on macOS as well as Linux/Android. USB-fd
+wrapping itself remains Linux/Android-only, with explicit unsupported-platform
+tests; this does not add macOS USB-fd acquisition support.
+
 Product and offline mock commands now use this same versioned control/stream
 protocol. The separate 24-byte `--socket` daemon/client entry points were removed;
 their capture and shutdown scenarios use canonical runtime/instance endpoints.

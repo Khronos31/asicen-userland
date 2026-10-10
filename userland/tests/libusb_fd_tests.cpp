@@ -64,6 +64,8 @@ bool duplicate_survives_closing_the_original()
     CHECK(::pipe(pipe_fds) == 0);
     ScopedFd original(pipe_fds[0]);
     ScopedFd writer(pipe_fds[1]);
+    const int original_flags = ::fcntl(original.get(), F_GETFD);
+    CHECK(original_flags >= 0);
 
     const char payload[] = "asicen";
     CHECK(::write(writer.get(), payload, sizeof(payload)) ==
@@ -73,6 +75,7 @@ bool duplicate_survives_closing_the_original()
     CHECK(duplicate.get() >= 0);
     const int flags = ::fcntl(duplicate.get(), F_GETFD);
     CHECK(flags >= 0 && (flags & FD_CLOEXEC) != 0);
+    CHECK(::fcntl(original.get(), F_GETFD) == original_flags);
 
     CHECK(original.close() == 0);
 
@@ -105,9 +108,13 @@ bool failed_wrap_keeps_the_callers_fd_open()
     ScopedFd writer(pipe_fds[1]);
 
     asicen::LibusbDevice device;
-    // A pipe is not a USB device, so the wrap fails after the internal
-    // duplicate is made; only that duplicate may be cleaned up.
-    CHECK(device.open(context.get(), original.get()) != 0);
+    // Linux/Android reject the pipe after duplicating it. Other POSIX hosts
+    // reject USB-fd wrapping as unsupported. Neither path may close the caller.
+    const int opened = device.open(context.get(), original.get());
+    CHECK(opened != 0);
+#if !defined(__linux__) && !defined(__ANDROID__)
+    CHECK(opened == LIBUSB_ERROR_NOT_SUPPORTED);
+#endif
     CHECK(::fcntl(original.get(), F_GETFD) >= 0);
     CHECK(!device.is_open());
 
@@ -122,7 +129,13 @@ bool negative_descriptor_is_rejected()
     CHECK(context.initialize(true) == 0);
 
     asicen::LibusbDevice device;
-    CHECK(device.open(context.get(), -1) != 0);
+    const int opened = device.open(context.get(), -1);
+    CHECK(opened != 0);
+#if defined(__linux__) || defined(__ANDROID__)
+    CHECK(opened == LIBUSB_ERROR_INVALID_PARAM);
+#else
+    CHECK(opened == LIBUSB_ERROR_NOT_SUPPORTED);
+#endif
     CHECK(!device.is_open());
 
     return true;

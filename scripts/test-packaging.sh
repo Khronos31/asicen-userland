@@ -96,12 +96,12 @@ PATH="$script_dir/testdata:$PATH" python3 "$script_dir/package-artifact.py" \
     --platform linux-musl-x86_64 --version "$version" --static-build-dir "$test_root/build" \
     --ifd-library "$test_root/ifd-build/ifd.so" \
     --reader-template "$script_dir/../packaging/pcsc/reader.conf.d/asicen-userland.conf.in" \
-    --output-dir "$test_root/out"
+    --source-ref self-test --output-dir "$test_root/out"
 PATH="$script_dir/testdata:$PATH" python3 "$script_dir/package-artifact.py" \
     --platform linux-musl-x86_64 --version "$version" --static-build-dir "$test_root/build" \
     --ifd-library "$test_root/ifd-build/ifd.so" \
     --reader-template "$script_dir/../packaging/pcsc/reader.conf.d/asicen-userland.conf.in" \
-    --output-dir "$test_root/out-second"
+    --source-ref self-test --output-dir "$test_root/out-second"
 first_sha=$(sha256sum "$test_root/out/asicen-userland-$version-linux-musl-x86_64.tar.gz" | awk '{print $1}')
 second_sha=$(sha256sum "$test_root/out-second/asicen-userland-$version-linux-musl-x86_64.tar.gz" | awk '{print $1}')
 [ "$first_sha" = "$second_sha" ] || {
@@ -200,7 +200,7 @@ ASICEN_TEST_ARCH=aarch64 PATH="$script_dir/testdata:$PATH" python3 "$script_dir/
     --platform linux-musl-aarch64 --version "$version" --static-build-dir "$test_root/build" \
     --ifd-library "$test_root/ifd-build/ifd.so" \
     --reader-template "$script_dir/../packaging/pcsc/reader.conf.d/asicen-userland.conf.in" \
-    --output-dir "$test_root/out-aarch64"
+    --source-ref self-test --output-dir "$test_root/out-aarch64"
 ASICEN_TEST_ARCH=aarch64 PATH="$script_dir/testdata:$PATH" python3 "$script_dir/audit-artifact.py" \
     --platform linux-musl-aarch64 \
     --archive "$test_root/out-aarch64/asicen-userland-$version-linux-musl-aarch64.tar.gz"
@@ -210,7 +210,7 @@ ASICEN_TEST_ARCH=aarch64 ASICEN_TEST_LIBC=glibc PATH="$script_dir/testdata:$PATH
     --platform linux-glibc-aarch64 --version "$version" --static-build-dir "$test_root/build" \
     --ifd-library "$test_root/ifd-build/ifd.so" \
     --reader-template "$script_dir/../packaging/pcsc/reader.conf.d/asicen-userland.conf.in" \
-    --output-dir "$test_root/out-glibc-aarch64"
+    --source-ref self-test --output-dir "$test_root/out-glibc-aarch64"
 ASICEN_TEST_ARCH=aarch64 ASICEN_TEST_LIBC=glibc PATH="$script_dir/testdata:$PATH" \
     python3 "$script_dir/audit-artifact.py" --platform linux-glibc-aarch64 \
     --archive "$test_root/out-glibc-aarch64/asicen-userland-$version-linux-glibc-aarch64.tar.gz"

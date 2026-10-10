@@ -220,9 +220,9 @@ public:
     std::array<std::uint8_t, 512U> window{};
     std::array<std::uint8_t, 64U> staging{};
     std::deque<std::vector<std::uint8_t>> pending;
-    unsigned calls = 0U;
+    std::atomic<unsigned> calls{0U};
     unsigned reset_prepares = 0U;
-    unsigned controller_inits = 0U;
+    std::atomic<unsigned> controller_inits{0U};
     std::uint8_t page = 0U;
     bool card_present = true;
     bool fail_cleanup = false;
@@ -266,16 +266,83 @@ public:
     }
     void request_card_stop() noexcept override { stopped = true; }
 
-    unsigned operations = 0U;
-    unsigned cleanups = 0U;
-    std::uint32_t last_operation_timeout = 0U;
-    std::uint32_t last_cleanup_timeout = 0U;
-    bool quarantined = false;
-    bool stopped = false;
+    std::atomic<unsigned> operations{0U};
+    std::atomic<unsigned> cleanups{0U};
+    std::atomic<std::uint32_t> last_operation_timeout{0U};
+    std::atomic<std::uint32_t> last_cleanup_timeout{0U};
+    std::atomic<bool> quarantined{false};
+    std::atomic<bool> stopped{false};
     px4::userland::Error entry_error = px4::userland::Error::OK;
 
 private:
 };
+
+class ObservedProtocolSession final : public CardProtocolSession {
+public:
+    ObservedProtocolSession(CardProtocolSession& session, FixtureOperationGuard& guard) noexcept
+        : session_(session), guard_(guard)
+    {
+    }
+
+    Result<void> initialize() noexcept override
+    {
+        const auto result = session_.initialize();
+        // The server's card worker serializes protocol operations and presence
+        // polling. Record this operation before a later detect_card() replaces
+        // the guard's latest timeout with its independent 5000 ms budget.
+        initialize_timeout.store(guard_.last_operation_timeout.load());
+        return result;
+    }
+    Result<std::size_t> transmit(ByteView apdu, MutableByteView response) noexcept override
+    {
+        const auto result = session_.transmit(apdu, response);
+        transmit_timeout.store(guard_.last_operation_timeout.load());
+        return result;
+    }
+    bool initialized() const noexcept override { return session_.initialized(); }
+    const CardAtr& atr() const noexcept override { return session_.atr(); }
+    void invalidate() noexcept override { session_.invalidate(); }
+    void request_stop() noexcept override { session_.request_stop(); }
+
+    std::atomic<std::uint32_t> initialize_timeout{0U};
+    std::atomic<std::uint32_t> transmit_timeout{0U};
+
+private:
+    CardProtocolSession& session_;
+    FixtureOperationGuard& guard_;
+};
+
+bool test_protocol_timeouts_survive_presence_poll()
+{
+    MailboxFixture transport;
+    transport.queue(t1_frame(0xe0U, {}));
+    transport.queue(t1_frame(0xe1U, {251U}));
+    transport.queue(t1_frame(0x00U, {0x90U, 0x00U}));
+    asicen::W3u3CardMailboxHardware mailbox(transport);
+    CardSession raw_session(mailbox, mailbox);
+    FixtureOperationGuard guard;
+    asicen::W3u3CardServiceBackend backend(mailbox, guard, nullptr);
+    asicen::W3u3CardProtocolSession session(raw_session, guard, nullptr);
+    ObservedProtocolSession observed_session(session, guard);
+
+    CHECK(observed_session.initialize());
+    CHECK(guard.last_operation_timeout == 15000U);
+    const auto present = backend.detect_card();
+    CHECK(present && present.value());
+    CHECK(guard.last_operation_timeout == 5000U);
+    CHECK(observed_session.initialize_timeout == 15000U);
+
+    const std::array<std::uint8_t, 5U> apdu{{0x90U, 0x30U, 0U, 0U, 0U}};
+    std::array<std::uint8_t, 2U> response{};
+    const auto transmitted = observed_session.transmit(
+        ByteView{apdu.data(), apdu.size()}, MutableByteView{response.data(), response.size()});
+    CHECK(transmitted && transmitted.value() == 2U);
+    CHECK(response[0] == 0x90U && response[1] == 0U);
+    CHECK(backend.detect_card());
+    CHECK(guard.last_operation_timeout == 5000U);
+    CHECK(observed_session.transmit_timeout == 15000U);
+    return true;
+}
 
 class TestTime final : public TunerServiceTime {
 public:
@@ -329,7 +396,8 @@ bool test_card_service_through_product_ifd()
     volatile std::sig_atomic_t stop = 0;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, &stop);
     asicen::W3u3CardProtocolSession session(raw_session, guard, &stop);
-    CardService card(backend, session);
+    ObservedProtocolSession observed_session(session, guard);
+    CardService card(backend, observed_session);
     asicen::CardOnlyTunerBackend tuner_backend;
     PosixTunerNonceSource nonce;
     TestTime time;
@@ -363,14 +431,18 @@ bool test_card_service_through_product_ifd()
                                              MutableByteView{atr.data(), atr.size()}, atr_length);
     if (power_result != IfdResult::success) {
         std::fprintf(stderr, "IFD power-up result=%u atr_length=%zu calls=%u\n",
-                     static_cast<unsigned>(power_result), atr_length, transport.calls);
+                     static_cast<unsigned>(power_result), atr_length, transport.calls.load());
     }
     CHECK(power_result == IfdResult::success);
     CHECK(atr_length == 13U);
-    CHECK(guard.last_operation_timeout == 15000U);
+    CHECK(observed_session.initialize_timeout == 15000U);
     const unsigned resets_after_connect = transport.controller_inits;
     CHECK(ifd.presence(0U) == IfdResult::icc_present);
     CHECK(ifd.presence(0U) == IfdResult::icc_present);
+    // Force the presence/protocol interleaving that used to make the timeout
+    // assertion scheduler-dependent, without suppressing background polling.
+    CHECK(guard.last_operation_timeout == 5000U);
+    CHECK(observed_session.initialize_timeout == 15000U);
     CHECK(transport.controller_inits == resets_after_connect);
 
     std::array<std::uint8_t, 5U> apdu{{0x90U, 0x30U, 0U, 0U, 0U}};
@@ -380,6 +452,7 @@ bool test_card_service_through_product_ifd()
                        MutableByteView{response.data(), response.size()},
                        response_length) == IfdResult::success);
     CHECK(response_length == 61U && response[59] == 0x90U && response[60] == 0x00U);
+    CHECK(observed_session.transmit_timeout == 15000U);
 
     // Exercise the actual IPC route: card-only mode rejects tuner access
     // before any operation reaches receiver hardware.
@@ -414,12 +487,12 @@ bool test_card_service_through_product_ifd()
     raw.close();
 
     CHECK(ifd.close_channel(0U) == IfdResult::success);
-    const auto shutdown = card.shutdown();
-    CHECK(shutdown);
-    CHECK(guard.cleanups != 0U && guard.last_cleanup_timeout == 2000U);
     done.store(true);
     pump.join();
     CHECK(server->shutdown());
+    const auto shutdown = card.shutdown();
+    CHECK(shutdown);
+    CHECK(guard.cleanups != 0U && guard.last_cleanup_timeout == 2000U);
     server.reset();
     std::filesystem::remove_all(directory);
     return true;
@@ -470,7 +543,8 @@ bool test_card_operation_entry_preserves_error_class()
 
 int main()
 {
-    if (!test_card_operation_entry_preserves_error_class() ||
+    if (!test_protocol_timeouts_survive_presence_poll() ||
+        !test_card_operation_entry_preserves_error_class() ||
         !test_card_service_through_product_ifd() || !test_card_cleanup_failure_is_reported()) {
         return 1;
     }

@@ -41,6 +41,12 @@ def main():
         directory_loader = loader.copy()
         directory_loader[6] = str(root)
         run(directory_loader, 70)
+        directory_link = root / "directory-link"
+        directory_link.symlink_to(root, target_is_directory=True)
+        directory_loader[6] = str(directory_link)
+        result = run(directory_loader, 70)
+        assert result.stdout == b""
+        assert b"INTERNAL" in result.stderr
         args = [transform, "--seed-file", str(seed), "--input", str(raw), "--output", str(output)]
         packet = bytes([0x47, 0x1F, 0xFF, 0x10]) + bytes(184)
         for malformed in (b"", b"garbage", packet, packet * 8 + b"tail"):

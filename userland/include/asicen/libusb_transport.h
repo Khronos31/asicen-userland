@@ -83,8 +83,9 @@ struct KernelDriverState {
 
 KernelDriverState classify_kernel_driver_state(int query_result) noexcept;
 
-// Duplicates fd with FD_CLOEXEC for libusb_wrap_sys_device retention. The
-// caller's fd is never closed. Returns the duplicate or a negative value.
+// POSIX descriptor duplication with FD_CLOEXEC. The caller's fd is never
+// closed. Returns the duplicate or a negative value. USB wrapping remains a
+// separate Linux/Android-only operation.
 int duplicate_fd_cloexec(int fd) noexcept;
 
 class LibusbDevice final {

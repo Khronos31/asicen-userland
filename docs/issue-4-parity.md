@@ -176,6 +176,12 @@
 - Alpine の全件試験に必要な bash と、bind mount した `/src` の Git ownership 前提が欠けていた。使い捨て CI コンテナ内の必要箇所を修正する。
 - FD safety test が不要なデバイス列挙を伴う context を初期化していた。実製品の FD 経路と同じ no-discovery 初期化へ揃え、native libusb の pipe 拒否と caller FD 保持の assertion は維持する。
 
+続く `0145628` の CI では、以前遮られていた macOS 全件試験まで進み、追加の可搬性問題を確認した。libc++ が firmware の read error を EOF とする問題は explicit ferror で修正し、POSIX FD 複製の Linux 限定ガードを是正する。これらは参照コード由来の汎用処理の不具合として差分を記録し、ハードウェア例外にはしない。配布 fixture は実 CI の GITHUB_SHA と混ざらないよう self-test の source_ref を明示し、Linux ELF mock は readelf/nm の探索も隔離する。
+
+Alpine の libusb 1.0.28 は no-discovery option の処理より前に usbfs の存在を確認するため、使い捨て CI コンテナに空の `/dev/bus/usb/001` directory を用意する。device node・mount・実 USB access は追加せず、旧版ライブラリの native pipe-wrap 拒否試験を維持する。1.0.30 の動作へ依存して旧版テストを取り除かない。
+
+macOS の長い TMPDIR では、製品名・instance・endpoint suffix を足した AF_UNIX path が上限を超える。CLI/mock fixture は完全な path 長を確認して短い `/tmp` へ fallback する。card-only fixture は背景 presence poll が最新 timeout を上書きする競合を除き、実際の initialize/transmit 境界で 15000 ms を記録・検査する。presence の 5000 ms と teardown の 2000 ms の契約も保持し、終了検証は server の worker join 後に行う。
+
 ## 残るハードウェア条件
 
 AN019 の shared seed/controller05 と最後の peer 停止時の規則は、複数ストリームの安全な同時開始・停止を確定する根拠が不足している。物理的に不可能とは判断せず、未実装・未検証として現状の能力上限を明示する。汎用の経路・ownership テストを省略する理由にはしない。

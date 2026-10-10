@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -30,7 +31,24 @@ def wait_socket(path, proc):
     raise AssertionError("daemon socket did not appear")
 
 
-with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
+@contextmanager
+def temporary_runtime_root():
+    # Match the pinned C++ fixture policy: keep TMPDIR when the complete
+    # endpoint fits, otherwise use /tmp. macOS has the smallest supported
+    # sun_path (104 bytes); partial-request is this fixture's longest instance.
+    configured_root = os.environ.get("TMPDIR", "/tmp")
+    if not os.path.isabs(configured_root):
+        configured_root = "/tmp"
+    with tempfile.TemporaryDirectory(prefix="asicen-cli-", dir=configured_root) as temp:
+        longest = Path(temp) / "runtime/asicen-userland/partial-request/control.sock"
+        if len(os.fsencode(longest)) + 1 < 104:
+            yield temp
+            return
+    with tempfile.TemporaryDirectory(prefix="asicen-cli-", dir="/tmp") as temp:
+        yield temp
+
+
+with temporary_runtime_root() as temp:
     root = Path(temp)
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)

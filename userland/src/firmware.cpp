@@ -1,7 +1,8 @@
 // FirmwareImage/FirmwareProvider adapted from px4-userland
 // 1a1485d0c3e972e0a47be907edb67949564aa9a7, userland/src/firmware.cpp.
 // ASICEN modification: model-specific size/hash policy and no IT930x scatter
-// interpretation. File I/O, error classes, chunking and SHA processing match.
+// interpretation. Error classes, chunking and SHA processing match; stdio keeps
+// read errors distinct from EOF on standard libraries that conflate them.
 // SPDX-License-Identifier: GPL-2.0-only
 #include "asicen/firmware.h"
 
@@ -11,12 +12,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
+#include <cstdio>
+#include <memory>
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <filesystem>
 #include <string>
 #include <windows.h>
 #endif
@@ -40,9 +41,8 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
     }
 
 #if defined(_WIN32)
-    // Windows narrow std::ifstream uses the active code page, so a UTF-8 path
-    // outside that code page would not open. Convert strictly and open by wide
-    // std::filesystem::path instead.
+    // Windows narrow fopen uses the active code page, so a UTF-8 path outside
+    // that code page would not open. Convert strictly and open by wide path.
     const int wide_length = ::MultiByteToWideChar(
         CP_UTF8, MB_ERR_INVALID_CHARS, path_.c_str(),
         static_cast<int>(path_.size()), nullptr, 0);
@@ -55,12 +55,13 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
                               wide_length) != wide_length) {
         return Result<FirmwareImage>::failure(Error::INVALID_ARGUMENT);
     }
-    std::ifstream file(std::filesystem::path(wide_path),
-                       std::ios::in | std::ios::binary);
+    std::FILE* const opened_file = ::_wfopen(wide_path.c_str(), L"rb");
 #else
-    std::ifstream file(path_, std::ios::in | std::ios::binary);
+    std::FILE* const opened_file = std::fopen(path_.c_str(), "rb");
 #endif
-    if (!file.is_open()) {
+    const auto close_file = [](std::FILE* stream) noexcept { std::fclose(stream); };
+    const std::unique_ptr<std::FILE, decltype(close_file)> file(opened_file, close_file);
+    if (!file) {
         return Result<FirmwareImage>::failure(Error::NOT_FOUND);
     }
 
@@ -73,12 +74,14 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
     data.reserve(manifest->size);
     Sha256 sha256;
     std::array<std::uint8_t, 512U> chunk{};
-    while (file) {
-        file.read(reinterpret_cast<char*>(chunk.data()),
-                  static_cast<std::streamsize>(chunk.size()));
-        const std::streamsize read_count = file.gcount();
-        if (read_count > 0) {
-            const std::size_t count = static_cast<std::size_t>(read_count);
+    while (!std::feof(file.get())) {
+        const std::size_t count = std::fread(chunk.data(), 1U, chunk.size(), file.get());
+        // libc++ filebuf can turn a failed read (for example EISDIR) into EOF.
+        // Check even a partial read before size/hash validation hides its error.
+        if (std::ferror(file.get())) {
+            return Result<FirmwareImage>::failure(Error::INTERNAL);
+        }
+        if (count > 0U) {
             if (data.size() > manifest->size -
                                   (count > manifest->size ? manifest->size : count)) {
                 return Result<FirmwareImage>::failure(Error::FIRMWARE_REJECTED);
@@ -87,10 +90,6 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
             data.insert(data.end(), chunk.data(), chunk.data() + count);
         }
     }
-    if (!file.eof() && file.fail()) {
-        return Result<FirmwareImage>::failure(Error::INTERNAL);
-    }
-
     const auto digest = sha256.finish();
     if (!FirmwareImage::accepted_policy(model_, data.size(), digest)) {
         return Result<FirmwareImage>::failure(Error::FIRMWARE_REJECTED);
