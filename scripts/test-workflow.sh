@@ -62,6 +62,27 @@ grep -F 'TERMUX_LAUNCHER' "$root/scripts/audit-artifact.py" >/dev/null
 grep -F '"packaging" / "termux"' "$root/scripts/package-artifact.py" >/dev/null
 # shellcheck disable=SC2016
 test "$(grep -c 'docker run --rm -e GITHUB_SHA="\$GITHUB_SHA"' "$workflow")" -ge 4
+# Every fresh container that builds the runner-owned checkout needs its own
+# exact-path Git trust before querying source provenance. Source-archive
+# relink containers have no checkout and use source-manifest.json instead.
+awk '
+    /docker run / {
+        checkout = ($0 ~ /GITHUB_WORKSPACE:\/src/)
+        if (checkout) checkout_count++
+        trusted = 0
+    }
+    checkout && /^[[:space:]]*git config --global --add safe.directory \/src;$/ { trusted = 1 }
+    checkout && /scripts\/build-linux-(static|ifd)\.sh/ && !trusted {
+        print "checkout build lacks exact /src Git trust before line " NR > "/dev/stderr"
+        exit 1
+    }
+    END {
+        if (checkout_count != 5) {
+            print "expected five checkout-mounted Linux build containers" > "/dev/stderr"
+            exit 1
+        }
+    }
+' "$workflow"
 grep -F 'linux-glibc-x86_64' "$workflow" >/dev/null
 grep -F 'linux-musl-x86_64' "$workflow" >/dev/null
 grep -F 'linux-glibc-aarch64' "$workflow" >/dev/null
