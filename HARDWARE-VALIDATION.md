@@ -1002,3 +1002,44 @@ between devices is the width of the tune window and the board
 capacitance, not the LNB transaction logic. The 15 V output itself is
 working on the W3U3; only the open-circuit retention time differs
 between models.
+
+### Deterministic LNB 15 V window: `--tune-timeout-ms` (2026-10-10)
+
+The width of the 15 V output window is the tune continuation time, which
+is given by `asicen-ts --tune-timeout-ms`. This was confirmed on both
+devices with the same explicit timeout.
+
+- W3U3, `--tune-timeout-ms 30000`: the satellite input held 15 V for
+  the full 30 s tune window, then the transaction rollback switched the
+  supply off. The terminal voltage then decayed slowly through the
+  on-board capacitor discharge; the user confirmed it reached 0 V.
+- Q3U4, `--tune-timeout-ms 30000` (separate session): the input also
+  held 15 V for 30 s, then dropped to 0 V immediately (no visible
+  capacitor discharge).
+
+Conclusion: the 15 V sustain window equals the tune timeout
+(`--tune-timeout-ms`), independent of device and identical between
+px4-ts and asicen-ts. The post-off voltage decay (instant vs slow
+on-board capacitor discharge) is the only hardware difference between
+the Q3U4 and the W3U3.
+
+### Full-channel regression, representative machine (2026-10-10)
+
+Representative row: `asicen-userland-0.1.0-linux-glibc-x86_64` on
+AnduinOS x86_64 (PX-W3U3, primary receiver 1 for terrestrial,
+receiver 0 for satellite). Satellite input is fed from the apartment
+building wall distribution; LNB was kept at 0 V (no feeding toward the
+shared wall equipment). Each channel ran a finite-length 10 s capture
+through the release-candidate `asicen-ts`; all channels reported
+sync-errors=0, tei=0, continuity-errors=0, queue-drops=0, usb-errors=0.
+
+- Terrestrial (13 channels): T16, T17, T19, T21, T22, T23, T24, T25,
+  T26, T27, T30, T31, T32.
+- BS (9 channels): BS01_0, BS03_0, BS05_0, BS09_0, BS13_0, BS15_0,
+  BS19_0, BS21_0, BS23_0.
+- CS (11 channels): CS2, CS4, CS6, CS8, CS10, CS12, CS14, CS16, CS18,
+  CS20, CS22.
+
+Total 33 channels, all error-free. T30/T31/T32 failed once on the first
+10 s pass and succeeded on retry; the first-pass failure was a transient
+reception interruption, not a further retest.
