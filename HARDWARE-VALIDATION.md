@@ -1083,3 +1083,23 @@ satellite BS01_0 at LNB 0 V (85,884 packets, sync/tei/cc = 0), and the
 internal card ATR restored (same ATR as before). (A brief satellite 0
 packet period after the operations was traced to the satellite input
 becoming unconnected; the user reconnected it and reception resumed.)
+
+### 2-hour soak, representative machine (2026-10-10)
+
+Same candidate (`asicen-userland-0.1.0-linux-glibc-x86_64`) and PX-W3U3
+on AnduinOS x86_64. A single continuous T27 capture
+(`asicen-ts --receiver 1 --channel T27 --duration-seconds 7200`) ran
+from 20:12:52 to 22:12:47 JST (2 hours), streaming to disk.
+
+- TS: 14,135,249,624 bytes / 75,187,498 packets.
+- Counter summary: sync-errors=0 tei=0 continuity-errors=0
+  queue-drops=0 usb-errors=0 empty-intervals=0.
+- daemon FD/RSS: start FD=16 / RSS=2536 kB, end FD=14 / RSS=2552 kB
+  (no monotonic growth; no fd/rss leak observed).
+
+Notes: the first 2-hour attempt streamed to /tmp, which is a tmpfs
+(3.8 GB) on this host; it filled and the capture stopped after about
+18 min (1,976,528,896 bytes). The representative run above streamed to
+disk instead. This failed tmpfs attempt is recorded as the reason the
+soak output target is a disk path, not a soak failure of the release
+candidate.
