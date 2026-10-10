@@ -52,11 +52,11 @@ cmake -S "$work/project" -B "$work/build" -G Ninja \
     -DASICEN_LIBUSB_LIBRARY="$work/libusb-prefix/lib/libusb-1.0.a" \
     '-DASICEN_LIBUSB_EXTRA_LINK_OPTIONS=SHELL:-framework IOKit;SHELL:-framework CoreFoundation;SHELL:-framework Security;-lobjc'
 cmake --build "$work/build" --parallel "$(sysctl -n hw.logicalcpu 2>/dev/null || printf '2')" \
-    --target asicend asicen-ts asicenctl
+    --target asicend asicend-mock asicen-ts asicenctl
 
-for binary in asicend asicen-ts asicenctl; do
+for binary in asicend asicend-mock asicen-ts asicenctl; do
     "$work/build/$binary" --help >/dev/null
 done
 python3 "$work/project/userland/tests/product_cli_integration.py" \
-    "$work/build/asicend" "$work/build/asicenctl" "$work/build/asicen-ts"
+    "$work/build/asicend-mock" "$work/build/asicenctl" "$work/build/asicen-ts"
 printf '%s\n' 'modified-libUSB source relink and product IPC smoke: PASS'
