@@ -182,6 +182,8 @@ Alpine の libusb 1.0.28 は no-discovery option の処理より前に usbfs の
 
 macOS の長い TMPDIR では、製品名・instance・endpoint suffix を足した AF_UNIX path が上限を超える。CLI/mock fixture は完全な path 長を確認して短い `/tmp` へ fallback する。card-only fixture は背景 presence poll が最新 timeout を上書きする競合を除き、実際の initialize/transmit 境界で 15000 ms を記録・検査する。presence の 5000 ms と teardown の 2000 ms の契約も保持し、終了検証は server の worker join 後に行う。
 
+`a0a1032` の macOS 全 72 件は成功したが、続く lifecycle 20 回反復で seed fixture の誤計数を検出した。乱数 seed 中の正当なゼロ byte を消去と数えていたため、DSC の適用／停止 phase で分類する。全ゼロ・混在・非ゼロ seed と失敗位置 1/2/16 の 9 組を固定し、消去が 16 件・全てゼロ・各 register 0x10..0x1f に一度ずつであることを検証する。全ゼロ seed の正常適用も別に試験し、本体コードや乱数生成には変更を加えない。
+
 ## 残るハードウェア条件
 
 AN019 の shared seed/controller05 と最後の peer 停止時の規則は、複数ストリームの安全な同時開始・停止を確定する根拠が不足している。物理的に不可能とは判断せず、未実装・未検証として現状の能力上限を明示する。汎用の経路・ownership テストを省略する理由にはしない。

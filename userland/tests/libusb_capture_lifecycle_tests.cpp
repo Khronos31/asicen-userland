@@ -61,6 +61,11 @@ struct LibusbW3u3HardwareTestPeer {
         hardware.tuned_ = false;
     }
     static bool gain_applied(const LibusbW3u3Hardware& hardware) { return hardware.gain_applied_; }
+    static void set_link_seed(LibusbW3u3Hardware& hardware,
+                              const std::array<std::uint8_t, 16>& seed)
+    {
+        hardware.link_seed_ = seed;
+    }
     static bool gpio_snapshot_valid(const LibusbW3u3Hardware& hardware)
     {
         return hardware.gpio_snapshot_valid_ || hardware.board_power_attempted_;
@@ -166,7 +171,11 @@ struct FakeUsb {
     int dsc_stop_count = 0;
     int seed_write_count = 0;
     int seed_clear_count = 0;
-    int fail_seed_once = 0;
+    std::array<unsigned, 16> seed_clear_register_counts{};
+    bool seed_clear_values_zero = true;
+    bool seed_cleanup_active = false;
+    int fail_seed_write_number = 0;
+    const std::array<std::uint8_t, 16>* seed_override = nullptr;
     bool fail_dsc_start = false;
     bool fail_cf_restore_once = false;
     std::uint8_t gpio = 0xa5U;
@@ -465,13 +474,17 @@ struct FakeUsb {
             if (slave == 0x4aU && transfer.length > 1U) {
                 const std::uint8_t value = static_cast<std::uint8_t>(transfer.index & 0xffU);
                 if (first >= 0x10U && first <= 0x1fU) {
-                    if (value == 0U) {
+                    // Zero is valid seed material. DSC stop, rather than the
+                    // payload value, distinguishes cleanup from application.
+                    if (seed_cleanup_active) {
                         ++seed_clear_count;
+                        ++seed_clear_register_counts[first - 0x10U];
+                        seed_clear_values_zero = seed_clear_values_zero && value == 0U;
                     } else {
                         ++seed_write_count;
                     }
-                    if (fail_seed_once && value != 0U) {
-                        fail_seed_once = 0;
+                    if (!seed_cleanup_active && seed_write_count == fail_seed_write_number) {
+                        fail_seed_write_number = 0;
                         if (response != nullptr) {
                             response[0] = 0U;
                         }
@@ -533,12 +546,17 @@ struct FakeUsb {
         }
         case Request::DscStart:
             ++dsc_start_count;
+            seed_cleanup_active = false;
+            if (seed_override != nullptr && hardware != nullptr) {
+                LibusbW3u3HardwareTestPeer::set_link_seed(*hardware, *seed_override);
+            }
             if (response != nullptr && transfer.length > 0U) {
                 response[0] = fail_dsc_start ? 0U : 1U;
             }
             return static_cast<int>(transfer.length);
         case Request::DscStop:
             ++dsc_stop_count;
+            seed_cleanup_active = true;
             return status();
         case Request::GpioRead:
             if (response == nullptr) {
@@ -974,18 +992,59 @@ bool test_dsc_failure_stops_local0_and_restores_cf()
 
 bool test_seed_failure_stops_local0_clears_seed_and_restores_cf()
 {
+    std::array<std::array<std::uint8_t, 16>, 3> seeds{};
+    seeds[1].fill(0x80U);
+    seeds[1][0] = 0U;
+    seeds[1][8] = 0U;
+    seeds[2].fill(0xffU);
+    for (const auto& seed : seeds) {
+        for (int failed_write : {1, 2, 16}) {
+            FakeUsb fake;
+            fake.fail_seed_write_number = failed_write;
+            fake.seed_override = &seed;
+            LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+            Hooks hooks{};
+            configure(hardware, fake, hooks, 0U);
+            std::atomic<bool> cancelled{false};
+
+            CHECK(!hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+            CHECK(saw_dsc(fake, Request::DscStart, 0U));
+            CHECK(saw_dsc(fake, Request::DscStop, 0U));
+            CHECK(fake.seed_write_count == failed_write);
+            CHECK(fake.fail_seed_write_number == 0);
+            CHECK(fake.seed_clear_count == 16);
+            CHECK(fake.seed_clear_values_zero);
+            for (unsigned count : fake.seed_clear_register_counts) {
+                CHECK(count == 1U);
+            }
+            CHECK(fake.controller[0x05] == 0U);
+            CHECK(fake.cancel_count == 4);
+            CHECK(fake.cf[0] == fake.initial_cf(0U));
+        }
+    }
+    return true;
+}
+
+bool test_zero_seed_application_is_distinct_from_cleanup()
+{
+    const std::array<std::uint8_t, 16> seed{};
     FakeUsb fake;
-    fake.fail_seed_once = 1;
+    fake.seed_override = &seed;
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
     Hooks hooks{};
     configure(hardware, fake, hooks, 0U);
     std::atomic<bool> cancelled{false};
 
-    CHECK(!hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
-    CHECK(saw_dsc(fake, Request::DscStart, 0U));
-    CHECK(saw_dsc(fake, Request::DscStop, 0U));
-    CHECK(fake.seed_write_count >= 1);
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(fake.seed_write_count == 16);
+    CHECK(fake.seed_clear_count == 0);
+    CHECK(hardware.stop().has_value());
+    CHECK(fake.seed_write_count == 16);
     CHECK(fake.seed_clear_count == 16);
+    CHECK(fake.seed_clear_values_zero);
+    for (unsigned count : fake.seed_clear_register_counts) {
+        CHECK(count == 1U);
+    }
     CHECK(fake.controller[0x05] == 0U);
     CHECK(fake.cancel_count == 4);
     CHECK(fake.cf[0] == fake.initial_cf(0U));
@@ -1676,6 +1735,8 @@ int main()
          test_dsc_failure_stops_local0_and_restores_cf},
         {"test_seed_failure_stops_local0_clears_seed_and_restores_cf",
          test_seed_failure_stops_local0_clears_seed_and_restores_cf},
+        {"test_zero_seed_application_is_distinct_from_cleanup",
+         test_zero_seed_application_is_distinct_from_cleanup},
         {"test_rejected_open_reserves_before_cleanup_state_and_quarantines",
          test_rejected_open_reserves_before_cleanup_state_and_quarantines},
         {"test_shutdown_preserves_gpio_restore_after_nested_cf_cleanup_failure",
