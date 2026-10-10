@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0-only
+policy_module(asicend, 1.0.0)
+
+gen_require(`
+    type pcscd_t;
+')
+
+type asicend_t;
+type asicend_exec_t;
+init_daemon_domain(asicend_t, asicend_exec_t)
+init_nnp_daemon_domain(asicend_t)
+
+type asicend_var_run_t;
+files_pid_file(asicend_var_run_t)
+files_pid_filetrans(init_t, asicend_var_run_t, dir, "asicen-userland")
+type asicend_data_t;
+files_type(asicend_data_t)
+
+# asicend creates the per-device directory and the control/stream sockets below
+# the systemd-managed /run/asicen-userland directory.
+manage_dirs_pattern(asicend_t, asicend_var_run_t, asicend_var_run_t)
+manage_sock_files_pattern(asicend_t, asicend_var_run_t, asicend_var_run_t)
+
+# libusb uses generic USB device nodes and reads USB topology from sysfs.
+dev_rw_generic_usb_dev(asicend_t)
+dev_read_sysfs(asicend_t)
+udev_read_db(asicend_t)
+
+# libusb's hotplug path receives kernel object uevent notifications.
+allow asicend_t self:netlink_kobject_uevent_socket create_socket_perms;
+
+# The unit's firmware path is explicitly labeled as data; only its parent
+# directories use the ordinary Fedora usr_t label.
+files_search_usr(asicend_t)
+read_files_pattern(asicend_t, asicend_data_t, asicend_data_t)
+
+# pcscd may use the standard reference-policy stream connection pattern for
+# the dedicated socket hierarchy. The final target is deliberately asicend_t,
+# so this does not grant connections to arbitrary or unconfined domains.
+stream_connect_pattern(pcscd_t, asicend_var_run_t, asicend_var_run_t, asicend_t)

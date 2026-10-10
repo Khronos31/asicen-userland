@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-09: under ASICEN_PRODUCT_CLI, command names,
-// receiver bounds, serial-free instance routing, and px4-compatible
-// --lnb-voltage 0|15 parsing. That parser replaced the earlier no-LNB guard.
+// ASICEN modification, 2026-10-10: ASICEN command spelling, absent serial and receiver capacity.
 // The original license notice is unchanged.
 #include "px4_ts_core.h"
 
@@ -132,15 +130,15 @@ bool valid_frequency(System system, std::uint64_t frequency) noexcept
 
 bool valid_arguments(const Px4TsArguments& arguments) noexcept
 {
+    if (
 #if defined(ASICEN_PRODUCT_CLI)
-    const bool invalid_identity = !arguments.device.empty() ||
-        !valid_instance(arguments.instance) ||
-        arguments.receiver >= asicen::profile::kReceiverCount;
+        (!arguments.device.empty() || !valid_instance(arguments.instance) ||
+         arguments.receiver >= asicen::profile::kReceiverCount) ||
 #else
-    const bool invalid_identity = arguments.instance.empty() ? !valid_serial(arguments.device) :
-        (!arguments.device.empty() || !valid_instance(arguments.instance));
+        (arguments.instance.empty() ? !valid_serial(arguments.device) :
+                                      (!arguments.device.empty() ||
+                                       !valid_instance(arguments.instance))) ||
 #endif
-    if (invalid_identity ||
         arguments.frequency_khz == 0U ||
         !valid_frequency(arguments.system, arguments.frequency_khz) ||
         arguments.tune_timeout_ms < 100U || arguments.tune_timeout_ms > 30000U ||
@@ -298,14 +296,12 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
             if (!result.output.empty()) return invalid("duplicate --output");
             result.output.assign(value.data(), value.size());
         } else if (option == "--receiver") {
-#if defined(ASICEN_PRODUCT_CLI)
-            constexpr std::uint8_t receiver_limit = asicen::profile::kReceiverCount;
-#else
-            constexpr std::uint8_t receiver_limit = static_cast<std::uint8_t>(kReceiverCount);
-#endif
             if (have_receiver || !parse_unsigned(value, result.receiver) ||
-                result.receiver >= receiver_limit)
-                return invalid("receiver is outside the available range");
+#if defined(ASICEN_PRODUCT_CLI)
+                result.receiver >= asicen::profile::kReceiverCount) return invalid("receiver must be 0..3");
+#else
+                result.receiver >= kReceiverCount) return invalid("receiver must be 0..7");
+#endif
             have_receiver = true;
         } else if (option == "--system") {
             if (have_system || !parse_system(value, result.system))
@@ -401,23 +397,18 @@ void print_px4_ts_usage(void* output) noexcept
 {
     FILE* file = static_cast<FILE*>(output);
     if (file == nullptr) return;
+    std::fprintf(file,
 #if defined(ASICEN_PRODUCT_CLI)
-    std::fprintf(file,
-                 "usage: asicen-ts --instance TOKEN --receiver 0..3 (--channel CH | "
-                 "--system isdb-t|isdb-s --frequency-khz N) [options]\n"
-                 "  --channel T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>\n"
-                 "  --stream-id N | --slot 0..11   (isdb-s, exactly one)\n"
-                 "  --bandwidth-hz N               (isdb-t default 6000000)\n"
-                 "  --lnb-voltage 0|15             (isdb-s; 15 is daemon-dependent)\n"
-                 "  --tune-timeout-ms 100..30000  (default 10000)\n"
-                 "  --output PATH|- --duration-seconds N | --packet-count N\n"
-                 "  --runtime-dir PATH --group --help\n");
+                 "usage: asicen-ts --instance TOKEN --receiver 0..3 "
+                 "--system isdb-t|isdb-s --frequency-khz N [options]\n"
+                 "       asicen-ts --instance TOKEN --receiver 0..3 "
+                 "--channel CH [options]\n"
 #else
-    std::fprintf(file,
                  "usage: px4-ts (--device BASE_SERIAL | --instance TOKEN) --receiver 0..7 "
                  "--system isdb-t|isdb-s --frequency-khz N [options]\n"
                  "       px4-ts (--device BASE_SERIAL | --instance TOKEN) --receiver 0..7 "
                  "--channel CH [options]\n"
+#endif
                  "  --channel CH                   (T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>)\n"
                  "  --stream-id N | --slot 0..11   (isdb-s, exactly one)\n"
                  "  --bandwidth-hz N               (isdb-t default 6000000)\n"
@@ -425,7 +416,6 @@ void print_px4_ts_usage(void* output) noexcept
                  "  --tune-timeout-ms 100..30000  (default 10000)\n"
                  "  --output PATH|- --duration-seconds N | --packet-count N\n"
                  "  --runtime-dir PATH --group --help\n");
-#endif
 }
 
 int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept

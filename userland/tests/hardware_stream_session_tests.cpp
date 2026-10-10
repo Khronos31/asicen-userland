@@ -19,56 +19,75 @@
 namespace {
 using namespace px4::userland;
 
-void check(bool ok, const char* message) {
+bool check(bool ok, const char* message)
+{
     if (!ok) {
         std::cerr << "FAIL: " << message << '\n';
-        std::exit(1);
+        return false;
     }
+    return true;
 }
 
-template <typename T>
-void check(const Result<T>& result, const char* message) {
-    check(result.has_value(), message);
+template <typename T> bool check(const Result<T>& result, const char* message)
+{
+    return check(result.has_value(), message);
 }
+
+#define CHECK(...)                                                                                 \
+    do {                                                                                           \
+        if (!check(__VA_ARGS__)) {                                                                 \
+            return false;                                                                          \
+        }                                                                                          \
+    } while (false)
 
 class FakeSource final : public asicen::StreamCaptureSource {
 public:
     Result<void> prepare(std::uint8_t receiver, ipc::System system,
-                         const std::atomic<bool>& cancelled) noexcept override {
+                         const std::atomic<bool>& cancelled) noexcept override
+    {
         std::lock_guard<std::mutex> lock(mutex);
         events.push_back("prepare");
         interrupted = false;
-        if (prepare_error) return Result<void>::failure(Error::USB_IO);
-        prepared = receiver == expected_receiver && system == expected_system &&
-                   !cancelled.load();
-        return prepared ? Result<void>::success()
-                        : Result<void>::failure(Error::UNSUPPORTED);
+        if (prepare_error) {
+            return Result<void>::failure(Error::USB_IO);
+        }
+        prepared = receiver == expected_receiver && system == expected_system && !cancelled.load();
+        return prepared ? Result<void>::success() : Result<void>::failure(Error::UNSUPPORTED);
     }
 
-    asicen::CaptureRunResult run(
-        const std::atomic<bool>& cancelled,
-        bool (*emit)(void*, const std::uint8_t*, std::size_t),
-        void* context) noexcept override {
+    asicen::CaptureRunResult run(const std::atomic<bool>& cancelled,
+                                 bool (*emit)(void*, const std::uint8_t*, std::size_t),
+                                 void* context) noexcept override
+    {
+        run_started.store(true, std::memory_order_release);
         for (const auto& chunk : chunks) {
-            if (cancelled.load()) break;
-            if (!emit(context, chunk.data(), chunk.size())) break;
+            if (cancelled.load()) {
+                break;
+            }
+            if (!emit(context, chunk.data(), chunk.size())) {
+                break;
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 ++emitted;
             }
             condition.notify_all();
         }
-        if (result == asicen::CaptureRunResult::fatal_drain) return result;
+        if (result == asicen::CaptureRunResult::fatal_drain) {
+            return result;
+        }
         std::unique_lock<std::mutex> lock(mutex);
         run_started.store(true, std::memory_order_release);
         condition.notify_all();
         condition.wait(lock, [&] { return cancelled.load() || interrupted; });
-        if (hold_run_after_interrupt)
+        if (hold_run_after_interrupt) {
             condition.wait(lock, [&] { return release_held_run; });
+        }
         return result;
     }
 
-    void interrupt() noexcept override {
+    void interrupt() noexcept override
+    {
         {
             std::lock_guard<std::mutex> lock(mutex);
             interrupted = true;
@@ -78,22 +97,24 @@ public:
         condition.notify_all();
     }
 
-    Result<void> stop() noexcept override {
+    Result<void> stop() noexcept override
+    {
         std::lock_guard<std::mutex> lock(mutex);
         events.push_back("stop");
         ++stop_calls;
-        return stop_error ? Result<void>::failure(Error::USB_IO)
-                          : Result<void>::success();
+        return stop_error ? Result<void>::failure(Error::USB_IO) : Result<void>::success();
     }
 
-    bool wait_emitted(std::size_t count) {
+    TunerStreamCounters source_counters() const noexcept override { return observations; }
+
+    bool wait_emitted(std::size_t count)
+    {
         std::unique_lock<std::mutex> lock(mutex);
-        return condition.wait_for(lock, std::chrono::seconds(2), [&] {
-            return emitted >= count;
-        });
+        return condition.wait_for(lock, std::chrono::seconds(2), [&] { return emitted >= count; });
     }
 
-    void release_run() {
+    void release_run()
+    {
         {
             std::lock_guard<std::mutex> lock(mutex);
             release_held_run = true;
@@ -118,73 +139,67 @@ public:
     std::atomic<bool> run_started{false};
     std::atomic<bool> interrupt_seen{false};
     asicen::CaptureRunResult result = asicen::CaptureRunResult::cancelled;
-};
-
-class FakeFatal final : public asicen::StreamProcessFatal {
-public:
-    void terminate_nonzero(int code) noexcept override {
-        exit_code.store(code);
-        called.store(true);
-    }
-    std::atomic<bool> called{false};
-    std::atomic<int> exit_code{0};
+    TunerStreamCounters observations{};
 };
 
 class ShutdownTrackingFrontend final : public TunerServiceBackend {
 public:
     std::uint8_t receiver_count() const noexcept override { return 4U; }
-    bool receiver_supports(std::uint8_t receiver, ipc::System system) const noexcept override {
+    bool receiver_supports(std::uint8_t receiver, ipc::System system) const noexcept override
+    {
         return (receiver == 0U && system == ipc::System::ISDB_S) ||
                (receiver == 1U && system == ipc::System::ISDB_T);
     }
     Result<void> open_receiver(std::uint8_t) noexcept override { return Result<void>::success(); }
-    Result<void> tune_terrestrial(std::uint8_t, std::uint32_t,
-                                  std::uint32_t) noexcept override {
+    Result<void> tune_terrestrial(std::uint8_t, std::uint32_t, std::uint32_t) noexcept override
+    {
         return Result<void>::success();
     }
-    Result<void> tune_satellite(std::uint8_t, std::uint32_t,
-                                std::uint32_t) noexcept override {
+    Result<void> tune_satellite(std::uint8_t, std::uint32_t, std::uint32_t) noexcept override
+    {
         return Result<void>::success();
     }
-    Result<bool> is_locked(std::uint8_t, ipc::System) noexcept override {
+    Result<bool> is_locked(std::uint8_t, ipc::System) noexcept override
+    {
         return Result<bool>::success(true);
     }
-    Result<void> select_satellite_slot(std::uint8_t, std::uint8_t,
-                                       std::uint32_t) noexcept override {
+    Result<void> select_satellite_slot(std::uint8_t, std::uint8_t, std::uint32_t) noexcept override
+    {
         return Result<void>::success();
     }
-    Result<void> select_satellite_tsid(std::uint8_t, std::uint16_t,
-                                       std::uint32_t) noexcept override {
+    Result<void> select_satellite_tsid(std::uint8_t, std::uint16_t, std::uint32_t) noexcept override
+    {
         return Result<void>::success();
     }
-    Result<void> close_receiver(std::uint8_t) noexcept override {
-        return Result<void>::success();
-    }
+    Result<void> close_receiver(std::uint8_t) noexcept override { return Result<void>::success(); }
     Result<void> begin_tune_power(std::uint8_t receiver, ipc::System system,
-                                  std::uint8_t voltage) noexcept override {
+                                  std::uint8_t voltage) noexcept override
+    {
         ++power_calls;
         power_receiver = receiver;
         power_system = system;
         power_voltage = voltage;
         return power_error == Error::OK ? Result<void>::success()
-                                       : Result<void>::failure(power_error);
+                                        : Result<void>::failure(power_error);
     }
-    Result<void> commit_tune_power(std::uint8_t receiver) noexcept override {
+    Result<void> commit_tune_power(std::uint8_t receiver) noexcept override
+    {
         ++commit_calls;
         power_receiver = receiver;
         return power_error == Error::OK ? Result<void>::success()
-                                       : Result<void>::failure(power_error);
+                                        : Result<void>::failure(power_error);
     }
-    Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override {
+    Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override
+    {
         ++rollback_calls;
         power_receiver = receiver;
         return power_error == Error::OK ? Result<void>::success()
-                                       : Result<void>::failure(power_error);
+                                        : Result<void>::failure(power_error);
     }
-    Result<void> shutdown() noexcept override {
+    Result<void> shutdown() noexcept override
+    {
         ++shutdown_calls;
-        return shutdown_error ? Result<void>::failure(Error::NOT_READY)
-                              : Result<void>::success();
+        return shutdown_error ? Result<void>::failure(Error::NOT_READY) : Result<void>::success();
     }
     unsigned shutdown_calls = 0;
     bool shutdown_error = false;
@@ -197,7 +212,8 @@ public:
     Error power_error = Error::OK;
 };
 
-std::vector<std::uint8_t> packet(std::uint8_t cc) {
+std::vector<std::uint8_t> packet(std::uint8_t cc)
+{
     std::vector<std::uint8_t> bytes(188U, 0xffU);
     bytes[0] = 0x47U;
     bytes[1] = 0x00U;
@@ -206,7 +222,8 @@ std::vector<std::uint8_t> packet(std::uint8_t cc) {
     return bytes;
 }
 
-TunerAttachment identity(std::uint64_t attachment_id = 8U) {
+TunerAttachment identity(std::uint64_t attachment_id = 8U)
+{
     TunerAttachment value{};
     value.owner_client_id = 4U;
     value.lease_id = 6U;
@@ -217,59 +234,232 @@ TunerAttachment identity(std::uint64_t attachment_id = 8U) {
     return value;
 }
 
-void start_precedes_attach_and_full_identity_is_required() {
+bool mock_stream_uses_canonical_bounds_and_attachment_identity()
+{
+    asicen::MockTunerStream stream;
+    const auto attached = identity(80U);
+    CHECK(stream.attach(attached), "mock attaches a complete identity");
+    std::array<std::uint8_t, 376U> output{};
+    for (const auto size : {0U, 1U, 187U, 189U, 1048477U}) {
+        CHECK(stream.read(attached, {output.data(), size}, {0U}).error() == Error::INVALID_ARGUMENT,
+              "mock rejects nonpacket or oversized reads before touching output");
+    }
+    CHECK(stream.read(attached, {nullptr, 188U}, {0U}).error() == Error::INVALID_ARGUMENT,
+          "mock rejects null output");
+    CHECK(stream.final_snapshot(attached).error() == Error::NOT_READY,
+          "mock final snapshot is unavailable before detach");
+    for (unsigned field = 0U; field < 6U; ++field) {
+        auto forged = attached;
+        switch (field) {
+        case 0U:
+            ++forged.owner_client_id;
+            break;
+        case 1U:
+            ++forged.lease_id;
+            break;
+        case 2U:
+            ++forged.attachment_id;
+            break;
+        case 3U:
+            ++forged.receiver;
+            break;
+        case 4U:
+            forged.system = ipc::System::ISDB_S;
+            break;
+        case 5U:
+            ++forged.nonce[0];
+            break;
+        }
+        CHECK(stream.read(forged, {output.data(), output.size()}, {0U}).error() ==
+                      Error::NOT_FOUND &&
+                  stream.detach(forged).error() == Error::NOT_FOUND &&
+                  stream.stats(forged).error() == Error::NOT_FOUND &&
+                  stream.terminal(forged).error() == Error::NOT_FOUND &&
+                  stream.final_snapshot(forged).error() == Error::NOT_FOUND &&
+                  stream.release_final(forged).error() == Error::NOT_FOUND,
+              "every mock stream operation rejects each altered identity field");
+    }
+    const auto read = stream.read(attached, {output.data(), output.size()}, {0U});
+    CHECK(read && read.value().bytes == output.size() && output[0] == 0x47U &&
+              output[188] == 0x47U && (output[3] & 0x0fU) == 0U && (output[191] & 0x0fU) == 1U,
+          "canonical mock retains exact packet size, sync and continuity coverage");
+    constexpr std::size_t max_read = (kMaxStreamTransfer / 188U) * 188U;
+    std::vector<std::uint8_t> maximum(max_read + 188U);
+    CHECK(stream.read(attached, {maximum.data(), maximum.size()}, {0U}).error() ==
+              Error::INVALID_ARGUMENT,
+          "aligned read beyond the shared maximum is rejected");
+    const auto maximum_read = stream.read(attached, {maximum.data(), max_read}, {0U});
+    CHECK(maximum_read && maximum_read.value().bytes != 0U &&
+              maximum_read.value().bytes <= max_read && maximum_read.value().bytes % 188U == 0U,
+          "exact shared maximum capacity is accepted with packet-aligned delivery");
+    CHECK(stream.detach(attached), "mock detaches the exact owner");
+    CHECK(stream.final_snapshot(attached), "mock publishes final after detach");
+    const auto eof = stream.read(attached, {output.data(), output.size()}, {0U});
+    CHECK(eof && eof.value().eof, "detached mock returns terminal EOF");
+    CHECK(stream.release_final(attached), "mock releases final identity");
+    CHECK(stream.stats(attached).error() == Error::NOT_FOUND,
+          "released mock identity cannot access retired state");
+    asicen::MockTunerBackend frontend;
+    CHECK(frontend.select_satellite_slot(0U, 7U, 1000U), "last ASICEN TSID slot is valid");
+    CHECK(frontend.select_satellite_slot(0U, 8U, 1000U).error() == Error::INVALID_ARGUMENT,
+          "mock rejects slot beyond ASICEN eight-entry table");
+    return true;
+}
+
+bool start_precedes_attach_and_full_identity_is_required()
+{
     asicen::MockTunerBackend frontend;
     FakeSource source;
-    FakeFatal fatal;
+
     source.chunks = {packet(0), packet(1)};
-    asicen::HardwareStreamService service(frontend, source, fatal);
-    check(service.start_capture(1U, ipc::System::ISDB_T), "start capture prepares source");
-    check(source.wait_emitted(2U), "pre-attach queue receives bounded data");
+    asicen::HardwareStreamService service(frontend, source);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start capture prepares source");
+    CHECK(!source.run_started.load(), "packet delivery waits for an attachment");
     auto id = identity();
-    check(service.attach(id), "attach registers identity after capture start");
+    CHECK(service.attach(id), "attach registers identity after capture start");
+    CHECK(source.wait_emitted(2U), "attached queue receives bounded data");
     auto wrong = id;
     wrong.nonce[0] ^= 1U;
-    check(service.stats(wrong).error() == Error::NOT_FOUND,
-          "nonce mismatch is rejected");
+    CHECK(service.stats(wrong).error() == Error::NOT_FOUND, "nonce mismatch is rejected");
     wrong = id;
     wrong.owner_client_id++;
-    check(service.terminal(wrong).error() == Error::NOT_FOUND,
-          "owner mismatch is rejected");
+    CHECK(service.terminal(wrong).error() == Error::NOT_FOUND, "owner mismatch is rejected");
     std::array<std::uint8_t, 188> output{};
     const auto read = service.read(id, {output.data(), output.size()}, {20U});
-    check(read && read.value().bytes == output.size() && output[0] == 0x47U,
+    CHECK(read && read.value().bytes == output.size() && output[0] == 0x47U,
           "reader receives the pre-attach packets");
     std::array<std::uint8_t, 189> odd_output{};
     const auto odd_read = service.read(id, {odd_output.data(), odd_output.size()}, {0U});
-    check(odd_read && odd_read.value().bytes == 188U,
-          "read does not split TS packets when only 188 bytes remain");
-    check(service.detach(id), "detach stops and joins producer");
-    check(service.read(id, {output.data(), output.size()}, {0U}).error() == Error::NOT_FOUND,
-          "detach invalidates live attachment before return");
+    CHECK(!odd_read && odd_read.error() == Error::INVALID_ARGUMENT,
+          "read rejects a non-packet-aligned output buffer");
+    CHECK(service.read(id, {nullptr, 188U}, {0U}).error() == Error::INVALID_ARGUMENT,
+          "read rejects null output");
+    CHECK(service.read(id, {output.data(), 0U}, {0U}).error() == Error::INVALID_ARGUMENT,
+          "read rejects empty output");
+    CHECK(
+        service.read(id, {output.data(), asicen::HardwareStreamService::kMaxReadBytes + 188U}, {0U})
+                .error() == Error::INVALID_ARGUMENT,
+        "read rejects output above the transfer limit before accessing it");
+    const auto queued_stats = service.stats(id);
+    CHECK(queued_stats && queued_stats.value().packets == 2U && queued_stats.value().bytes == 376U,
+          "counters include queued unread packets at enqueue time");
+    CHECK(service.detach(id), "detach stops and joins producer");
+    const auto drained = service.read(id, {output.data(), output.size()}, {0U});
+    CHECK(drained && drained.value().bytes == 188U && output[3] == 0x11U,
+          "detached attachment drains its queued tail in order");
+    const auto eof = service.read(id, {output.data(), output.size()}, {0U});
+    CHECK(eof && eof.value().eof && eof.value().terminal == TunerStreamTerminal::stopped,
+          "drain-only attachment reports terminal EOF");
+    CHECK(service.read(id, {output.data(), output.size()}, {0U}).error() == Error::NOT_FOUND,
+          "terminal EOF retires the drain-only identity");
     const auto final = service.final_snapshot(id);
-    check(final && final.value().counters.bytes == output.size() + 188U &&
-              final.value().terminal == static_cast<std::uint8_t>(
-                  TunerStreamTerminal::stopped),
+    CHECK(final && final.value().counters.bytes == output.size() + 188U &&
+              final.value().terminal == static_cast<std::uint8_t>(TunerStreamTerminal::stopped),
           "final counters are retained for exact identity");
-    check(service.stop_capture(1U, ipc::System::ISDB_T), "cleanup succeeds after detach");
-    check(service.release_final(id), "final state is released after protocol flush");
-    check(service.start_capture(1U, ipc::System::ISDB_T), "fresh generation can restart");
-    check(service.stop_capture(1U, ipc::System::ISDB_T), "unattached attempt can stop");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "cleanup succeeds after detach");
+    CHECK(service.release_final(id), "final state is released after protocol flush");
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "fresh generation can restart");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "unattached attempt can stop");
+    return true;
 }
 
-void detach_does_not_publish_stale_final_snapshot_before_worker_join() {
+bool quality_counters_follow_enqueued_packets()
+{
     asicen::MockTunerBackend frontend;
     FakeSource source;
-    FakeFatal fatal;
+
+    auto first = packet(0U);
+    auto tei = packet(2U);
+    tei[1U] |= 0x80U;
+    auto discontinuity = packet(7U);
+    discontinuity[3U] = 0x37U;
+    discontinuity[4U] = 1U;
+    discontinuity[5U] = 0x80U;
+    auto after_reset = packet(8U);
+    auto null_packet = packet(9U);
+    null_packet[1U] = 0x1fU;
+    null_packet[2U] = 0xffU;
+    source.chunks = {first, tei, discontinuity, after_reset, null_packet, null_packet};
+    source.observations.sync_errors = 2U;
+    source.observations.empty_intervals = 3U;
+    asicen::HardwareStreamService service(
+        frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{6U * 188U});
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start quality observation");
+    const auto id = identity(31U);
+    CHECK(service.attach(id), "attach quality observation");
+    CHECK(source.wait_emitted(6U), "quality packets reach queue");
+    const auto stats = service.stats(id);
+    CHECK(stats && stats.value().packets == 6U && stats.value().bytes == 1128U &&
+              stats.value().tei_packets == 1U && stats.value().continuity_errors == 1U &&
+              stats.value().sync_errors == 2U && stats.value().empty_intervals == 3U,
+          "quality counters include unread queue, PID gap, TEI, sync and empty intervals");
+    CHECK(service.detach(id), "detach quality observation");
+    const auto snapshot = service.final_snapshot(id);
+    CHECK(snapshot && snapshot.value().counters.sync_errors == 2U &&
+              snapshot.value().counters.empty_intervals == 3U,
+          "source observations survive final snapshot");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop quality source");
+    const auto stopped_snapshot = service.final_snapshot(id);
+    CHECK(stopped_snapshot && stopped_snapshot.value().counters.sync_errors == 2U,
+          "source observations survive hardware cleanup");
+    return true;
+}
+
+bool thread_launch_failure_rolls_back_prepared_capture()
+{
+    asicen::MockTunerBackend frontend;
+    FakeSource source;
+
+    const auto fail_launch = [](pthread_t*, const pthread_attr_t*, asicen::NativeThread::Entry,
+                                void*) { return 11; };
+    asicen::HardwareStreamService service(
+        frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{188U}, fail_launch);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::INTERNAL,
+          "thread exhaustion is a fallible INTERNAL result");
+    CHECK(source.prepared && source.stop_calls == 1 && source.interrupt_seen.load() &&
+              !source.run_started.load(),
+          "failed worker launch interrupts and stops prepared capture without termination");
+    return true;
+}
+
+bool production_queue_capacity_validates_packet_bounds()
+{
+    for (const std::size_t packets : {0U, 4095U, 262145U}) {
+        asicen::MockTunerBackend frontend;
+        FakeSource source;
+
+        asicen::HardwareStreamService service(frontend, source, packets);
+        CHECK(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::INVALID_ARGUMENT,
+              "production queue rejects out-of-range packet counts before USB preparation");
+        CHECK(!source.prepared, "invalid queue performs no source setup");
+    }
+    asicen::MockTunerBackend frontend;
+    FakeSource source;
+
+    asicen::HardwareStreamService service(frontend, source, 4096U);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T),
+          "minimum production queue accepts packets");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T),
+          "pre-attachment worker is cancellable and joins on stop");
+    CHECK(!source.run_started.load(), "unattached capture never publishes or counts packets");
+    return true;
+}
+
+bool detach_does_not_publish_stale_final_snapshot_before_worker_join()
+{
+    asicen::MockTunerBackend frontend;
+    FakeSource source;
+
     source.hold_run_after_interrupt = true;
-    asicen::HardwareStreamService service(frontend, source, fatal);
-    check(service.start_capture(1U, ipc::System::ISDB_T),
+    asicen::HardwareStreamService service(frontend, source);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T),
           "start capture for final-snapshot publication race");
     const auto id = identity(18U);
-    check(service.attach(id), "attach final-snapshot publication race");
-    for (int i = 0; i < 200 && !source.run_started.load(std::memory_order_acquire); ++i)
+    CHECK(service.attach(id), "attach final-snapshot publication race");
+    for (int i = 0; i < 200 && !source.run_started.load(std::memory_order_acquire); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    check(source.run_started.load(std::memory_order_acquire), "capture worker is running");
+    }
+    CHECK(source.run_started.load(std::memory_order_acquire), "capture worker is running");
 
     std::atomic<bool> detach_done{false};
     std::atomic<bool> detach_ok{false};
@@ -277,98 +467,130 @@ void detach_does_not_publish_stale_final_snapshot_before_worker_join() {
         detach_ok.store(static_cast<bool>(service.detach(id)), std::memory_order_release);
         detach_done.store(true, std::memory_order_release);
     });
-    for (int i = 0; i < 200 && !source.interrupt_seen.load(std::memory_order_acquire); ++i)
+    struct DetachJoin {
+        FakeSource& source;
+        std::thread& thread;
+        ~DetachJoin()
+        {
+            source.release_run();
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    } detach_join{source, detacher};
+    for (int i = 0; i < 200 && !source.interrupt_seen.load(std::memory_order_acquire); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    check(source.interrupt_seen.load(std::memory_order_acquire),
+    }
+    CHECK(source.interrupt_seen.load(std::memory_order_acquire),
           "detach reached the blocked worker join");
 
     std::array<std::uint8_t, 188> output{};
     const auto interim_read = service.read(id, {output.data(), output.size()}, {0U});
-    check(interim_read && interim_read.value().timed_out && !interim_read.value().eof &&
+    CHECK(interim_read && interim_read.value().timed_out && !interim_read.value().eof &&
               interim_read.value().terminal == TunerStreamTerminal::none,
           "stream read waits for the final snapshot while detach joins");
-    check(service.final_snapshot(id).error() == Error::NOT_READY,
+    CHECK(service.final_snapshot(id).error() == Error::NOT_READY,
           "an unpublished default snapshot is never exposed");
-    check(!detach_done.load(std::memory_order_acquire), "worker join remains blocked");
+    CHECK(!detach_done.load(std::memory_order_acquire), "worker join remains blocked");
 
     source.release_run();
     detacher.join();
-    check(detach_ok.load(std::memory_order_acquire), "detach completes after worker exits");
+    CHECK(detach_ok.load(std::memory_order_acquire), "detach completes after worker exits");
     const auto final = service.final_snapshot(id);
-    check(final && final.value().counters.packets == 0U &&
+    CHECK(final && final.value().counters.packets == 0U &&
               final.value().terminal == static_cast<std::uint8_t>(TunerStreamTerminal::stopped),
           "only the completed detach publishes the stopped final snapshot");
+    return true;
 }
 
-void overflow_is_sticky_and_quarantines_cleanup_failure() {
+bool overflow_is_sticky_and_quarantines_cleanup_failure()
+{
     asicen::MockTunerBackend frontend;
     FakeSource source;
-    FakeFatal fatal;
+
     source.chunks = {packet(0), packet(1)};
-    asicen::HardwareStreamService service(frontend, source, fatal, 188U);
-    check(service.start_capture(1U, ipc::System::ISDB_T), "start for overflow case");
+    asicen::HardwareStreamService service(
+        frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{188U});
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start for overflow case");
     auto id = identity(9U);
-    check(service.attach(id), "attach overflow case");
-    check(source.wait_emitted(1U), "first packet is queued");
+    CHECK(service.attach(id), "attach overflow case");
+    CHECK(source.wait_emitted(1U), "first packet is queued");
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     const auto terminal = service.terminal(id);
-    check(terminal && terminal.value() ==
-              TunerStreamTerminal::slow_consumer,
+    CHECK(terminal && terminal.value() == TunerStreamTerminal::slow_consumer,
           "queue overflow is a sticky terminal, not a silent drop");
-    check(service.detach(id), "overflow worker joins");
+    CHECK(service.detach(id), "overflow worker joins");
     source.stop_error = true;
-    check(service.stop_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
           "cleanup failure is returned");
     const auto final = service.final_snapshot(id);
-    check(final && final.value().counters.usb_errors == 1U &&
-              final.value().terminal == static_cast<std::uint8_t>(
-                  TunerStreamTerminal::slow_consumer),
+    CHECK(final && final.value().counters.usb_errors == 1U &&
+              final.value().terminal ==
+                  static_cast<std::uint8_t>(TunerStreamTerminal::slow_consumer),
           "quarantined final counters retain first terminal and cleanup error");
-    check(service.release_final(id).error() == Error::NOT_READY,
+    CHECK(service.release_final(id).error() == Error::NOT_READY,
           "quarantined snapshot cannot make the hardware reusable");
-    check(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
           "unclean session is quarantined against reuse");
-    check(!fatal.called.load(), "ordinary cleanup failure does not invoke fatal callback");
+    return true;
 }
 
-void failed_prepare_attempts_cleanup_and_reports_quarantine() {
+bool failed_prepare_attempts_cleanup_and_reports_quarantine()
+{
     asicen::MockTunerBackend frontend;
     FakeSource source;
-    FakeFatal fatal;
+
     source.prepare_error = true;
     source.stop_error = true;
-    asicen::HardwareStreamService service(frontend, source, fatal);
-    check(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
+    asicen::HardwareStreamService service(frontend, source);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
           "preparation error is preserved");
-    check(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
           "failed compensating cleanup quarantines hardware");
-    check(source.stop_calls == 1, "partial start receives one cleanup attempt");
+    CHECK(source.stop_calls == 1, "partial start receives one cleanup attempt");
+    return true;
 }
 
-void fatal_callback_drain_requests_nonzero_process_exit() {
+bool fatal_callback_drain_quarantines_without_process_exit()
+{
     asicen::MockTunerBackend frontend;
     FakeSource source;
-    FakeFatal fatal;
+
     source.result = asicen::CaptureRunResult::fatal_drain;
-    asicen::HardwareStreamService service(frontend, source, fatal);
-    check(service.start_capture(1U, ipc::System::ISDB_T), "start fatal case");
-    for (int i = 0; i < 200 && !fatal.called.load(); ++i)
+    asicen::HardwareStreamService service(frontend, source);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start fatal case");
+    CHECK(service.attach(identity(25U)), "attach fatal case");
+    for (int i = 0; i < 200 && !source.run_started.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    check(fatal.called.load() && fatal.exit_code.load() == 70,
-          "fatal pending callback path requests nonzero process termination");
+    }
+    CHECK(service.shutdown().error() == Error::USB_IO,
+          "pending callback path quarantines and reports USB_IO without terminating");
+    return true;
 }
 
-void fatal_callback_drain_exits_child_without_running_destructors() {
+bool fatal_callback_drain_allows_safe_service_destruction()
+{
     const pid_t child = ::fork();
-    check(child >= 0, "fork fatal-drain test child");
+    CHECK(child >= 0, "fork fatal-drain test child");
     if (child == 0) {
         asicen::MockTunerBackend frontend;
         FakeSource source;
         source.result = asicen::CaptureRunResult::fatal_drain;
-        asicen::ExitProcessFatal fatal;
-        asicen::HardwareStreamService service(frontend, source, fatal);
-        if (!service.start_capture(1U, ipc::System::ISDB_T)) ::_exit(101);
-        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        asicen::HardwareStreamService service(frontend, source);
+        if (!service.start_capture(1U, ipc::System::ISDB_T)) {
+            ::_exit(101);
+        }
+        if (!service.attach(identity(26U))) {
+            ::_exit(103);
+        }
+        for (int i = 0; i < 200 && !source.run_started.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (service.shutdown().error() != Error::USB_IO) {
+            ::_exit(102);
+        }
+        ::_exit(0);
     }
     int status = 0;
     bool exited = false;
@@ -385,164 +607,206 @@ void fatal_callback_drain_exits_child_without_running_destructors() {
         (void)::kill(child, SIGKILL);
         (void)::waitpid(child, &status, 0);
     }
-    check(exited && WIFEXITED(status) && WEXITSTATUS(status) == 70,
-          "pending-callback fatal path exits child nonzero within bound");
+    CHECK(exited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "quarantined stream returns within bound without forced process exit");
+    return true;
 }
 
-void shutdown_cleans_source_and_is_sticky_against_restart() {
+bool shutdown_cleans_source_and_is_sticky_against_restart()
+{
     asicen::MockTunerBackend frontend;
     FakeSource source;
-    FakeFatal fatal;
-    asicen::HardwareStreamService service(frontend, source, fatal);
-    check(service.start_capture(1U, ipc::System::ISDB_T), "start shutdown case");
-    check(service.shutdown(), "shutdown joins worker and cleans source");
-    check(source.stop_calls == 1, "shutdown invokes source cleanup");
-    check(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::NOT_READY,
+
+    asicen::HardwareStreamService service(frontend, source);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start shutdown case");
+    CHECK(service.shutdown(), "shutdown joins worker and cleans source");
+    CHECK(source.stop_calls == 1, "shutdown invokes source cleanup");
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::NOT_READY,
           "global stop cannot be cleared by a later capture start");
+    return true;
 }
 
-void shutdown_cleanup_failure_is_reported_in_final_state() {
+bool shutdown_cleanup_failure_is_reported_in_final_state()
+{
     ShutdownTrackingFrontend frontend;
     FakeSource source;
-    FakeFatal fatal;
-    asicen::HardwareStreamService service(frontend, source, fatal);
-    check(service.start_capture(1U, ipc::System::ISDB_T), "start shutdown failure case");
+
+    asicen::HardwareStreamService service(frontend, source);
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start shutdown failure case");
     auto id = identity(11U);
-    check(service.attach(id), "attach shutdown failure case");
-    check(service.detach(id), "detach before cleanup failure");
+    CHECK(service.attach(id), "attach shutdown failure case");
+    CHECK(service.detach(id), "detach before cleanup failure");
     source.stop_error = true;
     frontend.shutdown_error = true;
-    check(service.stop_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T).error() == Error::USB_IO,
           "shutdown cleanup error is returned");
-    check(service.shutdown().error() == Error::USB_IO,
+    CHECK(service.shutdown().error() == Error::USB_IO,
           "shutdown retains earlier stream cleanup failure");
-    check(frontend.shutdown_calls == 1U,
+    CHECK(frontend.shutdown_calls == 1U,
           "frontend shutdown still runs after quarantined stream cleanup failure");
     const auto final = service.final_snapshot(id);
-    check(final && final.value().counters.usb_errors == 1U &&
-              final.value().terminal == static_cast<std::uint8_t>(
-                  TunerStreamTerminal::usb_error),
+    CHECK(final && final.value().counters.usb_errors == 1U &&
+              final.value().terminal == static_cast<std::uint8_t>(TunerStreamTerminal::usb_error),
           "cleanup failure upgrades lifecycle stopped state into an error snapshot");
+    return true;
 }
 
-void model_capabilities_delegate_without_enabling_unsupported_paths() {
+bool model_capabilities_delegate_without_enabling_unsupported_paths()
+{
     asicen::MockTunerBackend combined(1U);
     FakeSource source;
-    FakeFatal fatal;
-    asicen::HardwareStreamService service(combined, source, fatal);
-    check(service.receiver_count() == 1U, "single-receiver count is delegated");
-    check(service.receiver_supports(0U, ipc::System::ISDB_T) &&
-          service.receiver_supports(0U, ipc::System::ISDB_S),
+
+    asicen::HardwareStreamService service(combined, source);
+    CHECK(service.receiver_count() == 1U, "single-receiver count is delegated");
+    CHECK(service.receiver_supports(0U, ipc::System::ISDB_T) &&
+              service.receiver_supports(0U, ipc::System::ISDB_S),
           "shared receiver inherits both supported tune systems");
-    check(service.open_receiver(0U), "combined receiver can open");
-    check(service.tune_terrestrial(0U, 557142U, 1000U),
+    CHECK(service.open_receiver(0U), "combined receiver can open");
+    CHECK(service.tune_terrestrial(0U, 557142U, 1000U),
           "terrestrial tune need not use logical receiver one");
-    check(service.tune_satellite(0U, 1049480U, 1000U),
-          "same combined receiver can tune satellite");
-    check(service.open_receiver(1U).error() == Error::UNSUPPORTED &&
-          service.start_capture(1U, ipc::System::ISDB_T).error() == Error::UNSUPPORTED,
+    CHECK(service.tune_satellite(0U, 1049480U, 1000U), "same combined receiver can tune satellite");
+    CHECK(service.open_receiver(1U).error() == Error::UNSUPPORTED &&
+              service.start_capture(1U, ipc::System::ISDB_T).error() == Error::UNSUPPORTED,
           "out-of-model receiver rejected before source prepare");
-    check(source.events.empty(), "unsupported mapping never prepares the source");
+    CHECK(source.events.empty(), "unsupported mapping never prepares the source");
     source.expected_receiver = 0U;
-    check(service.start_capture(0U, ipc::System::ISDB_T),
+    CHECK(service.start_capture(0U, ipc::System::ISDB_T),
           "combined terrestrial receiver reaches source with logical receiver zero");
-    check(service.stop_capture(0U, ipc::System::ISDB_T), "combined terrestrial source stops");
+    CHECK(service.stop_capture(0U, ipc::System::ISDB_T), "combined terrestrial source stops");
     source.expected_system = ipc::System::ISDB_S;
-    check(service.start_capture(0U, ipc::System::ISDB_S),
+    CHECK(service.start_capture(0U, ipc::System::ISDB_S),
           "same logical receiver can select satellite source after cleanup");
-    check(service.stop_capture(0U, ipc::System::ISDB_S), "combined satellite source stops");
+    CHECK(service.stop_capture(0U, ipc::System::ISDB_S), "combined satellite source stops");
 
     asicen::MockTunerBackend four;
     FakeSource secondary_source;
-    asicen::HardwareStreamService secondary(four, secondary_source, fatal);
-    check(secondary.receiver_count() == 4U &&
-          secondary.receiver_supports(2U, ipc::System::ISDB_S) &&
-          secondary.receiver_supports(3U, ipc::System::ISDB_T),
+    asicen::HardwareStreamService secondary(four, secondary_source);
+    CHECK(secondary.receiver_count() == 4U &&
+              secondary.receiver_supports(2U, ipc::System::ISDB_S) &&
+              secondary.receiver_supports(3U, ipc::System::ISDB_T),
           "wrapper accepts additional receivers only when frontend supports them");
-    check(secondary.tune_terrestrial(3U, 557142U, 1000U) &&
-          secondary.select_satellite_slot(2U, 0U, 1000U),
+    CHECK(secondary.tune_terrestrial(3U, 557142U, 1000U) &&
+              secondary.select_satellite_slot(2U, 0U, 1000U),
           "secondary frontend operations preserve receiver routing");
-    check(!secondary.receiver_supports(4U, ipc::System::ISDB_S),
+    CHECK(!secondary.receiver_supports(4U, ipc::System::ISDB_S),
           "wrapper enforces delegated count boundary");
     secondary_source.expected_receiver = 3U;
-    check(secondary.start_capture(3U, ipc::System::ISDB_T),
+    CHECK(secondary.start_capture(3U, ipc::System::ISDB_T),
           "supported secondary logical receiver reaches the selected source");
-    check(secondary.stop_capture(3U, ipc::System::ISDB_T), "secondary source stops");
+    CHECK(secondary.stop_capture(3U, ipc::System::ISDB_T), "secondary source stops");
+    return true;
 }
 
-void primary_satellite_receiver_mapping_is_explicit() {
+bool primary_satellite_receiver_mapping_is_explicit()
+{
     ShutdownTrackingFrontend frontend;
     FakeSource source;
-    FakeFatal fatal;
-    asicen::HardwareStreamService service(frontend, source, fatal);
-    check(service.receiver_supports(0U, ipc::System::ISDB_S),
+
+    asicen::HardwareStreamService service(frontend, source);
+    CHECK(service.receiver_supports(0U, ipc::System::ISDB_S),
           "primary W3U3 receiver is satellite local zero");
-    check(service.receiver_supports(1U, ipc::System::ISDB_T),
+    CHECK(service.receiver_supports(1U, ipc::System::ISDB_T),
           "second W3U3 lane retains terrestrial local one");
-    check(!service.receiver_supports(0U, ipc::System::ISDB_T) &&
-          !service.receiver_supports(1U, ipc::System::ISDB_S) &&
-          !service.receiver_supports(2U, ipc::System::ISDB_S),
+    CHECK(!service.receiver_supports(0U, ipc::System::ISDB_T) &&
+              !service.receiver_supports(1U, ipc::System::ISDB_S) &&
+              !service.receiver_supports(2U, ipc::System::ISDB_S),
           "unsupported receiver/system combinations stay unavailable");
-    check(service.tune_satellite(1U, 1049480U, 5000U).error() == Error::UNSUPPORTED,
+    CHECK(service.tune_satellite(1U, 1049480U, 5000U).error() == Error::UNSUPPORTED,
           "satellite tuning cannot route onto the wrong frontend lane");
-    check(service.select_satellite_slot(1U, 0U, 1000U).error() == Error::UNSUPPORTED,
+    CHECK(service.select_satellite_slot(1U, 0U, 1000U).error() == Error::UNSUPPORTED,
           "satellite TSID selection cannot route onto local one");
+    return true;
 }
 
-void lnb_requests_delegate_exact_values_and_errors() {
+bool lnb_requests_delegate_exact_values_and_errors()
+{
     ShutdownTrackingFrontend frontend;
     FakeSource source;
-    FakeFatal fatal;
-    asicen::HardwareStreamService service(frontend, source, fatal);
+
+    asicen::HardwareStreamService service(frontend, source);
     for (const std::uint8_t voltage : {15U, 0U}) {
-        check(service.begin_tune_power(0U, ipc::System::ISDB_S, voltage),
+        CHECK(service.begin_tune_power(0U, ipc::System::ISDB_S, voltage),
               "valid satellite LNB request delegates to frontend");
-        check(frontend.power_receiver == 0U &&
-              frontend.power_system == ipc::System::ISDB_S &&
-              frontend.power_voltage == voltage,
+        CHECK(frontend.power_receiver == 0U && frontend.power_system == ipc::System::ISDB_S &&
+                  frontend.power_voltage == voltage,
               "wrapper preserves ON/OFF and receiver/system exactly");
-        check(service.commit_tune_power(0U), "LNB commit delegates");
-        check(service.rollback_tune_power(0U), "LNB rollback delegates");
+        CHECK(service.commit_tune_power(0U), "LNB commit delegates");
+        CHECK(service.rollback_tune_power(0U), "LNB rollback delegates");
     }
-    check(frontend.power_calls == 2U && frontend.commit_calls == 2U &&
-          frontend.rollback_calls == 2U, "each valid request is forwarded exactly once");
+    CHECK(frontend.power_calls == 2U && frontend.commit_calls == 2U &&
+              frontend.rollback_calls == 2U,
+          "each valid request is forwarded exactly once");
     for (const auto error : {Error::UNSUPPORTED, Error::USB_IO, Error::DISCONNECTED,
-                            Error::NOT_READY, Error::TIMEOUT}) {
+                             Error::NOT_READY, Error::TIMEOUT}) {
         frontend.power_error = error;
-        check(service.begin_tune_power(0U, ipc::System::ISDB_S, 15U).error() == error &&
-              service.commit_tune_power(0U).error() == error &&
-              service.rollback_tune_power(0U).error() == error,
+        CHECK(service.begin_tune_power(0U, ipc::System::ISDB_S, 15U).error() == error &&
+                  service.commit_tune_power(0U).error() == error &&
+                  service.rollback_tune_power(0U).error() == error,
               "frontend denial and hardware/cleanup errors cannot become success");
     }
     const auto calls = frontend.power_calls;
-    check(service.begin_tune_power(1U, ipc::System::ISDB_T, 15U).error() ==
-              Error::INVALID_ARGUMENT &&
-          service.begin_tune_power(0U, ipc::System::ISDB_S, 13U).error() ==
-              Error::INVALID_ARGUMENT,
+    CHECK(service.begin_tune_power(1U, ipc::System::ISDB_T, 15U).error() ==
+                  Error::INVALID_ARGUMENT &&
+              service.begin_tune_power(0U, ipc::System::ISDB_S, 13U).error() ==
+                  Error::INVALID_ARGUMENT,
           "invalid voltage and terrestrial ON fail before frontend access");
-    check(service.begin_tune_power(2U, ipc::System::ISDB_S, 15U).error() ==
-              Error::UNSUPPORTED &&
-          service.begin_tune_power(0U, ipc::System::ISDB_T, 0U).error() ==
-              Error::UNSUPPORTED,
+    CHECK(service.begin_tune_power(2U, ipc::System::ISDB_S, 15U).error() == Error::UNSUPPORTED &&
+              service.begin_tune_power(0U, ipc::System::ISDB_T, 0U).error() == Error::UNSUPPORTED,
           "wrong receiver/system cannot reach LNB controls");
-    check(frontend.power_calls == calls && source.events.empty(),
+    CHECK(frontend.power_calls == calls && source.events.empty(),
           "rejected power requests perform no frontend or capture operation");
+    return true;
 }
 
 }  // namespace
 
-int main() {
-    start_precedes_attach_and_full_identity_is_required();
-    detach_does_not_publish_stale_final_snapshot_before_worker_join();
-    overflow_is_sticky_and_quarantines_cleanup_failure();
-    failed_prepare_attempts_cleanup_and_reports_quarantine();
-    fatal_callback_drain_requests_nonzero_process_exit();
-    fatal_callback_drain_exits_child_without_running_destructors();
-    shutdown_cleans_source_and_is_sticky_against_restart();
-    shutdown_cleanup_failure_is_reported_in_final_state();
-    primary_satellite_receiver_mapping_is_explicit();
-    lnb_requests_delegate_exact_values_and_errors();
-    model_capabilities_delegate_without_enabling_unsupported_paths();
+int main()
+{
+    if (!mock_stream_uses_canonical_bounds_and_attachment_identity()) {
+        return 1;
+    }
+    if (!production_queue_capacity_validates_packet_bounds()) {
+        return 1;
+    }
+    if (!thread_launch_failure_rolls_back_prepared_capture()) {
+        return 1;
+    }
+    if (!quality_counters_follow_enqueued_packets()) {
+        return 1;
+    }
+    if (!start_precedes_attach_and_full_identity_is_required()) {
+        return 1;
+    }
+    if (!detach_does_not_publish_stale_final_snapshot_before_worker_join()) {
+        return 1;
+    }
+    if (!overflow_is_sticky_and_quarantines_cleanup_failure()) {
+        return 1;
+    }
+    if (!failed_prepare_attempts_cleanup_and_reports_quarantine()) {
+        return 1;
+    }
+    if (!fatal_callback_drain_quarantines_without_process_exit()) {
+        return 1;
+    }
+    if (!fatal_callback_drain_allows_safe_service_destruction()) {
+        return 1;
+    }
+    if (!shutdown_cleans_source_and_is_sticky_against_restart()) {
+        return 1;
+    }
+    if (!shutdown_cleanup_failure_is_reported_in_final_state()) {
+        return 1;
+    }
+    if (!primary_satellite_receiver_mapping_is_explicit()) {
+        return 1;
+    }
+    if (!lnb_requests_delegate_exact_values_and_errors()) {
+        return 1;
+    }
+    if (!model_capabilities_delegate_without_enabling_unsupported_paths()) {
+        return 1;
+    }
     std::cout << "hardware stream session tests passed\n";
     return 0;
 }

@@ -31,19 +31,24 @@
 #include <utility>
 
 namespace asicen {
-bool v2_target_valid(V2FrontendTarget t) {
+bool v2_target_valid(V2FrontendTarget t)
+{
     return t.internal_source < 8;
 }
-bool v2_target_is_satellite(V2FrontendTarget t) {
+bool v2_target_is_satellite(V2FrontendTarget t)
+{
     return v2_target_valid(t) && (t.internal_source & 1U) != 0;
 }
-std::uint8_t v2_demod_slave(V2FrontendTarget t) {
+std::uint8_t v2_demod_slave(V2FrontendTarget t)
+{
     return v2_target_valid(t) ? static_cast<std::uint8_t>(0x20 + 2 * t.internal_source) : 0;
 }
-std::uint8_t v2_internal_source_from_api(std::uint8_t source) {
+std::uint8_t v2_internal_source_from_api(std::uint8_t source)
+{
     return source < 8 ? static_cast<std::uint8_t>(source ^ 1U) : 0xff;
 }
-V2SourceRoute v2_source_route(const std::uint8_t *data, std::size_t size, std::uint8_t local) {
+V2SourceRoute v2_source_route(const std::uint8_t* data, std::size_t size, std::uint8_t local)
+{
     V2SourceRoute r{};
     if (!data || size != kCustomerInfoSize || local > 1 || data[0] != 1)
         return r;
@@ -58,7 +63,8 @@ V2SourceRoute v2_source_route(const std::uint8_t *data, std::size_t size, std::u
     r.valid = true;
     return r;
 }
-std::uint32_t v2_tune_frequency_hz(V2FrontendTarget t, std::uint32_t f) {
+std::uint32_t v2_tune_frequency_hz(V2FrontendTarget t, std::uint32_t f)
+{
     if (!v2_target_valid(t))
         return 0;
     if (v2_target_is_satellite(t)) {
@@ -77,7 +83,8 @@ std::uint32_t v2_tune_frequency_hz(V2FrontendTarget t, std::uint32_t f) {
         f = 473143U;
     return (f / 1000U) * 1000000U + 143000U;
 }
-V2Pll compute_v2_satellite_pll(std::uint32_t f, bool bit6, bool bit0) {
+V2Pll compute_v2_satellite_pll(std::uint32_t f, bool bit6, bool bit0)
+{
     V2Pll out{};
     if (f < 950000U || f > 2150000U)
         return out;
@@ -162,32 +169,37 @@ V2Pll compute_v2_satellite_pll(std::uint32_t f, bool bit6, bool bit0) {
 }
 namespace {
 using Bytes = std::vector<std::uint8_t>;
-std::vector<ControlTransfer> staged(V2FrontendTarget t, const Bytes &bytes, bool stop = true) {
+std::vector<ControlTransfer> staged(V2FrontendTarget t, const Bytes& bytes, bool stop = true)
+{
     if (!v2_target_valid(t) || bytes.empty())
         return {};
     return build_i2c_write_sequence(v2_demod_slave(t), 0, bytes.data(), bytes.size(), stop ? 2 : 3);
 }
-void add_control(FrontendPlan &plan, const ControlTransfer &c, const char *label) {
+void add_control(FrontendPlan& plan, const ControlTransfer& c, const char* label)
+{
     FrontendOp op{};
     op.transfer = c;
     op.require_status = (c.request != Request::Gpio && c.request != Request::GpioExSet);
     op.label = label;
     plan.push_back(op);
 }
-void add_delay(FrontendPlan &plan, unsigned ms) {
+void add_delay(FrontendPlan& plan, unsigned ms)
+{
     FrontendOp op{};
     op.kind = FrontendOpKind::Delay;
     op.delay_ms = ms;
     op.label = "V2 delay";
     plan.push_back(op);
 }
-void append_demod(FrontendPlan &plan, V2FrontendTarget t, std::uint8_t reg, std::uint8_t val) {
+void append_demod(FrontendPlan& plan, V2FrontendTarget t, std::uint8_t reg, std::uint8_t val)
+{
     for (auto c : staged(t, {reg, val}))
         add_control(plan, c, "V2 demod write");
 }
 } // namespace
 std::vector<ControlTransfer> v2_tuner_write_plan(V2FrontendTarget t, std::uint16_t reg,
-                                                 std::uint32_t value, std::uint8_t width) {
+                                                 std::uint32_t value, std::uint8_t width)
+{
     if (!v2_target_valid(t))
         return {};
     if (v2_target_is_satellite(t)) {
@@ -206,7 +218,8 @@ std::vector<ControlTransfer> v2_tuner_write_plan(V2FrontendTarget t, std::uint16
     return staged(t, b);
 }
 std::vector<ControlTransfer> v2_tuner_read_plan(V2FrontendTarget t, std::uint16_t reg,
-                                                std::uint8_t width) {
+                                                std::uint8_t width)
+{
     if (!v2_target_valid(t))
         return {};
     Bytes arm, trigger;
@@ -227,7 +240,8 @@ std::vector<ControlTransfer> v2_tuner_read_plan(V2FrontendTarget t, std::uint16_
     out.push_back(make_i2c_read_no_wait(v2_demod_slave(t), width));
     return out;
 }
-FrontendPlan plan_v2_demod_init(V2FrontendTarget t) {
+FrontendPlan plan_v2_demod_init(V2FrontendTarget t)
+{
     FrontendPlan out;
     if (!v2_target_valid(t))
         return out;
@@ -247,7 +261,8 @@ FrontendPlan plan_v2_demod_init(V2FrontendTarget t) {
     }
     return out;
 }
-FrontendPlan plan_v2_select_tsid(V2FrontendTarget t, std::uint16_t tsid) {
+FrontendPlan plan_v2_select_tsid(V2FrontendTarget t, std::uint16_t tsid)
+{
     FrontendPlan p;
     if (!v2_target_is_satellite(t))
         return p;
@@ -255,7 +270,8 @@ FrontendPlan plan_v2_select_tsid(V2FrontendTarget t, std::uint16_t tsid) {
     append_demod(p, t, 0x90, static_cast<std::uint8_t>(tsid));
     return p;
 }
-FrontendPlan plan_v2_tsids_read(V2FrontendTarget t) {
+FrontendPlan plan_v2_tsids_read(V2FrontendTarget t)
+{
     FrontendPlan p;
     if (!v2_target_is_satellite(t))
         return p;
@@ -266,7 +282,8 @@ FrontendPlan plan_v2_tsids_read(V2FrontendTarget t) {
     }
     return p;
 }
-FrontendPlan plan_v2_shared_power_on() {
+FrontendPlan plan_v2_shared_power_on()
+{
     FrontendPlan p;
     auto gpio = [&](std::uint8_t v, std::uint8_t m, unsigned ms) {
         add_control(p, make_gpio_set(v, m), "V2 shared GPIO");
@@ -287,7 +304,8 @@ FrontendPlan plan_v2_shared_power_on() {
     add_delay(p, 100);
     return p;
 }
-FrontendPlan plan_v2_shared_power_off() {
+FrontendPlan plan_v2_shared_power_off()
+{
     // TC power(local/API0,power0), official1fdbd..1fe1c. Do not restore
     // unrelated snapshot bits or infer GPIO20's electrical function.
     FrontendPlan p;
@@ -297,7 +315,8 @@ FrontendPlan plan_v2_shared_power_off() {
     add_delay(p, 100);
     return p;
 }
-FrontendPlan plan_v2_revision11_startup_prefix() {
+FrontendPlan plan_v2_revision11_startup_prefix()
+{
     FrontendPlan p;
     auto gpio = [&](std::uint8_t v, std::uint8_t m, unsigned ms) {
         add_control(p, make_gpio_set(v, m), "V2 startup GPIO");
@@ -314,7 +333,8 @@ FrontendPlan plan_v2_revision11_startup_prefix() {
     // Caller now reads a8:b0 one byte, waits10ms, then privately reads16.
     return p;
 }
-FrontendPlan plan_v2_revision11_startup_tail() {
+FrontendPlan plan_v2_revision11_startup_tail()
+{
     FrontendPlan p;
     add_control(p, make_gpio_set(0xa7, 0xfb), "V2 startup default GPIO");
     add_control(p, make_gpio_set(0x40, 0x40), "V2 shared standby");
@@ -327,16 +347,19 @@ FrontendPlan plan_v2_revision11_startup_tail() {
 namespace {
 class Engine {
   public:
-    FrontendTransport *transport;
+    FrontendTransport* transport;
     V2FrontendTarget target;
-    V2FrontendReport *report;
+    V2FrontendReport* report;
     V2FrontendResult status = V2FrontendResult::Completed;
     std::uint32_t nmi_chip_id = 0;
     std::chrono::steady_clock::time_point deadline;
-    Engine(FrontendTransport *t, V2FrontendTarget s, V2FrontendReport *r, unsigned ms)
+    Engine(FrontendTransport* t, V2FrontendTarget s, V2FrontendReport* r, unsigned ms)
         : transport(t), target(s), report(r),
-          deadline(std::chrono::steady_clock::now() + std::chrono::milliseconds(ms)) {}
-    bool ok() {
+          deadline(std::chrono::steady_clock::now() + std::chrono::milliseconds(ms))
+    {
+    }
+    bool ok()
+    {
         if (status != V2FrontendResult::Completed)
             return false;
         if (transport->cancelled())
@@ -345,7 +368,8 @@ class Engine {
             status = V2FrontendResult::DeadlineExceeded;
         return status == V2FrontendResult::Completed;
     }
-    bool delay(unsigned ms) {
+    bool delay(unsigned ms)
+    {
         if (!ok())
             return false;
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -358,7 +382,8 @@ class Engine {
         transport->delay_ms(ms);
         return ok();
     }
-    bool control(ControlTransfer c, Bytes *read = nullptr) {
+    bool control(ControlTransfer c, Bytes* read = nullptr)
+    {
         if (!ok())
             return false;
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -386,7 +411,8 @@ class Engine {
             read->assign(b.begin() + 1, b.end());
         return ok();
     }
-    bool sequence(const std::vector<ControlTransfer> &plan, Bytes *read = nullptr) {
+    bool sequence(const std::vector<ControlTransfer>& plan, Bytes* read = nullptr)
+    {
         if (plan.empty()) {
             status = V2FrontendResult::InvalidArgument;
             return false;
@@ -396,10 +422,12 @@ class Engine {
                 return false;
         return true;
     }
-    bool dw(std::uint8_t reg, std::uint8_t value) {
+    bool dw(std::uint8_t reg, std::uint8_t value)
+    {
         return sequence(staged(target, {reg, value}));
     }
-    bool dr(std::uint8_t reg, std::uint8_t &value) {
+    bool dr(std::uint8_t reg, std::uint8_t& value)
+    {
         auto p = staged(target, {reg}, false);
         p.push_back(make_i2c_read_no_wait(v2_demod_slave(target), 1));
         Bytes b;
@@ -408,10 +436,12 @@ class Engine {
         value = b[0];
         return true;
     }
-    bool wr(std::uint16_t reg, std::uint32_t value, std::uint8_t width = 1) {
+    bool wr(std::uint16_t reg, std::uint32_t value, std::uint8_t width = 1)
+    {
         return sequence(v2_tuner_write_plan(target, reg, value, width));
     }
-    bool rd(std::uint16_t reg, std::uint32_t &value, std::uint8_t width = 1) {
+    bool rd(std::uint16_t reg, std::uint32_t& value, std::uint8_t width = 1)
+    {
         Bytes b;
         if (!sequence(v2_tuner_read_plan(target, reg, width), &b))
             return false;
@@ -420,11 +450,13 @@ class Engine {
             value |= std::uint32_t(b[i]) << (8 * i);
         return true;
     }
-    bool mask(std::uint16_t reg, std::uint8_t andmask, std::uint8_t ormask) {
+    bool mask(std::uint16_t reg, std::uint8_t andmask, std::uint8_t ormask)
+    {
         std::uint32_t v = 0;
         return rd(reg, v) && wr(reg, (v & andmask) | ormask);
     }
-    bool tr8(std::uint8_t reg, std::uint8_t start, std::uint8_t bits, std::uint8_t *value) {
+    bool tr8(std::uint8_t reg, std::uint8_t start, std::uint8_t bits, std::uint8_t* value)
+    {
         std::uint32_t v = 0;
         if (!rd(reg, v))
             return false;
@@ -432,7 +464,8 @@ class Engine {
         return true;
     }
     bool tw16(std::uint8_t reg, std::uint8_t start, std::uint8_t bits, std::uint8_t bytes, bool rmw,
-              std::uint16_t value) {
+              std::uint16_t value)
+    {
         if (!bytes)
             bytes = 1;
         if (bytes > 2 || !bits || bits > 16 || start + bits > 16) {
@@ -456,8 +489,9 @@ class Engine {
         }
         return true;
     }
-    bool demod_init() {
-        for (const auto &op : plan_v2_demod_init(target)) {
+    bool demod_init()
+    {
+        for (const auto& op : plan_v2_demod_init(target)) {
             if (!control(op.transfer))
                 return false;
         }
@@ -467,30 +501,38 @@ class Engine {
     bool nmi_tune(std::uint32_t hz);
     bool tda_init();
     bool tda_tune(std::uint32_t khz, bool prepare = true);
-    bool lock(bool &locked);
+    bool lock(bool& locked);
 };
 
 class NmiAdapter final : public V2NmiIo {
   public:
-    Engine &e;
-    explicit NmiAdapter(Engine &engine) : e(engine) {}
-    bool read(std::uint16_t reg, std::uint32_t *value, std::uint8_t width) override {
+    Engine& e;
+    explicit NmiAdapter(Engine& engine) : e(engine)
+    {
+    }
+    bool read(std::uint16_t reg, std::uint32_t* value, std::uint8_t width) override
+    {
         return value && e.rd(reg, *value, width);
     }
-    bool write(std::uint16_t reg, std::uint32_t value, std::uint8_t width) override {
+    bool write(std::uint16_t reg, std::uint32_t value, std::uint8_t width) override
+    {
         return e.wr(reg, value, width);
     }
-    bool demod_write(std::uint8_t reg, std::uint8_t value) override {
+    bool demod_write(std::uint8_t reg, std::uint8_t value) override
+    {
         return e.dw(reg, value);
     }
-    bool delay_ms(unsigned ms) override {
+    bool delay_ms(unsigned ms) override
+    {
         return e.delay(ms);
     }
-    bool healthy() const override {
+    bool healthy() const override
+    {
         return e.status == V2FrontendResult::Completed;
     }
 };
-bool nmi_result(Engine &e, V2NmiResult r) {
+bool nmi_result(Engine& e, V2NmiResult r)
+{
     if (r == V2NmiResult::Completed)
         return e.ok();
     if (e.status != V2FrontendResult::Completed)
@@ -505,7 +547,8 @@ bool nmi_result(Engine &e, V2NmiResult r) {
         e.status = V2FrontendResult::FailedTransfer;
     return false;
 }
-bool Engine::nmi_init() {
+bool Engine::nmi_init()
+{
     NmiAdapter io(*this);
     const auto r = initialize_v2_nmi(io, &nmi_chip_id);
     if (report && nmi_chip_id) {
@@ -514,16 +557,18 @@ bool Engine::nmi_init() {
     }
     return nmi_result(*this, r);
 }
-bool Engine::nmi_tune(std::uint32_t hz) {
+bool Engine::nmi_tune(std::uint32_t hz)
+{
     NmiAdapter io(*this);
     return nmi_result(*this, tune_v2_nmi(io, hz, nmi_chip_id));
 }
-bool Engine::tda_init() {
+bool Engine::tda_init()
+{
     using u8 = std::uint8_t;
     u8 val = 0;
-    void *c = nullptr;
-    auto tda2014x_r8 = [&](void *, u8 r, u8 b, u8 n, u8 *v) { return tr8(r, b, n, v); };
-    auto tda2014x_w16 = [&](void *, u8 r, u8 b, u8 n, u8 bytes, bool rmw, u8, std::uint16_t v) {
+    void* c = nullptr;
+    auto tda2014x_r8 = [&](void*, u8 r, u8 b, u8 n, u8* v) { return tr8(r, b, n, v); };
+    auto tda2014x_w16 = [&](void*, u8 r, u8 b, u8 n, u8 bytes, bool rmw, u8, std::uint16_t v) {
         return tw16(r, b, n, bytes, rmw, v);
     };
     return (/* SetPowerMode */
@@ -580,7 +625,8 @@ bool Engine::tda_init() {
             tda2014x_r8(c, 6, 0, 8, &val) && tda2014x_w16(c, 6, 0, 8, 0, 0, 6, (val & 0xF7) | 8)) &&
            tda_tune(1318000U, false);
 }
-bool Engine::tda_tune(std::uint32_t khz, bool prepare) {
+bool Engine::tda_tune(std::uint32_t khz, bool prepare)
+{
     if (prepare && (!dw(0x0a, 0) || !dw(0x10, 0xb0) || !dw(0x11, 2) || !dw(3, 1)))
         return false;
     std::uint8_t mux = 0, bit6 = 0, bit0 = 0, val = 0;
@@ -645,7 +691,8 @@ bool Engine::tda_tune(std::uint32_t khz, bool prepare) {
         return false;
     return dw(0xa, 0xff) && dw(0x10, 0xb2) && dw(0x11, 0) && dw(3, 1);
 }
-bool Engine::lock(bool &locked) {
+bool Engine::lock(bool& locked)
+{
     locked = false;
     std::uint8_t v = 0;
     if (v2_target_is_satellite(target)) {
@@ -677,14 +724,16 @@ bool Engine::lock(bool &locked) {
         report->locked = locked;
     return true;
 }
-V2FrontendResult finish(Engine &e, bool success) {
+V2FrontendResult finish(Engine& e, bool success)
+{
     if (!success && e.status == V2FrontendResult::Completed)
         return V2FrontendResult::NotLocked;
     return e.status;
 }
 } // namespace
-V2FrontendResult initialize_v2_frontend(FrontendTransport *transport, V2FrontendTarget target,
-                                        V2FrontendReport *report, unsigned budget_ms) {
+V2FrontendResult initialize_v2_frontend(FrontendTransport* transport, V2FrontendTarget target,
+                                        V2FrontendReport* report, unsigned budget_ms)
+{
     if (report)
         *report = {};
     if (!transport || !v2_target_valid(target) || budget_ms == 0)
@@ -694,9 +743,10 @@ V2FrontendResult initialize_v2_frontend(FrontendTransport *transport, V2Frontend
         e.demod_init() && (v2_target_is_satellite(target) ? e.tda_init() : e.nmi_init());
     return finish(e, ok);
 }
-V2FrontendResult tune_v2_frontend(FrontendTransport *transport, V2FrontendTarget target,
-                                  std::uint32_t rf_khz, V2FrontendReport *report,
-                                  unsigned budget_ms) {
+V2FrontendResult tune_v2_frontend(FrontendTransport* transport, V2FrontendTarget target,
+                                  std::uint32_t rf_khz, V2FrontendReport* report,
+                                  unsigned budget_ms)
+{
     if (report)
         *report = {};
     const auto hz = v2_tune_frequency_hz(target, rf_khz);
@@ -729,8 +779,9 @@ V2FrontendResult tune_v2_frontend(FrontendTransport *transport, V2FrontendTarget
     }
     return V2FrontendResult::NotLocked;
 }
-V2FrontendResult read_v2_frontend_lock(FrontendTransport *transport, V2FrontendTarget target,
-                                       bool *locked, V2FrontendReport *report, unsigned budget_ms) {
+V2FrontendResult read_v2_frontend_lock(FrontendTransport* transport, V2FrontendTarget target,
+                                       bool* locked, V2FrontendReport* report, unsigned budget_ms)
+{
     if (report)
         *report = {};
     if (locked)
@@ -740,9 +791,10 @@ V2FrontendResult read_v2_frontend_lock(FrontendTransport *transport, V2FrontendT
     Engine e(transport, target, report, budget_ms);
     return finish(e, e.lock(*locked));
 }
-V2FrontendResult read_v2_frontend_tsids(FrontendTransport *transport, V2FrontendTarget target,
-                                        std::array<std::uint16_t, 8> *tsids,
-                                        V2FrontendReport *report, unsigned budget_ms) {
+V2FrontendResult read_v2_frontend_tsids(FrontendTransport* transport, V2FrontendTarget target,
+                                        std::array<std::uint16_t, 8>* tsids,
+                                        V2FrontendReport* report, unsigned budget_ms)
+{
     if (report)
         *report = {};
     if (tsids)
@@ -761,9 +813,10 @@ V2FrontendResult read_v2_frontend_tsids(FrontendTransport *transport, V2Frontend
     *tsids = result;
     return V2FrontendResult::Completed;
 }
-V2FrontendResult select_v2_frontend_tsid(FrontendTransport *transport, V2FrontendTarget target,
-                                         std::uint16_t tsid, V2FrontendReport *report,
-                                         unsigned budget_ms) {
+V2FrontendResult select_v2_frontend_tsid(FrontendTransport* transport, V2FrontendTarget target,
+                                         std::uint16_t tsid, V2FrontendReport* report,
+                                         unsigned budget_ms)
+{
     if (report)
         *report = {};
     if (!transport || !v2_target_is_satellite(target) || !budget_ms)

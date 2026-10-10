@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_QUEUED_CAPTURE_H
+#define ASICEN_USERLAND_QUEUED_CAPTURE_H
 
 #include "asicen/stream_capture.h"
 
@@ -65,8 +66,8 @@ struct QueueObservation {
     std::uint64_t duplicate_or_stale_callbacks = 0;
 
     void set_phase(QueuePhase phase);
-    void record_callback(std::size_t slot, std::uint64_t generation,
-                         int raw_status, int requested_length, int actual_length);
+    void record_callback(std::size_t slot, std::uint64_t generation, int raw_status,
+                         int requested_length, int actual_length);
     void record_normal_delivery(std::size_t size);
     void record_before_stop(std::size_t pending, std::size_t ready);
     void record_cancel(std::size_t slot, std::uint64_t generation, int return_code);
@@ -82,30 +83,26 @@ private:
 class QueuedCaptureIo {
 public:
     virtual ~QueuedCaptureIo() = default;
-    virtual bool prepare(std::uint8_t endpoint, std::size_t depth,
-                         std::size_t chunk_size) = 0;
+    virtual bool prepare(std::uint8_t endpoint, std::size_t depth, std::size_t chunk_size) = 0;
     virtual bool submit(std::size_t slot) = 0;
     virtual QueueWait wait(unsigned timeout_ms, QueueCompletion* completion) = 0;
     virtual bool resubmit(std::size_t slot) = 0;
-    virtual void set_observation(QueueObservation* observation) {
-        (void)observation;
-    }
+    virtual void set_observation(QueueObservation* observation) { (void)observation; }
     virtual void set_phase(QueuePhase phase) { (void)phase; }
     virtual void snapshot_before_stop() {}
     virtual void cancel_and_drain() = 0;
+    virtual bool drain_complete() const { return true; }
     virtual void release() = 0;
 };
 
-CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
-                                 CaptureOutput* output,
-                                 const CaptureRequest& request,
-                                 std::size_t depth, CaptureStats* stats,
-                                 bool filter_start = false,
-                                 const std::uint8_t* original_cf40 = nullptr,
-                                 QueueObservation* observation = nullptr,
-                                 FilterRepeat filter_repeat = FilterRepeat::None,
-                                 std::uint8_t reset_state = 1,
-                                 const std::uint8_t* original_cf_block = nullptr,
-                                 bool link_seed = false);
+CaptureOutcome
+run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io, CaptureOutput* output,
+                   const CaptureRequest& request, std::size_t depth, CaptureStats* stats,
+                   bool filter_start = false, const std::uint8_t* original_cf40 = nullptr,
+                   QueueObservation* observation = nullptr,
+                   FilterRepeat filter_repeat = FilterRepeat::None, std::uint8_t reset_state = 1,
+                   const std::uint8_t* original_cf_block = nullptr, bool link_seed = false);
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_QUEUED_CAPTURE_H

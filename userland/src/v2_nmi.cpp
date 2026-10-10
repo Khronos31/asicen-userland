@@ -10,7 +10,8 @@
 #include <limits>
 
 namespace asicen {
-V2NmiFamily v2_nmi_family(std::uint32_t id) {
+V2NmiFamily v2_nmi_family(std::uint32_t id)
+{
     if ((id & 0xfff00U) == 0x13100U)
         return V2NmiFamily::Nm131;
     if ((id & 0xfff00U) == 0x12000U)
@@ -28,46 +29,56 @@ struct BytePair {
 };
 class CheckedIo {
   public:
-    explicit CheckedIo(V2NmiIo &io) : io_(io) {}
-    bool read(std::uint16_t reg, U &value, std::uint8_t width = 4) {
+    explicit CheckedIo(V2NmiIo& io) : io_(io)
+    {
+    }
+    bool read(std::uint16_t reg, U& value, std::uint8_t width = 4)
+    {
         if (!io_.healthy() || !io_.read(reg, &value, width) || !io_.healthy())
             return false;
         if (width == 1)
             value &= 0xffU;
         return true;
     }
-    bool write(std::uint16_t reg, U value, std::uint8_t width = 4) {
+    bool write(std::uint16_t reg, U value, std::uint8_t width = 4)
+    {
         if (width == 1)
             value &= 0xffU;
         if (reg == 0x36)
             value &= 0x7fU; // initializer config+4 = 0: LDO on
         return io_.healthy() && io_.write(reg, value, width) && io_.healthy();
     }
-    bool rf(std::uint16_t reg, U value) {
+    bool rf(std::uint16_t reg, U value)
+    {
         return write(reg, value, 1);
     }
-    bool modify(std::uint16_t reg, U mask, U bits) {
+    bool modify(std::uint16_t reg, U mask, U bits)
+    {
         U value = 0;
         return read(reg, value) && write(reg, (value & mask) | bits);
     }
-    template <std::size_t N> bool pairs(const BytePair (&pairs)[N]) {
+    template <std::size_t N> bool pairs(const BytePair (&pairs)[N])
+    {
         for (auto pair : pairs)
             if (!rf(pair.reg, pair.value))
                 return false;
         return true;
     }
-    bool demod(std::uint8_t reg, std::uint8_t value) {
+    bool demod(std::uint8_t reg, std::uint8_t value)
+    {
         return io_.healthy() && io_.demod_write(reg, value) && io_.healthy();
     }
-    bool wait(unsigned ms) {
+    bool wait(unsigned ms)
+    {
         return io_.healthy() && io_.delay_ms(ms) && io_.healthy();
     }
 
   private:
-    V2NmiIo &io_;
+    V2NmiIo& io_;
 };
 
-bool nm130_reference(CheckedIo &io, U hz) {
+bool nm130_reference(CheckedIo& io, U hz)
+{
     // 0x196f2..0x197bf: exact-frequency reference-divider exceptions.
     constexpr U double_reference[] = {
         171000000, 506000000, 554000000, 602000000, 650000000,
@@ -86,7 +97,8 @@ bool nm130_reference(CheckedIo &io, U hz) {
     return io.rf(0x21, value);
 }
 
-bool tune_rf(CheckedIo &io, U hz, V2NmiFamily family, U &clock_offset) {
+bool tune_rf(CheckedIo& io, U hz, V2NmiFamily family, U& clock_offset)
+{
     constexpr U bounds[] = {0, 0, 434000000, 237000000, 214000000, 118000000, 79000000, 53000000};
     constexpr std::uint8_t multiplier[] = {0, 1, 2, 3, 4, 6, 9, 12};
     struct Filter {
@@ -177,7 +189,8 @@ bool tune_rf(CheckedIo &io, U hz, V2NmiFamily family, U &clock_offset) {
     return io.rf(0x37, rf >= 155000000 && rf < 300000000 ? 0x9c : 0x84);
 }
 
-bool tune_digital(CheckedIo &io, U hz, V2NmiFamily family, U clock) {
+bool tune_digital(CheckedIo& io, U hz, V2NmiFamily family, U clock)
+{
     // Mode-transition writes are reapplied to make each tune independent of
     // vendor global caches. This establishes standard 6 / output mode 2.
     if (family == V2NmiFamily::Nm131 && !io.write(0x1c0, 0x2d8c19c7))
@@ -235,7 +248,8 @@ bool tune_digital(CheckedIo &io, U hz, V2NmiFamily family, U clock) {
 // vtable+0x128 -> 0x1a66c sets ltgain, vtable+8 -> 0x1b358 rereads ID.
 // Tables at 0x28eb8/0x28ef8 match public GPL nm131.c by Budi Rachmanto.
 // The vendor initializer performs no calibration, delay or bounded poll.
-V2NmiResult initialize_v2_nmi(V2NmiIo &raw, std::uint32_t *chip_id) {
+V2NmiResult initialize_v2_nmi(V2NmiIo& raw, std::uint32_t* chip_id)
+{
     if (!chip_id)
         return V2NmiResult::InvalidArgument;
     CheckedIo io(raw);
@@ -255,7 +269,7 @@ V2NmiResult initialize_v2_nmi(V2NmiIo &raw, std::uint32_t *chip_id) {
         {0x18, 0x67}, {0x19, 0xd4}, {0x1a, 0x44}, {0x1c, 0x10}, {0x1d, 0xee}, {0x1e, 0x99},
         {0x21, 0xc5}, {0x22, 0x91}, {0x24, 0x01}, {0x2b, 0x91}, {0x2d, 0x01}, {0x2f, 0x80},
         {0x31, 0x00}, {0x33, 0x00}, {0x38, 0x00}, {0x39, 0x2f}, {0x3a, 0x00}, {0x3b, 0x00}};
-    for (const auto &rv : common)
+    for (const auto& rv : common)
         if (!io.write(rv.reg, rv.value, 1))
             return V2NmiResult::Failed;
     std::uint32_t value = 0;
@@ -271,15 +285,15 @@ V2NmiResult initialize_v2_nmi(V2NmiIo &raw, std::uint32_t *chip_id) {
                                        {0x34, 0x68}, {0x35, 0x54}, {0x36, 0x7c}};
     static constexpr RfPair extended[] = {{0x28, 0x00}, {0x2e, 0x56}, {0x34, 0x78}};
     if (family == V2NmiFamily::Nm120) {
-        for (const auto &rv : nm120)
+        for (const auto& rv : nm120)
             if (!io.write(rv.reg, rv.value, 1))
                 return V2NmiResult::Failed;
     } else if (family == V2NmiFamily::Nm130) {
-        for (const auto &rv : nm130)
+        for (const auto& rv : nm130)
             if (!io.write(rv.reg, rv.value, 1))
                 return V2NmiResult::Failed;
     } else if (family == V2NmiFamily::Extended813000) {
-        for (const auto &rv : extended)
+        for (const auto& rv : extended)
             if (!io.write(rv.reg, rv.value, 1))
                 return V2NmiResult::Failed;
     } else {
@@ -295,7 +309,8 @@ V2NmiResult initialize_v2_nmi(V2NmiIo &raw, std::uint32_t *chip_id) {
     return raw.healthy() ? V2NmiResult::Completed : V2NmiResult::Failed;
 }
 
-V2NmiResult tune_v2_nmi(V2NmiIo &raw, U hz, U chip_id) {
+V2NmiResult tune_v2_nmi(V2NmiIo& raw, U hz, U chip_id)
+{
     const auto family = v2_nmi_family(chip_id);
     if (family == V2NmiFamily::Unsupported)
         return V2NmiResult::UnsupportedChip;

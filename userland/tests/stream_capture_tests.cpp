@@ -7,14 +7,21 @@
 
 namespace {
 
-int failures = 0;
-
-void check(bool value, const char* name) {
+bool check(bool value, const char* name)
+{
     if (!value) {
         std::cerr << "FAIL: " << name << '\n';
-        ++failures;
+        return false;
     }
+    return true;
 }
+
+#define CHECK(...)                                                                                 \
+    do {                                                                                           \
+        if (!check(__VA_ARGS__)) {                                                                 \
+            return false;                                                                          \
+        }                                                                                          \
+    } while (false)
 
 using Clock = std::chrono::steady_clock;
 
@@ -22,8 +29,9 @@ class FakeBackend final : public asicen::CaptureBackend {
 public:
     bool dsc_start(std::uint8_t) override { return start_ok; }
     bool dsc_stop(std::uint8_t) override { return stop_ok; }
-    asicen::CaptureIo bulk_read(std::uint8_t, unsigned char* data, int length,
-                                int* transferred, unsigned) override {
+    asicen::CaptureIo bulk_read(std::uint8_t, unsigned char* data, int length, int* transferred,
+                                unsigned) override
+    {
         if (read_index >= io.size()) {
             *transferred = 0;
             return asicen::CaptureIo::Timeout;
@@ -50,7 +58,8 @@ public:
 
 class FakeOutput final : public asicen::CaptureOutput {
 public:
-    bool write(const unsigned char*, std::size_t size) override {
+    bool write(const unsigned char*, std::size_t size) override
+    {
         if (fail) {
             return false;
         }
@@ -62,7 +71,8 @@ public:
     std::size_t written = 0;
 };
 
-asicen::CaptureRequest request(std::uint64_t limit, Clock::time_point deadline) {
+asicen::CaptureRequest request(std::uint64_t limit, Clock::time_point deadline)
+{
     asicen::CaptureRequest req{};
     req.local = 1;
     req.endpoint = 0x82;
@@ -74,7 +84,8 @@ asicen::CaptureRequest request(std::uint64_t limit, Clock::time_point deadline) 
 
 }  // namespace
 
-int main() {
+bool run_tests()
+{
     const auto soon = [] { return Clock::now() + std::chrono::milliseconds(5); };
     const auto later = [] { return Clock::now() + std::chrono::seconds(1); };
 
@@ -84,10 +95,10 @@ int main() {
         FakeOutput output;
         auto req = request(0, later());
         req.endpoint = 0;
-        check(asicen::run_raw_capture(&backend, &output, req, nullptr) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, req, nullptr) ==
                   asicen::CaptureOutcome::InvalidArgument,
               "invalid endpoint");
-        check(asicen::run_raw_capture(nullptr, &output, request(0, later()), nullptr) ==
+        CHECK(asicen::run_raw_capture(nullptr, &output, request(0, later()), nullptr) ==
                   asicen::CaptureOutcome::InvalidArgument,
               "null backend");
     }
@@ -97,7 +108,7 @@ int main() {
         FakeBackend backend;
         backend.start_ok = false;
         FakeOutput output;
-        check(asicen::run_raw_capture(&backend, &output, request(0, later()), nullptr) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, request(0, later()), nullptr) ==
                   asicen::CaptureOutcome::StartFailed,
               "start failure");
     }
@@ -107,10 +118,10 @@ int main() {
         FakeBackend backend;
         FakeOutput output;
         asicen::CaptureStats stats{};
-        check(asicen::run_raw_capture(&backend, &output, request(0, Clock::now()),
-                                      &stats) == asicen::CaptureOutcome::ZeroBytes,
+        CHECK(asicen::run_raw_capture(&backend, &output, request(0, Clock::now()), &stats) ==
+                  asicen::CaptureOutcome::ZeroBytes,
               "zero bytes");
-        check(stats.bytes == 0, "zero stats");
+        CHECK(stats.bytes == 0, "zero stats");
     }
 
     // Limit reached -> Completed.
@@ -120,23 +131,23 @@ int main() {
         backend.transfers = {4, 4};
         FakeOutput output;
         asicen::CaptureStats stats{};
-        check(asicen::run_raw_capture(&backend, &output, request(8, later()), &stats) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, request(8, later()), &stats) ==
                   asicen::CaptureOutcome::Completed,
               "limit completed");
-        check(stats.bytes == 8 && stats.limit_reached, "limit stats");
-        check(output.written == 8, "limit written");
+        CHECK(stats.bytes == 8 && stats.limit_reached, "limit stats");
+        CHECK(output.written == 8, "limit written");
     }
 
-    // Partial timeout carrying bytes that reach the limit -> Completed.
+    // A timeout does not publish partial bytes.
     {
         FakeBackend backend;
         backend.io = {asicen::CaptureIo::Timeout};
         backend.transfers = {8};
         FakeOutput output;
-        check(asicen::run_raw_capture(&backend, &output, request(8, later()), nullptr) ==
-                  asicen::CaptureOutcome::Completed,
-              "partial timeout limit");
-        check(output.written == 8, "partial timeout written");
+        CHECK(asicen::run_raw_capture(&backend, &output, request(8, soon()), nullptr) ==
+                  asicen::CaptureOutcome::ZeroBytes,
+              "partial timeout remains an empty interval");
+        CHECK(output.written == 0, "partial timeout bytes are not published");
     }
 
     // Exact-limit USB error must not be hidden by the limit break.
@@ -145,10 +156,10 @@ int main() {
         backend.io = {asicen::CaptureIo::Error};
         backend.transfers = {8};
         FakeOutput output;
-        check(asicen::run_raw_capture(&backend, &output, request(8, later()), nullptr) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, request(8, later()), nullptr) ==
                   asicen::CaptureOutcome::UsbFailed,
               "exact-limit usb error");
-        check(output.written == 8, "error bytes still written");
+        CHECK(output.written == 0, "error bytes are not published");
     }
 
     // Bytes captured but packet-count not reached before deadline.
@@ -158,10 +169,10 @@ int main() {
         backend.transfers = {4};
         FakeOutput output;
         asicen::CaptureStats stats{};
-        check(asicen::run_raw_capture(&backend, &output, request(16, soon()), &stats) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, request(16, soon()), &stats) ==
                   asicen::CaptureOutcome::LimitNotReached,
               "limit not reached");
-        check(stats.bytes == 4 && !stats.limit_reached, "limit-not-reached stats");
+        CHECK(stats.bytes == 4 && !stats.limit_reached, "limit-not-reached stats");
     }
 
     // Stop failure is authoritative.
@@ -171,7 +182,7 @@ int main() {
         backend.io = {asicen::CaptureIo::Ok};
         backend.transfers = {4};
         FakeOutput output;
-        check(asicen::run_raw_capture(&backend, &output, request(4, later()), nullptr) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, request(4, later()), nullptr) ==
                   asicen::CaptureOutcome::StopFailed,
               "stop failure");
     }
@@ -183,7 +194,7 @@ int main() {
         backend.transfers = {4};
         FakeOutput output;
         output.fail = true;
-        check(asicen::run_raw_capture(&backend, &output, request(0, later()), nullptr) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, request(0, later()), nullptr) ==
                   asicen::CaptureOutcome::OutputFailed,
               "output failure");
     }
@@ -193,10 +204,15 @@ int main() {
         FakeBackend backend;
         backend.cancel = true;
         FakeOutput output;
-        check(asicen::run_raw_capture(&backend, &output, request(0, later()), nullptr) ==
+        CHECK(asicen::run_raw_capture(&backend, &output, request(0, later()), nullptr) ==
                   asicen::CaptureOutcome::Cancelled,
               "cancelled");
     }
 
-    return failures == 0 ? 0 : 1;
+    return true;
+}
+
+int main()
+{
+    return run_tests() ? 0 : 1;
 }

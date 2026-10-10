@@ -1,6 +1,8 @@
 # ASICEN userland development contract
 
-Status: initial acceptance plan, 2026-10-08. This is not a release/support claim.
+Status: acceptance plan, updated 2026-10-10 for Issue #4 parity against
+px4-userland `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
+This is not a release/support claim.
 
 ## Objective
 
@@ -18,7 +20,7 @@ Unsupported operations must fail explicitly; mock success is not hardware proof.
 
 The read-only px4 comparison found reusable portable IPC, control client/server,
 endpoint ownership, tuner/card service, TS client and PC/SC IFD components.
-Prefer adapting those components over extending the research 24-byte IPC.
+Use those components instead of the former research 24-byte IPC.
 Record exact source revisions and GPL-2.0-only notices before incorporating
 source. recisdb remains an external downstream program.
 
@@ -40,8 +42,10 @@ source. recisdb remains an external downstream program.
 - A finite capture must report the authoritative backend terminal result.
   Test slow/disconnected consumers and signal stop; do not infer success merely
   from receiving the requested bytes.
-- Preserve existing research tests. `--socket` mock compatibility may remain
-  as an explicit research path, but must never claim real tuning or card success.
+- Preserve research test coverage through the canonical runtime/instance IPC.
+  The former `--socket` 24-byte mock protocol is superseded by Issue #4;
+  reject its obsolete CLI route explicitly rather than keeping two protocols.
+  Mock success must never claim real tuning or card success.
 
 ## Acceptance increments
 
@@ -50,18 +54,25 @@ source. recisdb remains an external downstream program.
 px4-userland compatibility includes its distribution targets and dependency
 contract, not only CLI spelling. This requirement is currently **UNMET**;
 successful native development builds and TS trials do not satisfy it.
-The audit baseline is px4-userland `3de7d512cef11756e6f033557ee49917cad2f11c`,
-SPEC section 10.4 and its release-candidate workflow.
-Windows support in the reference is still being implemented (user clarification
-2026-10-09). Its presence in the specification/workflow is a target definition,
-not evidence of completion. Windows remains required for ASICEN as well.
+The current parity baseline is px4-userland
+`1a1485d0c3e972e0a47be907edb67949564aa9a7` and its release-candidate workflow.
+The earlier audit used `3de7d512cef11756e6f033557ee49917cad2f11c`.
+Windows Phase 1 is now an ASICEN development and build-verification target: the three
+product commands and same-host IPC including card operations. Windows real-device
+acceptance remains unverified. WinSCard compatibility and Microsoft PC/SC IFD
+registration remain Phase 2; a cross-build does not complete hardware acceptance.
+The user's 2026-10-11 JST release decision explicitly excludes Windows binaries
+from 0.1.0 distribution while retaining the implementation and build checks.
+Formal Windows support is planned for 0.2.x after WinSCard support is ready.
 
 - Distribute the three product commands `asicend`, `asicen-ts`, `asicenctl`,
   plus the applicable native card adapter and Android launcher. Research
   diagnostics are not substitutes for product commands or platform artifacts.
-- Produce nine binary archives: Linux x86_64 and aarch64, each with glibc and
-  musl IFD variants; macOS arm64; Android aarch64, armv7a and x86_64; Windows
-  x86_64. Also provide one corresponding-source archive and SHA256SUMS.
+- For 0.1.0 produce eight binary archives: Linux x86_64 and aarch64, each with
+  glibc and musl IFD variants; macOS arm64; Android aarch64, armv7a and x86_64.
+  Also provide one corresponding-source archive and SHA256SUMS. Keep Windows
+  x86_64 source, developer packaging support and build tests, but exclude its
+  binary archive from the release candidate set and published distribution.
 - Linux's three commands must be musl fully static executables, with no
   PT_INTERP, DT_NEEDED or GLIBC version requirements. Merely statically
   linking glibc does not satisfy this contract. Both Linux archive variants
@@ -73,9 +84,8 @@ not evidence of completion. Windows remains required for ASICEN as well.
 - Statically include libusb wherever the product links it. Clients/IFD that
   use only IPC need not acquire an unnecessary libusb dependency. macOS may
   depend on system libraries/frameworks; Android may depend on API24+ Bionic.
-  The in-progress reference Windows packaging specifies a libusb DLL; that is a
-  reference difference, not permission to silently waive the user's static
-  libusb requirement for ASICEN's Windows build.
+  The pinned reference Windows build also uses static libusb. ASICEN follows
+  that current contract and does not package a libusb DLL.
 - Package exact dependency licenses/notices, corresponding source and
   reproducible build/relink materials alongside the binaries. Audit the
   final archive inventory, machine architecture and dynamic dependencies;
@@ -128,11 +138,14 @@ remain useful development milestones, not a replacement for this contract.
   services, touch secret files, or release/version-bump.
 - Public source development is authorized by the user's 2026-10-09 instruction,
   superseding the initial plan to keep the repository private until 0.1.0.
-- Keep vendor binaries, firmware, TS samples and card data untracked.
-  Firmware is an exception for binary distribution archives only: the user's
-  2026-10-09 instruction requires it there, supplied from outside the repo,
-  with vendor provenance and unresolved-rights notice. Never include firmware
-  in Git or label it covered by the product's open-source license.
+- Keep additional vendor binaries, TS samples and card data untracked.
+  The current repository already tracks the separately identified
+  `firmware/asicen-loader.bin`; binary archives include that exact pinned image,
+  while corresponding-source exports exclude it. Preserve the provenance and
+  unresolved-rights notice in `THIRD_PARTY_NOTICES.md`. Do not label the vendor
+  image as covered by the product's open-source license or infer permission
+  to add other images. This records the current tree, superseding the older
+  outside-the-repository loader description.
 - Do not change existing tests or adopt kernel modules/legacy ioctl devices.
 - LNB electrical testing is deferred until measurement with a physical tester.
   The 2026-10-09 LNB request authorizes implementation and offline regression

@@ -2,16 +2,19 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <vector>
 
 namespace asicen {
-void QueueObservation::set_phase(QueuePhase phase) { phase_ = phase; }
+void QueueObservation::set_phase(QueuePhase phase)
+{
+    phase_ = phase;
+}
 
-void QueueObservation::record_callback(std::size_t slot, std::uint64_t generation,
-                                      int raw_status, int requested_length,
-                                      int actual_length) {
-    if (slot >= kMaxSlots || (saw_generation_[slot] &&
-                              generation <= last_generation_[slot])) {
+void QueueObservation::record_callback(std::size_t slot, std::uint64_t generation, int raw_status,
+                                       int requested_length, int actual_length)
+{
+    if (slot >= kMaxSlots || (saw_generation_[slot] && generation <= last_generation_[slot])) {
         ++duplicate_or_stale_callbacks;
         return;
     }
@@ -32,26 +35,34 @@ void QueueObservation::record_callback(std::size_t slot, std::uint64_t generatio
     }
     if (event_count < events.size()) {
         const auto now = std::chrono::steady_clock::now().time_since_epoch();
-        events[event_count++] = {slot, generation,
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()),
-            phase_, raw_status, requested_length, actual_length};
+        events[event_count++] = {
+            slot,
+            generation,
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()),
+            phase_,
+            raw_status,
+            requested_length,
+            actual_length};
     } else {
         ++event_overflow;
     }
 }
 
-void QueueObservation::record_normal_delivery(std::size_t size) {
+void QueueObservation::record_normal_delivery(std::size_t size)
+{
     ++normal_delivery_count;
     normal_delivery_actual_bytes += size;
 }
 
-void QueueObservation::record_before_stop(std::size_t pending, std::size_t ready) {
+void QueueObservation::record_before_stop(std::size_t pending, std::size_t ready)
+{
     pending_before_stop = pending;
     ready_before_stop = ready;
 }
 
-void QueueObservation::record_cancel(std::size_t slot, std::uint64_t generation,
-                                     int return_code) {
+void QueueObservation::record_cancel(std::size_t slot, std::uint64_t generation, int return_code)
+{
     if (cancellation_count < cancellations.size()) {
         cancellations[cancellation_count++] = {slot, generation, return_code};
     } else {
@@ -61,49 +72,51 @@ void QueueObservation::record_cancel(std::size_t slot, std::uint64_t generation,
 
 namespace {
 
-int remaining_ms(std::chrono::steady_clock::time_point deadline) {
+int remaining_ms(std::chrono::steady_clock::time_point deadline)
+{
     const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) return 0;
-    return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                deadline - now)
-                                .count());
+    if (now >= deadline) {
+        return 0;
+    }
+    return static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
 }
 
 }  // namespace
 
 CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
-                                 CaptureOutput* output,
-                                 const CaptureRequest& request,
-                                 std::size_t depth, CaptureStats* stats,
-                                 bool filter_start,
-                                 const std::uint8_t* initial_cf40,
-                                 QueueObservation* observation,
-                                 FilterRepeat filter_repeat,
-                                 std::uint8_t reset_state,
-                                 const std::uint8_t* initial_cf_block,
-                                 bool link_seed) {
-    if (stats != nullptr) *stats = {};
+                                  CaptureOutput* output, const CaptureRequest& request,
+                                  std::size_t depth, CaptureStats* stats, bool filter_start,
+                                  const std::uint8_t* initial_cf40, QueueObservation* observation,
+                                  FilterRepeat filter_repeat, std::uint8_t reset_state,
+                                  const std::uint8_t* initial_cf_block, bool link_seed)
+{
+    if (stats != nullptr) {
+        *stats = {};
+    }
     const bool repeat_enabled = filter_repeat != FilterRepeat::None;
     const auto restore_full_block = [&]() {
-        return !repeat_enabled ||
-               (control != nullptr && initial_cf_block != nullptr &&
-                control->write_cf_block(request.local, initial_cf_block,
-                                        CaptureBackend::kCfBlockSize));
+        return !repeat_enabled || (control != nullptr && initial_cf_block != nullptr &&
+                                   control->write_cf_block(request.local, initial_cf_block,
+                                                           CaptureBackend::kCfBlockSize));
     };
-    if (control == nullptr || io == nullptr || output == nullptr ||
-        request.endpoint == 0 || request.local > 1 || request.chunk_size == 0 ||
+    if (control == nullptr || io == nullptr || output == nullptr || request.endpoint == 0 ||
+        request.local > 1 || request.chunk_size == 0 ||
+        request.chunk_size > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
         depth == 0 || depth > 4 || (filter_start && (request.local != 1 || depth != 4)) ||
-        (link_seed && (!filter_start || request.local != 1 || depth != 4 ||
-                       reset_state != 1)) ||
-        (repeat_enabled && (!filter_start || request.local != 1 || depth != 4 ||
-                            reset_state != 1 || initial_cf_block == nullptr))) {
+        (link_seed && (!filter_start || request.local != 1 || depth != 4 || reset_state != 1)) ||
+        (repeat_enabled && (!filter_start || request.local != 1 || depth != 4 || reset_state != 1 ||
+                            initial_cf_block == nullptr))) {
         const bool restored = restore_full_block();
-        if (repeat_enabled && !restored && stats != nullptr)
+        if (repeat_enabled && !restored && stats != nullptr) {
             stats->cf40_restore_failed = true;
+        }
         return repeat_enabled && !restored ? CaptureOutcome::UsbFailed
                                            : CaptureOutcome::InvalidArgument;
     }
-    if (observation != nullptr) io->set_observation(observation);
+    if (observation != nullptr) {
+        io->set_observation(observation);
+    }
 
     bool link_diagnostic_active = false;
     bool link_apply_attempted = false;
@@ -112,10 +125,12 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     if (link_seed) {
         if (!control->snapshot_link_diagnostic()) {
             const bool cf_restored = repeat_enabled
-                ? restore_full_block()
-                : (initial_cf40 != nullptr &&
-                   control->write_cf40(request.local, *initial_cf40));
-            if (stats != nullptr) stats->cf40_restore_failed = !cf_restored;
+                                         ? restore_full_block()
+                                         : (initial_cf40 != nullptr &&
+                                            control->write_cf40(request.local, *initial_cf40));
+            if (stats != nullptr) {
+                stats->cf40_restore_failed = !cf_restored;
+            }
             return CaptureOutcome::UsbFailed;
         }
         link_diagnostic_active = true;
@@ -130,8 +145,9 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
             cf40_snapshotted = true;
         } else {
             if (!control->read_cf40(request.local, &original_cf40)) {
-                if (!restore_full_block() && stats != nullptr)
+                if (!restore_full_block() && stats != nullptr) {
                     stats->cf40_restore_failed = true;
+                }
                 return CaptureOutcome::UsbFailed;
             }
             cf40_snapshotted = true;
@@ -139,8 +155,7 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         std::uint8_t current_cf40 = 0;
         // Match the source selector==1 path before starting host/device reads.
         if (!control->read_cf40(request.local, &current_cf40) ||
-            !control->write_cf40(request.local,
-                                 static_cast<std::uint8_t>(current_cf40 | 0x03U))) {
+            !control->write_cf40(request.local, static_cast<std::uint8_t>(current_cf40 | 0x03U))) {
             filter_failed = true;
         }
     }
@@ -149,7 +164,9 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         bool locked = false;
         return control->terrestrial_locked(request.local, &locked, request.deadline) && locked;
     };
-    if (!filter_failed && repeat_enabled && !check_locked()) filter_failed = true;
+    if (!filter_failed && repeat_enabled && !check_locked()) {
+        filter_failed = true;
+    }
     if (!filter_failed && filter_repeat == FilterRepeat::BeforeQueue &&
         !control->filter_repeat_pulse(request.local, reset_state, request.deadline)) {
         filter_failed = true;
@@ -160,14 +177,18 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         const bool restored = repeat_enabled ? restore_full_block()
                                              : (!cf40_snapshotted ||
                                                 control->write_cf40(request.local, original_cf40));
-        if (stats != nullptr) stats->cf40_restore_failed = !restored;
+        if (stats != nullptr) {
+            stats->cf40_restore_failed = !restored;
+        }
         return CaptureOutcome::UsbFailed;
     }
     if (filter_failed) {
-        const bool restored = restore_full_block() &&
-                              (repeat_enabled || !cf40_snapshotted ||
-                               control->write_cf40(request.local, original_cf40));
-        if (stats != nullptr) stats->cf40_restore_failed = !restored;
+        const bool restored =
+            restore_full_block() && (repeat_enabled || !cf40_snapshotted ||
+                                     control->write_cf40(request.local, original_cf40));
+        if (stats != nullptr) {
+            stats->cf40_restore_failed = !restored;
+        }
         return CaptureOutcome::UsbFailed;
     }
 
@@ -193,7 +214,9 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     if (!setup_failed) {
         dsc_attempted = true;
         dsc_started = control->dsc_start(request.local);
-        if (!dsc_started) usb_failed = true;
+        if (!dsc_started) {
+            usb_failed = true;
+        }
     }
 
     if (dsc_started && filter_start) {
@@ -201,14 +224,15 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         // async transfer/callback storage remains owned until drain below.
         std::uint8_t current_cf40 = 0;
         if (!control->read_cf40(request.local, &current_cf40) ||
-            !control->write_cf40(
-                request.local, static_cast<std::uint8_t>(current_cf40 | 0x08U))) {
+            !control->write_cf40(request.local, static_cast<std::uint8_t>(current_cf40 | 0x08U))) {
             filter_failed = true;
         }
     }
     if (dsc_started && !filter_failed && link_seed) {
         link_apply_attempted = true;
-        if (stats != nullptr) stats->link_seed_state_unverifiable = true;
+        if (stats != nullptr) {
+            stats->link_seed_state_unverifiable = true;
+        }
         if (!control->apply_link_seed()) {
             link_apply_failed = true;
             filter_failed = true;
@@ -218,8 +242,7 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         if (!check_locked()) {
             filter_failed = true;
         } else if (filter_repeat == FilterRepeat::AfterPostStartBit &&
-                   !control->filter_repeat_pulse(request.local, reset_state,
-                                                 request.deadline)) {
+                   !control->filter_repeat_pulse(request.local, reset_state, request.deadline)) {
             filter_failed = true;
         }
     }
@@ -230,31 +253,44 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
             break;
         }
         const int left = remaining_ms(request.deadline);
-        if (left <= 0) break;
+        if (left <= 0) {
+            break;
+        }
         if (request.byte_limit != 0 && total >= request.byte_limit) {
             limit_reached = true;
             break;
         }
 
         QueueCompletion completion{};
-        const QueueWait waited = io->wait(
-            static_cast<unsigned>(std::min(1000, std::max(1, left))), &completion);
-        if (waited == QueueWait::Timeout) continue;
+        const QueueWait waited =
+            io->wait(static_cast<unsigned>(std::min(1000, std::max(1, left))), &completion);
+        if (waited == QueueWait::Timeout) {
+            continue;
+        }
         if (waited == QueueWait::Error) {
             usb_failed = true;
             break;
         }
         if (completion.slot >= depth || !pending[completion.slot] ||
+            completion.size > request.chunk_size || completion.actual_length < 0 ||
+            (completion.requested_length > 0 &&
+             completion.actual_length > completion.requested_length) ||
             (completion.size != 0 && completion.data == nullptr)) {
             usb_failed = true;
             break;
         }
 
         pending[completion.slot] = false;
-        if (observation != nullptr)
-            observation->record_normal_delivery(completion.size);
-        std::size_t to_write = completion.size;
-        if (request.byte_limit != 0 && total + to_write > request.byte_limit) {
+        if (completion.io == CaptureIo::Error) {
+            usb_failed = true;
+            break;
+        }
+        if (observation != nullptr) {
+            observation->record_normal_delivery(completion.io == CaptureIo::Ok ? completion.size
+                                                                               : 0U);
+        }
+        std::size_t to_write = completion.io == CaptureIo::Ok ? completion.size : 0U;
+        if (request.byte_limit != 0 && to_write > request.byte_limit - total) {
             to_write = static_cast<std::size_t>(request.byte_limit - total);
         }
         if (to_write != 0 && !output->write(completion.data, to_write)) {
@@ -263,10 +299,6 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         }
         total += to_write;
 
-        if (completion.io == CaptureIo::Error) {
-            usb_failed = true;
-            break;
-        }
         if (request.byte_limit != 0 && total >= request.byte_limit) {
             limit_reached = true;
             break;
@@ -275,7 +307,9 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
             cancelled = true;
             break;
         }
-        if (remaining_ms(request.deadline) <= 0) break;
+        if (remaining_ms(request.deadline) <= 0) {
+            break;
+        }
         if (!io->resubmit(completion.slot)) {
             usb_failed = true;
             break;
@@ -292,12 +326,23 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
     }
     io->set_phase(QueuePhase::CancelDrain);
     io->cancel_and_drain();
+    if (!io->drain_complete()) {
+        if (stats != nullptr) {
+            stats->bytes = total;
+            stats->limit_reached = limit_reached;
+            stats->cf40_restore_failed = cf40_snapshotted || repeat_enabled;
+            stats->link_seed_cleanup_failed = link_apply_attempted;
+            stats->link_seed_apply_failed = link_apply_failed;
+        }
+        // Callback storage, handle and context remain owned by the caller's
+        // quarantine. Do not restore controller state or release URBs here.
+        return CaptureOutcome::UsbFailed;
+    }
     if (link_diagnostic_active && link_apply_attempted) {
         // Seed registers are write-only through the recovered read path. After
         // stop+drain, issue zero writes and verify controller05=0; never claim
         // that the old seed was restored or that the latch was erased.
-        link_cleanup_ok = dsc_stopped &&
-                          control->clear_link_seed_and_verify_controller();
+        link_cleanup_ok = dsc_stopped && control->clear_link_seed_and_verify_controller();
     }
     bool cf40_restored = true;
     if (repeat_enabled) {
@@ -314,14 +359,27 @@ CaptureOutcome run_queued_capture(CaptureBackend* control, QueuedCaptureIo* io,
         stats->link_seed_cleanup_failed = link_apply_attempted && !link_cleanup_ok;
         stats->link_seed_apply_failed = link_apply_failed;
     }
-    if (dsc_attempted && !dsc_stopped) return CaptureOutcome::StopFailed;
-    if (filter_failed || !cf40_restored || !link_cleanup_ok) return CaptureOutcome::UsbFailed;
-    if (output_failed) return CaptureOutcome::OutputFailed;
-    if (usb_failed) return CaptureOutcome::UsbFailed;
-    if (cancelled) return CaptureOutcome::Cancelled;
-    if (total == 0) return CaptureOutcome::ZeroBytes;
-    if (request.byte_limit != 0 && !limit_reached)
+    if (dsc_attempted && !dsc_stopped) {
+        return CaptureOutcome::StopFailed;
+    }
+    if (filter_failed || !cf40_restored || !link_cleanup_ok) {
+        return CaptureOutcome::UsbFailed;
+    }
+    if (output_failed) {
+        return CaptureOutcome::OutputFailed;
+    }
+    if (usb_failed) {
+        return CaptureOutcome::UsbFailed;
+    }
+    if (cancelled) {
+        return CaptureOutcome::Cancelled;
+    }
+    if (total == 0) {
+        return CaptureOutcome::ZeroBytes;
+    }
+    if (request.byte_limit != 0 && !limit_reached) {
         return CaptureOutcome::LimitNotReached;
+    }
     return CaptureOutcome::Completed;
 }
 

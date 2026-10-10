@@ -1,129 +1,125 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
+# Build the macOS arm64 production executables with the pinned libusb 1.0.30
+# linked statically, so the release does not depend on a host libusb.
 set -eu
-export TMPDIR=/tmp
-export MACOSX_DEPLOYMENT_TARGET=14.0
-umask 022
 
-usage() {
-    printf '%s\n' 'usage: build-macos-static.sh --source-snapshot FILE.tar.gz --libusb-archive FILE.tar.bz2 --pcsc-include-dir DIR --pcsc-version VERSION --pcsc-license-expression EXPR --output DIR'
-}
-source_snapshot=
-libusb_archive=
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+build=
+source_archive=
+source_dir=
 pcsc_include=
-pcsc_version=
-pcsc_license_expression=
-output=
+tests=OFF
+usage() {
+    printf '%s\n' "usage: $0 --build-dir DIR [--pcsc-include-dir DIR] [--tests] [--libusb-source-archive FILE | --libusb-source-dir DIR]"
+}
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --source-snapshot) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; source_snapshot=$2; shift 2 ;;
-        --libusb-archive) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; libusb_archive=$2; shift 2 ;;
-        --pcsc-include-dir) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; pcsc_include=$2; shift 2 ;;
-        --pcsc-version) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; pcsc_version=$2; shift 2 ;;
-        --pcsc-license-expression) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; pcsc_license_expression=$2; shift 2 ;;
-        --output) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; output=$2; shift 2 ;;
-        --help) usage; exit 0 ;;
-        *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    --build-dir) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; build=$2; shift 2 ;;
+    --pcsc-include-dir) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; pcsc_include=$2; shift 2 ;;
+    --tests) tests=ON; shift ;;
+    --libusb-source-archive) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; source_archive=$2; shift 2 ;;
+    --libusb-source-dir) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; source_dir=$2; shift 2 ;;
+    --help) usage; exit 0 ;;
+    *) printf '%s\n' "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
-[ -n "$source_snapshot" ] && [ -n "$libusb_archive" ] && [ -n "$pcsc_include" ] && \
-    [ -n "$pcsc_version" ] && [ -n "$pcsc_license_expression" ] && [ -n "$output" ] || { usage >&2; exit 2; }
-[ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || {
-    printf '%s\n' 'native Apple silicon macOS is required' >&2; exit 1;
-}
-for tool in xcrun clang clang++ cmake ninja make python3 shasum tar nm otool lipo strip; do
-    command -v "$tool" >/dev/null 2>&1 || { printf 'required tool missing: %s\n' "$tool" >&2; exit 1; }
+[ -n "$build" ] || { usage >&2; exit 2; }
+[ "$(uname -s)" = Darwin ] || { printf '%s\n' 'macOS is required' >&2; exit 1; }
+[ "$(uname -m)" = arm64 ] || { printf '%s\n' 'unsupported architecture' >&2; exit 1; }
+for tool in cmake ninja cc make nm otool shasum; do
+    command -v "$tool" >/dev/null || { printf '%s\n' "$tool is required" >&2; exit 1; }
 done
-
-repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
-[ -f "$source_snapshot" ] && [ ! -L "$source_snapshot" ] || { printf '%s\n' 'invalid source snapshot' >&2; exit 1; }
-[ -f "$libusb_archive" ] && [ ! -L "$libusb_archive" ] || { printf '%s\n' 'invalid libusb archive' >&2; exit 1; }
-[ -d "$pcsc_include" ] && [ ! -L "$pcsc_include" ] && [ -f "$pcsc_include/ifdhandler.h" ] || {
-    printf '%s\n' 'pcsc-lite include directory must contain ifdhandler.h and not be a symlink' >&2; exit 1;
-}
-source_snapshot=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$source_snapshot")
-pcsc_include=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$pcsc_include")
-libusb_archive=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$libusb_archive")
-case "$source_snapshot" in "$repo"/*) printf '%s\n' 'source snapshot must be outside the checkout' >&2; exit 1 ;; esac
-case "$libusb_archive" in "$repo"/*) printf '%s\n' 'libusb archive must be outside the checkout' >&2; exit 1 ;; esac
-libusb_sha=$(shasum -a 256 "$libusb_archive" | awk '{print $1}')
-[ "$libusb_sha" = fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf ] || {
-    printf '%s\n' 'libusb archive is not the pinned 1.0.30 source' >&2; exit 1;
-}
-
-parent=$(dirname -- "$output")
-mkdir -p "$parent"
-parent=$(CDPATH='' cd -- "$parent" && pwd -P)
-output="$parent/$(basename -- "$output")"
-case "$output/" in "$repo/"*) printf '%s\n' 'candidate must be outside the checkout' >&2; exit 1 ;; esac
-[ ! -e "$output" ] && [ ! -L "$output" ] && [ ! -e "$output.tar.gz" ] && [ ! -L "$output.tar.gz" ] || {
-    printf '%s\n' 'candidate output already exists' >&2; exit 1;
-}
-
-work=$(mktemp -d "$parent/.asicen-macos-work.XXXXXX")
-cleanup() { rm -rf -- "$work"; }
+mkdir -p "$build"
+build=$(CDPATH='' cd -- "$build" && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/asicen-macos-static.XXXXXX")
+cleanup() { find "$work" -depth -delete; }
 trap cleanup EXIT HUP INT TERM
-mkdir -p "$work/src" "$work/libusb-src" "$work/libusb-prefix"
-python3 "$repo/scripts/audit-linux-candidate.py" --source-archive "$source_snapshot"
-tar -xzf "$source_snapshot" -C "$work/src"
-cmp -s "$0" "$work/src/scripts/build-macos-static.sh" || {
-    printf '%s\n' 'builder differs from the immutable source snapshot' >&2; exit 1;
-}
-tar -xjf "$libusb_archive" -C "$work/libusb-src" --strip-components=1
-(
-    cd "$work/libusb-src"
-    ./configure --prefix="$work/libusb-prefix" --disable-shared --enable-static --with-pic \
-        --disable-udev --disable-examples-build --disable-tests-build --disable-dependency-tracking
-    make -j"$(sysctl -n hw.logicalcpu 2>/dev/null || printf '2')"
-    make install
-)
-[ -f "$work/libusb-prefix/lib/libusb-1.0.a" ] || {
-    printf '%s\n' 'static libusb archive was not produced' >&2; exit 1;
-}
-libs_private=$(sed -n 's/^Libs\.private:[[:space:]]*//p' "$work/libusb-prefix/lib/pkgconfig/libusb-1.0.pc")
-for required in IOKit CoreFoundation Security; do
+archive=$work/libusb-1.0.30.tar.bz2
+if [ -n "$source_archive" ] && [ -n "$source_dir" ]; then
+    printf '%s\n' 'choose only one libusb source input' >&2
+    exit 2
+elif [ -n "$source_dir" ]; then
+    if [ ! -d "$source_dir" ] || [ ! -x "$source_dir/configure" ] || [ ! -f "$source_dir/COPYING" ]; then
+        printf '%s\n' "invalid libusb source directory: $source_dir" >&2
+        exit 1
+    fi
+    mkdir -p "$work/libusb"
+    # Keep the timestamps: a plain copy makes configure.ac and the m4 inputs
+    # look newer than configure, and make would then try to rerun autoconf.
+    cp -pR "$source_dir/." "$work/libusb/"
+elif [ -n "$source_archive" ]; then
+    [ -f "$source_archive" ] || { printf '%s\n' "libusb archive not found: $source_archive" >&2; exit 1; }
+    cp "$source_archive" "$archive"
+else
+    command -v curl >/dev/null || { printf '%s\n' 'curl or --libusb-source-archive is required' >&2; exit 1; }
+    curl -fsSL --retry 2 -o "$archive" \
+        https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
+fi
+expected=fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf
+if [ -z "$source_dir" ]; then
+    actual=$(shasum -a 256 "$archive" | awk '{print $1}')
+    [ "$actual" = "$expected" ] || { printf '%s\n' "libusb checksum mismatch: $actual" >&2; exit 1; }
+fi
+
+# The static libusb is installed inside the build tree so that the CMake
+# cache keeps pointing at an existing archive after this script exits.
+prefix=$build/libusb-static
+if [ -e "$prefix" ]; then find "$prefix" -depth -delete; fi
+mkdir -p "$work/libusb"
+[ -n "$source_dir" ] || tar -xjf "$archive" -C "$work/libusb" --strip-components=1
+# libusb is built outside CMake, so give its compiler the same reproducibility
+# contract as the Android libusb build (not a macOS project-build contract).
+# The mktemp work tree varies per run, so map it to "." instead of letting it
+# enter recorded file and debug paths.
+. "$root/scripts/libusb-reproducibility.sh"
+libusb_cflags=$(libusb_reproducible_cflags "$work/libusb" "$work")
+(cd "$work/libusb" && CFLAGS="$libusb_cflags" ./configure --prefix="$prefix" --disable-shared --enable-static \
+    --disable-examples-build --disable-tests-build --disable-dependency-tracking &&
+    make -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 2)" && make install)
+[ -f "$prefix/lib/libusb-1.0.a" ] || { printf '%s\n' 'static libusb was not built' >&2; exit 1; }
+
+# A static libusb carries its darwin backend's system dependencies in
+# Libs.private (libobjc and the IOKit, CoreFoundation, and Security
+# frameworks). Take them from the libusb build itself instead of restating them.
+libs_private=$(sed -n 's/^Libs\.private:[[:space:]]*//p' "$prefix/lib/pkgconfig/libusb-1.0.pc")
+for framework in IOKit CoreFoundation Security; do
     case "$libs_private" in
-        *"-framework $required"*|*"-framework,$required"*|*"-Wl,-framework,$required"*) ;;
-        *)
-        printf 'static libusb metadata is missing -framework %s: %s\n' "$required" "$libs_private" >&2
-        exit 1 ;;
+    *"-framework,$framework"*|*"-framework $framework"*) ;;
+    *) printf '%s\n' "libusb Libs.private lacks $framework: $libs_private" >&2; exit 1 ;;
     esac
 done
-case "$libs_private" in *-lobjc*) ;; *) printf '%s\n' 'libusb private flags omit -lobjc' >&2; exit 1 ;; esac
 
-extra_link_options='SHELL:-framework IOKit;SHELL:-framework CoreFoundation;SHELL:-framework Security;-lobjc'
-build="$work/build"
-cmake -S "$work/src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-    -DCMAKE_SKIP_RPATH=ON -DASICEN_ENABLE_LIBUSB=ON -DASICEN_ENABLE_IFD=ON \
-    -DASICEN_REQUIRE_IFD=ON -DASICEN_BUILD_TESTS=ON \
-    -DASICEN_PCSC_IFD_INCLUDE_DIR="$pcsc_include" \
-    -DASICEN_LIBUSB_INCLUDE_DIR="$work/libusb-prefix/include/libusb-1.0" \
-    -DASICEN_LIBUSB_LIBRARY="$work/libusb-prefix/lib/libusb-1.0.a" \
-    "-DASICEN_LIBUSB_EXTRA_LINK_OPTIONS=$extra_link_options"
-cmake --build "$build" --parallel "$(sysctl -n hw.logicalcpu 2>/dev/null || printf '2')"
-(cd "$build" && ctest --output-on-failure --no-tests=error)
-(cd "$build" && ctest --repeat until-fail:20 --output-on-failure \
-    -R '^asicen-libusb-capture-lifecycle-tests$')
+set -- -DASICEN_BUILD_PCSC_IFD=OFF
+if [ -n "$pcsc_include" ]; then
+    set -- -DASICEN_REQUIRE_PCSC_IFD=ON -DASICEN_PCSC_IFD_INCLUDE_DIR:PATH="$pcsc_include"
+fi
+cmake -S "$root" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DASICEN_BUILD_TESTS="$tests" -DASICEN_ENABLE_LIBUSB=ON \
+    -DASICEN_LIBUSB_INCLUDE_DIR="$prefix/include/libusb-1.0" \
+    -DASICEN_LIBUSB_LIBRARY="$prefix/lib/libusb-1.0.a" \
+    -DASICEN_LIBUSB_LINK_LIBRARIES="$libs_private" \
+    "$@"
+cmake --build "$build"
 
+# Verify static libusb provenance before packaging strips local symbols.
 nm_output=$(nm "$build/asicend")
 for symbol in libusb_init libusb_open libusb_close; do
-    printf '%s\n' "$nm_output" | grep -E "[[:space:]][Tt][[:space:]]+_${symbol}$" >/dev/null || {
-        printf 'static libusb symbol missing before stripping: %s\n' "$symbol" >&2; exit 1;
+    printf '%s\n' "$nm_output" | grep -E "[[:space:]]T _$symbol$" >/dev/null || {
+        printf '%s\n' "missing static libusb symbol in asicend: $symbol" >&2
+        exit 1
     }
 done
-[ -d "$build/ASICEN-IFD.bundle" ] || { printf '%s\n' 'ASICEN IFD bundle was not produced' >&2; exit 1; }
-for binary in asicend asicen-ts asicenctl; do
-    strip -S -x "$build/$binary"
+for program in asicend asicen-ts asicenctl; do
+    linkage=$(otool -L "$build/$program")
+    printf '%s\n' "$linkage"
+    if printf '%s\n' "$linkage" | grep -F 'libusb-1.0' >/dev/null; then
+        printf '%s\n' "dynamic libusb dependency in $program" >&2
+        exit 1
+    fi
+    # Only asicend links libusb, so only asicend may carry its darwin frameworks.
+    if [ "$program" != asicend ] && printf '%s\n' "$linkage" | grep -F 'IOKit.framework' >/dev/null; then
+        printf '%s\n' "libusb system frameworks leaked into $program" >&2
+        exit 1
+    fi
 done
-strip -S -x "$build/libifd-asicen.dylib"
-strip -S -x "$build/ASICEN-IFD.bundle/Contents/MacOS/libifd-asicen.dylib"
-python3 "$work/src/scripts/package-macos-candidate.py" \
-    --build-dir "$build" --libusb-source-dir "$work/libusb-src" \
-    --source-snapshot "$source_snapshot" --libusb-archive "$libusb_archive" \
-    --pcsc-include-dir "$pcsc_include" --pcsc-version "$pcsc_version" \
-    --pcsc-license-expression "$pcsc_license_expression" \
-    --output "$output"
-python3 "$work/src/scripts/audit-macos-candidate.py" \
-    --archive "$output.tar.gz"
-printf 'firmware-free macOS intermediate candidate: %s.tar.gz\n' "$output"

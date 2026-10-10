@@ -9,19 +9,17 @@
 #include <iostream>
 #include <vector>
 
-extern "C" unsigned char official_fiti(void*, unsigned char, void*)
-    asm("_Z13Fiti_LAN_GainPvhS_");
-extern "C" unsigned char oracle_write(void*, unsigned char, unsigned char,
-                                      unsigned char*, unsigned char, unsigned char)
-    asm("_Z14TLIB_I2C_WritePvhhPhhh");
-extern "C" unsigned char oracle_read(void*, unsigned char, unsigned char,
-                                     unsigned char*, unsigned char, unsigned char)
-    asm("_Z13TLIB_I2C_ReadPvhhPhhh");
+extern "C" unsigned char official_fiti(void*, unsigned char, void*) asm("_Z13Fiti_LAN_GainPvhS_");
+extern "C" unsigned char oracle_write(void*, unsigned char, unsigned char, unsigned char*,
+                                      unsigned char,
+                                      unsigned char) asm("_Z14TLIB_I2C_WritePvhhPhhh");
+extern "C" unsigned char oracle_read(void*, unsigned char, unsigned char, unsigned char*,
+                                     unsigned char, unsigned char) asm("_Z13TLIB_I2C_ReadPvhhPhhh");
 extern "C" void oracle_delay(unsigned long) asm("_Z10TLIB_Delaym");
-extern "C" unsigned char oracle_gpio(void*, unsigned char, unsigned char)
-    asm("_Z12TLIB_SetGPIOPvhh");
-extern "C" unsigned char oracle_gpio_ex(void*, unsigned char, unsigned char)
-    asm("_Z14TLIB_SetGPIOExPvhh");
+extern "C" unsigned char oracle_gpio(void*, unsigned char,
+                                     unsigned char) asm("_Z12TLIB_SetGPIOPvhh");
+extern "C" unsigned char oracle_gpio_ex(void*, unsigned char,
+                                        unsigned char) asm("_Z14TLIB_SetGPIOExPvhh");
 
 namespace {
 
@@ -31,29 +29,38 @@ struct BusModel {
     std::uint8_t selected_reg = 0;
     std::vector<std::uint8_t> read_regs;
     std::vector<std::array<std::uint8_t, 2>> writes;
-} *active = nullptr;
+}* active = nullptr;
 
 class FrontendModel final : public asicen::FrontendTransport {
-public:
-    explicit FrontendModel(const std::vector<std::uint8_t>& input) : reads(input) {}
-    int control(const asicen::ControlTransfer& transfer, unsigned char* data) override {
-        for (std::uint16_t i = 0; i < transfer.length; ++i) data[i] = 0;
-        if (transfer.length) data[0] = 1;
+  public:
+    explicit FrontendModel(const std::vector<std::uint8_t>& input) : reads(input)
+    {
+    }
+    int control(const asicen::ControlTransfer& transfer, unsigned char* data) override
+    {
+        for (std::uint16_t i = 0; i < transfer.length; ++i)
+            data[i] = 0;
+        if (transfer.length)
+            data[0] = 1;
         if (transfer.request == asicen::Request::I2cWrite &&
             static_cast<std::uint8_t>(transfer.value >> 8U) == 0xfeU &&
             static_cast<std::uint8_t>(transfer.index & 0xffU) == 0xc6U) {
             selected_reg = static_cast<std::uint8_t>(transfer.index >> 8U);
         }
         if (transfer.request == asicen::Request::I2cReadNoWait && transfer.length > 1) {
-            if (next >= reads.size()) return -1;
+            if (next >= reads.size())
+                return -1;
             data[1] = reads[next++];
             read_regs.push_back(selected_reg);
         }
         if (transfer.request == asicen::Request::I2cBufferFill) {
             const std::size_t offset = transfer.value & 0xffU;
-            if (offset < staged.size()) staged[offset] = static_cast<std::uint8_t>(transfer.value >> 8U);
-            if (offset + 1 < staged.size()) staged[offset + 1] = static_cast<std::uint8_t>(transfer.index);
-            if (offset + 2 < staged.size()) staged[offset + 2] = static_cast<std::uint8_t>(transfer.index >> 8U);
+            if (offset < staged.size())
+                staged[offset] = static_cast<std::uint8_t>(transfer.value >> 8U);
+            if (offset + 1 < staged.size())
+                staged[offset + 1] = static_cast<std::uint8_t>(transfer.index);
+            if (offset + 2 < staged.size())
+                staged[offset + 2] = static_cast<std::uint8_t>(transfer.index >> 8U);
             staged_count = offset + (staged.size() - offset < 3 ? staged.size() - offset : 3);
         } else if (transfer.request == asicen::Request::I2cBufferSend) {
             if (staged_count == staged.size() && staged[0] == 0xfe && staged[1] == 0xc6)
@@ -63,23 +70,27 @@ public:
         }
         return transfer.length;
     }
-    void delay_ms(unsigned) override {}
+    void delay_ms(unsigned) override
+    {
+    }
     std::vector<std::uint8_t> reads;
     std::size_t next = 0;
     std::uint8_t selected_reg = 0;
     std::vector<std::uint8_t> read_regs;
     std::vector<std::array<std::uint8_t, 2>> writes;
-private:
+
+  private:
     std::array<std::uint8_t, 4> staged{};
     std::size_t staged_count = 0;
 };
 
-}  // namespace
+} // namespace
 
-extern "C" unsigned char oracle_write(void*, unsigned char, unsigned char reg,
-                                      unsigned char* data, unsigned char len,
-                                      unsigned char) {
-    if (active == nullptr) return 0;
+extern "C" unsigned char oracle_write(void*, unsigned char, unsigned char reg, unsigned char* data,
+                                      unsigned char len, unsigned char)
+{
+    if (active == nullptr || (data == nullptr && len != 0U))
+        return 0;
     if (reg == 0xfe && len >= 2 && data[0] == 0xc6) {
         active->selected_reg = data[1];
     } else if (reg == 0 && len >= 4 && data[0] == 0xfe && data[1] == 0xc6) {
@@ -88,21 +99,34 @@ extern "C" unsigned char oracle_write(void*, unsigned char, unsigned char reg,
     return 1;
 }
 
-extern "C" unsigned char oracle_read(void*, unsigned char, unsigned char,
-                                     unsigned char* data, unsigned char len,
-                                     unsigned char) {
-    if (active == nullptr || len == 0 || active->next >= active->reads.size()) return 0;
+extern "C" unsigned char oracle_read(void*, unsigned char, unsigned char, unsigned char* data,
+                                     unsigned char len, unsigned char)
+{
+    if (active == nullptr || data == nullptr || len == 0 || active->next >= active->reads.size())
+        return 0;
     active->read_regs.push_back(active->selected_reg);
     data[0] = active->reads[active->next++];
     return 1;
 }
 
-extern "C" void oracle_delay(unsigned long) {}
-extern "C" unsigned char oracle_gpio(void*, unsigned char, unsigned char) { return 1; }
-extern "C" unsigned char oracle_gpio_ex(void*, unsigned char, unsigned char) { return 1; }
+extern "C" void oracle_delay(unsigned long)
+{
+}
+extern "C" unsigned char oracle_gpio(void*, unsigned char, unsigned char)
+{
+    return 1;
+}
+extern "C" unsigned char oracle_gpio_ex(void*, unsigned char, unsigned char)
+{
+    return 1;
+}
 
-int main() {
-    struct Case { std::uint8_t mode, sample, d; std::vector<std::uint8_t> reads; };
+int main()
+{
+    struct Case {
+        std::uint8_t mode, sample, d;
+        std::vector<std::uint8_t> reads;
+    };
     const std::array<Case, 12> cases{{
         {0x02, 251, 0x00, {251, 0x02, 0x00, 0x55}},
         {0x02, 252, 0xa2, {252, 0x02, 0xa2, 0x55, 0xa2, 9, 0xa2}},
@@ -126,8 +150,8 @@ int main() {
         const unsigned char vendor_rc = official_fiti(nullptr, 1, state.data());
 
         FrontendModel portable(c.reads);
-        const auto portable_rc = asicen::run_frontend_plan(
-            asicen::plan_fc0012_gain_once(1), &portable);
+        const auto portable_rc =
+            asicen::run_frontend_plan(asicen::plan_fc0012_gain_once(1), &portable);
         if (vendor_rc != 1 || portable_rc != asicen::FrontendRunResult::Completed ||
             vendor.read_regs != portable.read_regs || vendor.writes != portable.writes) {
             std::cerr << "oracle mismatch case=" << i << '\n';
@@ -136,5 +160,7 @@ int main() {
     }
     active = nullptr;
     std::cout << "matched 12 synthetic Fiti_LAN_Gain cases\n";
-    return 0;
+    std::cout.flush();
+    std::cerr.flush();
+    return std::cout && std::cerr ? 0 : 1;
 }

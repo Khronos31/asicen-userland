@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-09: receiver-to-USB-function lane split under
-// ASICEN_PROFILE_ASICEN. The reference split remains when that macro is absent.
+// ASICEN modification, 2026-10-10: ASICEN receiver-to-USB-function lane capacity.
 // The original license notice is unchanged.
 #include "control_workers.h"
 #if defined(ASICEN_PROFILE_ASICEN)
@@ -8,11 +7,26 @@
 #endif
 
 #include <atomic>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <afunix.h>
+#include <bcrypt.h>
+#include <windows.h>
+#include <cwchar>
+#include <pthread.h>
+#include "windows/windows_security.h"
+#else
 #include <cerrno>
 #include <fcntl.h>
 #include <pthread.h>
 #include <poll.h>
 #include <unistd.h>
+#endif
 
 namespace px4::userland::ipc::posix {
 namespace {
@@ -34,17 +48,23 @@ bool operation_lane_valid(ControlWorkerLane lane,
     case ControlWorkerOperation::tuner_stats:
     case ControlWorkerOperation::tuner_attach_stream:
     case ControlWorkerOperation::tuner_detach_stream:
-        if (task.receiver >= kReceiverCount) {
+        if (task.receiver >=
+#if defined(ASICEN_PROFILE_ASICEN)
+            asicen::profile::kReceiverCount
+#else
+            kReceiverCount
+#endif
+        ) {
             return false;
         }
+        return lane == (task.receiver <
 #if defined(ASICEN_PROFILE_ASICEN)
-        return lane == (task.receiver < asicen::profile::kReceiversPerUsbFunction ?
-                            ControlWorkerLane::tuner_dev1 :
-                            ControlWorkerLane::tuner_dev2);
+                            asicen::profile::kReceiversPerUsbFunction
 #else
-        return lane == (task.receiver < 4U ? ControlWorkerLane::tuner_dev1 :
-                                             ControlWorkerLane::tuner_dev2);
+                            4U
 #endif
+                            ? ControlWorkerLane::tuner_dev1 :
+                              ControlWorkerLane::tuner_dev2);
     case ControlWorkerOperation::tuner_shutdown:
         return lane == ControlWorkerLane::tuner_dev1;
     case ControlWorkerOperation::card_status:
@@ -67,6 +87,36 @@ bool operation_lane_valid(ControlWorkerLane lane,
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
 ControlWorkerStartupOptions* test_startup_options = nullptr;
 #endif
+
+#if defined(_WIN32)
+bool ensure_winsock() noexcept
+{
+    static std::atomic<int> state{0};  // 0=init, 1=ready, 2=failed
+    int current = state.load(std::memory_order_acquire);
+    if (current == 1) {
+        return true;
+    }
+    if (current == 2) {
+        return false;
+    }
+    int expected = 0;
+    if (state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+        WSADATA data{};
+        if (::WSAStartup(MAKEWORD(2, 2), &data) == 0) {
+            state.store(1, std::memory_order_release);
+            return true;
+        }
+        state.store(2, std::memory_order_release);
+        return false;
+    }
+    while ((current = state.load(std::memory_order_acquire)) == 0) {
+        ::Sleep(0);
+    }
+    return current == 1;
+}
+#endif
+
+#if !defined(_WIN32)
 
 class WakePipe final {
 public:
@@ -125,7 +175,7 @@ public:
         }
     }
 
-    int read_fd() const noexcept { return read_fd_; }
+    WakeHandle read_fd() const noexcept { return read_fd_; }
 
 private:
     static bool set_flag(int descriptor, int get_command, int set_command,
@@ -146,6 +196,342 @@ private:
     int read_fd_ = -1;
     int write_fd_ = -1;
 };
+
+#else
+
+bool set_socket_nonblocking(SOCKET handle) noexcept
+{
+    u_long enabled = 1UL;
+    return ::ioctlsocket(handle, FIONBIO, &enabled) == 0;
+}
+
+bool clear_socket_inherit(SOCKET handle) noexcept
+{
+    return ::SetHandleInformation(reinterpret_cast<HANDLE>(handle),
+                                  HANDLE_FLAG_INHERIT, 0) != 0;
+}
+
+bool random_hex_token(wchar_t* out, std::size_t capacity) noexcept
+{
+    std::array<std::uint8_t, 8U> bytes{};
+    if (::BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                          BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        return false;
+    }
+    if (capacity < bytes.size() * 2U + 1U) {
+        return false;
+    }
+    static const wchar_t digits[] = L"0123456789abcdef";
+    for (std::size_t index = 0U; index < bytes.size(); ++index) {
+        out[index * 2U] = digits[bytes[index] >> 4U];
+        out[index * 2U + 1U] = digits[bytes[index] & 0x0fU];
+    }
+    out[bytes.size() * 2U] = L'\0';
+    return true;
+}
+
+bool path_to_utf8(const wchar_t* path, char* out, std::size_t capacity) noexcept
+{
+    const int length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, -1,
+                                             out, static_cast<int>(capacity),
+                                             nullptr, nullptr);
+    return length > 0 && static_cast<std::size_t>(length) <= capacity;
+}
+
+struct PathIdentity final {
+    std::uint64_t device = 0U;
+    std::uint64_t index = 0U;
+    bool valid = false;
+};
+
+bool path_identity(const wchar_t* path, DWORD flags, PathIdentity& output) noexcept
+{
+    const HANDLE file = ::CreateFileW(
+        path, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        flags, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    const BOOL ok = ::GetFileInformationByHandle(file, &info);
+    (void)::CloseHandle(file);
+    if (ok == 0) {
+        return false;
+    }
+    output.device = info.dwVolumeSerialNumber;
+    output.index = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) |
+                   static_cast<std::uint64_t>(info.nFileIndexLow);
+    output.valid = true;
+    return true;
+}
+
+bool same_identity(const PathIdentity& left, const PathIdentity& right) noexcept
+{
+    return left.valid && right.valid && left.device == right.device &&
+           left.index == right.index;
+}
+
+// Windows worker wake is a same-user AF_UNIX SOCK_STREAM pair created inside a
+// freshly-created random directory owned by the current user with a protected
+// current-user-only DACL. No preexisting path is reused or blindly deleted, no
+// network socket is involved, and drain is bounded.
+class WakePipe final {
+public:
+    WakePipe() noexcept = default;
+    ~WakePipe() noexcept { close(); }
+
+    Result<void> open() noexcept
+    {
+        if (!ensure_winsock()) {
+            return Result<void>::failure(Error::INTERNAL);
+        }
+        std::array<wchar_t, MAX_PATH> base{};
+        const DWORD base_length =
+            ::GetEnvironmentVariableW(L"LOCALAPPDATA", base.data(),
+                                      static_cast<DWORD>(base.size()));
+        if (base_length == 0U || base_length >= base.size()) {
+            return Result<void>::failure(Error::INTERNAL);
+        }
+        // Require a drive-absolute local path; never a relative or truncated
+        // one that could resolve elsewhere.
+        const bool absolute = ((base[0] >= L'A' && base[0] <= L'Z') ||
+                               (base[0] >= L'a' && base[0] <= L'z')) &&
+                              base[1] == L':' && base[2] == L'\\';
+        if (!absolute) {
+            return Result<void>::failure(Error::INTERNAL);
+        }
+        // The parent must itself satisfy the same-user runtime policy; an
+        // untrusted user with write/delete-child rights could otherwise
+        // replace our private child directory.
+        if (!windows_security::verify_runtime_parent(base.data())) {
+            return Result<void>::failure(Error::INTERNAL);
+        }
+        if (!create_private_directory(base.data())) {
+            return cleanup(Error::INTERNAL);
+        }
+        (void)path_identity(directory_.data(), FILE_FLAG_BACKUP_SEMANTICS,
+                            directory_identity_);
+        if (std::swprintf(endpoint_.data(), endpoint_.size(), L"%s\\w.sock",
+                          directory_.data()) <= 0) {
+            return cleanup(Error::INTERNAL);
+        }
+        SOCKADDR_UN address{};
+        address.sun_family = AF_UNIX;
+        if (!path_to_utf8(endpoint_.data(), address.sun_path,
+                          sizeof(address.sun_path))) {
+            return cleanup(Error::INTERNAL);
+        }
+
+        const SOCKET listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (listener == INVALID_SOCKET) {
+            return cleanup(Error::INTERNAL);
+        }
+        if (!clear_socket_inherit(listener) ||
+            ::bind(listener, reinterpret_cast<const sockaddr*>(&address),
+                   sizeof(address)) != 0 ||
+            ::listen(listener, 1) != 0) {
+            ::closesocket(listener);
+            return cleanup(Error::INTERNAL);
+        }
+        (void)path_identity(endpoint_.data(), FILE_FLAG_OPEN_REPARSE_POINT,
+                            endpoint_identity_);
+
+        // Nonblocking connect with a bounded poll; a live local listener
+        // completes immediately, but never block indefinitely.
+        SOCKET writer = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (writer == INVALID_SOCKET || !clear_socket_inherit(writer) ||
+            !set_socket_nonblocking(writer)) {
+            if (writer != INVALID_SOCKET) {
+                ::closesocket(writer);
+            }
+            ::closesocket(listener);
+            return cleanup(Error::INTERNAL);
+        }
+        int connect_result = ::connect(writer,
+                                       reinterpret_cast<const sockaddr*>(&address),
+                                       sizeof(address));
+        if (connect_result != 0 && ::WSAGetLastError() != WSAEWOULDBLOCK) {
+            ::closesocket(writer);
+            ::closesocket(listener);
+            return cleanup(Error::INTERNAL);
+        }
+        if (connect_result != 0) {
+            WSAPOLLFD descriptor{};
+            descriptor.fd = writer;
+            descriptor.events = POLLWRNORM;
+            const int polled = ::WSAPoll(&descriptor, 1UL, 2000);
+            if (polled <= 0) {
+                ::closesocket(writer);
+                ::closesocket(listener);
+                return cleanup(Error::INTERNAL);
+            }
+            int socket_error = 0;
+            int socket_error_size = static_cast<int>(sizeof(socket_error));
+            if (::getsockopt(writer, SOL_SOCKET, SO_ERROR,
+                             reinterpret_cast<char*>(&socket_error),
+                             &socket_error_size) != 0 ||
+                socket_error != 0) {
+                ::closesocket(writer);
+                ::closesocket(listener);
+                return cleanup(Error::INTERNAL);
+            }
+        }
+        // Bounded accept: the connection is already queued, but never block
+        // indefinitely on a hostile listener state.
+        if (!set_socket_nonblocking(listener)) {
+            ::closesocket(writer);
+            ::closesocket(listener);
+            return cleanup(Error::INTERNAL);
+        }
+        SOCKET reader = INVALID_SOCKET;
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            reader = ::accept(listener, nullptr, nullptr);
+            if (reader != INVALID_SOCKET) {
+                break;
+            }
+            if (::WSAGetLastError() != WSAEWOULDBLOCK) {
+                break;
+            }
+            WSAPOLLFD descriptor{};
+            descriptor.fd = listener;
+            descriptor.events = POLLRDNORM;
+            (void)::WSAPoll(&descriptor, 1UL, 10);
+        }
+        ::closesocket(listener);
+        // Remove the endpoint before exposing the pair; identity-checked so we
+        // never delete a replacement.
+        remove_endpoint();
+        if (reader == INVALID_SOCKET || !clear_socket_inherit(reader) ||
+            !set_socket_nonblocking(reader) || !set_socket_nonblocking(writer)) {
+            if (reader != INVALID_SOCKET) {
+                ::closesocket(reader);
+            }
+            ::closesocket(writer);
+            return cleanup(Error::INTERNAL);
+        }
+        read_socket_ = reader;
+        write_socket_ = writer;
+        return Result<void>::success();
+    }
+
+    void close() noexcept
+    {
+        if (read_socket_ != INVALID_SOCKET) ::closesocket(read_socket_);
+        if (write_socket_ != INVALID_SOCKET) ::closesocket(write_socket_);
+        read_socket_ = INVALID_SOCKET;
+        write_socket_ = INVALID_SOCKET;
+        remove_endpoint();
+        if (created_directory_ && directory_[0] != L'\0') {
+            PathIdentity current{};
+            // Only remove the exact directory we created; a missing saved
+            // identity fails open as a safe orphan rather than a blind delete.
+            if (directory_identity_.valid &&
+                path_identity(directory_.data(), FILE_FLAG_BACKUP_SEMANTICS,
+                              current) &&
+                same_identity(directory_identity_, current)) {
+                (void)::RemoveDirectoryW(directory_.data());
+            }
+            created_directory_ = false;
+        }
+    }
+
+    void signal(std::atomic<Error>& error) noexcept
+    {
+        const char byte = 1;
+        if (::send(write_socket_, &byte, 1, 0) == 1) {
+            return;
+        }
+        if (::WSAGetLastError() == WSAEWOULDBLOCK) {
+            return;
+        }
+        error.store(Error::INTERNAL);
+    }
+
+    void drain() noexcept
+    {
+        std::array<char, 512U> bytes{};
+        for (int iteration = 0; iteration < 64; ++iteration) {
+            const int read =
+                ::recv(read_socket_, bytes.data(), static_cast<int>(bytes.size()), 0);
+            if (read <= 0) {
+                return;
+            }
+        }
+    }
+
+    WakeHandle read_fd() const noexcept
+    {
+        return static_cast<WakeHandle>(read_socket_);
+    }
+
+private:
+    bool create_private_directory(const wchar_t* base) noexcept
+    {
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            std::array<wchar_t, 32U> token{};
+            if (!random_hex_token(token.data(), token.size())) {
+                return false;
+            }
+            if (std::swprintf(directory_.data(), directory_.size(), L"%s\\px4-wake-%s",
+                              base, token.data()) <= 0) {
+                directory_[0] = L'\0';
+                return false;
+            }
+            SECURITY_ATTRIBUTES attributes{};
+            SECURITY_DESCRIPTOR descriptor{};
+            PACL acl = nullptr;
+            windows_security::SidBuffer sid_storage{};
+            if (!windows_security::build_current_user_security(attributes,
+                                                               descriptor, acl,
+                                                               sid_storage)) {
+                return false;
+            }
+            const BOOL made = ::CreateDirectoryW(directory_.data(), &attributes);
+            ::LocalFree(acl);
+            if (made != 0) {
+                created_directory_ = true;
+                return true;
+            }
+            if (::GetLastError() != ERROR_ALREADY_EXISTS) {
+                directory_[0] = L'\0';
+                return false;
+            }
+        }
+        return false;
+    }
+
+    void remove_endpoint() noexcept
+    {
+        if (endpoint_[0] == L'\0') {
+            return;
+        }
+        PathIdentity current{};
+        if (endpoint_identity_.valid &&
+            path_identity(endpoint_.data(), FILE_FLAG_OPEN_REPARSE_POINT, current) &&
+            same_identity(endpoint_identity_, current)) {
+            (void)::DeleteFileW(endpoint_.data());
+        }
+        endpoint_[0] = L'\0';
+        endpoint_identity_ = PathIdentity{};
+    }
+
+    Result<void> cleanup(Error error) noexcept
+    {
+        close();
+        return Result<void>::failure(error);
+    }
+
+    SOCKET read_socket_ = INVALID_SOCKET;
+    SOCKET write_socket_ = INVALID_SOCKET;
+    std::array<wchar_t, MAX_PATH> directory_{};
+    std::array<wchar_t, MAX_PATH> endpoint_{};
+    bool created_directory_ = false;
+    PathIdentity directory_identity_{};
+    PathIdentity endpoint_identity_{};
+};
+
+#endif  // _WIN32
 
 }  // namespace
 
@@ -748,9 +1134,9 @@ std::size_t ControlWorkerLanes::pending_completions_for_test(
 }
 #endif
 
-int ControlWorkerLanes::wake_fd() const noexcept
+WakeHandle ControlWorkerLanes::wake_fd() const noexcept
 {
-    return impl_ ? impl_->wake.read_fd() : -1;
+    return impl_ ? impl_->wake.read_fd() : kInvalidWakeHandle;
 }
 
 void ControlWorkerLanes::drain_wake() noexcept
@@ -805,8 +1191,15 @@ Result<void> ControlWorkerLanes::stop_and_join() noexcept
             }
         }
         if (!drained) {
+#if defined(_WIN32)
+            WSAPOLLFD descriptor{};
+            descriptor.fd = static_cast<SOCKET>(impl_->wake.read_fd());
+            descriptor.events = POLLRDNORM;
+            (void)::WSAPoll(&descriptor, 1UL, 10);
+#else
             pollfd descriptor{impl_->wake.read_fd(), POLLIN, 0};
             (void)::poll(&descriptor, 1U, 10);
+#endif
             impl_->wake.drain();
         }
     }

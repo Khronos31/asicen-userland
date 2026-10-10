@@ -1,0 +1,53 @@
+#!/bin/sh
+# Synthetic otool used only by test-packaging.sh; it is not a release tool.
+printf '%s\n' "${2:-$1}"
+if [ "${1:-}" = "-l" ]; then
+    if [ "${ASICEN_TEST_OTOOL_MODE:-normal}" = bad-rpath ]; then
+        printf '%s\n' '      cmd LC_RPATH'
+    fi
+    if [ "${ASICEN_TEST_OTOOL_MODE:-normal}" = bad-dwarf ]; then
+        printf '%s\n' '      segname __DWARF'
+    fi
+    printf '%s\n' '      cmd LC_DYSYMTAB'
+    case "${ASICEN_TEST_OTOOL_MODE:-normal}" in
+    allowed-local)
+        printf '%s\n' '      nlocalsym 1'
+        ;;
+    bad-local)
+        printf '%s\n' '      nlocalsym 1'
+        ;;
+    bad-two)
+        printf '%s\n' '      nlocalsym 2'
+        ;;
+    *)
+        printf '%s\n' '      nlocalsym 0'
+        ;;
+    esac
+    exit 0
+fi
+if [ "${1:-}" = "-D" ]; then
+    case "$2" in
+    *libasicen-userland-ifd.dylib)
+        printf '%s\n' '@rpath/libasicen-userland-ifd.dylib'
+        ;;
+    esac
+    exit 0
+fi
+case "${ASICEN_TEST_OTOOL_MODE:-normal}:$*" in
+bad-pcsc:*libasicen-userland-ifd.dylib*)
+    printf '%s\n' '    /usr/local/lib/libpcsclite.1.dylib (compatibility version 1.0.0, current version 1.0.0)'
+    ;;
+bad-ifd-libusb:*libasicen-userland-ifd.dylib*)
+    printf '%s\n' '    /opt/homebrew/lib/libusb-1.0.0.dylib (compatibility version 1.0.0, current version 1.0.0)'
+    ;;
+bad-libusb:*)
+    printf '%s\n' '    /opt/homebrew/lib/libusb-1.0.0.dylib (compatibility version 1.0.0, current version 1.0.0)'
+    ;;
+bad-homebrew:*/asicen-ts*)
+    printf '%s\n' '    /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib (compatibility version 3.0.0, current version 3.0.0)'
+    ;;
+*:*/asicend*)
+    printf '%s\n' '    /usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)'
+    printf '%s\n' '    /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit (compatibility version 1.0.0, current version 275.0.0)'
+    ;;
+esac

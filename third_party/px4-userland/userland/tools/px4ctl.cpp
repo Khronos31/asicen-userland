@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-09: under ASICEN_PRODUCT_CLI, command names,
-// receiver bounds, serial-free instance routing, usage text and error labels.
+// ASICEN modification, 2026-10-10: ASICEN command spelling and serial-free instance selection.
 // The original license notice is unchanged.
 #include "px4/control_client.h"
 #include "px4ctl_format.h"
+
+#if defined(_WIN32)
+#include "px4_windows_args.h"
+#endif
 
 #include <array>
 #include <charconv>
@@ -226,15 +229,14 @@ Arguments parse_arguments(int argc, const char* const* argv) noexcept
 
 void usage(FILE* output) noexcept
 {
+    std::fprintf(output,
 #if defined(ASICEN_PRODUCT_CLI)
-    std::fprintf(output,
-                 "usage: asicenctl --instance TOKEN [--runtime-dir PATH] COMMAND\n");
+                 "usage: asicenctl --instance TOKEN "
 #else
-    std::fprintf(output,
                  "usage: px4ctl (--device BASE_SERIAL | --instance TOKEN) "
+#endif
                  "[--runtime-dir PATH] [--group] "
                  "COMMAND\n");
-#endif
     std::fprintf(output,
                  "commands: list, status, card-status, card-atr, card-reset, "
                  "card-apdu HEX [--repeat N]\n");
@@ -333,8 +335,18 @@ Result<void> close_card(PosixControlClient& client, std::uint64_t handle) noexce
 
 int main(int argc, char** argv)
 {
+#if defined(_WIN32)
+    const std::vector<std::string> owned_argv =
+        px4::userland::cli::windows_argv_utf8(argc, argv);
+    std::vector<const char*> argv_views;
+    argv_views.reserve(owned_argv.size());
+    for (const std::string& value : owned_argv) argv_views.push_back(value.c_str());
+    const Arguments arguments =
+        parse_arguments(static_cast<int>(argv_views.size()), argv_views.data());
+#else
     const Arguments arguments =
         parse_arguments(argc, const_cast<const char* const*>(argv));
+#endif
     if (!arguments.valid) {
         std::fprintf(stderr, "argument error: %.*s\n",
                      static_cast<int>(arguments.error.size()), arguments.error.data());
@@ -361,11 +373,7 @@ int main(int argc, char** argv)
     }
 
     Error operation_error = Error::OK;
-#if defined(ASICEN_PRODUCT_CLI)
     if (arguments.command == Command::list) {
-#else
-    if (arguments.command == Command::list) {
-#endif
         const auto response = empty_request(*client.value(), MessageType::LIST);
         if (!response) {
             operation_error = response.error();
@@ -375,12 +383,7 @@ int main(int argc, char** argv)
             if (!decoded) {
                 operation_error = decoded.error();
             } else {
-                std::string output = tools::format_list(decoded.value());
-#if defined(ASICEN_PRODUCT_CLI)
-                if (decoded.value().serial_utf8.size == 0U && output.rfind("serial=", 0) == 0)
-                    output.replace(0U, 7U, "serial=null");
-                output.insert(output.find('\n'), " backend=mock-only");
-#endif
+                const std::string output = tools::format_list(decoded.value());
                 std::fwrite(output.data(), 1U, output.size(), stdout);
             }
         }
@@ -393,10 +396,7 @@ int main(int argc, char** argv)
                 ByteView{response.value().payload.data(), response.value().payload.size()});
             if (!decoded) operation_error = decoded.error();
             else {
-                std::string output = tools::format_status(decoded.value());
-#if defined(ASICEN_PRODUCT_CLI)
-                output.insert(0U, "backend=mock-only ");
-#endif
+                const std::string output = tools::format_status(decoded.value());
                 std::fwrite(output.data(), 1U, output.size(), stdout);
             }
         }

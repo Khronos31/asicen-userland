@@ -2,6 +2,7 @@
 #include "asicen/px4_mock_backend.h"
 
 #include "asicen/product_profile.h"
+#include "px4/transport.h"
 
 #include <algorithm>
 #include <array>
@@ -14,121 +15,157 @@ namespace {
 
 using namespace px4::userland;
 
+bool same_attachment(const TunerAttachment& left,
+                     const TunerAttachment& right) noexcept
+{
+    return left.owner_client_id == right.owner_client_id &&
+           left.lease_id == right.lease_id &&
+           left.attachment_id == right.attachment_id &&
+           left.receiver == right.receiver && left.system == right.system &&
+           left.nonce == right.nonce;
+}
+
 Result<void> available(const std::atomic<bool>& stopping) noexcept
 {
-    return stopping.load() ? Result<void>::failure(Error::NOT_READY)
-                           : Result<void>::success();
+    return stopping.load() ? Result<void>::failure(Error::NOT_READY) : Result<void>::success();
 }
 
 }  // namespace
 
 MockTunerBackend::MockTunerBackend(const DeviceProfile& device) noexcept
     : receiver_count_(profile::valid_receiver_count(device.enclosure_receiver_count) &&
-                      device.combined_isdb_ts == (device.enclosure_receiver_count == 1U)
-                          ? device.enclosure_receiver_count : 0U),
-      combined_isdb_ts_(device.combined_isdb_ts) {}
+                              device.combined_isdb_ts == (device.enclosure_receiver_count == 1U)
+                          ? device.enclosure_receiver_count
+                          : 0U),
+      combined_isdb_ts_(device.combined_isdb_ts)
+{
+}
 
 MockTunerBackend::MockTunerBackend(std::uint8_t count) noexcept
     : receiver_count_(profile::valid_receiver_count(count) ? count : 0U),
-      combined_isdb_ts_(count == 1U) {}
+      combined_isdb_ts_(count == 1U)
+{
+}
 
 std::uint8_t MockTunerBackend::receiver_count() const noexcept
 {
     return receiver_count_;
 }
 
-bool MockTunerBackend::receiver_supports(std::uint8_t receiver,
-                                         ipc::System system) const noexcept
+bool MockTunerBackend::receiver_supports(std::uint8_t receiver, ipc::System system) const noexcept
 {
-    if (receiver >= receiver_count_) return false;
-    if (combined_isdb_ts_)
+    if (receiver >= receiver_count_) {
+        return false;
+    }
+    if (combined_isdb_ts_) {
         return system == ipc::System::ISDB_T || system == ipc::System::ISDB_S;
-    return system == (profile::is_satellite_receiver(receiver)
-                          ? ipc::System::ISDB_S : ipc::System::ISDB_T);
+    }
+    return system ==
+           (profile::is_satellite_receiver(receiver) ? ipc::System::ISDB_S : ipc::System::ISDB_T);
 }
 
 Result<void> MockTunerBackend::open_receiver(std::uint8_t receiver) noexcept
 {
-    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    if (receiver >= receiver_count_) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
     return available(stopping_);
 }
 
-Result<void> MockTunerBackend::tune_terrestrial(std::uint8_t receiver,
-    std::uint32_t frequency_khz, std::uint32_t timeout_ms) noexcept
+Result<void> MockTunerBackend::tune_terrestrial(std::uint8_t receiver, std::uint32_t frequency_khz,
+                                                std::uint32_t timeout_ms) noexcept
 {
-    if (!receiver_supports(receiver, ipc::System::ISDB_T) ||
-        frequency_khz < 40000U || frequency_khz > 1002000U || timeout_ms < 100U)
+    if (!receiver_supports(receiver, ipc::System::ISDB_T) || frequency_khz < 40000U ||
+        frequency_khz > 1002000U || timeout_ms < 100U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
     return available(stopping_);
 }
 
-Result<void> MockTunerBackend::tune_satellite(std::uint8_t receiver,
-    std::uint32_t frequency_khz, std::uint32_t timeout_ms) noexcept
+Result<void> MockTunerBackend::tune_satellite(std::uint8_t receiver, std::uint32_t frequency_khz,
+                                              std::uint32_t timeout_ms) noexcept
 {
-    if (!receiver_supports(receiver, ipc::System::ISDB_S) ||
-        frequency_khz < 146875U || frequency_khz > 2350000U || timeout_ms < 100U)
+    if (!receiver_supports(receiver, ipc::System::ISDB_S) || frequency_khz < 146875U ||
+        frequency_khz > 2350000U || timeout_ms < 100U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
     return available(stopping_);
 }
 
-Result<bool> MockTunerBackend::is_locked(std::uint8_t receiver,
-                                         ipc::System system) noexcept
+Result<bool> MockTunerBackend::is_locked(std::uint8_t receiver, ipc::System system) noexcept
 {
-    if (!receiver_supports(receiver, system)) return Result<bool>::failure(Error::INVALID_ARGUMENT);
-    if (stopping_.load()) return Result<bool>::failure(Error::NOT_READY);
+    if (!receiver_supports(receiver, system)) {
+        return Result<bool>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (stopping_.load()) {
+        return Result<bool>::failure(Error::NOT_READY);
+    }
     return Result<bool>::success(true);
 }
 
-Result<void> MockTunerBackend::select_satellite_slot(std::uint8_t receiver,
-    std::uint8_t slot, std::uint32_t) noexcept
+Result<void> MockTunerBackend::select_satellite_slot(std::uint8_t receiver, std::uint8_t slot,
+                                                     std::uint32_t) noexcept
 {
-    if (!receiver_supports(receiver, ipc::System::ISDB_S) || slot >= 12U)
+    if (!receiver_supports(receiver, ipc::System::ISDB_S) || slot >= 8U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
     return available(stopping_);
 }
 
-Result<void> MockTunerBackend::select_satellite_tsid(std::uint8_t receiver,
-    std::uint16_t tsid, std::uint32_t) noexcept
+Result<void> MockTunerBackend::select_satellite_tsid(std::uint8_t receiver, std::uint16_t tsid,
+                                                     std::uint32_t) noexcept
 {
-    if (!receiver_supports(receiver, ipc::System::ISDB_S) || tsid == 0xffffU)
+    if (!receiver_supports(receiver, ipc::System::ISDB_S) || tsid == 0xffffU) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
     return available(stopping_);
 }
 
 Result<void> MockTunerBackend::close_receiver(std::uint8_t receiver) noexcept
 {
-    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    if (receiver >= receiver_count_) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
     std::lock_guard<std::mutex> lock(power_mutex_);
     power_[receiver] = {};
     return Result<void>::success();
 }
 
-Result<void> MockTunerBackend::begin_tune_power(std::uint8_t receiver,
-    ipc::System system, std::uint8_t lnb_voltage) noexcept
+Result<void> MockTunerBackend::begin_tune_power(std::uint8_t receiver, ipc::System system,
+                                                std::uint8_t lnb_voltage) noexcept
 {
-    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
-    if (!receiver_supports(receiver, system) ||
-        (lnb_voltage != 0U && lnb_voltage != 15U) ||
-        (system == ipc::System::ISDB_T && lnb_voltage != 0U))
+    if (receiver >= receiver_count_) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
+    if (!receiver_supports(receiver, system) || (lnb_voltage != 0U && lnb_voltage != 15U) ||
+        (system == ipc::System::ISDB_T && lnb_voltage != 0U)) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
-    if (lnb_voltage == 15U && !allow_lnb_power_)
+    }
+    if (lnb_voltage == 15U && !allow_lnb_power_) {
         return Result<void>::failure(Error::UNSUPPORTED);
+    }
     std::lock_guard<std::mutex> lock(power_mutex_);
-    if (stopping_.load()) return Result<void>::failure(Error::NOT_READY);
+    if (stopping_.load()) {
+        return Result<void>::failure(Error::NOT_READY);
+    }
     auto& power = power_[receiver];
-    if (power.pending) return Result<void>::failure(Error::BUSY);
+    if (power.pending) {
+        return Result<void>::failure(Error::BUSY);
+    }
     power.previous = power.voltage;
     power.requested = lnb_voltage;
     power.pending = true;
-    // Match the service transaction: power needed for acquisition comes on
-    // before tuning; an existing request is removed only after tune success.
-    if (lnb_voltage == 15U) power.voltage = 15U;
+    // Apply the pending request before tuning; rollback restores the previous
+    // committed request when acquisition fails.
+    power.voltage = lnb_voltage;
     return Result<void>::success();
 }
 
 Result<void> MockTunerBackend::commit_tune_power(std::uint8_t receiver) noexcept
 {
-    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    if (receiver >= receiver_count_) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
     std::lock_guard<std::mutex> lock(power_mutex_);
     auto& power = power_[receiver];
     if (power.pending) {
@@ -140,7 +177,9 @@ Result<void> MockTunerBackend::commit_tune_power(std::uint8_t receiver) noexcept
 
 Result<void> MockTunerBackend::rollback_tune_power(std::uint8_t receiver) noexcept
 {
-    if (receiver >= receiver_count_) return Result<void>::failure(Error::NOT_FOUND);
+    if (receiver >= receiver_count_) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
     std::lock_guard<std::mutex> lock(power_mutex_);
     auto& power = power_[receiver];
     if (power.pending) {
@@ -150,26 +189,28 @@ Result<void> MockTunerBackend::rollback_tune_power(std::uint8_t receiver) noexce
     return Result<void>::success();
 }
 
-Result<std::uint8_t> MockTunerBackend::simulated_lnb_voltage(
-    std::uint8_t receiver) const noexcept
+Result<std::uint8_t> MockTunerBackend::simulated_lnb_voltage(std::uint8_t receiver) const noexcept
 {
-    if (receiver >= receiver_count_)
+    if (receiver >= receiver_count_) {
         return Result<std::uint8_t>::failure(Error::NOT_FOUND);
+    }
     std::lock_guard<std::mutex> lock(power_mutex_);
     return Result<std::uint8_t>::success(power_[receiver].voltage);
 }
 
-Result<void> MockTunerBackend::start_capture(std::uint8_t receiver,
-                                             ipc::System system) noexcept
+Result<void> MockTunerBackend::start_capture(std::uint8_t receiver, ipc::System system) noexcept
 {
-    if (!receiver_supports(receiver, system)) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, system)) {
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
     return available(stopping_);
 }
 
-Result<void> MockTunerBackend::stop_capture(std::uint8_t receiver,
-                                             ipc::System system) noexcept
+Result<void> MockTunerBackend::stop_capture(std::uint8_t receiver, ipc::System system) noexcept
 {
-    if (!receiver_supports(receiver, system)) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!receiver_supports(receiver, system)) {
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
     return Result<void>::success();
 }
 
@@ -188,9 +229,15 @@ void MockTunerBackend::request_stop() noexcept
 
 Result<void> MockTunerStream::attach(const TunerAttachment& attachment) noexcept
 {
+    if (attachment.owner_client_id == 0U || attachment.lease_id == 0U ||
+        attachment.attachment_id == 0U || attachment.receiver >= 4U ||
+        (attachment.system != ipc::System::ISDB_T && attachment.system != ipc::System::ISDB_S)) {
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (streams_.find(attachment.attachment_id) != streams_.end())
+    if (streams_.find(attachment.attachment_id) != streams_.end()) {
         return Result<void>::failure(Error::BUSY);
+    }
     State state;
     state.identity = attachment;
     streams_.emplace(attachment.attachment_id, state);
@@ -201,55 +248,67 @@ Result<void> MockTunerStream::detach(const TunerAttachment& attachment) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = streams_.find(attachment.attachment_id);
-    if (found == streams_.end()) return Result<void>::failure(Error::NOT_FOUND);
+    if (found == streams_.end() || !same_attachment(found->second.identity, attachment)) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
     found->second.active = false;
     found->second.detached = true;
     found->second.final = TunerStreamFinalSnapshot{
-        found->second.counters,
-        static_cast<std::uint8_t>(TunerStreamTerminal::stopped)};
+        found->second.counters, static_cast<std::uint8_t>(TunerStreamTerminal::stopped)};
     return Result<void>::success();
 }
 
-Result<TunerStreamCounters> MockTunerStream::stats(
-    const TunerAttachment& attachment) const noexcept
+Result<TunerStreamCounters> MockTunerStream::stats(const TunerAttachment& attachment) const noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = streams_.find(attachment.attachment_id);
-    if (found == streams_.end()) return Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
+    if (found == streams_.end() || !same_attachment(found->second.identity, attachment)) {
+        return Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
+    }
     return Result<TunerStreamCounters>::success(found->second.counters);
 }
 
-Result<TunerStreamFinalSnapshot> MockTunerStream::final_snapshot(
-    const TunerAttachment& attachment) const noexcept
+Result<TunerStreamFinalSnapshot>
+MockTunerStream::final_snapshot(const TunerAttachment& attachment) const noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = streams_.find(attachment.attachment_id);
-    if (found == streams_.end())
+    if (found == streams_.end() || !same_attachment(found->second.identity, attachment)) {
         return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
-    if (found->second.detached) return Result<TunerStreamFinalSnapshot>::success(found->second.final);
-    return Result<TunerStreamFinalSnapshot>::success(
-        TunerStreamFinalSnapshot{found->second.counters,
-                                 static_cast<std::uint8_t>(TunerStreamTerminal::none)});
+    }
+    if (found->second.detached) {
+        return Result<TunerStreamFinalSnapshot>::success(found->second.final);
+    }
+    return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_READY);
 }
 
 Result<void> MockTunerStream::release_final(const TunerAttachment& attachment) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = streams_.find(attachment.attachment_id);
-    if (found == streams_.end()) return Result<void>::failure(Error::NOT_FOUND);
-    if (!found->second.detached) return Result<void>::failure(Error::NOT_READY);
+    if (found == streams_.end() || !same_attachment(found->second.identity, attachment)) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
+    if (!found->second.detached) {
+        return Result<void>::failure(Error::NOT_READY);
+    }
     streams_.erase(found);
     return Result<void>::success();
 }
 
-Result<TunerStreamReadResult> MockTunerStream::read(
-    const TunerAttachment& attachment, MutableByteView output, Timeout) noexcept
+Result<TunerStreamReadResult> MockTunerStream::read(const TunerAttachment& attachment,
+                                                    MutableByteView output, Timeout) noexcept
 {
-    if (output.data == nullptr || output.size < 188U)
-        return Result<TunerStreamReadResult>::failure(Error::BUFFER_TOO_SMALL);
+    constexpr std::size_t kMaxReadBytes = (kMaxStreamTransfer / 188U) * 188U;
+    if (output.data == nullptr || output.size == 0U || output.size % 188U != 0U ||
+        output.size > kMaxReadBytes) {
+        return Result<TunerStreamReadResult>::failure(Error::INVALID_ARGUMENT);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = streams_.find(attachment.attachment_id);
-    if (found == streams_.end()) return Result<TunerStreamReadResult>::failure(Error::NOT_FOUND);
+    if (found == streams_.end() || !same_attachment(found->second.identity, attachment)) {
+        return Result<TunerStreamReadResult>::failure(Error::NOT_FOUND);
+    }
     if (!found->second.active) {
         return Result<TunerStreamReadResult>::success(
             TunerStreamReadResult{0U, true, false, TunerStreamTerminal::stopped});
@@ -261,8 +320,7 @@ Result<TunerStreamReadResult> MockTunerStream::read(
         bytes[0] = 0x47U;
         bytes[1] = 0x1fU;
         bytes[2] = 0xffU;
-        bytes[3] = static_cast<std::uint8_t>(0x10U |
-            (found->second.counters.packets & 0x0fU));
+        bytes[3] = static_cast<std::uint8_t>(0x10U | (found->second.counters.packets & 0x0fU));
         ++found->second.counters.packets;
     }
     const std::size_t byte_count = packet_count * 188U;
@@ -271,35 +329,56 @@ Result<TunerStreamReadResult> MockTunerStream::read(
         TunerStreamReadResult{byte_count, false, false, TunerStreamTerminal::none});
 }
 
-Result<TunerStreamTerminal> MockTunerStream::terminal(
-    const TunerAttachment& attachment) const noexcept
+Result<TunerStreamTerminal>
+MockTunerStream::terminal(const TunerAttachment& attachment) const noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = streams_.find(attachment.attachment_id);
-    if (found == streams_.end()) return Result<TunerStreamTerminal>::failure(Error::NOT_FOUND);
-    return Result<TunerStreamTerminal>::success(found->second.active
-        ? TunerStreamTerminal::none : TunerStreamTerminal::stopped);
+    if (found == streams_.end() || !same_attachment(found->second.identity, attachment)) {
+        return Result<TunerStreamTerminal>::failure(Error::NOT_FOUND);
+    }
+    return Result<TunerStreamTerminal>::success(
+        found->second.active ? TunerStreamTerminal::none : TunerStreamTerminal::stopped);
 }
 
 Result<void> UnsupportedCardBackend::set_power(bool) noexcept
-{ return Result<void>::success(); }
+{
+    return Result<void>::success();
+}
 
 Result<void> UnsupportedCardBackend::initialize_uart() noexcept
-{ return Result<void>::success(); }
+{
+    return Result<void>::success();
+}
 
 Result<bool> UnsupportedCardBackend::detect_card() noexcept
-{ return Result<bool>::failure(Error::UNSUPPORTED); }
+{
+    return Result<bool>::failure(Error::UNSUPPORTED);
+}
 
 Result<void> UnsupportedCardSession::initialize() noexcept
-{ return Result<void>::failure(px4::userland::Error::UNSUPPORTED); }
+{
+    return Result<void>::failure(px4::userland::Error::UNSUPPORTED);
+}
 
 Result<std::size_t> UnsupportedCardSession::transmit(ByteView, MutableByteView) noexcept
-{ return Result<std::size_t>::failure(px4::userland::Error::UNSUPPORTED); }
+{
+    return Result<std::size_t>::failure(px4::userland::Error::UNSUPPORTED);
+}
 
-bool UnsupportedCardSession::initialized() const noexcept { return false; }
+bool UnsupportedCardSession::initialized() const noexcept
+{
+    return false;
+}
 
-const CardAtr& UnsupportedCardSession::atr() const noexcept { return atr_; }
+const CardAtr& UnsupportedCardSession::atr() const noexcept
+{
+    return atr_;
+}
 
-void UnsupportedCardSession::invalidate() noexcept { atr_ = CardAtr{}; }
+void UnsupportedCardSession::invalidate() noexcept
+{
+    atr_ = CardAtr{};
+}
 
 }  // namespace asicen

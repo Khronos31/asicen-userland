@@ -47,8 +47,9 @@ S3U2 software switch. The physical-support statement remains separate.
 
 ## Power transaction contract
 
-The transaction follows px4-userland: an ON request is applied before tuning;
-an OFF request is committed after a successful tune. Failed retuning restores
+The transaction follows the pinned px4-userland implementation: both ON and
+OFF requests are applied before tuning, including a 15V-to-0V transition.
+The requested setting is committed after a successful tune. Failed retuning restores
 the prior committed setting. Closing the hardware receiver and terminal
 shutdown disable software-controlled power rather than restoring a previously
 powered GPIO snapshot. Cleanup failures remain visible and quarantine the

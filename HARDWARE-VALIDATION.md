@@ -894,8 +894,9 @@ were primary address4 and secondary address10.
 The host pcap contains1430 events, with zero dropped packets. Captures were
 started before DevCreate and stopped after restoration; no capture reader
 or harness process remains. The sanitized combined trace is
-docs/hardware-traces/2026-10-08-customer-info-init.usbmon.txt; firmware,
-EEPROM identity and Customer_Info payloads are omitted. Full raw text,
+docs/hardware-traces/2026-10-08-customer-info-init.usbmon.txt; EEPROM identity
+and Customer_Info payloads are omitted. The 20 firmware-loader submissions
+retain usbmon's truncated payload snippets. Full raw text,
 pcap and stderr remain under
 /config/.tools/asicen-work/official-trace-20261008/ and on the SSH machines.
 

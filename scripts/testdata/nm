@@ -1,0 +1,33 @@
+#!/bin/sh
+# Synthetic nm used only by test-packaging.sh; it is not a release tool.
+case "${ASICEN_TEST_NM_MODE:-normal}:${1:-}" in
+bad-ifd-exports:*)
+    printf '%s\n' '_IFDHCreateChannel' '_IFDHCreateChannelByName' '_IFDHCloseChannel'
+    exit 0
+    ;;
+*:-ap)
+    case "${ASICEN_TEST_OTOOL_MODE:-normal}" in
+    allowed-local)
+        printf '%s\n' '0000000005614542 - 00 0000 OPT radr://5614542'
+        ;;
+    bad-local)
+        printf '%s\n' '0000000000001000 t _local_helper'
+        ;;
+    *)
+        printf '%s\n' '0000000000001000 t _local_helper'
+        ;;
+        esac
+        exit 0
+        ;;
+esac
+if [ "${1:-}" = -D ]; then
+    printf '%s\n' \
+        IFDHCreateChannel IFDHCreateChannelByName IFDHCloseChannel \
+        IFDHGetCapabilities IFDHSetCapabilities IFDHSetProtocolParameters \
+        IFDHPowerICC IFDHTransmitToICC IFDHControl IFDHICCPresence
+    exit 0
+fi
+printf '%s\n' \
+    _IFDHCreateChannel _IFDHCreateChannelByName _IFDHCloseChannel \
+    _IFDHGetCapabilities _IFDHSetCapabilities _IFDHSetProtocolParameters \
+    _IFDHPowerICC _IFDHTransmitToICC _IFDHControl _IFDHICCPresence

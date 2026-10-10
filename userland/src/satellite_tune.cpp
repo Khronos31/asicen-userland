@@ -48,15 +48,18 @@ constexpr std::uint32_t kCsFirstRfKhz = 12291000U;
 constexpr std::uint32_t kCsStepKhz = 40000U;
 constexpr std::uint32_t kIfToRfOffsetKhz = 10678000U;
 
-std::uint32_t rf_for_row(std::size_t row) {
+std::uint32_t rf_for_row(std::size_t row)
+{
     if (row < 12) {
         return kBsFirstRfKhz + static_cast<std::uint32_t>(row) * kBsStepKhz;
     }
     return kCsFirstRfKhz + static_cast<std::uint32_t>(row - 12) * kCsStepKhz;
 }
 
-bool find_row(std::uint32_t rf_khz, std::size_t* row) {
-    if (row == nullptr) return false;
+bool find_row(std::uint32_t rf_khz, std::size_t* row)
+{
+    if (row == nullptr)
+        return false;
     for (std::size_t i = 0; i < kTunerBytes.size(); ++i) {
         if (rf_for_row(i) == rf_khz) {
             *row = i;
@@ -66,10 +69,11 @@ bool find_row(std::uint32_t rf_khz, std::size_t* row) {
     return false;
 }
 
-void append_control_sequence(FrontendPlan* plan,
-                             const std::vector<ControlTransfer>& transfers,
-                             const char* label) {
-    if (plan == nullptr) return;
+void append_control_sequence(FrontendPlan* plan, const std::vector<ControlTransfer>& transfers,
+                             const char* label)
+{
+    if (plan == nullptr)
+        return;
     for (const ControlTransfer& transfer : transfers) {
         FrontendOp op{};
         op.kind = FrontendOpKind::Control;
@@ -80,18 +84,21 @@ void append_control_sequence(FrontendPlan* plan,
     }
 }
 
-bool append_i2c_write(FrontendPlan* plan, std::uint8_t slave,
-                      std::uint8_t reg, const std::uint8_t* data,
-                      std::size_t size, std::uint8_t mode,
-                      const char* label) {
-    if (plan == nullptr) return false;
+bool append_i2c_write(FrontendPlan* plan, std::uint8_t slave, std::uint8_t reg,
+                      const std::uint8_t* data, std::size_t size, std::uint8_t mode,
+                      const char* label)
+{
+    if (plan == nullptr)
+        return false;
     const auto transfers = build_i2c_write_sequence(slave, reg, data, size, mode);
-    if (transfers.empty()) return false;
+    if (transfers.empty())
+        return false;
     append_control_sequence(plan, transfers, label);
     return true;
 }
 
-void append_delay(FrontendPlan* plan, unsigned delay_ms, const char* label) {
+void append_delay(FrontendPlan* plan, unsigned delay_ms, const char* label)
+{
     FrontendOp op{};
     op.kind = FrontendOpKind::Delay;
     op.delay_ms = delay_ms;
@@ -99,103 +106,108 @@ void append_delay(FrontendPlan* plan, unsigned delay_ms, const char* label) {
     plan->push_back(op);
 }
 
-SatelliteOperationResult convert_result(FrontendRunResult result) {
+SatelliteOperationResult convert_result(FrontendRunResult result)
+{
     switch (result) {
-        case FrontendRunResult::Completed:
-            return SatelliteOperationResult::Completed;
-        case FrontendRunResult::FailedTransfer:
-            return SatelliteOperationResult::FailedTransfer;
-        case FrontendRunResult::ShortTransfer:
-            return SatelliteOperationResult::ShortTransfer;
-        case FrontendRunResult::InvalidArgument:
-            return SatelliteOperationResult::InvalidArgument;
-        case FrontendRunResult::Cancelled:
-            return SatelliteOperationResult::Cancelled;
-        case FrontendRunResult::DeadlineExceeded:
-            return SatelliteOperationResult::DeadlineExceeded;
+    case FrontendRunResult::Completed:
+        return SatelliteOperationResult::Completed;
+    case FrontendRunResult::FailedTransfer:
+        return SatelliteOperationResult::FailedTransfer;
+    case FrontendRunResult::ShortTransfer:
+        return SatelliteOperationResult::ShortTransfer;
+    case FrontendRunResult::InvalidArgument:
+        return SatelliteOperationResult::InvalidArgument;
+    case FrontendRunResult::Cancelled:
+        return SatelliteOperationResult::Cancelled;
+    case FrontendRunResult::DeadlineExceeded:
+        return SatelliteOperationResult::DeadlineExceeded;
     }
     return SatelliteOperationResult::FailedTransfer;
 }
 
-SatelliteOperationResult run_transfer(FrontendTransport* transport,
-                                      const ControlTransfer& transfer,
-                                      std::vector<unsigned char>* response) {
+SatelliteOperationResult run_transfer(FrontendTransport* transport, const ControlTransfer& transfer,
+                                      std::vector<unsigned char>* response)
+{
     if (transport == nullptr || response == nullptr || transfer.length == 0) {
         return SatelliteOperationResult::InvalidArgument;
     }
-    if (transport->cancelled()) return SatelliteOperationResult::Cancelled;
-    if (transport->expired()) return SatelliteOperationResult::DeadlineExceeded;
+    if (transport->cancelled())
+        return SatelliteOperationResult::Cancelled;
+    if (transport->expired())
+        return SatelliteOperationResult::DeadlineExceeded;
 
     response->assign(transfer.length, 0);
     const int rc = transport->control(transfer, response->data());
-    if (rc < 0) return SatelliteOperationResult::FailedTransfer;
+    if (rc < 0)
+        return SatelliteOperationResult::FailedTransfer;
     if (rc != static_cast<int>(transfer.length)) {
         return SatelliteOperationResult::ShortTransfer;
     }
-    if ((*response)[0] != 1U) return SatelliteOperationResult::FailedTransfer;
+    if ((*response)[0] != 1U)
+        return SatelliteOperationResult::FailedTransfer;
     return SatelliteOperationResult::Completed;
 }
 
-SatelliteOperationResult run_i2c_write(FrontendTransport* transport,
-                                       std::uint8_t reg,
-                                       const std::uint8_t* data,
-                                       std::size_t size) {
+SatelliteOperationResult run_i2c_write(FrontendTransport* transport, std::uint8_t reg,
+                                       const std::uint8_t* data, std::size_t size)
+{
     if (transport == nullptr || data == nullptr || size == 0) {
         return SatelliteOperationResult::InvalidArgument;
     }
     const auto transfers = build_i2c_write_sequence(0x32, reg, data, size, 0);
-    if (transfers.empty()) return SatelliteOperationResult::InvalidArgument;
+    if (transfers.empty())
+        return SatelliteOperationResult::InvalidArgument;
     for (const ControlTransfer& transfer : transfers) {
         std::vector<unsigned char> response;
-        const SatelliteOperationResult result =
-            run_transfer(transport, transfer, &response);
-        if (result != SatelliteOperationResult::Completed) return result;
+        const SatelliteOperationResult result = run_transfer(transport, transfer, &response);
+        if (result != SatelliteOperationResult::Completed)
+            return result;
     }
     return SatelliteOperationResult::Completed;
 }
 
-SatelliteOperationResult run_i2c_read(FrontendTransport* transport,
-                                      std::uint8_t reg,
-                                      std::uint16_t length,
-                                      std::uint8_t mode,
-                                      std::vector<unsigned char>* data) {
+SatelliteOperationResult run_i2c_read(FrontendTransport* transport, std::uint8_t reg,
+                                      std::uint16_t length, std::uint8_t mode,
+                                      std::vector<unsigned char>* data)
+{
     if (transport == nullptr || data == nullptr || length == 0) {
         return SatelliteOperationResult::InvalidArgument;
     }
     const ControlTransfer transfer = make_i2c_read(0x32, reg, length, mode);
     std::vector<unsigned char> response;
-    const SatelliteOperationResult result =
-        run_transfer(transport, transfer, &response);
-    if (result != SatelliteOperationResult::Completed) return result;
+    const SatelliteOperationResult result = run_transfer(transport, transfer, &response);
+    if (result != SatelliteOperationResult::Completed)
+        return result;
     data->assign(response.begin() + 1, response.end());
     return SatelliteOperationResult::Completed;
 }
 
-}  // namespace
+} // namespace
 
-bool is_w3u3_satellite_rf_khz(std::uint32_t rf_khz) {
+bool is_w3u3_satellite_rf_khz(std::uint32_t rf_khz)
+{
     std::size_t row = 0;
     return find_row(rf_khz, &row);
 }
 
-bool w3u3_satellite_if_to_rf_khz(std::uint32_t if_khz,
-                                 std::uint32_t* rf_khz) noexcept {
+bool w3u3_satellite_if_to_rf_khz(std::uint32_t if_khz, std::uint32_t* rf_khz) noexcept
+{
     if (rf_khz == nullptr || if_khz > UINT32_MAX - kIfToRfOffsetKhz)
         return false;
     const std::uint32_t candidate = if_khz + kIfToRfOffsetKhz;
-    if (!is_w3u3_satellite_rf_khz(candidate)) return false;
+    if (!is_w3u3_satellite_rf_khz(candidate))
+        return false;
     *rf_khz = candidate;
     return true;
 }
 
 namespace {
 
-FrontendPlan plan_satellite_tune(std::uint32_t rf_khz,
-                                  std::uint16_t initial_tsid,
-                                  std::uint8_t terrestrial_finalize) {
+FrontendPlan plan_satellite_tune(std::uint32_t rf_khz, std::uint16_t initial_tsid,
+                                 std::uint8_t terrestrial_finalize)
+{
     std::size_t row = 0;
-    if (!find_row(rf_khz, &row) ||
-        (row >= 12 && initial_tsid != kW3u3SatelliteNoTsid)) {
+    if (!find_row(rf_khz, &row) || (row >= 12 && initial_tsid != kW3u3SatelliteNoTsid)) {
         return {};
     }
 
@@ -207,12 +219,10 @@ FrontendPlan plan_satellite_tune(std::uint32_t rf_khz,
         static_cast<std::uint8_t>(tune_tsid >> 8U),
         static_cast<std::uint8_t>(tune_tsid & 0xffU),
     };
-    if (!append_i2c_write(&plan, 0x32, 0x25, &demod_25, 1, 0,
-                          "satellite demod tune start") ||
+    if (!append_i2c_write(&plan, 0x32, 0x25, &demod_25, 1, 0, "satellite demod tune start") ||
         !append_i2c_write(&plan, 0x32, 0x23, &demod_23_start, 1, 0,
                           "satellite demod acquisition start") ||
-        !append_i2c_write(&plan, 0x32, 0x8f, tsid_bytes, 2, 0,
-                          "satellite initial TSID")) {
+        !append_i2c_write(&plan, 0x32, 0x8f, tsid_bytes, 2, 0, "satellite initial TSID")) {
         return {};
     }
 
@@ -222,25 +232,24 @@ FrontendPlan plan_satellite_tune(std::uint32_t rf_khz,
     };
     const std::uint8_t tuner_message_2[] = {0xfe, 0xc0, tuner[4]};
     const std::uint8_t tuner_message_3[] = {
-        0xfe, 0xc0, tuner[5], tuner[6],
+        0xfe,
+        0xc0,
+        tuner[5],
+        tuner[6],
     };
     const std::uint8_t tuner_message_4[] = {0xfe, 0xc0, tuner[7]};
     append_control_sequence(
-        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_1,
-                                        sizeof(tuner_message_1), 2),
+        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_1, sizeof(tuner_message_1), 2),
         "satellite tuner row bytes 0-3");
     append_control_sequence(
-        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_2,
-                                        sizeof(tuner_message_2), 2),
+        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_2, sizeof(tuner_message_2), 2),
         "satellite tuner row byte 4");
     append_delay(&plan, 10, "satellite tuner settle");
     append_control_sequence(
-        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_3,
-                                        sizeof(tuner_message_3), 2),
+        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_3, sizeof(tuner_message_3), 2),
         "satellite tuner row bytes 5-6");
     append_control_sequence(
-        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_4,
-                                        sizeof(tuner_message_4), 2),
+        &plan, build_i2c_write_sequence(0x32, 0, tuner_message_4, sizeof(tuner_message_4), 2),
         "satellite tuner row byte 7");
 
     const std::uint8_t terrestrial_adapter = terrestrial_finalize;
@@ -248,57 +257,64 @@ FrontendPlan plan_satellite_tune(std::uint32_t rf_khz,
     const std::uint8_t demod_23_finish = 0x4c;
     if (!append_i2c_write(&plan, 0x30, 0x0f, &terrestrial_adapter, 1, 0,
                           "satellite adapter finalize") ||
-        !append_i2c_write(&plan, 0x32, 0x03, &reacquire, 1, 0,
-                          "satellite reacquire") ||
-        !append_i2c_write(&plan, 0x32, 0x23, &demod_23_finish, 1, 0,
-                          "satellite tune complete")) {
+        !append_i2c_write(&plan, 0x32, 0x03, &reacquire, 1, 0, "satellite reacquire") ||
+        !append_i2c_write(&plan, 0x32, 0x23, &demod_23_finish, 1, 0, "satellite tune complete")) {
         return {};
     }
     return plan;
 }
 
-bool valid_legacy_satellite_profile(LegacyFrontendProfile profile) {
-    return profile == LegacyFrontendProfile::S3u ||
-           profile == LegacyFrontendProfile::S3u2;
+bool valid_legacy_satellite_profile(LegacyFrontendProfile profile)
+{
+    return profile == LegacyFrontendProfile::S3u || profile == LegacyFrontendProfile::S3u2;
 }
 
-}  // namespace
+} // namespace
 
-FrontendPlan plan_w3u3_satellite_tune(std::uint32_t rf_khz,
-                                      std::uint16_t initial_tsid) {
+FrontendPlan plan_w3u3_satellite_tune(std::uint32_t rf_khz, std::uint16_t initial_tsid)
+{
     return plan_satellite_tune(rf_khz, initial_tsid, 0x34);
 }
 
-FrontendPlan plan_legacy_satellite_tune(LegacyFrontendProfile profile,
-                                        std::uint32_t rf_khz,
-                                        std::uint16_t initial_tsid) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+FrontendPlan plan_legacy_satellite_tune(LegacyFrontendProfile profile, std::uint32_t rf_khz,
+                                        std::uint16_t initial_tsid)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     // S3U TC_SetFrequency2350 writes30:0f=3c for every satellite table row.
     // S3U2 TC_SetFrequency2830 uses34. RF rows, adapter protocol, TSID and
     // reacquire operations are common; all satellite paths use index0/32.
     return plan_satellite_tune(rf_khz, initial_tsid,
-                              profile == LegacyFrontendProfile::S3u ? 0x3c : 0x34);
+                               profile == LegacyFrontendProfile::S3u ? 0x3c : 0x34);
 }
 
-SatelliteOperationResult run_legacy_satellite_tune(
-    LegacyFrontendProfile profile, FrontendTransport* transport,
-    std::uint32_t rf_khz, std::uint16_t initial_tsid, FrontendRunReport* report) {
-    if (transport == nullptr) return SatelliteOperationResult::InvalidArgument;
+SatelliteOperationResult run_legacy_satellite_tune(LegacyFrontendProfile profile,
+                                                   FrontendTransport* transport,
+                                                   std::uint32_t rf_khz, std::uint16_t initial_tsid,
+                                                   FrontendRunReport* report)
+{
+    if (transport == nullptr)
+        return SatelliteOperationResult::InvalidArgument;
     const auto plan = plan_legacy_satellite_tune(profile, rf_khz, initial_tsid);
-    if (plan.empty()) return SatelliteOperationResult::InvalidArgument;
+    if (plan.empty())
+        return SatelliteOperationResult::InvalidArgument;
     return convert_result(run_frontend_plan(plan, transport, report));
 }
 
-SatelliteOperationResult run_w3u3_satellite_tune(
-    FrontendTransport* transport, std::uint32_t rf_khz,
-    std::uint16_t initial_tsid, FrontendRunReport* report) {
-    if (transport == nullptr) return SatelliteOperationResult::InvalidArgument;
+SatelliteOperationResult run_w3u3_satellite_tune(FrontendTransport* transport, std::uint32_t rf_khz,
+                                                 std::uint16_t initial_tsid,
+                                                 FrontendRunReport* report)
+{
+    if (transport == nullptr)
+        return SatelliteOperationResult::InvalidArgument;
     const FrontendPlan plan = plan_w3u3_satellite_tune(rf_khz, initial_tsid);
-    if (plan.empty()) return SatelliteOperationResult::InvalidArgument;
+    if (plan.empty())
+        return SatelliteOperationResult::InvalidArgument;
     return convert_result(run_frontend_plan(plan, transport, report));
 }
 
-SatelliteLockResult read_w3u3_satellite_lock(FrontendTransport* transport) {
+SatelliteLockResult read_w3u3_satellite_lock(FrontendTransport* transport)
+{
     SatelliteLockResult result{};
     std::vector<unsigned char> data;
     result.result = run_i2c_read(transport, 0xc3, 1, 1, &data);
@@ -308,9 +324,9 @@ SatelliteLockResult read_w3u3_satellite_lock(FrontendTransport* transport) {
     return result;
 }
 
-SatelliteLockResult poll_w3u3_satellite_lock(FrontendTransport* transport,
-                                             std::size_t max_attempts,
-                                             unsigned poll_interval_ms) {
+SatelliteLockResult poll_w3u3_satellite_lock(FrontendTransport* transport, std::size_t max_attempts,
+                                             unsigned poll_interval_ms)
+{
     SatelliteLockResult result{};
     if (transport == nullptr || max_attempts == 0) {
         result.result = SatelliteOperationResult::InvalidArgument;
@@ -347,29 +363,31 @@ SatelliteLockResult poll_w3u3_satellite_lock(FrontendTransport* transport,
     return result;
 }
 
-SatelliteTsidListResult read_w3u3_satellite_tsids(FrontendTransport* transport) {
+SatelliteTsidListResult read_w3u3_satellite_tsids(FrontendTransport* transport)
+{
     SatelliteTsidListResult result{};
     std::vector<unsigned char> data;
     result.result = run_i2c_read(transport, 0xce, 16, 1, &data);
-    if (result.result != SatelliteOperationResult::Completed) return result;
+    if (result.result != SatelliteOperationResult::Completed)
+        return result;
     for (std::size_t i = 0; i < result.tsids.size(); ++i) {
-        result.tsids[i] = static_cast<std::uint16_t>(
-            (static_cast<std::uint16_t>(data[i * 2]) << 8U) |
-            static_cast<std::uint16_t>(data[i * 2 + 1]));
+        result.tsids[i] =
+            static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[i * 2]) << 8U) |
+                                       static_cast<std::uint16_t>(data[i * 2 + 1]));
     }
     return result;
 }
 
 namespace {
 
-SatelliteTsidReadyResult wait_for_tsid_ready(
-    FrontendTransport* transport, std::size_t requested_slot,
-    std::uint16_t requested_tsid, bool match_tsid,
-    std::size_t max_attempts, unsigned poll_interval_ms) {
+SatelliteTsidReadyResult wait_for_tsid_ready(FrontendTransport* transport,
+                                             std::size_t requested_slot,
+                                             std::uint16_t requested_tsid, bool match_tsid,
+                                             std::size_t max_attempts, unsigned poll_interval_ms)
+{
     SatelliteTsidReadyResult result{};
     if (transport == nullptr || max_attempts == 0 ||
-        (match_tsid && (requested_tsid == 0U ||
-                        requested_tsid == kW3u3SatelliteNoTsid)) ||
+        (match_tsid && requested_tsid == kW3u3SatelliteNoTsid) ||
         (!match_tsid && requested_slot > kW3u3SatelliteTsidSlots)) {
         result.result = SatelliteOperationResult::InvalidArgument;
         return result;
@@ -393,24 +411,27 @@ SatelliteTsidReadyResult wait_for_tsid_ready(
         std::size_t slot = requested_slot;
         if (match_tsid) {
             const auto found = std::find(list.tsids.begin(), list.tsids.end(), requested_tsid);
-            if (found == list.tsids.end()) slot = kW3u3SatelliteTsidSlots;
-            else slot = static_cast<std::size_t>(found - list.tsids.begin());
+            if (found == list.tsids.end())
+                slot = kW3u3SatelliteTsidSlots;
+            else
+                slot = static_cast<std::size_t>(found - list.tsids.begin());
         }
         if (!match_tsid && requested_slot == kW3u3SatelliteTsidSlots) {
-            const auto found = std::find_if(list.tsids.begin(), list.tsids.end(),
-                [](std::uint16_t value) {
+            const auto found =
+                std::find_if(list.tsids.begin(), list.tsids.end(), [](std::uint16_t value) {
                     return value != 0U && value != kW3u3SatelliteNoTsid;
                 });
             if (found != list.tsids.end())
                 slot = static_cast<std::size_t>(found - list.tsids.begin());
         }
-        if (slot < kW3u3SatelliteTsidSlots && list.tsids[slot] != 0U &&
+        if (slot < kW3u3SatelliteTsidSlots && (match_tsid || list.tsids[slot] != 0U) &&
             list.tsids[slot] != kW3u3SatelliteNoTsid) {
             result.result = SatelliteOperationResult::Completed;
             result.slot = slot;
             return result;
         }
-        if (attempt + 1U == max_attempts) break;
+        if (attempt + 1U == max_attempts)
+            break;
         if (transport->cancelled()) {
             result.result = SatelliteOperationResult::Cancelled;
             return result;
@@ -425,40 +446,43 @@ SatelliteTsidReadyResult wait_for_tsid_ready(
     return result;
 }
 
-}  // namespace
+} // namespace
 
-SatelliteTsidReadyResult wait_w3u3_satellite_slot_ready(
-    FrontendTransport* transport, std::size_t slot,
-    std::size_t max_attempts, unsigned poll_interval_ms) {
+SatelliteTsidReadyResult wait_w3u3_satellite_slot_ready(FrontendTransport* transport,
+                                                        std::size_t slot, std::size_t max_attempts,
+                                                        unsigned poll_interval_ms)
+{
     if (slot >= kW3u3SatelliteTsidSlots) {
         SatelliteTsidReadyResult invalid{};
         invalid.result = SatelliteOperationResult::InvalidArgument;
         return invalid;
     }
-    return wait_for_tsid_ready(transport, slot, 0U, false,
-                               max_attempts, poll_interval_ms);
+    return wait_for_tsid_ready(transport, slot, 0U, false, max_attempts, poll_interval_ms);
 }
 
-SatelliteTsidReadyResult wait_w3u3_satellite_tsid_ready(
-    FrontendTransport* transport, std::uint16_t tsid,
-    std::size_t max_attempts, unsigned poll_interval_ms) {
-    return wait_for_tsid_ready(transport, kW3u3SatelliteTsidSlots, tsid, true,
-                               max_attempts, poll_interval_ms);
+SatelliteTsidReadyResult wait_w3u3_satellite_tsid_ready(FrontendTransport* transport,
+                                                        std::uint16_t tsid,
+                                                        std::size_t max_attempts,
+                                                        unsigned poll_interval_ms)
+{
+    return wait_for_tsid_ready(transport, kW3u3SatelliteTsidSlots, tsid, true, max_attempts,
+                               poll_interval_ms);
 }
 
-SatelliteTsidReadyResult wait_w3u3_satellite_any_ready(
-    FrontendTransport* transport, std::size_t max_attempts,
-    unsigned poll_interval_ms) {
-    return wait_for_tsid_ready(transport, kW3u3SatelliteTsidSlots, 0U, false,
-                               max_attempts, poll_interval_ms);
+SatelliteTsidReadyResult wait_w3u3_satellite_any_ready(FrontendTransport* transport,
+                                                       std::size_t max_attempts,
+                                                       unsigned poll_interval_ms)
+{
+    return wait_for_tsid_ready(transport, kW3u3SatelliteTsidSlots, 0U, false, max_attempts,
+                               poll_interval_ms);
 }
 
-SatelliteTsidSelectResult select_w3u3_satellite_tsid(
-    FrontendTransport* transport, std::size_t slot,
-    const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids) {
+SatelliteTsidSelectResult
+select_w3u3_satellite_tsid(FrontendTransport* transport, std::size_t slot,
+                           const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids)
+{
     SatelliteTsidSelectResult result{};
-    if (transport == nullptr || slot >= tsids.size() ||
-        tsids[slot] == kW3u3SatelliteNoTsid) {
+    if (transport == nullptr || slot >= tsids.size() || tsids[slot] == kW3u3SatelliteNoTsid) {
         result.result = SatelliteOperationResult::InvalidArgument;
         return result;
     }
@@ -468,14 +492,15 @@ SatelliteTsidSelectResult select_w3u3_satellite_tsid(
         static_cast<std::uint8_t>(selected & 0xffU),
     };
     result.result = run_i2c_write(transport, 0x8f, bytes, sizeof(bytes));
-    if (result.result != SatelliteOperationResult::Completed) return result;
+    if (result.result != SatelliteOperationResult::Completed)
+        return result;
 
     std::vector<unsigned char> readback;
     result.result = run_i2c_read(transport, 0x8f, 2, 0, &readback);
-    if (result.result != SatelliteOperationResult::Completed) return result;
+    if (result.result != SatelliteOperationResult::Completed)
+        return result;
     const std::uint16_t observed = static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(readback[0]) << 8U) |
-        static_cast<std::uint16_t>(readback[1]));
+        (static_cast<std::uint16_t>(readback[0]) << 8U) | static_cast<std::uint16_t>(readback[1]));
     if (observed != selected) {
         result.result = SatelliteOperationResult::VerificationFailed;
         return result;
@@ -487,58 +512,86 @@ SatelliteTsidSelectResult select_w3u3_satellite_tsid(
 
 // Source-equivalent index0 read/select operations. Explicit profile checks
 // prevent an invalid model value from becoming an implicit W3U3 alias.
-SatelliteLockResult read_legacy_satellite_lock(
-    LegacyFrontendProfile profile, FrontendTransport* transport) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+SatelliteLockResult read_legacy_satellite_lock(LegacyFrontendProfile profile,
+                                               FrontendTransport* transport)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     return read_w3u3_satellite_lock(transport);
 }
-SatelliteLockResult poll_legacy_satellite_lock(
-    LegacyFrontendProfile profile, FrontendTransport* transport,
-    std::size_t max_attempts, unsigned poll_interval_ms) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+SatelliteLockResult poll_legacy_satellite_lock(LegacyFrontendProfile profile,
+                                               FrontendTransport* transport,
+                                               std::size_t max_attempts, unsigned poll_interval_ms)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     return poll_w3u3_satellite_lock(transport, max_attempts, poll_interval_ms);
 }
-SatelliteTsidListResult read_legacy_satellite_tsids(
-    LegacyFrontendProfile profile, FrontendTransport* transport) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+SatelliteTsidListResult read_legacy_satellite_tsids(LegacyFrontendProfile profile,
+                                                    FrontendTransport* transport)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     return read_w3u3_satellite_tsids(transport);
 }
-SatelliteTsidReadyResult wait_legacy_satellite_slot_ready(
-    LegacyFrontendProfile profile, FrontendTransport* transport, std::size_t slot,
-    std::size_t max_attempts, unsigned poll_interval_ms) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+SatelliteTsidReadyResult wait_legacy_satellite_slot_ready(LegacyFrontendProfile profile,
+                                                          FrontendTransport* transport,
+                                                          std::size_t slot,
+                                                          std::size_t max_attempts,
+                                                          unsigned poll_interval_ms)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     return wait_w3u3_satellite_slot_ready(transport, slot, max_attempts, poll_interval_ms);
 }
-SatelliteTsidReadyResult wait_legacy_satellite_any_ready(
-    LegacyFrontendProfile profile, FrontendTransport* transport,
-    std::size_t max_attempts, unsigned poll_interval_ms) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+SatelliteTsidReadyResult wait_legacy_satellite_any_ready(LegacyFrontendProfile profile,
+                                                         FrontendTransport* transport,
+                                                         std::size_t max_attempts,
+                                                         unsigned poll_interval_ms)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     return wait_w3u3_satellite_any_ready(transport, max_attempts, poll_interval_ms);
 }
-SatelliteTsidReadyResult wait_legacy_satellite_tsid_ready(
-    LegacyFrontendProfile profile, FrontendTransport* transport, std::uint16_t tsid,
-    std::size_t max_attempts, unsigned poll_interval_ms) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+SatelliteTsidReadyResult wait_legacy_satellite_tsid_ready(LegacyFrontendProfile profile,
+                                                          FrontendTransport* transport,
+                                                          std::uint16_t tsid,
+                                                          std::size_t max_attempts,
+                                                          unsigned poll_interval_ms)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     return wait_w3u3_satellite_tsid_ready(transport, tsid, max_attempts, poll_interval_ms);
 }
-SatelliteTsidSelectResult select_legacy_satellite_tsid(
-    LegacyFrontendProfile profile, FrontendTransport* transport, std::size_t slot,
-    const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids) {
-    if (!valid_legacy_satellite_profile(profile)) return {};
+SatelliteTsidSelectResult
+select_legacy_satellite_tsid(LegacyFrontendProfile profile, FrontendTransport* transport,
+                             std::size_t slot,
+                             const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>& tsids)
+{
+    if (!valid_legacy_satellite_profile(profile))
+        return {};
     return select_w3u3_satellite_tsid(transport, slot, tsids);
 }
 
-const char* satellite_operation_result_name(SatelliteOperationResult result) noexcept {
+const char* satellite_operation_result_name(SatelliteOperationResult result) noexcept
+{
     switch (result) {
-        case SatelliteOperationResult::Completed: return "completed";
-        case SatelliteOperationResult::InvalidArgument: return "invalid-argument";
-        case SatelliteOperationResult::FailedTransfer: return "usb-failed";
-        case SatelliteOperationResult::ShortTransfer: return "usb-short";
-        case SatelliteOperationResult::Cancelled: return "cancelled";
-        case SatelliteOperationResult::DeadlineExceeded: return "deadline";
-        case SatelliteOperationResult::VerificationFailed: return "readback-mismatch";
+    case SatelliteOperationResult::Completed:
+        return "completed";
+    case SatelliteOperationResult::InvalidArgument:
+        return "invalid-argument";
+    case SatelliteOperationResult::FailedTransfer:
+        return "usb-failed";
+    case SatelliteOperationResult::ShortTransfer:
+        return "usb-short";
+    case SatelliteOperationResult::Cancelled:
+        return "cancelled";
+    case SatelliteOperationResult::DeadlineExceeded:
+        return "deadline";
+    case SatelliteOperationResult::VerificationFailed:
+        return "readback-mismatch";
     }
     return "unknown";
 }
 
-}  // namespace asicen
+} // namespace asicen

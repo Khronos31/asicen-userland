@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#pragma once
+#ifndef ASICEN_USERLAND_LIBUSB_HARDWARE_BACKEND_H
+#define ASICEN_USERLAND_LIBUSB_HARDWARE_BACKEND_H
 
 #include "asicen/hardware_ownership.h"
 #include "asicen/hardware_stream_session.h"
@@ -32,11 +33,24 @@ struct SatelliteProbeSummary {
 };
 
 struct CardProbeSummary {
+    int failure_status = 7;
     px4::userland::Error error = px4::userland::Error::INTERNAL;
     bool atr_valid = false;
     std::size_t atr_length = 0;
     std::size_t response_length = 0;
     std::uint16_t status_word = 0;
+    bool detected = false;
+    std::uint32_t transmit_count = 0U;
+    px4::userland::CardAtr atr{};
+    std::vector<std::uint8_t> response;
+};
+
+enum class CardProbeMode { detect, atr, apdu };
+
+struct CardProbeRequest {
+    CardProbeMode mode = CardProbeMode::detect;
+    px4::userland::ByteView apdu{};
+    std::uint32_t repeat = 1U;
 };
 
 // Source-gated in-process backend. S3U exposes one combined receiver; other
@@ -54,8 +68,8 @@ class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
                                  private CaptureBackend,
                                  private LinkSeedDiagnosticIo {
 public:
-    LibusbW3u3Hardware(libusb_context* context, UsbLocation primary,
-                       UsbLocation sibling, std::vector<std::uint8_t> primary_path,
+    LibusbW3u3Hardware(libusb_context* context, UsbLocation primary, UsbLocation sibling,
+                       std::vector<std::uint8_t> primary_path,
                        std::vector<std::uint8_t> sibling_path,
                        const DeviceProfile* expected_profile = nullptr);
     // Android/Termux entry point. primary_fd is required and sibling_fd is -1
@@ -63,7 +77,8 @@ public:
     // LibusbDevice duplicates them for the wrapped handle's lifetime. A fd
     // count that disagrees with the descriptor-resolved profile fails claim().
     LibusbW3u3Hardware(libusb_context* context, int primary_fd, int sibling_fd,
-                       const DeviceProfile* expected_profile = nullptr);
+                       const DeviceProfile* expected_profile = nullptr,
+                       LibusbAcquisitionApi& api = native_libusb_acquisition_api());
     ~LibusbW3u3Hardware() noexcept override;
     LibusbW3u3Hardware(const LibusbW3u3Hardware&) = delete;
     LibusbW3u3Hardware& operator=(const LibusbW3u3Hardware&) = delete;
@@ -73,11 +88,14 @@ public:
     const DeviceProfile* device_profile() const noexcept { return profile_; }
     px4::userland::Result<void> claim();
     px4::userland::Result<void> release() noexcept;
-    SatelliteProbeSummary probe_satellite(
-        std::uint32_t rf_khz, bool select_slot, std::size_t slot,
-        const volatile std::sig_atomic_t* stop_flag) noexcept;
-    CardProbeSummary probe_card(
-        const volatile std::sig_atomic_t* stop_flag) noexcept;
+    SatelliteProbeSummary probe_satellite(std::uint32_t rf_khz, bool select_slot, std::size_t slot,
+                                          const volatile std::sig_atomic_t* stop_flag,
+                                          bool (*stop_callback)() noexcept = nullptr) noexcept;
+    CardProbeSummary probe_card(const volatile std::sig_atomic_t* stop_flag,
+                                bool (*stop_callback)() noexcept = nullptr) noexcept;
+    CardProbeSummary probe_card(const CardProbeRequest& request,
+                                const volatile std::sig_atomic_t* stop_flag,
+                                bool (*stop_callback)() noexcept = nullptr) noexcept;
 
     std::uint8_t receiver_count() const noexcept override;
     bool receiver_supports(std::uint8_t, px4::userland::ipc::System) const noexcept override;
@@ -89,15 +107,14 @@ public:
     px4::userland::Result<void> tune_satellite(std::uint8_t, std::uint32_t,
                                                std::uint32_t) noexcept override;
     px4::userland::Result<bool> is_locked(std::uint8_t,
-                                         px4::userland::ipc::System) noexcept override;
+                                          px4::userland::ipc::System) noexcept override;
     px4::userland::Result<void> select_satellite_slot(std::uint8_t, std::uint8_t,
                                                       std::uint32_t) noexcept override;
     px4::userland::Result<void> select_satellite_tsid(std::uint8_t, std::uint16_t,
                                                       std::uint32_t) noexcept override;
     px4::userland::Result<void> close_receiver(std::uint8_t) noexcept override;
-    px4::userland::Result<void> begin_tune_power(std::uint8_t,
-                                                px4::userland::ipc::System,
-                                                std::uint8_t) noexcept override;
+    px4::userland::Result<void> begin_tune_power(std::uint8_t, px4::userland::ipc::System,
+                                                 std::uint8_t) noexcept override;
     px4::userland::Result<void> commit_tune_power(std::uint8_t) noexcept override;
     px4::userland::Result<void> rollback_tune_power(std::uint8_t) noexcept override;
     void mark_receiver_disconnected(std::uint8_t) noexcept override;
@@ -112,29 +129,30 @@ public:
     void set_allow_lnb_power(bool allow) noexcept { allow_lnb_power_ = allow; }
     bool allow_lnb_power() const noexcept { return allow_lnb_power_; }
 
-    px4::userland::Result<void> prepare(
-        std::uint8_t, px4::userland::ipc::System,
-        const std::atomic<bool>& cancelled) noexcept override;
+    px4::userland::Result<void> prepare(std::uint8_t, px4::userland::ipc::System,
+                                        const std::atomic<bool>& cancelled) noexcept override;
     CaptureRunResult run(const std::atomic<bool>& cancelled,
                          bool (*emit)(void*, const std::uint8_t*, std::size_t),
                          void* context) noexcept override;
     void interrupt() noexcept override;
+    px4::userland::TunerStreamCounters source_counters() const noexcept override;
+    StreamCaptureFramingCounters source_framing_counters() const noexcept override;
     px4::userland::Result<void> stop() noexcept override;
 
 private:
     friend struct LibusbW3u3HardwareTestPeer;
 
-    friend int run_card_only_server(
-        LibusbW3u3Hardware&, const char*, const char*, bool,
-        const volatile std::sig_atomic_t*) noexcept;
-    friend int run_live_card_stream_server(
-        LibusbW3u3Hardware&, const char*, const char*, bool,
-        const volatile std::sig_atomic_t*) noexcept;
-    bool begin_card_operation(
-        std::uint32_t timeout_ms,
-        const volatile std::sig_atomic_t* stop_flag) noexcept override;
+    friend int run_card_only_server(LibusbW3u3Hardware&, const char*, const char*, bool,
+                                    const volatile std::sig_atomic_t*,
+                                    bool (*)() noexcept) noexcept;
+    friend int run_live_card_stream_server(LibusbW3u3Hardware&, const char*, const char*, bool,
+                                           const volatile std::sig_atomic_t*,
+                                           bool (*)() noexcept) noexcept;
+    px4::userland::Result<void>
+    begin_card_operation(std::uint32_t timeout_ms,
+                         const volatile std::sig_atomic_t* stop_flag) noexcept override;
     void end_card_operation() noexcept override;
-    bool begin_card_cleanup(std::uint32_t timeout_ms) noexcept override;
+    px4::userland::Result<void> begin_card_cleanup(std::uint32_t timeout_ms) noexcept override;
     void end_card_cleanup(bool cleanup_succeeded) noexcept override;
     enum class PoweredControllerCheck : std::uint8_t {
         ready,
@@ -155,9 +173,11 @@ private:
         void (*free)(void*, libusb_transfer*) = nullptr;
         int (*pump_events)(void*, unsigned) = nullptr;
         void (*interrupt_events)(void*) = nullptr;
-        int (*control_function)(void*, std::uint8_t, const ControlTransfer&, unsigned char*) = nullptr;
+        int (*control_function)(void*, std::uint8_t, const ControlTransfer&,
+                                unsigned char*) = nullptr;
         // Test-only monotonic clock; production always uses steady_clock.
         std::chrono::steady_clock::time_point (*now)(void*) = nullptr;
+        NativeThread::Start launch_thread = nullptr;
     };
     libusb_transfer* allocate_transfer() noexcept;
     int submit_transfer(libusb_transfer*) noexcept;
@@ -188,10 +208,10 @@ private:
     SatelliteOperationResult run_model_satellite_tune(std::uint32_t) noexcept;
     SatelliteLockResult read_model_satellite_lock() noexcept;
     SatelliteLockResult poll_model_satellite_lock() noexcept;
-    SatelliteTsidReadyResult wait_model_satellite_tsid(std::size_t, std::uint16_t,
-                                                       bool) noexcept;
-    SatelliteTsidSelectResult select_model_satellite_tsid(
-        std::size_t, const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>&) noexcept;
+    SatelliteTsidReadyResult wait_model_satellite_tsid(std::size_t, std::uint16_t, bool) noexcept;
+    SatelliteTsidSelectResult
+    select_model_satellite_tsid(std::size_t,
+                                const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>&) noexcept;
     LegacyFrontendProfile legacy_frontend() const noexcept;
     bool snapshot_gpio_state() noexcept;
     bool supports_lnb_control() const noexcept;
@@ -215,12 +235,10 @@ private:
                   FrontendRunReport* report = nullptr) noexcept;
     bool read_i2c(std::uint8_t slave, std::uint8_t reg, std::uint16_t length,
                   std::uint8_t* output) noexcept;
-    bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg,
-                        std::uint8_t value) noexcept;
+    bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value) noexcept;
     bool set_cf_bit(std::uint8_t local, std::uint8_t mask, bool value) noexcept;
     CaptureRunResult stop_and_drain(bool dsc_was_attempted) noexcept;
-    CaptureRunResult cleanup_after_drain(bool dsc_stopped,
-                                         bool dsc_attempted) noexcept;
+    CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept;
     bool handle_events(unsigned timeout_ms) noexcept;
     bool stop_capture_safely() noexcept override;
     bool restore_gpio_snapshot_safely() noexcept override;
@@ -235,15 +253,23 @@ private:
     std::vector<std::uint8_t> primary_path_;
     std::vector<std::uint8_t> sibling_path_;
     std::atomic<bool> stop_requested_{false};
+    int open_error_ = 0;
+    V2FrontendTarget frontend_target(std::uint8_t receiver) const noexcept;
+    std::atomic<int> first_transport_error_{0};
+    px4::userland::Error transport_failure(px4::userland::Error fallback) const noexcept;
+    int control_function_impl(std::uint8_t function, const ControlTransfer&, unsigned char*);
+    px4::userland::Error plan_error_ = px4::userland::Error::OK;
     std::atomic<bool> disconnected_{false};
     std::atomic<bool> capture_interrupted_{false};
+    std::atomic<std::uint64_t> capture_sync_errors_{0U};
+    std::atomic<std::uint64_t> capture_empty_intervals_{0U};
     bool allow_lnb_power_ = true;
     bool card_cleanup_active_ = false;
     std::chrono::steady_clock::time_point deadline_{};
     bool deadline_active_ = false;
     std::recursive_timed_mutex control_gate_;
     std::atomic<bool> cleanup_io_active_{false};
-    bool claimed_ = false;
+    std::atomic<bool> claimed_{false};
     bool initialized_ = false;
     bool fd_function_mismatch_ = false;
     bool v2_roles_verified_ = false;
@@ -265,6 +291,7 @@ private:
     std::uint8_t source_receiver_ = kNoActiveReceiver;
     px4::userland::ipc::System tuned_system_ = px4::userland::ipc::System::ISDB_T;
     const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
+    bool (*diagnostic_stop_callback_)() noexcept = nullptr;
     bool gpio_snapshot_valid_ = false;
     std::uint8_t gpio_snapshot_ = 0;
     bool board_power_attempted_ = false;
@@ -279,7 +306,7 @@ private:
     std::chrono::steady_clock::time_point lnb_feedback_checked_at_{};
     std::atomic<bool> lnb_monitor_stop_{false};
     std::mutex lnb_monitor_mutex_;
-    std::thread lnb_monitor_;
+    NativeThread lnb_monitor_;
     bool lnb_state_known_ = false;
     bool lnb_on_ = false;
     bool lnb_cleanup_required_ = false;
@@ -294,8 +321,12 @@ private:
     struct AsyncState;
     struct DrainAdapter;
     std::unique_ptr<AsyncState> async_;
+    bool abandoned_ = false;
+    void quarantine_capture() noexcept;
     TransportCaptureDecoderV7 decoder_;
     const CaptureUsbHooks* capture_usb_hooks_ = nullptr;
 };
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_LIBUSB_HARDWARE_BACKEND_H

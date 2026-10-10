@@ -6,13 +6,13 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>English</string>
     <key>CFBundleExecutable</key>
-    <string>@ASICEN_IFD_BUNDLE_EXECUTABLE@</string>
+    <string>@ASICEN_IFD_BUNDLE_EXECUTABLE_NAME@</string>
     <key>CFBundleIdentifier</key>
     <string>io.github.khronos31.asicen-userland.ifd</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>ASICEN Userland IFD Handler</string>
+    <string>asicen-userland IFD Handler</string>
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>CFBundleShortVersionString</key>
@@ -22,9 +22,9 @@
     <key>ifdCapabilities</key>
     <string>0x00000000</string>
     <key>ifdManufacturerString</key>
-    <string>ASICEN Userland</string>
+    <string>asicen-userland contributors</string>
     <key>ifdProductString</key>
-    <string>ASICEN W3U3 Card Reader IPC Adapter</string>
+    <string>ASICEN PLEX Internal Card Reader IPC Adapter</string>
     <key>ifdVersionNumber</key>
     <string>0x00000001</string>
 </dict>
