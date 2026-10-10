@@ -3,3 +3,10 @@
 /evidence/raw/
 /evidence/loader-task.md
 /evidence/loader-code.md
+
+# Additional local build directories
+/build-hw/
+
+# Python bytecode
+__pycache__/
+*.py[cod]

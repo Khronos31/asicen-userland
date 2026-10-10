@@ -303,8 +303,28 @@ px4::userland::Result<ResolvedDevice> resolve_device(
     return px4::userland::Result<ResolvedDevice>::success(std::move(matched));
 }
 
-int lock_runtime() {
-    return asicen::acquire_enclosure_lock("/tmp/asicen-userland-enclosure.lock");
+int lock_runtime(const Options& options) {
+    std::string lock_path;
+    if (options.have_runtime_dir && !options.runtime_dir.empty()) {
+        lock_path = options.runtime_dir;
+        if (lock_path.back() != '/') lock_path.push_back('/');
+        lock_path += "asicen-userland-enclosure.lock";
+    } else {
+        // Same resolution as px4 posix_ipc::make_layout: explicit runtime-dir,
+        // otherwise XDG_RUNTIME_DIR, otherwise fail closed (no /tmp fallback).
+        // A TMPDIR fallback here would let the lock succeed while the control
+        // endpoint fails on the same configuration, creating a half-started
+        // daemon that claims USB and then exits 70.
+        const char* runtime_root = std::getenv("XDG_RUNTIME_DIR");
+        if (runtime_root == nullptr || runtime_root[0] == '\0') {
+            std::fprintf(stderr, "ASICEN enclosure lock path is unsafe: no --runtime-dir or XDG_RUNTIME_DIR\n");
+            return -1;
+        }
+        lock_path = runtime_root;
+        while (!lock_path.empty() && lock_path.back() == '/') lock_path.pop_back();
+        lock_path += "/asicen-userland-enclosure.lock";
+    }
+    return asicen::acquire_enclosure_lock(lock_path.c_str());
 }
 
 // Loads firmware into a loader device addressed by usb-path or fd. The
@@ -683,7 +703,7 @@ int run_asicend_hardware(int argc, char** argv) {
     ::sigaction(SIGINT, &action, nullptr);
     ::sigaction(SIGTERM, &action, nullptr);
     ::signal(SIGPIPE, SIG_IGN);
-    const int lock_fd = lock_runtime();
+    const int lock_fd = lock_runtime(options);
     if (lock_fd < 0) {
         std::fprintf(stderr, "ASICEN enclosure is already owned or lock path is unsafe\n");
         return 4;

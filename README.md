@@ -127,9 +127,12 @@ USB 機能が 1 つの PX-S3U と PX-S3U2 では `--usb-path` を 1 つだけ指
 
 Termux:API の `termux-usb` を利用してファイルディスクリプタを渡します。配布用 APK はありません。
 
+ランタイムディレクトリには `/tmp` を使わないでください。Termux の `/tmp` はユーザーが書き込めない場合があり、エンドポイント作成（`make_layout`）も `--runtime-dir` 未指定時は `$XDG_RUNTIME_DIR` だけを参照します。Android では UNIX ドメインソケットのパス長上限が短いため、`$HOME` 配下などの深い階層ではなく `$PREFIX/tmp` 直下の短い固定パスを使います（px4-userland と同じ運用）。
+
 ```sh
+mkdir -p "$PREFIX/tmp/asicen-example"
 asicen-termux --usb-device /dev/bus/usb/001/004 \
-  --runtime-dir /tmp/asicen-example --instance tuner
+  --runtime-dir "$PREFIX/tmp/asicen-example" --instance tuner
 ```
 
 USB 機能が 2 つの機種では、`--usb-device` を primary、sibling の順で 2 回指定します。ローダ状態からの起動時は、まず別途ファームウェアを転送してから runtime を起動してください（`--fd` は再列挙に追随しないため、転送と起動を分けます）。
