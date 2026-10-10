@@ -1043,3 +1043,43 @@ sync-errors=0, tei=0, continuity-errors=0, queue-drops=0, usb-errors=0.
 Total 33 channels, all error-free. T30/T31/T32 failed once on the first
 10 s pass and succeeded on retry; the first-pass failure was a transient
 reception interruption, not a further retest.
+
+### Short regression physical items, representative machine (2026-10-10)
+
+The same linux-glibc-x86_64 candidate and PX-W3U3 were used for the
+physical short-regression items: card remove/reinsert, USB detach during
+capture, and recovery after reinsertion.
+
+**Card remove/reinsert (internal B-CAS).** The daemon was left running
+throughout. With the card inserted, `card-status` reported
+`present=yes ... reader-generation=1` and `card-atr` returned
+`3b:f0:12:00:ff:91:81:b1:7c:45:1f:03:99`. After the user removed the
+card, `card-status` reported `present=no ... reader-generation=2`;
+`card-atr` and `card-apdu 90:00:00:00` both returned `NO_CARD`
+(exit 9). After the user reinserted the card, `card-status` reported
+`present=yes ... reader-generation=3`, `card-atr` returned the same ATR,
+and `card-apdu` returned `6d:00` (invalid-INS SW, i.e. the command
+exchange succeeded). Generation advanced 1 -> 2 -> 3 and ATR recovery
+confirming the daemon detects absence and reinsertion without restart.
+
+**USB detach during capture.** While a 60 s T27 capture
+(`asicen-ts ... --duration-seconds 60`) was streaming, the user
+unplugged the W3U3 USB cable (one cable carries both USB functions).
+The client exited in bounded time with `asicen-ts: DISCONNECTED` after
+writing 217,521 packets / 40,893,948 bytes, and no asicen-ts or asicend
+process remained. No IPC control socket remained in the runtime
+directory. The daemon itself was not running afterwards (also ended
+cleanly); when the device was re-enumerated, the old daemon did not
+auto-recover.
+
+**Recovery via cold start after reinsertion.** After reinsertion the
+devices re-enumerated as loaders (`1738:5211` x2), as expected after a
+cable pull. Starting the same candidate daemon with
+`--firmware firmware/asicen-loader.bin` completed the loader transfer
+for 2 functions, both USB functions returned to runtime (`0b06:0005`),
+and the daemon reported ready with receivers=2. Verification after
+recovery: terrestrial T27 (28,736 packets, sync/tei/cc = 0),
+satellite BS01_0 at LNB 0 V (85,884 packets, sync/tei/cc = 0), and the
+internal card ATR restored (same ATR as before). (A brief satellite 0
+packet period after the operations was traced to the satellite input
+becoming unconnected; the user reconnected it and reception resumed.)
