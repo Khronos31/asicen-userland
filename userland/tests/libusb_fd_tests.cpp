@@ -95,7 +95,9 @@ bool invalid_fd_is_rejected()
 bool failed_wrap_keeps_the_callers_fd_open()
 {
     asicen::LibusbContext context;
-    CHECK(context.initialize() == 0);
+    // Use the production FD-mode context: wrapping an already-granted fd does
+    // not need device discovery or a host USB hotplug monitor in offline CI.
+    CHECK(context.initialize(true) == 0);
 
     int pipe_fds[2] = {-1, -1};
     CHECK(::pipe(pipe_fds) == 0);
@@ -117,7 +119,7 @@ bool failed_wrap_keeps_the_callers_fd_open()
 bool negative_descriptor_is_rejected()
 {
     asicen::LibusbContext context;
-    CHECK(context.initialize() == 0);
+    CHECK(context.initialize(true) == 0);
 
     asicen::LibusbDevice device;
     CHECK(device.open(context.get(), -1) != 0);

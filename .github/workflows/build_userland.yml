@@ -65,7 +65,9 @@ jobs:
       - name: Build static executables in Alpine 3.22
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src alpine:3.22 sh -euxc '
-            apk add --no-cache git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
+            apk add --no-cache bash git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
+            # The bind mount retains the runner UID; trust only this checkout.
+            git config --global --add safe.directory /src;
             cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON;
             cmake --build build-userland;
             ctest --test-dir build-userland --output-on-failure;
@@ -134,7 +136,9 @@ jobs:
       - name: Build static and matching IFD variants in Alpine 3.22
         run: |
           docker run --rm -e GITHUB_SHA="$GITHUB_SHA" -v "$GITHUB_WORKSPACE:/src" -w /src alpine:3.22 sh -euxc '
-            apk add --no-cache git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
+            apk add --no-cache bash git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
+            # The bind mount retains the runner UID; trust only this checkout.
+            git config --global --add safe.directory /src;
             cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON;
             cmake --build build-userland;
             ctest --test-dir build-userland --output-on-failure;

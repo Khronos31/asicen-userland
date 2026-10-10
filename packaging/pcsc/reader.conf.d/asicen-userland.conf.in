@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# asicen-userland pcsc-lite reader template. Replace all @...@ placeholders.
+# On macOS, the LIBPATH value is the asicen-userland-ifd.bundle directory,
+# not its nested Contents/MacOS dylib.
+# access=user is private to one account; access=group is for a pcscd service
+# account sharing a group with asicend, which must then be started with --group.
+# ASICEN has no USB serial descriptor; select its daemon by instance token.
+FRIENDLYNAME "ASICEN PLEX Internal Card Reader"
+DEVICENAME   asicen-userland:runtime=@ASICEN_RUNTIME_DIR@:instance=@ASICEN_INSTANCE@:access=@ASICEN_ACCESS@
+LIBPATH      @ASICEN_IFD_LIBRARY@
+CHANNELID    0

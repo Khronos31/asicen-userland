@@ -255,6 +255,15 @@ class CanonicalStaticDistributionTests(unittest.TestCase):
             self.assertFalse((stage / "repository/firmware").exists())
             self.assertEqual((stage / "repository/VERSION").read_bytes(), subprocess.check_output(
                 ["git", "-C", str(root), "show", f"{commit}:VERSION"]))
+            # These source inputs live in *.d directories, which the compiler
+            # dependency ignore pattern also matches. A working-tree-only
+            # packaging test must not hide an omitted tracked template.
+            for name in (
+                "packaging/pcsc/reader.conf.d/asicen-userland.conf.in",
+                "packaging/fedora/sysusers.d/asicen-userland.conf",
+            ):
+                self.assertEqual((stage / "repository" / name).read_bytes(), subprocess.check_output(
+                    ["git", "-C", str(root), "show", f"{commit}:{name}"]))
 
     def test_tracked_firmware_copy_retains_exact_notice_and_hash(self):
         with tempfile.TemporaryDirectory() as temporary:

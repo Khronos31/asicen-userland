@@ -862,6 +862,7 @@ if(ASICEN_BUILD_TESTS AND TARGET asicen_ifdhandler)
         -DNM=${CMAKE_NM}
         -DLIBRARY=$<TARGET_FILE:asicen_ifdhandler>
         -DIS_APPLE=${APPLE}
+        -DBUNDLE=${ASICEN_IFD_BUNDLE_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-ifd-symbols.cmake)
 endif()
 if(ASICEN_ENABLE_LIBUSB AND (WIN32 OR ASICEN_BUILD_TESTS))

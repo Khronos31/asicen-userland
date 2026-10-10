@@ -167,6 +167,15 @@
 - SDK に依存しない歴史的 oracle 3 本の構文検査と validator self-test を通過。`official-trace-harness.cpp` は vendor `Data_define.h` がこの環境にないため全体compile未確認。ベンダーコードは実行していない。
 - Git の正確な commit からの対応ソース export と各 OS/ABI の CI 結果は PR で報告する。未commitの作業ツリーを既存 HEAD の成果物として偽装しない。過去の実機PASSを変更後バイナリへ転用しない。
 
+## 初回 CI で確認したことと修正
+
+`2c2f769` の PR CI では Ubuntu の全 71 CTest、Windows Server 2022 の offline implementation tests、Android 3 ABI、各対応ソース relink が成功した。配布・他 OS の後段で次の不備が見つかったため、後続コミットで修正する。初回 CI 全体は失敗であり、後続コミットの合否は PR に記録する。
+
+- `*.d` ignore に該当する新規 reader/sysusers テンプレートが追跡から漏れていた。両ファイルを追跡し、Git commit の source export に存在することを回帰で確認する。
+- macOS IFD symbols test に bundle path が渡っていなかった。固定 PX4 と同じ引数を復元する。
+- Alpine の全件試験に必要な bash と、bind mount した `/src` の Git ownership 前提が欠けていた。使い捨て CI コンテナ内の必要箇所を修正する。
+- FD safety test が不要なデバイス列挙を伴う context を初期化していた。実製品の FD 経路と同じ no-discovery 初期化へ揃え、native libusb の pipe 拒否と caller FD 保持の assertion は維持する。
+
 ## 残るハードウェア条件
 
 AN019 の shared seed/controller05 と最後の peer 停止時の規則は、複数ストリームの安全な同時開始・停止を確定する根拠が不足している。物理的に不可能とは判断せず、未実装・未検証として現状の能力上限を明示する。汎用の経路・ownership テストを省略する理由にはしない。
