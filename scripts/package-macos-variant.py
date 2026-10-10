@@ -66,7 +66,7 @@ def main() -> int:
         candidate = args.candidate.resolve(strict=True)
         firmware = args.firmware
         output = args.output
-        AUDIT.audit_candidate(candidate, final=False, run_smoke=True)
+        AUDIT.audit_candidate(candidate, final=False)
         if firmware.is_symlink() or not firmware.is_file():
             fail("firmware must be a regular, non-symlink file")
         firmware = firmware.resolve(strict=True)
@@ -105,7 +105,7 @@ def main() -> int:
             text += f"Firmware SHA-256: {AUDIT.FIRMWARE_SHA256}\n"
             metadata.write_text(text, encoding="utf-8")
             write_sums(stage)
-            AUDIT.audit_candidate(stage, final=True, run_smoke=False)
+            AUDIT.audit_candidate(stage, final=True)
             write_tar(stage, archive_path)
             AUDIT.audit_candidate_archive(archive_path, final=True)
             shutil.move(str(stage), str(normalized_output))

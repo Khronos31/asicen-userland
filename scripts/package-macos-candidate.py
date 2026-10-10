@@ -232,7 +232,7 @@ def main() -> int:
             for path in sorted(p for p in stage.rglob("*") if p.is_file() and p.name != "SHA256SUMS"):
                 sums.append(f"{digest(path)}  {path.relative_to(stage).as_posix()}")
             (stage / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
-            audit_candidate(stage, final=False, run_smoke=True)
+            audit_candidate(stage, final=False)
             write_candidate_archive(stage, archive_output)
             shutil.move(str(stage), str(normalized))
         print(f"created macOS arm64 intermediate: {normalized}")
