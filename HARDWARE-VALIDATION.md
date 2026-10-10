@@ -969,3 +969,36 @@ See [the first-TS report](docs/reverse-engineering/official-first-ts-2026-10-08.
 for the public API sequence, transform distinction, validation, invocation,
 trace limitations and retained artifacts. Full seed traces and TS remain
 local; only code and non-key diagnostics are committed.
+
+### W3U3 LNB 15V open-circuit measurement (2026-10-10)
+
+Performed on the Linux glibc x86_64 release candidate while validating
+release 0.1.0. The W3U3 satellite input was isolated from the building
+wall distribution (open circuit); no antenna was connected, so the
+satellite tune could not lock.
+
+Method: `asicend --usb-path 1-2.1 --usb-path 1-2.2 --model w3u3
+--allow-lnb-power --instance rcval`, then `asicen-ts --channel BS01_0
+--lnb-voltage 15`. A multimeter was left attached to the satellite
+input terminal and the LNB-on window was timed by the user.
+
+Observed (manual multimeter reading):
+
+- 0 V with no `--lnb-voltage` request.
+- Immediately after the 15 V request began, the terminal measured
+  15 V and stayed near 15 V for about 8 seconds.
+- The satellite tune then failed to lock (no signal), which triggered
+  the transactional LNB rollback; the software switched the LNB supply
+  off.
+- After the supply was switched off, the terminal voltage decayed
+  slowly toward 0 V over about 90 seconds. The decay shape is
+  consistent with the on-board capacitor discharging; the software
+  did not hold the line at an intermediate voltage.
+
+Interpretation: this matches the design (and the Q3U4 record from
+2026-09-13) where 15 V is sustained while a tune is in progress and is
+switched off on tune failure (`rollback_tune_power`). The difference
+between devices is the width of the tune window and the board
+capacitance, not the LNB transaction logic. The 15 V output itself is
+working on the W3U3; only the open-circuit retention time differs
+between models.

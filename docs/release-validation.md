@@ -57,6 +57,8 @@ px4-userland v0.1.10 の配布物と、その `docs/release-validation.md` に�
 
 USB 転送の成功や GPIO の読み戻しを、端子電圧の合格にしない。
 
+**0.1.0 の W3U3 実測記録（2026-10-10）**: linux-glibc-x86_64 候補の代表機で、W3U3 の衛星入力端子を壁設備から分離してテスターを当てて測定した。`--lnb-voltage 0` では 0V。`--lnb-voltage 15` の受信開始直後から 15V を確認し、約 8 秒間維持された後、衛星の tune が信号なし（アンテナ未接続）で失敗して LNB 供給が OFF になり、以降は基板上のコンデンサの放電により約 90 秒かけてゆっくり 0V へ落ちた。close 後は 0V へ戻り、オンへ戻らないことを確認した。詳細は `HARDWARE-VALIDATION.md` を参照。この観測は px4 当時の Q3U4 検証（オープン端で 15V→tune失敗時の rollback で OFF）と同じ LNB トランザクション仕様と整合する。
+
 ### 短時間の回帰
 
 接続確認は `asicend --list-json` を使う。アドレスは挿し直すと変わるので、再現性のために `--usb-path BUS-PORT` 形式を使う。
