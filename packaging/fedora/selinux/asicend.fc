@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
+/opt/asicen-userland/asicend -- gen_context(system_u:object_r:asicend_exec_t,s0)
+/opt/asicen-userland/firmware/asicen-loader\.bin -- gen_context(system_u:object_r:asicend_data_t,s0)
+/run/asicen-userland(/.*)? gen_context(system_u:object_r:asicend_var_run_t,s0)

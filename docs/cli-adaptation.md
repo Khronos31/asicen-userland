@@ -1,8 +1,18 @@
 # px4-userland CLI adaptation boundary
 
-Current compatibility verdict: see the
-[2026-10-09 audit](compatibility-audit-2026-10-09.md).
-This historical increment record does not establish distribution parity.
+Current comparison baseline is PX4
+`1a1485d0c3e972e0a47be907edb67949564aa9a7` and ASICEN starting point
+`42c92a6b27247498f1c2920fd98bb20a346e59e4`.
+The exhaustive discrepancy record is [Issue #4](https://github.com/Khronos31/asicen-userland/issues/4).
+The Issue #4 implementation supersedes the historical `--socket` 24-byte
+research protocol. Mock and hardware modes use the canonical runtime/instance
+control and stream service; obsolete `--socket` arguments fail with usage exit 2.
+The partial-frame, blocked-output, packet and shutdown tests are retained on
+that shared protocol. The historical descriptions below are not current CLI
+instructions.
+The text below is the historical increment record, including its original
+reference revision and old mock-only limitations; it does not describe the
+current product or establish distribution parity.
 Primary satellite and live internal-card use were added after its original
 hardware section; see the [live trial](reverse-engineering/live-card-stream-trial-2026-10-09.md).
 

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_V2_FRONTEND_H
+#define ASICEN_USERLAND_V2_FRONTEND_H
 
 // SPDX-License-Identifier: GPL-2.0-only
 // Isolated PX-W3U3 V2 RF frontend. This is deliberately not a product/backend
@@ -59,7 +60,7 @@ struct V2SourceRoute {
 // Validate the complete customer-info wire response; identity/board matching
 // remains the owner's responsibility. Never use PID or enumeration order as
 // a substitute for selecting the indicated shared RF-control master.
-V2SourceRoute v2_source_route(const std::uint8_t *customer_info, std::size_t length,
+V2SourceRoute v2_source_route(const std::uint8_t* customer_info, std::size_t length,
                               std::uint8_t local_lane);
 // Official V2 RF-kHz wrapper, including its terrestrial 143 kHz offset.
 // Satellite input remains RF kHz (not IF), as with the original W3U3 API.
@@ -90,24 +91,26 @@ FrontendPlan plan_v2_revision11_startup_tail();
 // The transport must serialize the whole call, including staging transactions.
 // Cooperative transport deadlines plus an independent monotonic time budget
 // apply even if the transport's default expired() implementation returns false.
-V2FrontendResult initialize_v2_frontend(FrontendTransport *transport, V2FrontendTarget target,
-                                        V2FrontendReport *report = nullptr,
+V2FrontendResult initialize_v2_frontend(FrontendTransport* transport, V2FrontendTarget target,
+                                        V2FrontendReport* report = nullptr,
                                         unsigned budget_ms = 3000);
-V2FrontendResult tune_v2_frontend(FrontendTransport *transport, V2FrontendTarget target,
-                                  std::uint32_t rf_khz, V2FrontendReport *report = nullptr,
+V2FrontendResult tune_v2_frontend(FrontendTransport* transport, V2FrontendTarget target,
+                                  std::uint32_t rf_khz, V2FrontendReport* report = nullptr,
                                   unsigned budget_ms = 3000);
-V2FrontendResult read_v2_frontend_lock(FrontendTransport *transport, V2FrontendTarget target,
-                                       bool *locked, V2FrontendReport *report = nullptr,
+V2FrontendResult read_v2_frontend_lock(FrontendTransport* transport, V2FrontendTarget target,
+                                       bool* locked, V2FrontendReport* report = nullptr,
                                        unsigned budget_ms = 1000);
-V2FrontendResult read_v2_frontend_tsids(FrontendTransport *transport, V2FrontendTarget target,
-                                        std::array<std::uint16_t, 8> *tsids,
-                                        V2FrontendReport *report = nullptr,
+V2FrontendResult read_v2_frontend_tsids(FrontendTransport* transport, V2FrontendTarget target,
+                                        std::array<std::uint16_t, 8>* tsids,
+                                        V2FrontendReport* report = nullptr,
                                         unsigned budget_ms = 1000);
 // The official V2 adapter checks write status; it does not read back a
 // selected TSID here. This result therefore confirms the two acknowledged
 // selector writes, not reception of a particular transport stream.
-V2FrontendResult select_v2_frontend_tsid(FrontendTransport *transport, V2FrontendTarget target,
-                                         std::uint16_t tsid, V2FrontendReport *report = nullptr,
+V2FrontendResult select_v2_frontend_tsid(FrontendTransport* transport, V2FrontendTarget target,
+                                         std::uint16_t tsid, V2FrontendReport* report = nullptr,
                                          unsigned budget_ms = 1000);
 
 } // namespace asicen
+
+#endif // ASICEN_USERLAND_V2_FRONTEND_H

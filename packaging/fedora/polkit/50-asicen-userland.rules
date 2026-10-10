@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
+polkit.addRule(function(action, subject) {
+    if ((action.id === "org.debian.pcsc-lite.access_pcsc" ||
+         action.id === "org.debian.pcsc-lite.access_card") &&
+        subject.isInGroup("pcscd")) {
+        return polkit.Result.YES;
+    }
+});

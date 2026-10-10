@@ -1,0 +1,87 @@
+#!/bin/sh
+# Synthetic readelf used only by test-packaging.sh; it is not a release tool.
+case "${ASICEN_TEST_ARCH:-x86_64}" in
+aarch64)
+    machine='AArch64'
+    libc='libc.musl-aarch64.so.1'
+    ;;
+x86_64)
+    machine='Advanced Micro Devices X86-64'
+    libc='libc.musl-x86_64.so.1'
+    ;;
+*)
+    printf '%s\n' 'unsupported ASICEN_TEST_ARCH' >&2
+    exit 1
+    ;;
+esac
+if [ "${ASICEN_TEST_LIBC:-musl}" = glibc ]; then
+    libc='libc.so.6'
+fi
+case "${1:-}" in
+--version-info)
+    if [ "${ASICEN_TEST_GLIBC_VERSION:-none}" != none ]; then
+        printf '%s\n' "  Name: GLIBC_${ASICEN_TEST_GLIBC_VERSION}"
+    fi
+    ;;
+-SW)
+    case "${ASICEN_TEST_SECTIONS:-stripped}" in
+    stripped) ;;
+    debug) printf '%s\n' '  [ 1] .debug_info        PROGBITS'
+        ;;
+    zdebug) printf '%s\n' '  [ 1] .zdebug_info       PROGBITS'
+        ;;
+    symtab) printf '%s\n' '  [ 1] .symtab            SYMTAB'
+        ;;
+    build-id-asicend)
+        case "$*" in
+        *asicend*) printf '%s\n' '  [ 1] .note.gnu.build-id NOTE' ;;
+        esac
+        ;;
+    build-id-non-asicend)
+        case "$*" in
+        *asicend*) ;;
+        *) printf '%s\n' '  [ 1] .note.gnu.build-id NOTE' ;;
+        esac
+        ;;
+    dynsym-unwind) printf '%s\n' '  [ 1] .dynsym            DYNSYM' '  [ 2] .eh_frame           PROGBITS'
+        ;;
+    *) printf '%s\n' "unsupported ASICEN_TEST_SECTIONS: ${ASICEN_TEST_SECTIONS}" >&2; exit 1 ;;
+    esac
+    ;;
+-h)
+    printf '%s\n' 'ELF Header:' '  Type: DYN (Position-Independent Executable file)' "  Machine: $machine"
+    ;;
+-lW)
+    case "$*" in
+    *ifd.so*) ;;
+    *) if [ "${ASICEN_TEST_SHARED:-0}" = 1 ]; then :; fi ;;
+    esac
+    ;;
+    -d)
+        case "$*" in
+        *ifd.so*)
+        printf '%s\n' " 0x0000000000000001 (NEEDED) Shared library: [$libc]"
+        if [ "${ASICEN_TEST_LIBC:-musl}" = glibc ]; then
+            printf '%s\n' ' 0x0000000000000001 (NEEDED) Shared library: [libpthread.so.0]'
+            if [ "${ASICEN_TEST_ARCH:-x86_64}" = x86_64 ]; then
+                printf '%s\n' ' 0x0000000000000001 (NEEDED) Shared library: [ld-linux-x86-64.so.2]'
+            else
+                printf '%s\n' ' 0x0000000000000001 (NEEDED) Shared library: [ld-linux-aarch64.so.1]'
+            fi
+            if [ "${ASICEN_TEST_NEEDED:-allowed}" = bad-glibc ]; then
+                printf '%s\n' ' 0x0000000000000001 (NEEDED) Shared library: [libdl.so.2]'
+            fi
+        elif [ "${ASICEN_TEST_NEEDED:-allowed}" = bad-musl ]; then
+            printf '%s\n' ' 0x0000000000000001 (NEEDED) Shared library: [libpthread.so.0]'
+        fi
+        ;;
+    *)
+    case "${ASICEN_TEST_LINKAGE:-normal}:$*" in
+    bad-all:*)
+        printf '%s\n' ' 0x0000000000000001 (NEEDED) Shared library: [libusb-1.0.so.0]'
+        ;;
+    esac
+    ;;
+    esac
+    ;;
+esac

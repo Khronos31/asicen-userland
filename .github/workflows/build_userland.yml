@@ -1,0 +1,1043 @@
+# SPDX-License-Identifier: GPL-2.0-only
+name: portable userland foundation
+
+on:
+  pull_request:
+    paths:
+      - CMakeLists.txt
+      - LICENSE
+      - README.md
+      - THIRD_PARTY_NOTICES.md
+      - packaging/**
+      - tests/**
+      - userland/**
+      - third_party/**
+      - firmware/**
+      - distribution/**
+      - scripts/**
+      - VERSION
+      - .github/workflows/build_userland.yml
+  push:
+    paths:
+      - CMakeLists.txt
+      - LICENSE
+      - README.md
+      - THIRD_PARTY_NOTICES.md
+      - packaging/**
+      - tests/**
+      - userland/**
+      - third_party/**
+      - firmware/**
+      - distribution/**
+      - scripts/**
+      - VERSION
+      - .github/workflows/build_userland.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-glibc-tests:
+    name: Ubuntu glibc x86_64 unit and integration tests
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build and run the complete CTest suite
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y cmake ninja-build g++ pkg-config binutils libusb-1.0-0-dev libpcsclite-dev shellcheck
+          cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON
+          cmake --build build-userland
+          ctest --test-dir build-userland --output-on-failure
+      - name: Test packaging and workflow failure boundaries
+        run: scripts/test-packaging.sh
+      - name: Test libusb compatibility paths
+        run: scripts/test-libusb-compatibility.sh
+
+  linux-x86_64:
+    name: Linux x86_64 static and libc-qualified IFD
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build static executables in Alpine 3.22
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src alpine:3.22 sh -euxc '
+            apk add --no-cache git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
+            cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON;
+            cmake --build build-userland;
+            ctest --test-dir build-userland --output-on-failure;
+            scripts/build-linux-static.sh --output /src/build-static;
+            for program in asicend asicen-ts asicenctl; do /src/build-static/$program --help; done'
+      - name: Build glibc 2.31 IFD and package both variants
+        run: |
+          docker run --rm -e GITHUB_SHA="$GITHUB_SHA" -v "$GITHUB_WORKSPACE:/src" -w /src debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9 sh -euxc '
+            find /etc/apt/sources.list.d -type f -delete;
+            printf "%s\\n" \
+              "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260825T000000Z bullseye main" \
+              "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260825T000000Z bullseye-security main" \
+              > /etc/apt/sources.list;
+            apt_install_retry() {
+              attempt=1;
+              while [ "$attempt" -le 3 ]; do
+                find /var/lib/apt/lists -mindepth 1 -depth -delete;
+                if apt-get update && apt-get install -y --no-install-recommends "$@"; then return 0; fi
+                [ "$attempt" -lt 3 ] || return 1;
+                sleep "$attempt";
+                attempt=$((attempt + 1));
+              done
+            };
+            apt_install_retry git cmake ninja-build g++ pkg-config libpcsclite-dev binutils python3;
+            scripts/build-linux-ifd.sh --libc glibc --output /src/build-ifd-glibc;
+            python3 -c "import ctypes; getattr(ctypes.CDLL(\"/src/build-ifd-glibc/asicen-userland-ifd.so\"), \"IFDHCreateChannel\")";
+            scripts/package-artifact.sh --platform linux-glibc-x86_64 --version "$(tr -d "\n" < VERSION)" --static-build-dir build-static --ifd-library build-ifd-glibc/asicen-userland-ifd.so --reader-template packaging/pcsc/reader.conf.d/asicen-userland.conf.in --source-ref "$GITHUB_SHA" --output-dir release-candidate;
+            true'
+      - name: Build and test matching musl IFD
+        run: |
+          docker run --rm -e GITHUB_SHA="$GITHUB_SHA" -v "$GITHUB_WORKSPACE:/src" -w /src alpine:3.22 sh -euxc '
+            apk add --no-cache git cmake samurai g++ pkgconf pcsc-lite-dev python3 binutils tar bzip2 linux-headers;
+            scripts/build-linux-ifd.sh --libc musl --output /src/build-ifd-musl;
+            python3 -c "import ctypes; getattr(ctypes.CDLL(\"/src/build-ifd-musl/asicen-userland-ifd.so\"), \"IFDHCreateChannel\")";
+            scripts/package-artifact.sh --platform linux-musl-x86_64 --version "$(tr -d "\n" < VERSION)" --static-build-dir build-static --ifd-library build-ifd-musl/asicen-userland-ifd.so --reader-template packaging/pcsc/reader.conf.d/asicen-userland.conf.in --source-ref "$GITHUB_SHA" --output-dir release-candidate;
+            extracted=/tmp/packaged-musl-x86_64; mkdir -p "$extracted";
+            tar -xzf release-candidate/asicen-userland-$(tr -d "\n" < VERSION)-linux-musl-x86_64.tar.gz -C "$extracted";
+            for program in asicend asicen-ts asicenctl; do "$extracted/$program" --help; done;
+            find "$extracted" -depth -delete'
+      - name: Audit and static start checks on Ubuntu
+        run: |
+          version="$(tr -d '\n' < VERSION)"
+          for libc in glibc musl; do scripts/audit-artifact.sh --platform "linux-$libc-x86_64" --archive "release-candidate/asicen-userland-$version-linux-$libc-x86_64.tar.gz"; done
+          for program in asicend asicen-ts asicenctl; do build-static/$program --help; done
+          sudo chown -R "$(id -u):$(id -g)" build-userland build-static build-ifd-glibc build-ifd-musl release-candidate
+      - name: Upload Linux x86_64 candidate archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-linux-x86_64
+          path: release-candidate/*.tar.gz
+          if-no-files-found: error
+      - name: Clean mounted Linux build outputs
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" build-userland build-static build-ifd-glibc build-ifd-musl release-candidate 2>/dev/null || true
+          for path in build-userland build-static build-ifd-glibc build-ifd-musl release-candidate; do
+            if [ -e "$path" ]; then find "$path" -depth -delete; fi
+          done
+
+  linux-aarch64:
+    name: Linux aarch64 static and libc-qualified IFD
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build static and matching IFD variants in Alpine 3.22
+        run: |
+          docker run --rm -e GITHUB_SHA="$GITHUB_SHA" -v "$GITHUB_WORKSPACE:/src" -w /src alpine:3.22 sh -euxc '
+            apk add --no-cache git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
+            cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON;
+            cmake --build build-userland;
+            ctest --test-dir build-userland --output-on-failure;
+            scripts/build-linux-static.sh --output /src/build-static;
+            scripts/build-linux-ifd.sh --libc musl --output /src/build-ifd-musl;
+            python3 -c "import ctypes; getattr(ctypes.CDLL(\"/src/build-ifd-musl/asicen-userland-ifd.so\"), \"IFDHCreateChannel\")";
+            scripts/package-artifact.sh --platform linux-musl-aarch64 --version "$(tr -d "\n" < VERSION)" --static-build-dir build-static --ifd-library build-ifd-musl/asicen-userland-ifd.so --reader-template packaging/pcsc/reader.conf.d/asicen-userland.conf.in --source-ref "$GITHUB_SHA" --output-dir release-candidate;
+            extracted=/tmp/packaged-musl-aarch64; mkdir -p "$extracted";
+            tar -xzf release-candidate/asicen-userland-$(tr -d "\n" < VERSION)-linux-musl-aarch64.tar.gz -C "$extracted";
+            for program in asicend asicen-ts asicenctl; do "$extracted/$program" --help; done;
+            find "$extracted" -depth -delete'
+          # glibc IFD is built on a Debian 11 aarch64 runner to prove the 2.31 floor.
+          docker run --rm -e GITHUB_SHA="$GITHUB_SHA" -v "$GITHUB_WORKSPACE:/src" -w /src debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9 sh -euxc '
+            find /etc/apt/sources.list.d -type f -delete;
+            printf "%s\\n" \
+              "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260825T000000Z bullseye main" \
+              "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260825T000000Z bullseye-security main" \
+              > /etc/apt/sources.list;
+            apt_install_retry() {
+              attempt=1;
+              while [ "$attempt" -le 3 ]; do
+                find /var/lib/apt/lists -mindepth 1 -depth -delete;
+                if apt-get update && apt-get install -y --no-install-recommends "$@"; then return 0; fi
+                [ "$attempt" -lt 3 ] || return 1;
+                sleep "$attempt";
+                attempt=$((attempt + 1));
+              done
+            };
+            apt_install_retry git cmake ninja-build g++ pkg-config libpcsclite-dev python3 binutils;
+            scripts/build-linux-ifd.sh --libc glibc --output /src/build-ifd-glibc;
+            python3 -c "import ctypes; getattr(ctypes.CDLL(\"/src/build-ifd-glibc/asicen-userland-ifd.so\"), \"IFDHCreateChannel\")";
+            scripts/package-artifact.sh --platform linux-glibc-aarch64 --version "$(tr -d "\n" < VERSION)" --static-build-dir build-static --ifd-library build-ifd-glibc/asicen-userland-ifd.so --reader-template packaging/pcsc/reader.conf.d/asicen-userland.conf.in --source-ref "$GITHUB_SHA" --output-dir release-candidate'
+      - name: Audit candidate archives
+        run: |
+          version="$(tr -d '\n' < VERSION)"
+          for program in asicend asicen-ts asicenctl; do build-static/$program --help; done
+          for libc in glibc musl; do scripts/audit-artifact.sh --platform "linux-$libc-aarch64" --archive "release-candidate/asicen-userland-$version-linux-$libc-aarch64.tar.gz"; done
+          sudo chown -R "$(id -u):$(id -g)" build-userland build-static build-ifd-glibc build-ifd-musl release-candidate
+      - name: Upload Linux aarch64 candidate archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-linux-aarch64
+          path: release-candidate/*.tar.gz
+          if-no-files-found: error
+      - name: Clean mounted Linux build outputs
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" build-userland build-static build-ifd-glibc build-ifd-musl release-candidate 2>/dev/null || true
+          for path in build-userland build-static build-ifd-glibc build-ifd-musl release-candidate; do
+            if [ -e "$path" ]; then find "$path" -depth -delete; fi
+          done
+
+  static-start-x86_64:
+    name: Downloaded static x86_64 executable start checks
+    needs: linux-x86_64
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-linux-x86_64
+          path: ${{ runner.temp }}/downloaded-x86_64
+      - name: Start exact downloaded static executables
+        run: |
+          set -eu
+          for archive in "$RUNNER_TEMP"/downloaded-x86_64/*.tar.gz; do
+            extract="$RUNNER_TEMP/extract-$(basename "$archive" .tar.gz)"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            for program in asicend asicen-ts asicenctl; do "$extract/$program" --help; done
+          done
+          find "$RUNNER_TEMP/downloaded-x86_64" "$RUNNER_TEMP"/extract-* -depth -delete 2>/dev/null || true
+
+  static-start-aarch64:
+    name: Downloaded static aarch64 executable start checks
+    needs: linux-aarch64
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-linux-aarch64
+          path: ${{ runner.temp }}/downloaded-aarch64
+      - name: Start exact downloaded static executables
+        run: |
+          set -eu
+          for archive in "$RUNNER_TEMP"/downloaded-aarch64/*.tar.gz; do
+            extract="$RUNNER_TEMP/extract-$(basename "$archive" .tar.gz)"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            for program in asicend asicen-ts asicenctl; do "$extract/$program" --help; done
+          done
+          find "$RUNNER_TEMP/downloaded-aarch64" "$RUNNER_TEMP"/extract-* -depth -delete 2>/dev/null || true
+
+  source-relink-x86_64:
+    name: Corresponding-source static relink proof x86_64
+    needs: source-archive
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-source
+          path: ${{ runner.temp }}/source-archive
+      - name: Relink modified libusb source in Alpine
+        run: |
+          set -eu
+          source_root="$RUNNER_TEMP/source-root"
+          mkdir -p "$source_root"
+          tar -xzf "$RUNNER_TEMP"/source-archive/*.tar.gz -C "$source_root"
+          docker run --rm -v "$source_root:/src" -w /src/repository alpine:3.22 sh -euxc '
+            apk add --no-cache git cmake samurai gcc g++ make pkgconf python3 binutils curl tar bzip2 linux-headers;
+            test -f /src/third_party/libusb-1.0.30.tar.bz2;
+            scripts/test-static-relink.sh --libusb-source-archive /src/third_party/libusb-1.0.30.tar.bz2'
+          find "$source_root" -depth -delete
+
+  source-relink-aarch64:
+    name: Corresponding-source static relink proof aarch64
+    needs: source-archive
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-source
+          path: ${{ runner.temp }}/source-archive
+      - name: Relink modified libusb source in native Alpine
+        run: |
+          set -eu
+          source_root="$RUNNER_TEMP/source-root"
+          mkdir -p "$source_root"
+          tar -xzf "$RUNNER_TEMP"/source-archive/*.tar.gz -C "$source_root"
+          docker run --rm -v "$source_root:/src" -w /src/repository alpine:3.22 sh -euxc '
+            apk add --no-cache git cmake samurai gcc g++ make pkgconf python3 binutils curl tar bzip2 linux-headers;
+            test -f /src/third_party/libusb-1.0.30.tar.bz2;
+            scripts/test-static-relink.sh --libusb-source-archive /src/third_party/libusb-1.0.30.tar.bz2'
+          find "$source_root" -depth -delete
+
+  source-relink-macos:
+    name: Corresponding-source static relink proof macOS arm64
+    needs: source-archive
+    timeout-minutes: 60
+    runs-on: macos-14
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-source
+          path: ${{ runner.temp }}/source-archive
+      - name: Relink modified libusb source on macOS
+        run: |
+          set -eu
+          brew install ninja
+          source_root="$RUNNER_TEMP/source-root"
+          mkdir -p "$source_root"
+          tar -xzf "$RUNNER_TEMP"/source-archive/*.tar.gz -C "$source_root"
+          test -f "$source_root/third_party/libusb-1.0.30.tar.bz2"
+          cd "$source_root/repository"
+          scripts/test-static-relink.sh --libusb-source-archive "$source_root/third_party/libusb-1.0.30.tar.bz2"
+          cd "$RUNNER_TEMP"
+          find "$source_root" -depth -delete
+
+  macos:
+    name: macOS
+    timeout-minutes: 60
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install build tools
+        run: |
+          brew install ninja pcsc-lite pkgconf
+          command -v otool
+          command -v nm
+          command -v strip
+      - name: Report macOS toolchain
+        run: |
+          echo "runner ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
+          sw_vers
+          xcode-select -p
+          xcodebuild -version
+          xcrun --show-sdk-version
+          clang --version
+          ld -v
+          cmake --version
+          ninja --version
+          brew list --versions ninja pcsc-lite pkgconf
+          libusb="$RUNNER_TEMP/libusb-1.0.30.tar.bz2"
+          curl -fsSL --retry 2 -o "$libusb" \
+            https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
+          echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$libusb" | shasum -a 256 -c -
+          shasum -a 256 "$libusb"
+      - name: Build with static libusb 1.0.30 and test
+        run: |
+          pcsc_prefix="$(brew --prefix pcsc-lite)"
+          pcsc_include="$pcsc_prefix/include/PCSC"
+          PKG_CONFIG_PATH="$pcsc_prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export PKG_CONFIG_PATH
+          pkg-config --modversion libpcsclite
+          scripts/build-macos-static.sh --build-dir build-userland --pcsc-include-dir "$pcsc_include" --tests \
+            --libusb-source-archive "$RUNNER_TEMP/libusb-1.0.30.tar.bz2"
+          test "$(sed -n 's/^ASICEN_PCSC_IFD_INCLUDE_DIR:PATH=//p' build-userland/CMakeCache.txt)" = "$pcsc_include"
+          ctest --test-dir build-userland -R '^(px4-pcsc-ifd-tests|asicen-ifd-prefix-tests-macos|asicen_ifd_symbols)$' --no-tests=error --output-on-failure
+          ctest --test-dir build-userland --output-on-failure
+          ctest --test-dir build-userland -R '^asicen-libusb-capture-lifecycle-tests$' --repeat until-fail:20 --output-on-failure
+          version="$(tr -d '\n' < VERSION)"
+          mkdir -p "$RUNNER_TEMP/release-candidate/macos"
+          scripts/package-artifact.sh --platform darwin-arm64 --version "$version" \
+            --build-dir build-userland --ifd-bundle build-userland/asicen-userland-ifd.bundle \
+            --reader-template packaging/pcsc/reader.conf.d/asicen-userland.conf.in \
+            --source-ref "$GITHUB_SHA" \
+            --output-dir "$RUNNER_TEMP/release-candidate/macos"
+          extract="$RUNNER_TEMP/packaged-macos"
+          mkdir -p "$extract"
+          tar -xzf "$RUNNER_TEMP/release-candidate/macos/asicen-userland-$version-darwin-arm64.tar.gz" -C "$extract"
+          for program in asicend asicen-ts asicenctl; do
+            otool -L "$extract/$program"
+            if otool -L "$extract/$program" | grep -F libusb; then exit 1; fi
+            "$extract/$program" --help
+          done
+          python3 scripts/macos-ifd-bundle-smoke.py \
+            "$extract/ifd/asicen-userland-ifd.bundle/Contents/MacOS/libasicen-userland-ifd.dylib" \
+            build-userland/asicend-mock
+          find "$extract" -depth -delete
+      - name: Upload macOS candidate archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-macos
+          path: ${{ runner.temp }}/release-candidate/macos/*.tar.gz
+          if-no-files-found: error
+
+  android-api-24:
+    needs: source-archive
+    name: Android API 24 build, package, and audit
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aarch64
+            abi: arm64-v8a
+            platform: android-aarch64
+          - name: armv7a
+            abi: armeabi-v7a
+            platform: android-armv7a
+          - name: x86_64
+            abi: x86_64
+            platform: android-x86_64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-source
+          path: ${{ runner.temp }}/source-archive
+      - uses: nttld/setup-ndk@afb4c9964b521afb97c864b7d40b11e6911bd410 # v1.5.0
+        id: setup-ndk
+        with:
+          ndk-version: r27d
+          add-to-path: false
+      - name: Install Android build tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y binutils cmake ninja-build shellcheck
+      - name: Check Termux launcher
+        run: |
+          shellcheck packaging/termux/asicen-termux tests/test-asicen-termux.sh
+          tests/test-asicen-termux.sh
+      - name: Build Android command-line artifacts
+        env:
+          ABI: ${{ matrix.abi }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          artifact_root="$RUNNER_TEMP/release-candidate/$ABI"
+          mkdir -p "$artifact_root"
+          scripts/build-android.sh --abi "$ABI" \
+            --output "$artifact_root/output" --evidence "$artifact_root/evidence"
+          version="$(tr -d '\n' < VERSION)"
+          scripts/package-artifact.sh --platform "${{ matrix.platform }}" --version "$version" \
+            --build-dir "$artifact_root/output" --binary-suffix "$ABI" \
+            --libusb-source-archive "$artifact_root/evidence/libusb/libusb-1.0.30.tar.bz2" \
+            --ndk-root "$ANDROID_NDK_HOME" \
+            --link-map-dir "$artifact_root/evidence/maps" \
+            --source-ref "$GITHUB_SHA" \
+            --output-dir "$artifact_root/package"
+          if [ "$ABI" = x86_64 ]; then
+            source_root="$RUNNER_TEMP/android-relink-source"
+            mkdir -p "$source_root"
+            tar -xzf "$RUNNER_TEMP"/source-archive/*.tar.gz -C "$source_root"
+            "$source_root/repository/scripts/test-android-libusb-relink.sh" --abi x86_64 \
+              --libusb-archive "$source_root/third_party/libusb-1.0.30.tar.bz2"
+            find "$source_root" -depth -delete
+          fi
+      - name: Upload Android candidate archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-${{ matrix.name }}
+          path: ${{ runner.temp }}/release-candidate/${{ matrix.abi }}/package/*.tar.gz
+          if-no-files-found: error
+
+  source-archive:
+    name: Corresponding source archive
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Build and audit source archive
+        run: |
+          libusb="$RUNNER_TEMP/libusb-1.0.30.tar.bz2"
+          curl -fsSL --retry 2 -o "$libusb" \
+            https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
+          echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$libusb" | sha256sum -c -
+          version="$(tr -d '\n' < VERSION)"
+          mkdir -p "$RUNNER_TEMP/release-candidate/source"
+          scripts/package-source.sh --version "$version" --source-root "$GITHUB_WORKSPACE" \
+            --source-ref "$GITHUB_SHA" --libusb-source-archive "$libusb" \
+            --output-dir "$RUNNER_TEMP/release-candidate/source"
+      - name: Upload source candidate archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-source
+          path: ${{ runner.temp }}/release-candidate/source/*.tar.gz
+          if-no-files-found: error
+
+  release-candidate:
+    name: Assemble release-candidate artifact
+    needs: [ubuntu-glibc-tests, linux-x86_64, linux-aarch64, static-start-x86_64, static-start-aarch64, source-relink-x86_64, source-relink-aarch64, source-relink-macos, macos, android-api-24, source-archive, windows-x86_64, windows-native-tests]
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: rc-*
+          merge-multiple: true
+          path: release-candidate
+      # Windows is built, packaged, and tested in CI, but is not distributed in
+      # 0.1.0. Restore the commented Windows entries here when WinSCard lands
+      # for the planned 0.2.x Windows release, and change the archive count to 10.
+      # - name: Download the tested Windows candidate archive
+      #   uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      #   with:
+      #     name: win-candidate
+      #     path: release-candidate
+      - name: Install native ELF audit tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y binutils
+      - name: Verify and checksum candidate archives
+        run: |
+          set -eu
+          version="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          data = Path('VERSION').read_bytes()
+          if not data.endswith(b'\n') or data.count(b'\n') != 1:
+              raise SystemExit('VERSION must contain exactly one newline')
+          version = data[:-1].decode('ascii')
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+              raise SystemExit('VERSION must contain strict N.N.N')
+          print(version)
+          PY
+          )"
+          python3 - "$version" <<'PY'
+          from pathlib import Path
+          import sys
+          import json
+          import os
+          import tarfile
+          import zipfile
+
+          version = sys.argv[1]
+          expected = {
+              f'asicen-userland-{version}-linux-glibc-x86_64.tar.gz',
+              f'asicen-userland-{version}-linux-musl-x86_64.tar.gz',
+              f'asicen-userland-{version}-linux-glibc-aarch64.tar.gz',
+              f'asicen-userland-{version}-linux-musl-aarch64.tar.gz',
+              f'asicen-userland-{version}-darwin-arm64.tar.gz',
+              f'asicen-userland-{version}-android-aarch64.tar.gz',
+              f'asicen-userland-{version}-android-armv7a.tar.gz',
+              f'asicen-userland-{version}-android-x86_64.tar.gz',
+              # f'asicen-userland-{version}-windows-x86_64.zip',
+              f'asicen-userland-{version}-source.tar.gz',
+          }
+          actual = {
+              path.name for path in Path('release-candidate').iterdir()
+              if path.is_file() and (path.name.endswith('.tar.gz') or path.name.endswith('.zip'))
+          }
+          if len(actual) != 9 or actual != expected:
+              raise SystemExit(f'exact archive set required: expected={sorted(expected)}, actual={sorted(actual)}')
+          for name in sorted(actual):
+              archive = Path('release-candidate') / name
+              if name.endswith('.zip'):
+                  with zipfile.ZipFile(archive) as stream:
+                      manifest = json.loads(stream.read('manifest.json'))
+              else:
+                  with tarfile.open(archive, 'r:gz') as stream:
+                      member = 'source-manifest.json' if name.endswith('-source.tar.gz') else 'manifest.json'
+                      manifest = json.load(stream.extractfile(member))
+              source_ref = manifest.get('repository_commit') if name.endswith('-source.tar.gz') else manifest.get('source_ref')
+              if source_ref != os.environ['GITHUB_SHA']:
+                  raise SystemExit(f'{name}: candidate source commit mismatch: {source_ref}')
+          PY
+          cd release-candidate
+          linux_glibc_archive="asicen-userland-$version-linux-glibc-x86_64.tar.gz"
+          linux_musl_archive="asicen-userland-$version-linux-musl-x86_64.tar.gz"
+          linux_glibc_aarch64_archive="asicen-userland-$version-linux-glibc-aarch64.tar.gz"
+          linux_musl_aarch64_archive="asicen-userland-$version-linux-musl-aarch64.tar.gz"
+          macos_archive="asicen-userland-$version-darwin-arm64.tar.gz"
+          android_aarch64_archive="asicen-userland-$version-android-aarch64.tar.gz"
+          android_armv7a_archive="asicen-userland-$version-android-armv7a.tar.gz"
+          android_x86_64_archive="asicen-userland-$version-android-x86_64.tar.gz"
+          # windows_archive="asicen-userland-$version-windows-x86_64.zip"
+          source_archive="asicen-userland-$version-source.tar.gz"
+          ../scripts/audit-artifact.sh --platform linux-glibc-x86_64 --archive "$linux_glibc_archive"
+          ../scripts/audit-artifact.sh --platform linux-musl-x86_64 --archive "$linux_musl_archive"
+          ../scripts/audit-artifact.sh --platform linux-glibc-aarch64 --archive "$linux_glibc_aarch64_archive"
+          ../scripts/audit-artifact.sh --platform linux-musl-aarch64 --archive "$linux_musl_aarch64_archive"
+          ../scripts/audit-artifact.sh --platform darwin-arm64 --archive "$macos_archive"
+          ../scripts/audit-artifact.sh --platform android-aarch64 --archive "$android_aarch64_archive"
+          ../scripts/audit-artifact.sh --platform android-armv7a --archive "$android_armv7a_archive"
+          ../scripts/audit-artifact.sh --platform android-x86_64 --archive "$android_x86_64_archive"
+          # ../scripts/audit-artifact.sh --platform windows-x86_64 --archive "$windows_archive"
+          ../scripts/audit-artifact.sh --source-archive --archive "$source_archive"
+          # Restore "$windows_archive" in the checksum input list for the 0.2.x Windows release.
+          sha256sum "$linux_glibc_archive" "$linux_musl_archive" "$linux_glibc_aarch64_archive" \
+            "$linux_musl_aarch64_archive" "$macos_archive" "$android_aarch64_archive" \
+            "$android_armv7a_archive" "$android_x86_64_archive" "$source_archive" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Upload single release-candidate artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate
+          path: release-candidate
+          if-no-files-found: error
+
+  release-candidate-linux-ubuntu-x86_64:
+    name: Release candidate Linux x86_64 Ubuntu artifact smoke
+    needs: release-candidate
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+      - name: Run exact candidate static CLIs and glibc IFD on Ubuntu
+        run: |
+          set -eu
+          version="$(tr -d '\n' < VERSION)"
+          for libc in glibc musl; do
+            archive="$RUNNER_TEMP/release-candidate/asicen-userland-$version-linux-$libc-x86_64.tar.gz"
+            extract="$RUNNER_TEMP/rc-$libc-x86_64"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            for program in asicend asicen-ts asicenctl; do "$extract/$program" --help; done
+          done
+          python3 -c "import ctypes; getattr(ctypes.CDLL('$RUNNER_TEMP/rc-glibc-x86_64/ifd/asicen-userland-ifd.so'), 'IFDHCreateChannel')"
+          find "$RUNNER_TEMP/release-candidate" "$RUNNER_TEMP"/rc-*-x86_64 -depth -delete
+
+  release-candidate-linux-alpine-x86_64:
+    name: Release candidate Linux x86_64 Alpine artifact smoke
+    needs: release-candidate
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+      - name: Run exact candidate static CLIs and musl IFD in Alpine
+        run: |
+          version="$(tr -d '\n' < VERSION)"
+          docker run --rm -e VERSION="$version" -v "$RUNNER_TEMP/release-candidate:/artifacts:ro" alpine:3.22 sh -euxc '
+            apk add --no-cache python3 tar;
+            version="$VERSION";
+            for libc in glibc musl; do
+              archive="/artifacts/asicen-userland-$version-linux-$libc-x86_64.tar.gz";
+              extract="/tmp/rc-$libc-x86_64";
+              mkdir -p "$extract";
+              tar -xzf "$archive" -C "$extract";
+              for program in asicend asicen-ts asicenctl; do "$extract/$program" --help; done;
+            done;
+            python3 -c "import ctypes; getattr(ctypes.CDLL(\"/tmp/rc-musl-x86_64/ifd/asicen-userland-ifd.so\"), \"IFDHCreateChannel\")"'
+
+  release-candidate-linux-ubuntu-aarch64:
+    name: Release candidate Linux aarch64 Ubuntu artifact smoke
+    needs: release-candidate
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+      - name: Run exact candidate static CLIs and glibc IFD on Ubuntu arm64
+        run: |
+          set -eu
+          version="$(tr -d '\n' < VERSION)"
+          for libc in glibc musl; do
+            archive="$RUNNER_TEMP/release-candidate/asicen-userland-$version-linux-$libc-aarch64.tar.gz"
+            extract="$RUNNER_TEMP/rc-$libc-aarch64"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            for program in asicend asicen-ts asicenctl; do "$extract/$program" --help; done
+          done
+          python3 -c "import ctypes; getattr(ctypes.CDLL('$RUNNER_TEMP/rc-glibc-aarch64/ifd/asicen-userland-ifd.so'), 'IFDHCreateChannel')"
+          find "$RUNNER_TEMP/release-candidate" "$RUNNER_TEMP"/rc-*-aarch64 -depth -delete
+
+  release-candidate-linux-alpine-aarch64:
+    name: Release candidate Linux aarch64 Alpine artifact smoke
+    needs: release-candidate
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+      - name: Run exact candidate static CLIs and musl IFD in Alpine arm64
+        run: |
+          version="$(tr -d '\n' < VERSION)"
+          docker run --rm -e VERSION="$version" -v "$RUNNER_TEMP/release-candidate:/artifacts:ro" alpine:3.22 sh -euxc '
+            apk add --no-cache python3 tar;
+            version="$VERSION";
+            for libc in glibc musl; do
+              archive="/artifacts/asicen-userland-$version-linux-$libc-aarch64.tar.gz";
+              extract="/tmp/rc-$libc-aarch64";
+              mkdir -p "$extract";
+              tar -xzf "$archive" -C "$extract";
+              for program in asicend asicen-ts asicenctl; do "$extract/$program" --help; done;
+            done;
+            python3 -c "import ctypes; getattr(ctypes.CDLL(\"/tmp/rc-musl-aarch64/ifd/asicen-userland-ifd.so\"), \"IFDHCreateChannel\")"'
+
+  windows-x86_64:
+    needs: source-archive
+    # Windows remains implementation/test-only until the WinSCard release.
+    name: Windows x64 development cross-build, PE audit, and package regression
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-source
+          path: ${{ runner.temp }}/source-archive
+      - name: Install host cross-build and audit tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y cmake ninja-build make shellcheck python3 binutils
+      - name: Download and verify the pinned libusb source archive
+        env:
+          LIBUSB_ARCHIVE: ${{ runner.temp }}/libusb-1.0.30.tar.bz2
+        run: |
+          mkdir -p "$RUNNER_TEMP/asicen-windows-toolchain"
+          curl -fsSL --retry 2 -o "$LIBUSB_ARCHIVE" \
+            https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
+          echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$LIBUSB_ARCHIVE" | sha256sum -c -
+          cp "$LIBUSB_ARCHIVE" "$RUNNER_TEMP/asicen-windows-toolchain/libusb-1.0.30.tar.bz2"
+      - name: Check Windows scripts and offline packaging/audit tests
+        env:
+          LIBUSB_ARCHIVE: ${{ runner.temp }}/libusb-1.0.30.tar.bz2
+        run: ASICEN_LIBUSB_1_0_30_ARCHIVE="$LIBUSB_ARCHIVE" scripts/test-windows-packaging.sh
+      - name: Cross-build, audit, and package two independent fresh builds
+        env:
+          LIBUSB_ARCHIVE: ${{ runner.temp }}/libusb-1.0.30.tar.bz2
+        run: |
+          set -eu
+          version="$(tr -d '\n' < VERSION)"
+          cache="$RUNNER_TEMP/asicen-windows-toolchain"
+          mkdir -p "$RUNNER_TEMP/win/bin-1" "$RUNNER_TEMP/win/bin-2" "$RUNNER_TEMP/win/tests" \
+            "$RUNNER_TEMP/win/zip-1" "$RUNNER_TEMP/win/zip-2"
+          scripts/build-windows.sh --output "$RUNNER_TEMP/win/bin-1" \
+            --test-output "$RUNNER_TEMP/win/tests" --cache "$cache"
+          scripts/build-windows.sh --output "$RUNNER_TEMP/win/bin-2" --cache "$cache"
+          scripts/audit-artifact.sh --platform windows-x86_64 --build-dir "$RUNNER_TEMP/win/bin-1"
+          for run in 1 2; do
+            scripts/package-artifact.sh --platform windows-x86_64 --version "$version" \
+              --build-dir "$RUNNER_TEMP/win/bin-$run" \
+              --libusb-source-archive "$LIBUSB_ARCHIVE" --source-ref "$GITHUB_SHA" \
+              --output-dir "$RUNNER_TEMP/win/release-$run"
+            cp "$RUNNER_TEMP/win/release-$run/asicen-userland-$version-windows-x86_64.zip" \
+              "$RUNNER_TEMP/win/zip-$run/"
+          done
+          first=$(sha256sum "$RUNNER_TEMP/win/zip-1/asicen-userland-$version-windows-x86_64.zip" | awk '{print $1}')
+          second=$(sha256sum "$RUNNER_TEMP/win/zip-2/asicen-userland-$version-windows-x86_64.zip" | awk '{print $1}')
+          [ "$first" = "$second" ] || { printf '%s\n' "Windows zip is not reproducible: $first != $second" >&2; exit 1; }
+          printf 'windows zip sha256: %s\n' "$first"
+          scripts/audit-artifact.sh --platform windows-x86_64 \
+            --archive "$RUNNER_TEMP/win/zip-1/asicen-userland-$version-windows-x86_64.zip"
+      - name: Corresponding-source Windows static relink proof
+        env:
+          LIBUSB_ARCHIVE: ${{ runner.temp }}/libusb-1.0.30.tar.bz2
+        run: |
+          source_root="$RUNNER_TEMP/windows-relink-source"
+          mkdir -p "$source_root"
+          tar -xzf "$RUNNER_TEMP"/source-archive/*.tar.gz -C "$source_root"
+          "$source_root/repository/scripts/test-windows-static-relink.sh" \
+            --libusb-source-archive "$source_root/third_party/libusb-1.0.30.tar.bz2" \
+            --baseline-asicend "$RUNNER_TEMP/win/bin-1/asicend.exe" \
+            --cache "$RUNNER_TEMP/asicen-windows-toolchain"
+          find "$source_root" -depth -delete
+      - name: Upload Windows CI-only candidate archive (not release distribution)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: win-candidate
+          path: ${{ runner.temp }}/win/zip-1/*.zip
+          if-no-files-found: error
+      - name: Upload Windows offline test executables
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: win-candidate-tests
+          path: ${{ runner.temp }}/win/tests
+          if-no-files-found: error
+
+  windows-native-tests:
+    name: Windows Server 2022 offline implementation tests
+    needs: windows-x86_64
+    timeout-minutes: 60
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: win-candidate
+          path: ${{ runner.temp }}/win-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: win-candidate-tests
+          path: ${{ runner.temp }}/win-candidate-tests
+      - name: Diagnose the Windows native test environment (read-only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Show-Acl([string]$path) {
+            try {
+              if (-not $path -or -not (Test-Path -LiteralPath $path)) {
+                Write-Host "acl target=$path exists=False"
+                return
+              }
+              $item = Get-Item -LiteralPath $path -Force
+              $acl = Get-Acl -LiteralPath $path
+              Write-Host "acl target=$path attributes=$($item.Attributes) owner=$($acl.Owner) protected=$($acl.AreAccessRulesProtected)"
+              Write-Host "  sddl=$($acl.Sddl)"
+              foreach ($ace in $acl.Access) {
+                Write-Host "  ace identity=$($ace.IdentityReference) rights=$($ace.FileSystemRights) type=$($ace.AccessControlType) inherited=$($ace.IsInherited)"
+              }
+            } catch {
+              Write-Host "acl error target=$path error=$($_.Exception.Message)"
+            }
+          }
+          Write-Host '== OS / build =='
+          try {
+            Write-Host "PSVersion=$($PSVersionTable.PSVersion) PSEdition=$($PSVersionTable.PSEdition)"
+            Write-Host "OSVersion=$([System.Environment]::OSVersion.VersionString)"
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem
+            Write-Host "Caption=$($os.Caption) Version=$($os.Version) BuildNumber=$($os.BuildNumber) ProductType=$($os.ProductType)"
+            $current = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+            Write-Host "InstallationType=$($current.InstallationType) DisplayVersion=$($current.DisplayVersion) CurrentBuild=$($current.CurrentBuild)"
+          } catch {
+            Write-Host "os error=$($_.Exception.Message)"
+          }
+          Write-Host '== identity =='
+          try {
+            $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+            Write-Host "User=$($identity.Name) SID=$($identity.User.Value) OwnerSID=$($identity.Owner.Value) IsSystem=$($identity.IsSystem)"
+          } catch {
+            Write-Host "identity error=$($_.Exception.Message)"
+          }
+          Write-Host '== environment paths and ACLs =='
+          foreach ($name in @('USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'RUNNER_TEMP')) {
+            $value = [System.Environment]::GetEnvironmentVariable($name)
+            Write-Host "$name=$value"
+            Show-Acl $value
+          }
+          Write-Host '== parent owner / ACL (SDDL) =='
+          foreach ($name in @('USERPROFILE', 'LOCALAPPDATA', 'TEMP')) {
+            $value = [System.Environment]::GetEnvironmentVariable($name)
+            if ($value) {
+              $parent = Split-Path -Parent $value
+              if ($parent) { Show-Acl $parent }
+            }
+          }
+          Write-Host '== raw System.Net.Sockets AF_UNIX probe (owned protected short temp dir, bounded, cleaned up) =='
+          $probeParent = [System.Environment]::GetEnvironmentVariable('TEMP')
+          if (-not $probeParent) { $probeParent = [System.IO.Path]::GetTempPath() }
+          Write-Host "probeParent=$probeParent"
+          $probeDir = $null
+          $probeSocket = $null
+          $listener = $null
+          $client = $null
+          $accepted = $null
+          try {
+            for ($attempt = 0; $attempt -lt 8; $attempt++) {
+              $candidate = Join-Path $probeParent ('asicenu-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+              if (-not (Test-Path -LiteralPath $candidate)) { $probeDir = $candidate; break }
+            }
+            if (-not $probeDir) { throw 'could not allocate a fresh probe directory' }
+            if (Test-Path -LiteralPath $probeDir) { throw "probe target already exists: $probeDir" }
+            $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $security = New-Object System.Security.AccessControl.DirectorySecurity
+            $security.SetOwner($currentUser)
+            $security.SetAccessRuleProtection($true, $false)
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+              $currentUser,
+              [System.Security.AccessControl.FileSystemRights]::FullControl,
+              ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+               [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
+              [System.Security.AccessControl.PropagationFlags]::None,
+              [System.Security.AccessControl.AccessControlType]::Allow)
+            $security.AddAccessRule($rule)
+            New-Item -ItemType Directory -Path $probeDir | Out-Null
+            Set-Acl -LiteralPath $probeDir -AclObject $security
+            $probeSocket = Join-Path $probeDir 'p.sock'
+            $probeDirFull = (Get-Item -LiteralPath $probeDir).FullName
+            $probeSocketFull = Join-Path $probeDirFull 'p.sock'
+            Write-Host "probeDir=$probeDirFull pathLength=$($probeDirFull.Length) socketPathLength=$($probeSocketFull.Length)"
+            Show-Acl $probeDirFull
+            $listener = [System.Net.Sockets.Socket]::new(
+              [System.Net.Sockets.AddressFamily]::Unix,
+              [System.Net.Sockets.SocketType]::Stream,
+              [System.Net.Sockets.ProtocolType]::Unspecified)
+            $listener.Bind([System.Net.Sockets.UnixDomainSocketEndPoint]::new($probeSocket))
+            $listener.Listen(1)
+            $client = [System.Net.Sockets.Socket]::new(
+              [System.Net.Sockets.AddressFamily]::Unix,
+              [System.Net.Sockets.SocketType]::Stream,
+              [System.Net.Sockets.ProtocolType]::Unspecified)
+            $connect = $client.BeginConnect([System.Net.Sockets.UnixDomainSocketEndPoint]::new($probeSocket), $null, $null)
+            if (-not $connect.AsyncWaitHandle.WaitOne(5000)) { throw 'AF_UNIX connect did not complete within 5000ms' }
+            $client.EndConnect($connect)
+            $accept = $listener.BeginAccept($null, $null)
+            if (-not $accept.AsyncWaitHandle.WaitOne(5000)) { throw 'AF_UNIX accept did not complete within 5000ms' }
+            $accepted = $listener.EndAccept($accept)
+            Write-Host 'AF_UNIX probe=OK'
+          } catch {
+            Write-Host "AF_UNIX probe=FAIL type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message) hresult=0x$('{0:X8}' -f $_.Exception.HResult)"
+          } finally {
+            foreach ($socket in @($accepted, $client, $listener)) {
+              if ($null -ne $socket) { try { $socket.Dispose() } catch { } }
+            }
+            try {
+              if ($probeSocket -and (Test-Path -LiteralPath $probeSocket)) { Remove-Item -LiteralPath $probeSocket -Force }
+              if ($probeDir -and (Test-Path -LiteralPath $probeDir)) { Remove-Item -LiteralPath $probeDir -Force }
+            } catch {
+              Write-Host "probe cleanup error=$($_.Exception.Message)"
+            }
+          }
+      # The Server 2022 runner's default LOCALAPPDATA is owned by
+      # BUILTIN\Administrators (measured: owner=BUILTIN Administrators,
+      # protected=False, inherited SYSTEM/Administrators/Users ACEs). The product's
+      # verify_runtime_parent requires the exact current-user owner, so worker startup
+      # fails there. This step points the offline suites only at a
+      # fresh test-only directory owned by the current user with a protected
+      # current-user-only FullControl DACL, satisfying the same policy without
+      # weakening it or changing the runner image.
+      - name: Prepare isolated owned LOCALAPPDATA for the offline suites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runnerTemp = [System.Environment]::GetEnvironmentVariable('RUNNER_TEMP')
+          if (-not $runnerTemp) { throw 'RUNNER_TEMP is not set' }
+          $fixture = $null
+          for ($attempt = 0; $attempt -lt 8; $attempt++) {
+            $candidate = Join-Path $runnerTemp ('asicenrt-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            if (-not (Test-Path -LiteralPath $candidate)) { $fixture = $candidate; break }
+          }
+          if (-not $fixture) { throw 'could not allocate a fresh CI runtime fixture' }
+          if (Test-Path -LiteralPath $fixture) { throw "CI runtime fixture already exists: $fixture" }
+          $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+          $security = New-Object System.Security.AccessControl.DirectorySecurity
+          $security.SetOwner($currentUser)
+          $security.SetAccessRuleProtection($true, $false)
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $currentUser,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+             [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow)
+          $security.AddAccessRule($rule)
+          $created = $false
+          try {
+            New-Item -ItemType Directory -Path $fixture | Out-Null
+            $created = $true
+            Set-Acl -LiteralPath $fixture -AclObject $security
+            $item = Get-Item -LiteralPath $fixture -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "CI runtime fixture is a reparse point: $fixture"
+            }
+            $acl = Get-Acl -LiteralPath $fixture
+            if (-not $acl.AreAccessRulesProtected) {
+              throw "CI runtime fixture DACL is not protected: $fixture"
+            }
+            $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+            if (-not $ownerSid -or $ownerSid.Value -ne $currentUser.Value) {
+              throw "CI runtime fixture owner is not the current user: $fixture"
+            }
+            foreach ($ace in $acl.Access) {
+              $aceSid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+              if ($ace.IsInherited -or
+                  $ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+                  $aceSid.Value -ne $currentUser.Value) {
+                throw "CI runtime fixture has an unexpected ACE: $($ace.IdentityReference)"
+              }
+            }
+            $fixtureFull = $item.FullName
+            $worstWorkerSocket = $fixtureFull.Length + '\asicen-wake-'.Length + 32 + '\w.sock'.Length
+            Write-Host "ciRuntimeFixture=$fixtureFull length=$($fixtureFull.Length) worstWorkerSocketPathBytes=$worstWorkerSocket"
+            if ($worstWorkerSocket -ge 108) {
+              throw "CI runtime fixture path is too long for the worker socket: $worstWorkerSocket UTF-8 bytes"
+            }
+            Add-Content -Path $env:GITHUB_ENV -Value "LOCALAPPDATA=$fixtureFull"
+            Add-Content -Path $env:GITHUB_ENV -Value "ASICEN_CI_RUNTIME_FIXTURE=$fixtureFull"
+            Write-Host "LOCALAPPDATA for the offline suites is now $fixtureFull"
+          } catch {
+            if ($created -and (Test-Path -LiteralPath $fixture)) {
+              try {
+                if (-not (Get-ChildItem -Force -LiteralPath $fixture)) {
+                  Remove-Item -LiteralPath $fixture -Force
+                }
+              } catch {
+                Write-Host "partial fixture cleanup error=$($_.Exception.Message)"
+              }
+            }
+            throw
+          }
+      - name: Run the cross-built Windows offline test suites
+        shell: pwsh
+        run: |
+          $tests = Join-Path $env:RUNNER_TEMP 'win-candidate-tests'
+          $suites = Get-ChildItem $tests -Filter '*tests.exe' | Sort-Object Name
+          if (-not $suites) { throw 'no Windows offline test executables were downloaded' }
+          $failed = @()
+          foreach ($suite in $suites) {
+            Write-Host "== $($suite.Name) =="
+            & $suite.FullName
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "FAILED $($suite.Name) exit=$($LASTEXITCODE)"
+              $failed += "$($suite.Name)=$($LASTEXITCODE)"
+            }
+          }
+          if ($failed.Count -ne 0) {
+            throw "Windows offline test suites failed: $($failed -join ', ')"
+          }
+      - name: Extract and smoke the exact CI-only Windows archive
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'win-candidate') -Filter *.zip | Select-Object -First 1
+          if (-not $archive) { throw 'no Windows CI-only archive downloaded' }
+          $extract = Join-Path $env:RUNNER_TEMP 'win-candidate-extract'
+          Expand-Archive -Path $archive.FullName -DestinationPath $extract
+          foreach ($program in 'asicend', 'asicen-ts', 'asicenctl') {
+            & (Join-Path $extract "$program.exe") --help
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & (Join-Path $extract 'asicend.exe') --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Clean up isolated owned LOCALAPPDATA (always)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fixture = [System.Environment]::GetEnvironmentVariable('ASICEN_CI_RUNTIME_FIXTURE')
+          $runnerTemp = [System.Environment]::GetEnvironmentVariable('RUNNER_TEMP')
+          if (-not $fixture) { Write-Host 'no isolated CI runtime fixture was created'; exit 0 }
+          if (-not $runnerTemp) { throw 'RUNNER_TEMP is not set during cleanup' }
+          if (-not (Test-Path -LiteralPath $fixture)) {
+            Write-Host "isolated fixture already gone: $fixture"
+            exit 0
+          }
+          $item = Get-Item -LiteralPath $fixture -Force
+          $fixtureFull = $item.FullName
+          $runnerTempFull = (Get-Item -LiteralPath $runnerTemp -Force).FullName.TrimEnd('\')
+          if (-not $fixtureFull.StartsWith($runnerTempFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "refusing to clean a fixture outside RUNNER_TEMP: $fixtureFull"
+          }
+          if (-not (Split-Path -Leaf $fixtureFull).StartsWith('asicenrt-')) {
+            throw "refusing to clean an unexpected fixture name: $fixtureFull"
+          }
+          if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing to clean a reparse-point fixture: $fixtureFull"
+          }
+          $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+          $acl = Get-Acl -LiteralPath $fixtureFull
+          $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+          if (-not $ownerSid -or $ownerSid.Value -ne $currentUser.Value) {
+            throw "fixture owner changed; preserving for inspection: $fixtureFull"
+          }
+          $residual = @(Get-ChildItem -Force -LiteralPath $fixtureFull)
+          if ($residual.Count -ne 0) {
+            foreach ($entry in $residual) {
+              Write-Host "residual fixture entry: $($entry.FullName) attributes=$($entry.Attributes)"
+            }
+            throw "product left residual endpoint/worker entries in $fixtureFull; not deleting them"
+          }
+          Remove-Item -LiteralPath $fixtureFull -Force
+          if (Test-Path -LiteralPath $fixtureFull) {
+            throw "failed to remove the empty isolated fixture: $fixtureFull"
+          }
+          Write-Host "removed empty isolated fixture: $fixtureFull"

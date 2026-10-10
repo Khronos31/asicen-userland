@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_CHANNEL_PLAN_H
+#define ASICEN_USERLAND_CHANNEL_PLAN_H
 
 #include <cstdint>
 
@@ -19,3 +20,5 @@ bool w3u3_is_valid_bs_transponder(std::uint8_t transponder);
 bool w3u3_is_valid_cs_transponder(std::uint8_t transponder);
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_CHANNEL_PLAN_H

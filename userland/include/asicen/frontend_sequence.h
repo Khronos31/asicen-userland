@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_FRONTEND_SEQUENCE_H
+#define ASICEN_USERLAND_FRONTEND_SEQUENCE_H
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
@@ -40,12 +41,15 @@ enum class PoweredInitResult : std::uint8_t {
 // source-verified startup/power steps have run. Keep its readiness check
 // strictly between power and demod initialization.
 template <typename PowerStep, typename ControllerGuard, typename InitStep>
-PoweredInitResult execute_powered_init_sequence(PowerStep power,
-                                                ControllerGuard guard,
-                                                InitStep init) {
-    if (!power()) return PoweredInitResult::power_failed;
-    if (!guard()) return PoweredInitResult::controller_guard_failed;
-    if (!init()) return PoweredInitResult::init_failed;
+PoweredInitResult execute_powered_init_sequence(PowerStep power, ControllerGuard guard,
+                                                InitStep init)
+{
+    if (!power())
+        return PoweredInitResult::power_failed;
+    if (!guard())
+        return PoweredInitResult::controller_guard_failed;
+    if (!init())
+        return PoweredInitResult::init_failed;
     return PoweredInitResult::completed;
 }
 
@@ -83,7 +87,7 @@ enum class FrontendOpKind : std::uint8_t {
 struct FrontendOp {
     FrontendOpKind kind = FrontendOpKind::Control;
     ControlTransfer transfer{};
-    bool require_status = false;  // response byte 0 must equal 1
+    bool require_status = false; // response byte 0 must equal 1
     unsigned delay_ms = 0;
     std::uint8_t local = 0;
     std::uint8_t source = 0;
@@ -157,13 +161,11 @@ FrontendPlan plan_legacy_frontend_power(LegacyFrontendProfile profile, bool on);
 FrontendPlan plan_legacy_frontend_init(LegacyFrontendProfile profile);
 // Adapter only, center frequency already normalized. S3U includes its S-demod
 // band write and omits the W3U3/S3U2 terrestrial-demod AGC tail.
-FrontendPlan plan_legacy_fc0012_tune(LegacyFrontendProfile profile,
-                                     std::uint32_t center_khz);
+FrontendPlan plan_legacy_fc0012_tune(LegacyFrontendProfile profile, std::uint32_t center_khz);
 // Complete T prefix, one adapter acquisition and model-specific tail. No
 // W3U3 LNA/GPIO01 operation or retry/reinit loop is added. Bandwidth6 only.
 FrontendPlan plan_legacy_terrestrial_tune(LegacyFrontendProfile profile,
-                                          std::uint32_t frequency_khz,
-                                          std::uint8_t bandwidth_mhz);
+                                          std::uint32_t frequency_khz, std::uint8_t bandwidth_mhz);
 FrontendPlan plan_legacy_terrestrial_lock(LegacyFrontendProfile profile,
                                           std::uint32_t frequency_khz);
 
@@ -172,8 +174,7 @@ FrontendPlan plan_legacy_terrestrial_lock(LegacyFrontendProfile profile,
 // tuning. S3U2's zero-field branch writes13=0f; its nondefault cached-state
 // feedback is deliberately not implemented by this API. S3U uses its shared
 // feedback algorithm at hardware index0. No periodic worker is started.
-FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile,
-                                      bool source_default);
+FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile, bool source_default);
 
 // Planning. Invalid arguments produce an empty plan (callers treat that as a
 // usage error before touching USB).
@@ -182,7 +183,7 @@ FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile,
 // value 0x27 mask 0xFB with the sibling bit 0x40 excluded). It never clears
 // LNB bit 0x20 (0x20 is set) and never touches bit 0x40.
 FrontendPlan plan_startup_subset();
-FrontendPlan plan_safe_power_on();  // TC_PowerTunerDemod(local 0, power 1)
+FrontendPlan plan_safe_power_on(); // TC_PowerTunerDemod(local 0, power 1)
 // Bounded raw multiplex setup. The one-argument form preserves the earlier
 // research plan; callers requiring source-accurate reset behavior should pass
 // the observed fourth-argument reset state explicitly.
@@ -206,8 +207,7 @@ FrontendPlan plan_terrestrial_init_with_satellite_demod();
 FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz);
 // Full terrestrial tune recovered from TC_SetFrequency (terrestrial branch)
 // with the DTV_SetTunerFreq field defaults (ptr[8]=ptr[0x10]=ptr[0x18]=0).
-FrontendPlan plan_terrestrial_tune_full(std::uint32_t freq_khz,
-                                        std::uint8_t bandwidth_mhz);
+FrontendPlan plan_terrestrial_tune_full(std::uint32_t freq_khz, std::uint8_t bandwidth_mhz);
 FrontendPlan plan_terrestrial_lock_read(std::uint32_t freq_khz);
 // One terrestrial feedback iteration. It performs the source-derived tuner
 // reads and only the conditional FC0012 writes selected by those readings.
@@ -231,14 +231,20 @@ struct FrontendRunReport {
 };
 
 class FrontendTransport {
-public:
+  public:
     virtual ~FrontendTransport() = default;
     virtual int control(const ControlTransfer& transfer, unsigned char* data) = 0;
     virtual void delay_ms(unsigned ms) = 0;
     // Optional cooperative cancellation/deadline. Defaults keep read-only
     // transports and offline test doubles unaffected.
-    virtual bool cancelled() const { return false; }
-    virtual bool expired() const { return false; }
+    virtual bool cancelled() const
+    {
+        return false;
+    }
+    virtual bool expired() const
+    {
+        return false;
+    }
 };
 
 // TC_SetFrequency terrestrial center-frequency transform (recovered at
@@ -248,16 +254,17 @@ std::uint32_t terrestrial_tune_center_khz(std::uint32_t freq_khz);
 
 // Runs ops in order, stopping at the first libusb failure, short transfer or
 // (where `require_status` is set) non-success status byte.
-FrontendRunResult run_frontend_plan(const FrontendPlan& plan,
-                                    FrontendTransport* transport,
+FrontendRunResult run_frontend_plan(const FrontendPlan& plan, FrontendTransport* transport,
                                     FrontendRunReport* report = nullptr);
-FrontendRunResult run_filter_reset_operation(
-    FrontendTransport* transport, std::uint8_t local, std::uint8_t reset_state,
-    std::array<std::uint8_t, 0x45>* block_before = nullptr,
-    std::array<std::uint8_t, 0x45>* block_after = nullptr);
+FrontendRunResult run_filter_reset_operation(FrontendTransport* transport, std::uint8_t local,
+                                             std::uint8_t reset_state,
+                                             std::array<std::uint8_t, 0x45>* block_before = nullptr,
+                                             std::array<std::uint8_t, 0x45>* block_after = nullptr);
 
 // Offline target/argument parsing used by the diagnostic tool.
 bool parse_usb_location(const std::string& text, std::uint8_t* bus, std::uint8_t* address);
 bool parse_port_path(const std::string& text);
 
-}  // namespace asicen
+} // namespace asicen
+
+#endif // ASICEN_USERLAND_FRONTEND_SEQUENCE_H

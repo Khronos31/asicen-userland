@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_CARD_MAILBOX_H
+#define ASICEN_USERLAND_CARD_MAILBOX_H
 
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +36,8 @@ std::vector<CardMailboxChunk> build_card_mailbox_chunks(std::size_t length);
 // Lengths above the protocol's 9-bit maximum511 return an empty plan.
 std::vector<CardMailboxChunk> build_card_mailbox_io_chunks(std::size_t length);
 
-std::uint16_t decode_card_mailbox_length(std::uint8_t low,
-                                         std::uint8_t high_bit_source);
+std::uint16_t decode_card_mailbox_length(std::uint8_t low, std::uint8_t high_bit_source);
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_CARD_MAILBOX_H

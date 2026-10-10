@@ -6,7 +6,13 @@
 #include "asicen/product_profile.h"
 #include "asicen/device_profile.h"
 #include "asicen/enclosure_grouping.h"
+#include "asicend_args.h"
+#include "asicend_list_format.h"
+#if defined(_WIN32)
+#include "px4_windows_args.h"
+#endif
 #ifdef ASICEN_ENABLE_LIBUSB
+#include "asicen/libusb_transport.h"
 #include <libusb.h>
 #endif
 
@@ -27,11 +33,11 @@ void usage(FILE* output)
 {
 #ifdef ASICEN_ENABLE_LIBUSB
     std::fprintf(output,
-        "usage: asicend --list-json\n"
+        "usage: asicend --list | --list-json\n"
         "       asicend --models\n"
         "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
         "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
-        "                 [--runtime-dir PATH] [--instance TOKEN] "
+        "                 [--runtime-dir PATH] --instance TOKEN "
         "[--group] [--allow-lnb-power] [--firmware PATH]\n"
         "       asicend --fd FD [--fd FD] [--model MODEL]\n"
         "                 [--runtime-dir PATH] [--instance TOKEN] "
@@ -39,13 +45,23 @@ void usage(FILE* output)
         "  --usb-path   native topology; up to two values, primary first then\n"
         "               sibling. Each value is BUS:ADDRESS or BUS-PORT.\n"
         "  --fd         granted USB descriptors; up to two, primary first.\n"
+        "               Without --instance, use the observed usb-BUS-PORT identity.\n"
         "  --allow-lnb-power  permit explicit ISDB-S 15 V requests; default off\n"
         "  --firmware   loader image; loaded before claiming\n"
+        "  --probe-satellite RF_KHZ [--slot 0..7]  bounded legacy satellite diagnostic\n"
+        "  --probe-card  bounded legacy card diagnostic\n"
+        "  --card-only   serve the card reader without tuner operations\n"
         "  --models     list supported source-backed models and exit\n"
-        "  --list-json  read-only enumeration and exit\n");
+        "  --list       print connected supported enclosures and exit;\n"
+        "  --list-json  print the same data as compact JSON and exit;\n"
+        "               read-only, needs neither firmware nor a daemon\n"
+#if defined(_WIN32)
+        "  --exit-on-stdin-eof  exit with cleanup when stdin reaches EOF\n"
+#endif
+    );
 #else
     std::fprintf(output,
-        "usage: asicend --models | --list-json\n"
+        "usage: asicend --models | --list | --list-json\n"
         "The hardware backend is unavailable in this libusb-OFF build.\n");
 #endif
 }
@@ -70,210 +86,59 @@ int list_models()
             lnb_control ? "source-backed-software" : "external-unconfirmed",
             lnb_control ? "supported" : "unsupported");
     }
+    if (std::ferror(stdout) != 0 || std::fflush(stdout) != 0) {
+        std::fprintf(stderr, "list: write to stdout failed\n");
+        return 70;
+    }
     return 0;
 }
 
 #ifdef ASICEN_ENABLE_LIBUSB
-// Formats one observed USB function as a compact JSON object matching px4's
-// device-observation entries: device number, serial (null on ASICEN), and the
-// flat bus/address/port location keys.
-void append_usb_observation(std::string& out, unsigned int device,
-                            const asicen::UsbFunctionObservation& obs) {
-    out += "{\"device\":";
-    out += std::to_string(device);
-    out += ",\"serial\":null,\"bus\":";
-    out += std::to_string(obs.bus);
-    out += ",\"address\":null,\"port\":";
-    if (obs.port_path.empty()) {
-        out += "null";
-    } else {
-        out += '"';
-        for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
-            if (k != 0U) out.push_back('.');
-            out += std::to_string(obs.port_path[k]);
-        }
-        out += '"';
-    }
-    out += "}";
-}
-
-// Emits the px4 receiver-records list for a profile. W3U2/W3U3/V2 expose one
-// ISDB-S and one ISDB-T lane per runtime function; S3U/S3U2 use a combined
-// terrestrial-capable frontend. LNB control is source-backed on the W3U
-// family and otherwise unsupported.
-void append_receivers(std::string& out, const asicen::DeviceProfile& profile) {
-    bool first = true;
-    const bool lnb_control = profile.model_id == asicen::ModelId::W3u2 ||
-                             profile.model_id == asicen::ModelId::W3u3 ||
-                             profile.model_id == asicen::ModelId::W3u3V2;
-    for (std::uint8_t receiver = 0U;
-         receiver < profile.enclosure_receiver_count; ++receiver) {
-        if (!first) out.push_back(',');
-        first = false;
-        const std::uint8_t function = receiver / 2U;
-        const std::uint8_t lane = receiver % 2U;
-        // px4 uses ISDB-T/S for a receiver that accepts either system
-        // (S3U's combined frontend); W3U-family lanes are ISDB-S then ISDB-T.
-        const char* system = profile.combined_isdb_ts
-            ? "ISDB-T/S"
-            : (lane == 0U ? "ISDB-S" : "ISDB-T");
-        out += "{\"receiver\":";
-        out += std::to_string(receiver);
-        out += ",\"device\":";
-        out += std::to_string(function);
-        out += ",\"local\":";
-        out += std::to_string(lane);
-        out += ",\"system\":\"";
-        out += system;
-        out += "\",\"lnb_15v_supported\":";
-        out += lnb_control ? "true" : "false";
-        out += "}";
-    }
-}
-
-int list_devices_json() {
+int list_devices(bool json)
+{
     libusb_context* context = nullptr;
-    if (libusb_init(&context) != 0) {
-        std::fprintf(stderr, "libusb_init failed\n");
-        return 70;
+    const int initialized = asicen::initialize_libusb_context(&context);
+    if (initialized != 0) {
+        std::fprintf(stderr, "enumeration failed: %s\n",
+                     px4::userland::error_string(asicen::map_libusb_error(initialized)));
+        return asicen::cli::exit_status(asicen::map_libusb_error(initialized));
     }
     libusb_device** list = nullptr;
     const ssize_t count = libusb_get_device_list(context, &list);
     if (count < 0) {
-        std::fprintf(stderr, "libusb_get_device_list failed\n");
-        libusb_exit(context);
-        return 70;
+        std::fprintf(stderr, "enumeration failed: %s\n",
+                     px4::userland::error_string(asicen::map_libusb_error(static_cast<int>(count))));
+        asicen::release_libusb_context(context);
+        return asicen::cli::exit_status(asicen::map_libusb_error(static_cast<int>(count)));
     }
-
-    // Collect all observations for supported runtime models and loaders.
-    // Grouping is topology-based: two runtime functions with the same hub
-    // parent form one enclosure; loaders and lone functions are reported
-    // ungrouped under the px4 --list-json schema.
-    std::vector<std::vector<asicen::UsbFunctionObservation>> dual(asicen::profile_count());
-    std::vector<asicen::UsbFunctionObservation> single;
+    std::vector<asicen::UsbFunctionObservation> observations;
     for (ssize_t i = 0; i < count; ++i) {
-        libusb_device_descriptor desc{};
+        libusb_device_descriptor descriptor{};
         libusb_device* device = list[i];
-        if (libusb_get_device_descriptor(device, &desc) != 0) continue;
-        asicen::UsbFunctionObservation obs;
-        obs.vid = desc.idVendor;
-        obs.pid = desc.idProduct;
-        obs.bus = static_cast<std::uint8_t>(libusb_get_bus_number(device));
+        if (libusb_get_device_descriptor(device, &descriptor) != 0) continue;
+        if (asicen::find_profile(descriptor.idVendor, descriptor.idProduct) == nullptr &&
+            !(descriptor.idVendor == 0x1738U &&
+              (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U))) continue;
+        asicen::UsbFunctionObservation observation;
+        observation.vid = descriptor.idVendor;
+        observation.pid = descriptor.idProduct;
+        observation.bus = libusb_get_bus_number(device);
+        observation.address = libusb_get_device_address(device);
         std::uint8_t ports[8]{};
-        const int nports = libusb_get_port_numbers(device, ports,
-                                                   static_cast<int>(sizeof(ports)));
-        if (nports < 0 || nports > 255) continue;
-        obs.port_path.assign(ports, ports + nports);
-        const asicen::DeviceProfile* profile =
-            asicen::find_profile(desc.idVendor, desc.idProduct);
-        if (profile == nullptr &&
-            !(desc.idVendor == 0x1738 &&
-              (desc.idProduct == 0x5211U || desc.idProduct == 0x5216U)))
-            continue;
-        if (profile == nullptr) {
-            single.push_back(obs);
-        } else {
-            const std::size_t index =
-                static_cast<std::size_t>(profile - asicen::profiles());
-            if (profile->expected_runtime_functions >= 2U)
-                dual[index].push_back(obs);
-            else
-                single.push_back(obs);
-        }
+        const int port_count = libusb_get_port_numbers(device, ports, sizeof(ports));
+        if (port_count > 0 && port_count <= static_cast<int>(sizeof(ports)))
+            observation.port_path.assign(ports, ports + port_count);
+        observations.push_back(std::move(observation));
     }
     libusb_free_device_list(list, 1);
-
-    std::string out = "{\"enclosures\":[";
-    bool first_group = true;
-    // Pair dual-function observations by shared hub parent.
-    for (std::size_t pi = 0U; pi < asicen::profile_count(); ++pi) {
-        const auto& profile = asicen::profiles()[pi];
-        if (dual[pi].empty()) continue;
-        const auto pairs = asicen::group_dual_function_enclosures(
-            dual[pi], profile.vid, profile.pid);
-        std::vector<bool> used(dual[pi].size(), false);
-        for (const auto& pair : pairs) {
-            const auto& primary = dual[pi][pair.first];
-            const auto& sibling = dual[pi][pair.second];
-            used[pair.first] = used[pair.second] = true;
-            if (!first_group) out.push_back(',');
-            first_group = false;
-            std::string usb;
-            char buf[16];
-            std::snprintf(buf, sizeof(buf), "%04x:%04x",
-                          static_cast<unsigned>(primary.vid),
-                          static_cast<unsigned>(primary.pid));
-            // px4's serial_unique reports whether this identity is unambiguous.
-            // ASICEN has no USB serial, so it is only unique when at most one
-            // ready enclosure of this model/pair is observed.
-            const bool serial_unique = pairs.size() == 1U;
-            out += "{\"serial\":null,\"model\":";
-            out += '"';
-            out += profile.model;
-            out += '"';
-            out += ",\"usb\":\"";
-            out += buf;
-            out += "\",\"status\":\"ready\",\"serial_unique\":";
-            out += serial_unique ? "true" : "false";
-            out += ",\"devices\":[";
-            // device 1 is the canonical primary (port path ends in .1); the
-            // sibling follows. pair.first/second order is enumeration order,
-            // not canonical topology, so order explicitly here.
-            const bool first_is_primary =
-                !primary.port_path.empty() && primary.port_path.back() == 1U;
-            const asicen::UsbFunctionObservation& device1 =
-                first_is_primary ? primary : sibling;
-            const asicen::UsbFunctionObservation& device2 =
-                first_is_primary ? sibling : primary;
-            append_usb_observation(out, 1U, device1);
-            out.push_back(',');
-            append_usb_observation(out, 2U, device2);
-            out += "],\"candidates\":[],\"receivers\":[";
-            append_receivers(out, profile);
-            out += "]}";
-        }
-        // Lone (unpaired) dual-capable functions are ungrouped.
-        for (std::size_t i = 0U; i < dual[pi].size(); ++i) {
-            if (used[i]) continue;
-            single.push_back(dual[pi][i]);
-        }
+    asicen::release_libusb_context(context);
+    const std::string output = asicen::cli::format_device_list(observations, json);
+    if ((!output.empty() &&
+         std::fwrite(output.data(), 1U, output.size(), stdout) != output.size()) ||
+        std::fflush(stdout) != 0) {
+        std::fprintf(stderr, "list: write to stdout failed\n");
+        return 70;
     }
-    out += "],\"ungrouped_usb_devices\":[";
-    bool first_rejected = true;
-    for (const auto& obs : single) {
-        std::string usb;
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%04x:%04x",
-                      static_cast<unsigned>(obs.vid), static_cast<unsigned>(obs.pid));
-        const asicen::DeviceProfile* p = asicen::find_profile(obs.vid, obs.pid);
-        const char* model = p != nullptr ? p->model : "ASICEN firmware loader";
-        if (!first_rejected) out.push_back(',');
-        first_rejected = false;
-        out += "{\"serial\":null,\"model\":\"";
-        out += model;
-        out += "\",\"usb\":\"";
-        out += buf;
-        out += "\",\"status\":\"";
-        out += p != nullptr ? "ready" : "loader";
-        // Flat location keys, matching px4's ungrouped entry shape.
-        out += "\",\"bus\":";
-        out += std::to_string(obs.bus);
-        out += ",\"address\":null,\"port\":";
-        if (obs.port_path.empty()) {
-            out += "null";
-        } else {
-            out += '"';
-            for (std::size_t k = 0U; k < obs.port_path.size(); ++k) {
-                if (k != 0U) out.push_back('.');
-                out += std::to_string(obs.port_path[k]);
-            }
-            out += '"';
-        }
-        out += "}";
-    }
-    out += "]}\n";
-    std::fputs(out.c_str(), stdout);
-    libusb_exit(context);
     return 0;
 }
 #endif
@@ -282,65 +147,45 @@ int list_devices_json() {
 
 int main(int argc, char** argv)
 {
-    bool list_json = false;
-    bool models = false;
-    bool hardware_requested = false;
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg(argv[i]);
-        if (arg == "--help" || arg == "-h") {
-            // px4 accepts --help alone only.
-            if (argc != 2) {
-                std::fprintf(stderr, "--help cannot be combined\n");
-                return 2;
-            }
-            usage(stdout);
-            return 0;
-        }
-        if (arg == "--models") { models = true; continue; }
-        if (arg == "--list-json") { list_json = true; continue; }
-        if (arg == "--list") {
-            // px4 keeps a text --list; asicend has no text enumeration yet.
-            std::fprintf(stderr, "--list is not implemented; use --list-json\n");
-            return 2;
-        }
-        if (arg == "--usb-path" || arg == "--fd" || arg == "--firmware" ||
-            arg == "--runtime-dir" || arg == "--instance" ||
-            arg == "--model" || arg == "--group" || arg == "--allow-lnb-power")
-            hardware_requested = true;
+#if defined(_WIN32)
+    std::vector<std::string> owned = px4::userland::cli::windows_argv_utf8(argc, argv);
+    std::vector<char*> views;
+    views.reserve(owned.size());
+    for (std::string& value : owned) views.push_back(value.data());
+    argc = static_cast<int>(views.size());
+    argv = views.data();
+#endif
+    const auto arguments = asicen::cli::parse_daemon_arguments(
+        argc, const_cast<const char* const*>(argv));
+    if (!arguments.valid) {
+        std::fprintf(stderr, "argument error: %.*s\n",
+                     static_cast<int>(arguments.error.size()), arguments.error.data());
+        usage(stderr);
+        return 2;
     }
-    if (models) {
-        // px4 requires --list/--list-json alone; keep --models alone too so a
-        // stray hardware option cannot be silently ignored.
-        for (int i = 1; i < argc; ++i) {
-            const std::string arg(argv[i]);
-            if (arg == "--models") continue;
-            std::fprintf(stderr, "--models cannot be combined with other arguments\n");
-            return 2;
-        }
-        return list_models();
+    if (arguments.help) {
+        usage(stdout);
+        return 0;
     }
-    if (list_json) {
-        for (int i = 1; i < argc; ++i) {
-            const std::string arg(argv[i]);
-            if (arg == "--list-json") continue;
-            std::fprintf(stderr, "--list-json cannot be combined with other arguments\n");
-            return 2;
-        }
+    if (arguments.models) return list_models();
+    if (arguments.list || arguments.list_json) {
 #ifdef ASICEN_ENABLE_LIBUSB
-        return list_devices_json();
+        return list_devices(arguments.list_json);
 #else
-        std::puts("{\"enclosures\":[],\"ungrouped_usb_devices\":[]}");
+        const std::string output = asicen::cli::format_device_list({}, arguments.list_json);
+        if ((!output.empty() &&
+             std::fwrite(output.data(), 1U, output.size(), stdout) != output.size()) ||
+            std::fflush(stdout) != 0) {
+            std::fprintf(stderr, "list: write to stdout failed\n");
+            return 70;
+        }
         return 0;
 #endif
     }
-    if (hardware_requested) {
 #ifdef ASICEN_ENABLE_LIBUSB
-        return run_asicend_hardware(argc, argv);
+    return run_asicend_hardware(argc, argv);
 #else
-        std::fprintf(stderr, "hardware backend unavailable in this libusb-OFF build\n");
-        return 3;
+    std::fprintf(stderr, "hardware backend unavailable in this libusb-OFF build\n");
+    return 3;
 #endif
-    }
-    usage(stderr);
-    return 2;
 }

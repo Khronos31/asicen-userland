@@ -56,7 +56,9 @@ bool run_it930x_card_tests();
 bool run_ipc_tests();
 bool run_ipc_state_tests();
 bool run_px4d_args_tests();
+#if !defined(_WIN32)
 bool run_px4d_signal_tests();
+#endif
 #if PX4_ENABLE_POSIX_IPC
 bool run_control_integration_tests();
 bool run_posix_ipc_tests();
@@ -1897,6 +1899,16 @@ public:
     std::size_t event_calls = 0U;
     std::size_t submit_calls = 0U;
     std::size_t callback_calls = 0U;
+    bool prepare_raw_io = false;
+    bool raw_io_active = false;
+    bool finish_with_pending_transfers = false;
+    int prepare_result = 0;
+    int finish_result = 0;
+    std::size_t prepared_size = 0U;
+    std::size_t finish_calls = 0U;
+    std::size_t alloc_fail_at = 0U;
+    std::vector<std::size_t> requested_stream_sizes;
+    std::vector<int> stream_lengths;
     std::vector<std::uint8_t> endpoints;
     std::vector<int> lengths;
     std::vector<std::string> events;
@@ -2196,17 +2208,42 @@ public:
         return result;
     }
 
+    int prepare_stream(Handle, std::uint8_t, std::size_t* size,
+                       bool* raw_io_enabled) noexcept override
+    {
+        requested_stream_sizes.push_back(*size);
+        *raw_io_enabled = false;
+        if (prepare_result != 0) return prepare_result;
+        if (prepared_size != 0U) *size = prepared_size;
+        *raw_io_enabled = prepare_raw_io;
+        raw_io_active = prepare_raw_io;
+        return 0;
+    }
+
+    int finish_stream(Handle, std::uint8_t) noexcept override
+    {
+        ++finish_calls;
+        for (const FakeTransfer* transfer : transfers_) {
+            if (transfer->submitted || transfer->callback_pending)
+                finish_with_pending_transfers = true;
+        }
+        if (finish_result == 0) raw_io_active = false;
+        return finish_result;
+    }
+
     Transfer alloc_transfer() noexcept override
     {
         ++alloc_calls;
+        if (alloc_fail_at != 0U && alloc_calls == alloc_fail_at) return nullptr;
         return new FakeTransfer;
     }
 
-    void fill_bulk_transfer(Transfer transfer, Handle, std::uint8_t, std::uint8_t* buffer, int,
+    void fill_bulk_transfer(Transfer transfer, Handle, std::uint8_t, std::uint8_t* buffer, int length,
                             TransferCallback callback, void* context,
                             unsigned int) noexcept override
     {
         auto* fake = static_cast<FakeTransfer*>(transfer);
+        stream_lengths.push_back(length);
         fake->callback = callback;
         fake->context = context;
         fake->buffer = buffer;
@@ -2258,6 +2295,7 @@ public:
     void free_transfer(Transfer transfer) noexcept override
     {
         ++free_calls;
+        transfers_.erase(std::remove(transfers_.begin(), transfers_.end(), transfer), transfers_.end());
         delete static_cast<FakeTransfer*>(transfer);
     }
 
@@ -2508,6 +2546,55 @@ bool test_bulk_transport_and_mapping()
     return true;
 }
 
+bool test_acquisition_conflict_mapping()
+{
+    // The device-acquisition boundary translates a competing process's hold
+    // of the device into the cross-platform BUSY while every other libusb
+    // code stays identical to map_libusb_error.  On Windows the WinUSB
+    // backend reports that hold as LIBUSB_ERROR_ACCESS from libusb_open
+    // (measured on real hardware with a running daemon), so ACCESS maps to
+    // BUSY there; on POSIX ACCESS at this boundary is a genuine permission
+    // denial and keeps the generic USB_IO translation.
+#if defined(_WIN32)
+    CHECK(map_acquisition_error(LIBUSB_ERROR_ACCESS) == Error::BUSY);
+#else
+    CHECK(map_acquisition_error(LIBUSB_ERROR_ACCESS) == Error::USB_IO);
+#endif
+    const std::array<int, 8U> passthrough{0, LIBUSB_ERROR_TIMEOUT,
+                                          LIBUSB_ERROR_NO_DEVICE,
+                                          LIBUSB_ERROR_BUSY,
+                                          LIBUSB_ERROR_NOT_FOUND,
+                                          LIBUSB_ERROR_NOT_SUPPORTED,
+                                          LIBUSB_ERROR_INVALID_PARAM,
+                                          LIBUSB_ERROR_OTHER};
+    const std::array<Error, 8U> expected{Error::OK, Error::TIMEOUT,
+                                         Error::DISCONNECTED, Error::BUSY,
+                                         Error::NOT_FOUND, Error::UNSUPPORTED,
+                                         Error::INVALID_ARGUMENT,
+                                         Error::USB_IO};
+    for (std::size_t index = 0U; index < passthrough.size(); ++index) {
+        CHECK(map_acquisition_error(passthrough[index]) == expected[index]);
+        CHECK(map_libusb_error(passthrough[index]) == expected[index]);
+    }
+
+    // A second daemon on the same device must report the acquisition
+    // conflict (device open: BUSY, exit 4) instead of a generic USB error.
+    auto conflict_api = std::unique_ptr<FakeApi>(new FakeApi);
+    FakeDevice conflict_first = fake_device("00000000000077", 1U);
+    FakeDevice conflict_second = fake_device("00000000000077", 2U);
+    conflict_api->devices = {&conflict_first, &conflict_second};
+    conflict_api->open_result = LIBUSB_ERROR_ACCESS;
+    const auto conflict = RuntimeTestAccess::open_native(
+        std::move(conflict_api), "00000000000077");
+    CHECK(!conflict);
+#if defined(_WIN32)
+    CHECK(conflict.error() == Error::BUSY);
+#else
+    CHECK(conflict.error() == Error::USB_IO);
+#endif
+    return true;
+}
+
 bool test_not_found_cancel_waits_for_callback()
 {
     FakeApi api;
@@ -2621,6 +2708,128 @@ bool test_native_enumeration_filters_and_stream_lifecycle()
     CHECK(missing_serial_enumerator.discover(missing_serial_discovery));
     CHECK(missing_serial_discovery.candidates()[0].status == ObservationStatus::invalid_serial);
     CHECK(missing_serial_api.serial_calls == 1U);
+    return true;
+}
+
+bool test_stream_policy_lifecycle()
+{
+    FakeApi api;
+    FakeDevice first = fake_device("00000000000017", 1U);
+    FakeDevice second = fake_device("00000000000017", 2U);
+    std::unique_ptr<LibusbTransport> transport;
+    CHECK(discover_fake(api, first, second, &transport));
+    api.prepare_raw_io = true;
+    api.prepared_size = 153600U;
+    api.completion_length = 153600;
+    api.complete_events = true;
+    const StreamConfig config{kTsInEndpoint, 188U * 816U, 2U};
+    CHECK(transport->start_stream(config));
+    CHECK(api.raw_io_active && api.finish_calls == 0U);
+    CHECK(api.stream_lengths.size() == 2U);
+    for (const int length : api.stream_lengths) CHECK(length == 153600);
+    // Validate a completion larger than the requested TS-aligned size. All
+    // allocation, resubmit and completion checks must use the effective size.
+    const auto event = transport->wait_stream(Timeout{0U});
+    CHECK(event && event.value().size == 153600U);
+    CHECK(event.value().kind == StreamEventKind::data);
+    CHECK(transport->stop_stream());
+    CHECK(!api.raw_io_active && api.finish_calls == 1U);
+    CHECK(!api.finish_with_pending_transfers);
+    CHECK(transport->stop_stream());
+    CHECK(transport->cancel_stream());
+    CHECK(api.finish_calls == 1U);
+
+    // A later synchronous purge keeps its original policy and length.
+    std::array<std::uint8_t, 1024U> purge{};
+    CHECK(transport->bulk_read(kTsInEndpoint,
+        MutableByteView{purge.data(), purge.size()}, Timeout{1U}));
+    CHECK(api.lengths.back() == 1024 && !api.raw_io_active);
+    CHECK(transport->start_stream(config));
+    CHECK(api.requested_stream_sizes.size() == 2U);
+    CHECK(api.requested_stream_sizes[0U] == config.transfer_size);
+    CHECK(api.requested_stream_sizes[1U] == config.transfer_size);
+    CHECK(transport->stop_stream());
+    CHECK(api.finish_calls == 2U && !api.finish_with_pending_transfers);
+    return true;
+}
+
+bool test_stream_policy_start_failures()
+{
+    for (unsigned int failure = 0U; failure < 3U; ++failure) {
+        FakeApi api;
+        FakeDevice first = fake_device("00000000000018", 1U);
+        FakeDevice second = fake_device("00000000000018", 2U);
+        std::unique_ptr<LibusbTransport> transport;
+        CHECK(discover_fake(api, first, second, &transport));
+        api.prepare_raw_io = true;
+        if (failure == 0U) api.prepare_result = LIBUSB_ERROR_IO;
+        if (failure == 1U) api.alloc_fail_at = 2U;
+        if (failure == 2U) {
+            api.submit_result = LIBUSB_ERROR_IO;
+            api.submit_fail_after = 2U;
+        }
+        CHECK(!transport->start_stream(StreamConfig{kTsInEndpoint, 8U, 3U}));
+        CHECK(!transport->stream_active());
+        CHECK(!api.raw_io_active && !api.finish_with_pending_transfers);
+        CHECK(api.finish_calls == (failure == 0U ? 0U : 1U));
+        CHECK(api.cancel_calls == (failure == 0U ? 0U : 1U));
+        if (failure == 0U) CHECK(api.alloc_calls == 0U && api.submit_calls == 0U);
+        CHECK(transport->stop_stream());
+        CHECK(api.finish_calls == (failure == 0U ? 0U : 1U));
+    }
+    return true;
+}
+
+bool test_stream_policy_restore_failure()
+{
+    FakeApi api;
+    FakeDevice first = fake_device("00000000000019", 1U);
+    FakeDevice second = fake_device("00000000000019", 2U);
+    std::unique_ptr<LibusbTransport> transport;
+    CHECK(discover_fake(api, first, second, &transport));
+    api.prepare_raw_io = true;
+    api.finish_result = LIBUSB_ERROR_IO;
+    CHECK(transport->start_stream(StreamConfig{kTsInEndpoint, 8U, 2U}));
+    CHECK(transport->stop_stream().error() == Error::USB_IO);
+    CHECK(api.finish_calls == 1U && !api.finish_with_pending_transfers);
+    CHECK(api.free_calls == 2U);
+    CHECK(!transport->stream_active());
+    CHECK(transport->start_stream(StreamConfig{kTsInEndpoint, 8U, 2U}).error() == Error::USB_IO);
+    std::array<std::uint8_t, 1U> command{};
+    CHECK(transport->bulk_read(kTsInEndpoint,
+        MutableByteView{command.data(), command.size()}, Timeout{1U}).error() == Error::USB_IO);
+    CHECK(api.bulk_calls == 0U && api.requested_stream_sizes.size() == 1U);
+    // RAW_IO only changes EP0x84. Keep control endpoints usable so the
+    // service can stop capture and turn off LNB power after the stream error.
+    CHECK(transport->bulk_write(kCommandOutEndpoint,
+        ByteView{command.data(), command.size()}, Timeout{1U}));
+    CHECK(transport->bulk_read(kCommandInEndpoint,
+        MutableByteView{command.data(), command.size()}, Timeout{1U}));
+    CHECK(api.bulk_calls == 2U);
+    const std::size_t closed = api.close_calls;
+    transport.reset();
+    CHECK(api.close_calls == closed + 1U);  // Drained handles are not leaked.
+    CHECK(api.finish_calls == 1U);
+    return true;
+}
+
+bool test_stream_policy_abandonment()
+{
+    FakeApi api;
+    FakeDevice first = fake_device("00000000000021", 1U);
+    FakeDevice second = fake_device("00000000000021", 2U);
+    std::unique_ptr<LibusbTransport> transport;
+    CHECK(discover_fake(api, first, second, &transport));
+    api.prepare_raw_io = true;
+    api.cancel_callbacks = false;
+    api.event_result = LIBUSB_ERROR_IO;
+    CHECK(transport->start_stream(StreamConfig{kTsInEndpoint, 8U, 2U}));
+    CHECK(transport->stop_stream().error() == Error::USB_IO);
+    CHECK(api.finish_calls == 0U && api.raw_io_active);
+    CHECK(api.free_calls == 0U && !transport->stream_active());
+    const std::size_t closed = api.close_calls;
+    transport.reset();
+    CHECK(api.close_calls == closed && api.finish_calls == 0U);
     return true;
 }
 
@@ -3496,10 +3705,20 @@ bool test_command_event_dispatch_does_not_starve_stream_replenishment()
 int main(int argc, char** argv)
 {
 #if PX4_ENABLE_LIBUSB
+    if (argc == 2 && std::strcmp(argv[1], "--stream-policy") == 0) {
+        if (!test_stream_policy_lifecycle() || !test_stream_policy_start_failures() ||
+            !test_stream_policy_restore_failure()) return 1;
+        std::printf("PASS stream_policy_lifecycle\n");
+        return 0;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--fail-safe-abandonment") == 0) {
         std::printf("RUN fail_safe_abandonment (explicit; ASAN detect_leaks=0)\n");
         if (!test_fail_safe_abandonment()) {
             std::fprintf(stderr, "FAIL fail_safe_abandonment\n");
+            return 1;
+        }
+        if (!test_stream_policy_abandonment()) {
+            std::fprintf(stderr, "FAIL stream_policy_abandonment\n");
             return 1;
         }
 #if defined(__linux__) || defined(__ANDROID__)
@@ -3558,7 +3777,9 @@ int main(int argc, char** argv)
         {"ipc_wire_codec", run_ipc_tests},
         {"ipc_connection_state", run_ipc_state_tests},
         {"px4d_arguments", run_px4d_args_tests},
+#if !defined(_WIN32)
         {"px4d_signals", run_px4d_signal_tests},
+#endif
 #if PX4_ENABLE_POSIX_IPC
         {"control_integration", run_control_integration_tests},
         {"posix_ipc_transport", run_posix_ipc_tests},
@@ -3582,10 +3803,14 @@ int main(int argc, char** argv)
         {"mlt5pe", run_mlt5pe_tests},
 #if PX4_ENABLE_LIBUSB
         {"bulk_transport_and_mapping", test_bulk_transport_and_mapping},
+        {"acquisition_conflict_mapping", test_acquisition_conflict_mapping},
         {"not_found_cancel_waits_for_callback", test_not_found_cancel_waits_for_callback},
         {"native_enumeration_filters_and_stream_lifecycle",
          test_native_enumeration_filters_and_stream_lifecycle},
         {"stream_completion_submission_order", test_stream_completion_submission_order},
+        {"stream_policy_lifecycle", test_stream_policy_lifecycle},
+        {"stream_policy_start_failures", test_stream_policy_start_failures},
+        {"stream_policy_restore_failure", test_stream_policy_restore_failure},
         {"fd_ownership_and_init_mode", test_fd_ownership_and_init_mode},
         {"fd_enclosure_batch", test_fd_enclosure_batch},
         {"native_enumeration_reports_unopened_devices",

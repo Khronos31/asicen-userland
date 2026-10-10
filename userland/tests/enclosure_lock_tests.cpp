@@ -1,81 +1,165 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
-#include "asicen/enclosure_lock.h"
+// SPDX-License-Identifier: GPL-2.0-only
+// Original enclosure-lock safety coverage migrated to the shared endpoint lease.
+#include "px4/posix_ipc.h"
+#include "../../third_party/px4-userland/userland/tests/test_temp_directory.h"
 
 #include <cstdlib>
 #include <cstdio>
 #include <fcntl.h>
-#include <iostream>
+#include <filesystem>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
-void check(bool ok, const char* message) {
-    if (!ok) {
-        std::cerr << "FAIL: " << message << '\n';
-        std::exit(1);
+
+using namespace px4::userland;
+using namespace px4::userland::ipc::posix;
+constexpr const char* kIdentity = "usb-1-2";
+
+#define CHECK(condition)                                                                    \
+    do {                                                                                    \
+        if (!(condition)) {                                                                 \
+            std::fprintf(stderr, "check failed at %s:%d: %s\n", __FILE__, __LINE__,         \
+                         #condition);                                                       \
+            return false;                                                                   \
+        }                                                                                   \
+    } while (false)
+
+class TemporaryDirectory final {
+public:
+    TemporaryDirectory()
+    {
+        std::string pattern = test::temporary_directory_template("asicen-lock-");
+        char* created = ::mkdtemp(pattern.data());
+        if (created != nullptr) {
+            path_ = created;
+            valid_ = ::chmod(path_.c_str(), 0700) == 0;
+        }
     }
+
+    ~TemporaryDirectory() noexcept
+    {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    TemporaryDirectory(const TemporaryDirectory&) = delete;
+    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
+
+    bool valid() const noexcept { return valid_; }
+    const std::string& path() const noexcept { return path_; }
+
+private:
+    std::string path_;
+    bool valid_ = false;
+};
+
+class ScopedFd final {
+public:
+    explicit ScopedFd(int fd) noexcept : fd_(fd) {}
+    ~ScopedFd() noexcept { (void)close(); }
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+
+    int get() const noexcept { return fd_; }
+    int close() noexcept
+    {
+        const int fd = fd_;
+        fd_ = -1;
+        return fd >= 0 ? ::close(fd) : 0;
+    }
+
+private:
+    int fd_ = -1;
+};
+
+int create_lock(const std::string& path)
+{
+    return ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 }
 
-void regular_lock_is_created_exclusively_and_existing_inode_reopens() {
-    const std::string path = "/tmp/asicen-lock-test-" + std::to_string(::getpid());
-    (void)::unlink(path.c_str());
-    const int first = asicen::acquire_enclosure_lock(path.c_str());
-    check(first >= 0, "lock helper creates and locks an absent path");
-    struct stat st{};
-    check(::fstat(first, &st) == 0 && S_ISREG(st.st_mode) &&
-              (st.st_mode & 0777U) == 0600U,
-          "new lock is a regular file with restrictive mode");
-    check(asicen::acquire_enclosure_lock(path.c_str()) < 0,
-          "second process cannot acquire a held flock");
-    check(::close(first) == 0, "release first test lock");
+bool regular_lock_is_created_exclusively_and_existing_inode_reopens()
+{
+    TemporaryDirectory directory;
+    CHECK(directory.valid());
+    const std::string path = directory.path() + "/.asicen-userland-usb-1-2.lock";
+    const EndpointConfig endpoint{directory.path().c_str(), "first", kControlEndpointName};
+    const EndpointConfig other{directory.path().c_str(), "second", kControlEndpointName};
+    auto first = SerialEndpointLease::acquire_identity(endpoint, kIdentity);
+    CHECK(first && first.value().valid());
+    struct stat status {};
+    CHECK(::lstat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode) &&
+          (status.st_mode & 07777U) == 0600U);
+    CHECK(SerialEndpointLease::acquire_identity(other, kIdentity).error() == Error::BUSY);
+    first.value().close();
+    CHECK(::lstat(path.c_str(), &status) != 0);
 
-    // Simulate the ctest-user/root-daemon ownership split under /tmp when
-    // running as root. Opening this existing inode without O_CREAT avoids
-    // fs.protected_regular restrictions; no ownership or system setting is
-    // changed outside this uniquely named temporary test file.
+    ScopedFd raw(create_lock(path));
+    CHECK(raw.get() >= 0);
+    // A privileged daemon must not adopt another user's pre-created inode.
+    // Only the inode in this mkdtemp-created private directory is changed.
     if (::geteuid() == 0) {
-        const int raw = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-        check(raw >= 0, "open temporary inode for ownership test");
-        check(::fchown(raw, 65534, 65534) == 0,
-              "set temporary lock owner for root/non-root split test");
-        (void)::close(raw);
+        CHECK(::fchown(raw.get(), 65534, 65534) == 0);
+        CHECK(SerialEndpointLease::acquire_identity(endpoint, kIdentity).error() ==
+              Error::INVALID_ARGUMENT);
+        CHECK(::fchown(raw.get(), 0, 0) == 0);
     }
-    const int reopened = asicen::acquire_enclosure_lock(path.c_str());
-    check(reopened >= 0, "existing regular lock is opened without O_CREAT");
-    check(::close(reopened) == 0, "release reopened test lock");
-    check(::lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode),
-          "releasing flock keeps the existing lock inode");
-    check(::unlink(path.c_str()) == 0, "remove only the unique test artifact");
+    CHECK(raw.close() == 0);
+    auto reopened = SerialEndpointLease::acquire_identity(endpoint, kIdentity);
+    CHECK(reopened && reopened.value().valid());
+    reopened.value().close();
+    CHECK(::lstat(path.c_str(), &status) != 0);
+
+    ScopedFd invalid_mode(create_lock(path));
+    CHECK(invalid_mode.get() >= 0);
+    CHECK(invalid_mode.close() == 0);
+    CHECK(::chmod(path.c_str(), 0666) == 0);
+    CHECK(SerialEndpointLease::acquire_identity(endpoint, kIdentity).error() ==
+          Error::INVALID_ARGUMENT);
+    CHECK(::chmod(path.c_str(), 0600) == 0);
+    const std::string alias = path + "-alias";
+    CHECK(::link(path.c_str(), alias.c_str()) == 0);
+    CHECK(SerialEndpointLease::acquire_identity(endpoint, kIdentity).error() ==
+          Error::INVALID_ARGUMENT);
+    CHECK(::unlink(alias.c_str()) == 0);
+    CHECK(::lstat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode));
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::rmdir(directory.path().c_str()) == 0);
+    return true;
 }
 
-void symlink_and_nonregular_paths_are_rejected() {
-    const std::string base = "/tmp/asicen-lock-test-" + std::to_string(::getpid());
-    const std::string target = base + "-target";
-    const std::string link = base + "-link";
-    const std::string directory = base + "-directory";
-    (void)::unlink(target.c_str());
-    (void)::unlink(link.c_str());
-    (void)::rmdir(directory.c_str());
-    const int fd = ::open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    check(fd >= 0, "create temporary symlink target");
-    (void)::close(fd);
-    check(::symlink(target.c_str(), link.c_str()) == 0,
-          "create temporary symlink lock path");
-    check(asicen::acquire_enclosure_lock(link.c_str()) < 0,
-          "symlink lock path is rejected");
-    check(::mkdir(directory.c_str(), 0700) == 0, "create temporary directory path");
-    check(asicen::acquire_enclosure_lock(directory.c_str()) < 0,
-          "non-regular lock path is rejected");
-    check(::unlink(link.c_str()) == 0 && ::unlink(target.c_str()) == 0 &&
-              ::rmdir(directory.c_str()) == 0,
-          "remove unique non-regular test artifacts");
+bool symlink_and_nonregular_paths_are_rejected()
+{
+    TemporaryDirectory directory;
+    CHECK(directory.valid());
+    const std::string target = directory.path() + "/target";
+    const std::string path = directory.path() + "/.asicen-userland-usb-1-2.lock";
+    const EndpointConfig endpoint{directory.path().c_str(), "test", kControlEndpointName};
+    ScopedFd raw(create_lock(target));
+    CHECK(raw.get() >= 0);
+    CHECK(raw.close() == 0);
+    CHECK(::symlink(target.c_str(), path.c_str()) == 0);
+    CHECK(!SerialEndpointLease::acquire_identity(endpoint, kIdentity));
+    struct stat status {};
+    CHECK(::lstat(target.c_str(), &status) == 0 && S_ISREG(status.st_mode));
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::mkdir(path.c_str(), 0700) == 0);
+    CHECK(!SerialEndpointLease::acquire_identity(endpoint, kIdentity));
+    CHECK(::unlink(target.c_str()) == 0 && ::rmdir(path.c_str()) == 0);
+    CHECK(::rmdir(directory.path().c_str()) == 0);
+    return true;
 }
-}  // namespace
 
-int main() {
-    regular_lock_is_created_exclusively_and_existing_inode_reopens();
-    symlink_and_nonregular_paths_are_rejected();
-    std::cout << "enclosure lock tests passed\n";
+} // namespace
+
+int main()
+{
+    if (!regular_lock_is_created_exclusively_and_existing_inode_reopens() ||
+        !symlink_and_nonregular_paths_are_rejected()) {
+        return 1;
+    }
+    std::puts("enclosure lock tests passed (shared endpoint lease)");
     return 0;
 }

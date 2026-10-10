@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_PROTOCOL_H
+#define ASICEN_USERLAND_PROTOCOL_H
 
 #include <array>
 #include <cstddef>
@@ -46,6 +47,9 @@ struct ControlTransfer {
     std::uint16_t length;
     Direction direction;
     std::uint16_t timeout_ms;
+    // Host-side checked-builder result, never part of the USB setup packet.
+    // Invalid inputs must be rejected before any transport operation.
+    bool valid = true;
 };
 
 constexpr std::uint8_t kVendorOut = 0x40;
@@ -62,14 +66,14 @@ constexpr unsigned long kIoctlStreamRead = 0x104;
 constexpr std::uint8_t kStreamLaneCount = 2;
 constexpr std::uint8_t kBulkEndpointLane0 = 0x81;
 constexpr std::uint8_t kBulkEndpointLane1 = 0x82;
-constexpr std::uint8_t bulk_endpoint_for_local(std::uint8_t local) noexcept {
-    return local == 0U ? kBulkEndpointLane0
-         : local == 1U ? kBulkEndpointLane1 : 0U;
+constexpr std::uint8_t bulk_endpoint_for_local(std::uint8_t local) noexcept
+{
+    return local == 0U ? kBulkEndpointLane0 : local == 1U ? kBulkEndpointLane1 : 0U;
 }
 constexpr std::size_t kStreamUnitBytes = 512;
 constexpr std::size_t kTsPacketBytes = 188;
 constexpr std::size_t kMaxUserspaceStreamRead = kTsPacketBytes * 1024;
-constexpr std::uint64_t kDefaultStreamRingUnits = 0x24b8;  // 9400 * 512 bytes
+constexpr std::uint64_t kDefaultStreamRingUnits = 0x24b8; // 9400 * 512 bytes
 constexpr std::uint64_t kDefaultBulkTransferCount = 4;
 
 constexpr std::size_t kCustomerInfoSize = 58;
@@ -91,21 +95,17 @@ std::uint8_t bm_request_type(Direction direction);
 std::uint8_t bulk_endpoint_for_lane(std::uint8_t lane);
 std::uint16_t setup_word(std::uint8_t low, std::uint8_t high);
 
-ControlTransfer make_i2c_read(std::uint8_t slave,
-                              std::uint8_t reg,
-                              std::uint16_t data_length,
-                              std::uint8_t mode,
-                              std::uint16_t timeout_ms = 1000);
+ControlTransfer make_i2c_read(std::uint8_t slave, std::uint8_t reg, std::uint16_t data_length,
+                              std::uint8_t mode, std::uint16_t timeout_ms = 1000);
 
-ControlTransfer make_i2c_read_no_wait(std::uint8_t slave,
-                                      std::uint16_t data_length,
+ControlTransfer make_i2c_read_no_wait(std::uint8_t slave, std::uint16_t data_length,
                                       std::uint16_t timeout_ms = 1000);
 
-bool parse_status_response(const std::uint8_t* response,
-                           std::size_t response_size,
-                           std::uint8_t* output,
-                           std::size_t output_size);
+bool parse_status_response(const std::uint8_t* response, std::size_t response_size,
+                           std::uint8_t* output, std::size_t output_size);
 
 bool parse_customer_info(const std::uint8_t* data, std::size_t size, CustomerInfo* out);
 
-}  // namespace asicen
+} // namespace asicen
+
+#endif // ASICEN_USERLAND_PROTOCOL_H

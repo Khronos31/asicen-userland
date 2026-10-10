@@ -7,6 +7,7 @@ libusb_init, or any USB access.
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 build = pathlib.Path(sys.argv[1])
 
@@ -48,5 +49,16 @@ rejects('--usb-path', '1:256')
 rejects('--fd', 'not-a-number')
 rejects('--fd', '-1')
 rejects('--fd', '5', '--fd', '5')
+rejects('--socket', '/unused')
+
+with tempfile.TemporaryDirectory() as directory:
+    path = pathlib.Path(directory) / 'invalid-product-firmware.bin'
+    path.write_bytes(bytes(16384))
+    for candidate, expected in ((path, 10), (path.with_name('missing.bin'), 3)):
+        result = run('--usb-path', '1:1', '--instance', 'preflight',
+                     '--model', 'w3u3', '--firmware', str(candidate))
+        check(result.returncode == expected, result.stderr)
+        check('libusb_init' not in result.stderr and 'enclosure identity' not in result.stderr,
+              'rejected product firmware must not reach USB access')
 
 print('fd CLI checks passed (no hardware access)')

@@ -46,10 +46,50 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
     try:
         wait_socket(endpoint, daemon)
 
+        # Mock instances represent independent synthetic enclosures. A shared
+        # runtime root must not turn their endpoint ownership into one global
+        # hardware lock.
+        independent_log = open(root / "independent.log", "wb")
+        logs.append(independent_log)
+        independent = subprocess.Popen(
+            [str(DAEMON), "--runtime-dir", str(runtime), "--instance", "independent"],
+            stdout=subprocess.DEVNULL, stderr=independent_log)
+        children.append(independent)
+        independent_endpoint = runtime / "asicen-userland" / "independent" / "control.sock"
+        wait_socket(independent_endpoint, independent)
+        independent.send_signal(signal.SIGHUP)
+        assert independent.wait(timeout=2) == 0
+        assert not independent_endpoint.exists()
+        assert daemon.poll() is None
+
+        # The obsolete 24-byte protocol is no longer a second command mode.
+        # Reject its selector even when leading, without creating any path.
+        obsolete_endpoint = root / "obsolete.sock"
+        for command in (DAEMON, TS):
+            obsolete = run(str(command), "--socket", str(obsolete_endpoint),
+                           capture_output=True, text=True)
+            assert obsolete.returncode == 2, obsolete.stderr
+            assert "argument error:" in obsolete.stderr, obsolete.stderr
+            assert not obsolete_endpoint.exists()
+
+        # An obsolete selector in an option value is also a usage error.
+        wrong_dispatch = run(str(TS), "--output", "--socket", "--help",
+                             capture_output=True, text=True)
+        assert wrong_dispatch.returncode == 2
+        assert "argument error:" in wrong_dispatch.stderr, wrong_dispatch.stderr
+        wrong_daemon_dispatch = run(str(DAEMON), "--runtime-dir", "--socket",
+                                    "--instance", "test", capture_output=True, text=True)
+        assert wrong_daemon_dispatch.returncode == 2
+        assert "argument error:" in wrong_daemon_dispatch.stderr, wrong_daemon_dispatch.stderr
+
+        ctl_help = run(str(CTL), "--help", capture_output=True, text=True)
+        assert ctl_help.returncode == 0 and "[--group]" in ctl_help.stdout
+
         listing = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                       instance, "list", capture_output=True, text=True)
         assert listing.returncode == 0, listing.stderr
-        assert "serial=null" in listing.stdout and "backend=mock-only" in listing.stdout
+        assert listing.stdout.startswith("serial= "), listing.stdout
+        assert "backend=mock-only" not in listing.stdout, listing.stdout
         expected = ["receiver=0 device=1 local=0 system=ISDB-S",
                     "receiver=1 device=1 local=1 system=ISDB-T",
                     "receiver=2 device=2 local=0 system=ISDB-S",
@@ -118,14 +158,14 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
         assert duplicate.returncode != 0
         assert endpoint.is_socket(), "duplicate daemon removed the live endpoint"
 
-        # The legacy research mode must also fail safely on the owned path.
+        # The rejected legacy selector cannot remove an owned product path.
         legacy = run(str(DAEMON), "--socket", str(endpoint),
                      capture_output=True, timeout=3)
-        assert legacy.returncode != 0
-        assert endpoint.is_socket(), "research daemon unlinked product endpoint"
+        assert legacy.returncode == 2
+        assert endpoint.is_socket(), "rejected legacy selector unlinked product endpoint"
         still_live = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                          instance, "list", capture_output=True, text=True)
-        assert still_live.returncode == 0 and "serial=null" in still_live.stdout
+        assert still_live.returncode == 0 and still_live.stdout.startswith("serial= ")
 
         # Closing a stream consumer must not wedge either client or daemon.
         consumer = subprocess.Popen(
@@ -168,10 +208,11 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
             slow_consumer.wait()
         sock.close()
 
-        research_socket = root / "research.sock"
+        research_instance = "partial-request"
+        research_socket = runtime / "asicen-userland" / research_instance / "control.sock"
         research_log = open(root / "research.log", "wb")
         research = subprocess.Popen(
-            [str(DAEMON), "--socket", str(research_socket)],
+            [str(DAEMON), "--runtime-dir", str(runtime), "--instance", research_instance],
             stdout=subprocess.DEVNULL, stderr=research_log)
         children.append(research)
         logs.append(research_log)
@@ -187,17 +228,19 @@ with tempfile.TemporaryDirectory(prefix="asicen-cli-") as temp:
         research_log.close()
         assert not research_socket.exists()
 
-        research_socket = root / "research-slow.sock"
+        research_instance = "blocked-output"
+        research_socket = runtime / "asicen-userland" / research_instance / "control.sock"
         research_log = open(root / "research-slow.log", "wb")
         research = subprocess.Popen(
-            [str(DAEMON), "--socket", str(research_socket)],
+            [str(DAEMON), "--runtime-dir", str(runtime), "--instance", research_instance],
             stdout=subprocess.DEVNULL, stderr=research_log)
         children.append(research)
         logs.append(research_log)
         wait_socket(research_socket, research)
         slow_research_client = subprocess.Popen(
-            [str(TS), "--socket", str(research_socket), "--receiver", "1",
-             "--packet-count", "100000"], stdout=subprocess.PIPE,
+            [str(TS), "--runtime-dir", str(runtime), "--instance", research_instance,
+             "--receiver", "1", "--channel", "T27", "--packet-count", "100000",
+             "--output", "-"], stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL)
         children.append(slow_research_client)
         time.sleep(0.1)
