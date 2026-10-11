@@ -5,9 +5,12 @@ px4-userland `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
 This is not a release/support claim.
 
 Release-procedure change (2026-10-11): share PX4's release verification and
-publication workflow and matrix/record structure while preserving ASICEN's
+publication implementation and matrix/record structure while preserving ASICEN's
 existing hardware acceptance, fixed 0.1.0 soak decisions, firmware policy and
-Windows distribution exclusion. This change does not authorize a release or
+Windows distribution exclusion. For 0.1.0, embed the reviewed GPL-2.0-only
+automation locally with recorded provenance; do not wait for PX4's next
+WinSCard release. A future external dependency must use the full commit SHA
+resolved from an official PX4 release tag. This change does not authorize a release or
 complete a hardware gate. The pinned code-parity reference above is unchanged.
 
 ## Objective
@@ -105,8 +108,13 @@ Formal Windows support is planned for 0.2.x after WinSCard support is ready.
 ### Release preparation and publication
 
 `build_userland.yml` remains a candidate-producing workflow: it does not create
-tags or GitHub Releases. The separate `release_tag.yml` calls PX4's shared
-`release_reusable.yml` and helper implementation at a fixed full commit SHA.
+tags or GitHub Releases. The separate `release_tag.yml` calls the locally
+embedded `release_reusable.yml` from the same ASICEN tag commit. Both helper
+checkouts are bound to that exact full commit SHA; an unrelated repository or
+mismatched SHA is rejected. No PX4 checkout or cross-repository workflow call
+is needed for 0.1.0. The source, license, local adaptations and later migration
+to a released PX4 tag's full commit SHA are recorded in
+`docs/release-automation-provenance.md`.
 It is triggered only by a version tag push after the user's explicit
 "tag + release" request. No extra GitHub Environment approval is added.
 

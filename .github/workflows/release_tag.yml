@@ -19,7 +19,9 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: Khronos31/px4-userland/.github/workflows/release_reusable.yml@b4635226082161ce09f811b1571c9dd25f40cf03
+    # Temporary local embedding for 0.1.0; provenance and replacement policy:
+    # docs/release-automation-provenance.md.
+    uses: ./.github/workflows/release_reusable.yml
     with:
       product: asicen-userland
-      verifier-ref: b4635226082161ce09f811b1571c9dd25f40cf03
+      verifier-ref: ${{ github.sha }}

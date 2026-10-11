@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-2.0-only
+name: Publish approved Stable tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+# Serialize all Stable publications, including different versions competing for Latest.
+concurrency:
+  group: stable-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'Khronos31/px4-userland' && github.event.deleted == false
+    # Reusable workflow jobs reduce this ceiling: verification has read-only access.
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release_reusable.yml
+    with:
+      product: px4-userland
+      verifier-ref: ${{ github.sha }}

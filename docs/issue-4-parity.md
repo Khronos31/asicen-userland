@@ -19,7 +19,7 @@
 
 ### リリース手順の追加整合（2026-10-11）
 
-Issue #4 / PR #5 後の別作業として、PX4 [Issue #55](https://github.com/Khronos31/px4-userland/issues/55) の公開自動化を共有する。`release_tag.yml` は PX4 の共通 workflow/helper を full commit SHA に固定して呼び、共通手順を `docs/releasing.md`、matrix・候補/run/hash/証拠の構造を `docs/release-record.md` に揃える。上記の C++ 比較基準・import は変更しない。
+Issue #4 / PR #5 後の別作業として、PX4 [Issue #55](https://github.com/Khronos31/px4-userland/issues/55) の公開自動化を共有する。0.1.0 ではレビュー済み publisher/verifier・テストを出典と GPL-2.0-only 表示付きで一時的に内包し、`release_tag.yml` は同じ ASICEN tag commit のローカル workflow/helper を使用する。ASICEN 0.1.0 は PX4 の次回 WinSCard リリースを待たず、その後に正式公開された PX4 tag の full commit SHA を確認して外部依存へ切り替える。取得元・hash・最小差分と切替条件は `docs/release-automation-provenance.md` に記録する。共通手順を `docs/releasing.md`、matrix・候補/run/hash/証拠の構造を `docs/release-record.md` に揃え、上記の C++ 比較基準・import は変更しない。
 
 ノートは必要試験後の明示的な作成依頼で `release-notes/vX.Y.Z.md` に書き、別の「タグ＋リリース」依頼を公開の開始条件とする。追加の Environment 手動承認は設けない。自動照合は候補2runの再現性、候補/tag payload、Draft/公開後の再取得を扱い、実機・物理操作・利用者判断は自動認定しない。過去の実測、8 binary の配布、Windows 0.1.0 除外、firmware の binary 同梱/source 除外と未解決の権利、ASICEN 0.1.0 の固定 soak/LNB/全チャンネル条件を保持する。
 
