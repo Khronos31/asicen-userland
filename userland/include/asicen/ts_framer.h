@@ -10,7 +10,7 @@
 namespace asicen {
 
 constexpr std::size_t kMpegTsPacketSize = 188;
-constexpr std::size_t kTsSyncProbePackets = 4;
+constexpr std::size_t kTsSyncProbePackets = 8;
 
 enum class TransportMode : std::uint8_t {
     Plain = 0xff,
