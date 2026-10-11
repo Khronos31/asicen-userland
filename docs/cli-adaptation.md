@@ -191,10 +191,15 @@ to the named revision. The local `tests/imported_tests_main.cpp` only calls
 those test entry points; it does not edit or weaken their expectations.
 `px4_portable_reference` builds the reference behavior without product profile
 defines. `asicen_px4_mock` builds the same service sources with the local
-mapping and magic. Product targets compile the local `userland/tools/asicend.cpp`,
-`asicend_research.cpp`, `asicenctl.cpp`, `asicen_ts.cpp`,
-`asicen_ts_research.cpp`, and `asicen_ts_portable.cpp`, plus imported
-`px4_ts_core.cpp`, `px4_ts_posix.cpp`, and formatting code as appropriate.
+mapping and magic. The `asicend` product target compiles
+`userland/tools/asicend.cpp`, adding `userland/tools/asicend_hardware.cpp` when
+libusb is enabled. `asicenctl` compiles `userland/tools/asicenctl.cpp`.
+`asicen-ts` compiles `userland/tools/asicen_ts.cpp` on POSIX or
+`userland/tools/asicen_ts_windows.cpp` on Windows, with imported
+`px4_ts_core.cpp` and the corresponding platform support; the commands also
+use imported signal and formatting code as appropriate. The separate UNIX
+offline target `asicend-mock` compiles `userland/tools/asicend_mock.cpp` when
+tools or tests are enabled and is not part of the distributed product.
 
 The copied `src/ipc.cpp`, `src/posix_ipc.cpp`, `src/control_server.cpp`,
 `src/control_workers.cpp`, and `include/px4/tuner_service.h` carry the product

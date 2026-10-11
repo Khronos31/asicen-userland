@@ -38,7 +38,8 @@ revision `1a1485d0c3e972e0a47be907edb67949564aa9a7` under GPL-2.0-only.
 Imported files retain their SPDX notices; its license is reproduced in
 `third_party/px4-userland/LICENSE`. The file inventory and local changes are
 recorded in [docs/cli-adaptation.md](docs/cli-adaptation.md). The adapted CLI
-entry points `asicenctl.cpp` and `asicen_ts_portable.cpp` retain that license.
+entry points `userland/tools/asicenctl.cpp`, `userland/tools/asicen_ts.cpp`,
+and `userland/tools/asicen_ts_windows.cpp` retain that GPL-2.0-only license.
 The combined CLI executables therefore use GPL version2; existing
 GPL-2.0-or-later source notices remain unchanged. No IT930x hardware backend
 is linked into the ASICEN commands.

@@ -118,11 +118,12 @@ remain useful development milestones, not a replacement for this contract.
 4. CLI: add daemon/control/TS commands with a written px4 CLI comparison;
    verify argument validation, finite capture, binary-only stdout, busy leases,
    signal/consumer disconnect cleanup, and failure exit codes offline. Preserve
-   the existing research tests and diagnostic probe entry point.
+   the existing research test coverage and diagnostic probe entry point.
    Baseline command: `cmake -S . -B build -DASICEN_ENABLE_LIBUSB=ON`,
    `cmake --build build --parallel 2`, and
    `ctest --test-dir build --output-on-failure`. Add meaningful error-boundary
-   coverage without modifying existing research tests.
+   coverage while preserving or strengthening existing research checks through
+   migration to the canonical contracts.
 5. Decode: identify a usable PC/SC reader without disrupting existing services;
    run recisdb against the captured sample, require success and verify clear
    elementary-stream decoding. User confirmed terrestrial/satellite antennas
@@ -146,7 +147,9 @@ remain useful development milestones, not a replacement for this contract.
   image as covered by the product's open-source license or infer permission
   to add other images. This records the current tree, superseding the older
   outside-the-repository loader description.
-- Do not change existing tests or adopt kernel modules/legacy ioctl devices.
+- Preserve or strengthen existing test coverage when migrating tests to the
+  canonical contracts. Do not weaken expectations, fixtures, mocks, or skips
+  merely to make failures pass. Do not adopt kernel modules/legacy ioctl devices.
 - LNB electrical testing is deferred until measurement with a physical tester.
   The 2026-10-09 LNB request authorizes implementation and offline regression
   tests; it does not authorize physical power tests. Hardware work, when

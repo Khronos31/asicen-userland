@@ -159,13 +159,13 @@
 
 ## 検証結果
 
-- Linux の libusb ON・PC/SC IFD ON・診断ツール ON・全テストのビルド成功。ローカル CTest は 71 件中 61 件成功、10 件が下記の実行環境制限で失敗。合格に読み替えたり skip を追加したりしていない。
-- 制限対象: `px4-portable-tests`、`px4-pcsc-ifd-tests`、`asicen-card-only-service-tests`、`asicen-libusb-fd-tests`、`asicen-hardware-ipc-integration-tests`、`asicen-product-shutdown-tests`、`asicen-product-worker-routing-tests`、`asicen-product-cli-integration`、`asicen-mock-integration`、`asicen-ifd-bundle-smoke`。この実行環境では AF_UNIX socket 作成が EPERM、native libusb context 初期化も失敗する。未変更の起点にも同じ種類の失敗があり、別途許可された実行でも制約は同じだった。
+- Linux の libusb ON・PC/SC IFD ON・診断ツール ON・全テストのビルド成功。最新のローカル CTest は 71 件中 62 件成功、9 件が下記の実行環境制限で失敗。合格に読み替えたり skip を追加したりしていない。`asicen-libusb-fd-tests` は no-discovery 初期化への修正後に成功した。
+- 制限対象: `px4-portable-tests`、`px4-pcsc-ifd-tests`、`asicen-card-only-service-tests`、`asicen-hardware-ipc-integration-tests`、`asicen-product-shutdown-tests`、`asicen-product-worker-routing-tests`、`asicen-product-cli-integration`、`asicen-mock-integration`、`asicen-ifd-bundle-smoke`。この sandbox では AF_UNIX socket 作成が EPERM となる。未変更の起点にも同じ種類の socket 失敗があり、別途許可された実行でも制約は同じだった。
 - libusb/IFD/tests/tools OFF の最小製品ビルド成功。Windows は固定 LLVM-MinGW と static libusb で製品 3 コマンドおよび offline test 実行ファイル群を cross-build。Windows 上での実行合格とは区別する。
 - packaging suite、Termux signal/cleanup、workflow、Fedora/mdev、report の模擬試験を通過。static/source 25＋macOS 5＋IFD allowlist 8 の配布回帰を通過。Windows の CI 用 ZIP は real PE の import/static-libusb/firmware/license/checksum と deterministic 再生成を監査した。
 - Logger/MockTransport、nonce、firmware、codec、IFD capability、TS parser、libusb acquisition/lifetime、stream/framer、diagnostic deadline/final event、fixture failure cleanup を個別に再検証。実機受信を伴わない。
 - SDK に依存しない歴史的 oracle 3 本の構文検査と validator self-test を通過。`official-trace-harness.cpp` は vendor `Data_define.h` がこの環境にないため全体compile未確認。ベンダーコードは実行していない。
-- Git の正確な commit からの対応ソース export と各 OS/ABI の CI 結果は PR で報告する。未commitの作業ツリーを既存 HEAD の成果物として偽装しない。過去の実機PASSを変更後バイナリへ転用しない。
+- `0a7fac276ff2761f0f1d293b9c05beed7d5c0aa2` の [最終 CI run 38095580383](https://github.com/Khronos31/asicen-userland/actions/runs/38095580383) は全 20 ジョブ成功。対応ソースは正確な Git commit から export し、未commitの作業ツリーを既存 HEAD の成果物として偽装しない。CI の成功や過去の実機PASSを変更後バイナリの実機検証へ読み替えない。
 
 ## 初回 CI で確認したことと修正
 
