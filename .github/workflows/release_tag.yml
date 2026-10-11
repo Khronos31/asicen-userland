@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-only
+name: Publish approved Stable tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+concurrency:
+  group: stable-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'Khronos31/asicen-userland' && github.event.deleted == false
+    # The shared verification job reduces this ceiling to read-only permissions.
+    permissions:
+      contents: write
+      actions: read
+    # Temporary local embedding for 0.1.0; provenance and replacement policy:
+    # docs/release-automation-provenance.md.
+    uses: ./.github/workflows/release_reusable.yml
+    with:
+      product: asicen-userland
+      verifier-ref: ${{ github.sha }}

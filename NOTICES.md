@@ -9,6 +9,11 @@ specific:
 
 - `third_party/px4-userland/` is GPL-2.0-only, from px4-userland `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
   Local changes are marked in the modified files and in `UPSTREAM.md`.
+- The embedded release publisher/verifier, tests and adapted workflows are
+  GPL-2.0-only from px4-userland `b4635226082161ce09f811b1571c9dd25f40cf03`.
+  Their SPDX notices remain intact. The exact upstream license is preserved in
+  `third_party/release-automation/LICENSE`; the file inventory, origin hashes
+  and local adaptations are in [release automation provenance](docs/release-automation-provenance.md).
 - The FC0012 tuner implementation is GPL-2.0-or-later.
 - `userland/src/v2_frontend.cpp` and `userland/src/v2_nmi.cpp` are the
   GPL-2.0-only adaptation described below. Upstream did not state a version.

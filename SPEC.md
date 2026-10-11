@@ -1,8 +1,17 @@
 # ASICEN userland development contract
 
-Status: acceptance plan, updated 2026-10-10 for Issue #4 parity against
+Status: acceptance plan, updated 2026-10-11 for Issue #4 parity against
 px4-userland `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
 This is not a release/support claim.
+
+Release-procedure change (2026-10-11): share PX4's release verification and
+publication implementation and matrix/record structure while preserving ASICEN's
+existing hardware acceptance, fixed 0.1.0 soak decisions, firmware policy and
+Windows distribution exclusion. For 0.1.0, embed the reviewed GPL-2.0-only
+automation locally with recorded provenance; do not wait for PX4's next
+WinSCard release. A future external dependency must use the full commit SHA
+resolved from an official PX4 release tag. This change does not authorize a release or
+complete a hardware gate. The pinned code-parity reference above is unchanged.
 
 ## Objective
 
@@ -95,6 +104,48 @@ Formal Windows support is planned for 0.2.x after WinSCard support is ready.
   or inferred from Linux x86_64 results. The user's later 2026-10-09 instruction
   authorizes public development source before 0.1.0; it does not waive these
   binary-release acceptance requirements.
+
+### Release preparation and publication
+
+`build_userland.yml` remains a candidate-producing workflow: it does not create
+tags or GitHub Releases. The separate `release_tag.yml` calls the locally
+embedded `release_reusable.yml` from the same ASICEN tag commit. Both helper
+checkouts are bound to that exact full commit SHA; an unrelated repository or
+mismatched SHA is rejected. No PX4 checkout or cross-repository workflow call
+is needed for 0.1.0. The source, license, local adaptations and later migration
+to a released PX4 tag's full commit SHA are recorded in
+`docs/release-automation-provenance.md`.
+It is triggered only by a version tag push after the user's explicit
+"tag + release" request. No extra GitHub Environment approval is added.
+
+Complete the required hardware/specification tests and reproducibility check
+before writing release notes, and write them only after the user's explicit
+request. Commit the user-facing Markdown to `release-notes/vX.Y.Z.md` and the
+candidate/run/hash/evidence record to the matching `.json` sidecar. Before the
+candidate is frozen, these two files contain only invalid pending placeholders
+so the candidate/tag source inventory remains identical. A notes request or
+notes commit is not permission to tag or publish.
+
+The shared gate binds two independent successful candidate runs to their exact
+source SHA/tree, attempts, artifact identities, complete asset hashes, effective
+build inputs and runner images. Require byte-identical candidate bundles and
+the exact successful tag build's artifacts. Compare candidate/tag inventories,
+file types, modes, link targets and all non-document payload bytes. The existing
+ASICEN Linux `evidence/linux-static-build.json` and
+`evidence/linux-ifd-build.json` may change only their validated `source_ref`
+identity and corresponding manifest hashes/sizes/checksums; every other field
+and the referenced executable/library bytes must stay fixed. Firmware bytes
+are not a document or metadata exception.
+
+Human evidence must satisfy the existing eight-archive short/LNB matrix,
+representative full-channel regression and selected soak requirements in
+`docs/release-validation.md`. Machine-readable completion is an attestation,
+not proof that a person measured hardware or authorized physical operations.
+Keep historical failures and support boundaries. After verifying the Draft's
+exact ten assets and committed body, publish Stable/Latest and redownload and
+verify again. Stop on missing evidence, incomplete runs or conflicts; never
+replace an existing tag or conflicting published asset. Full procedures and
+record fields are in `docs/releasing.md` and `docs/release-record.md`.
 
 See [the compatibility audit](docs/compatibility-audit-2026-10-09.md) for the
 observed gaps and executable checks. The following reception increments
