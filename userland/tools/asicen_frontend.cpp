@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +26,7 @@
 #include <unistd.h>
 
 #include "asicen/device_profile.h"
+#include "asicen/diagnostic_probe.h"
 #include "asicen/frontend_sequence.h"
 #include "asicen/libusb_transport.h"
 #include "asicen/link_seed_diagnostic.h"
@@ -36,7 +39,8 @@ namespace {
 
 volatile std::sig_atomic_t g_stop = 0;
 
-void handle_signal(int) {
+void handle_signal(int)
+{
     g_stop = 1;
 }
 
@@ -59,9 +63,9 @@ struct Arguments {
     bool have_frequency = false;
     std::uint32_t frequency_khz = 0;
     bool have_output = false;
-    std::string output = "-";
+    std::string output;
     bool have_seconds = false;
-    unsigned seconds = 5;
+    unsigned seconds = 0;
     bool have_packet_count = false;
     std::uint64_t packet_count = 0;
     unsigned queue_depth = 1;
@@ -75,21 +79,18 @@ struct Arguments {
     unsigned timeout_ms = 20000;
     bool have_lock_timeout = false;
     unsigned lock_timeout_ms = 3000;
+    std::string error;
 };
 
-void usage(const char* argv0) {
-    std::cerr
+void usage(const char* argv0, std::ostream& output = std::cerr)
+{
+    output
         << "usage:\n"
-        << "  " << argv0
-        << " --device BUS:ADDRESS --port BUS-PORT power-on\n"
-        << "  " << argv0
-        << " --device BUS:ADDRESS --port BUS-PORT restore-sibling\n"
-        << "  " << argv0
-        << " --device BUS:ADDRESS --port BUS-PORT [--shared-demod] init\n"
-        << "  " << argv0
-        << " --device BUS:ADDRESS --port BUS-PORT --frequency-khz N tune\n"
-        << "  " << argv0
-        << " --device BUS:ADDRESS --port BUS-PORT --frequency-khz N lock\n"
+        << "  " << argv0 << " --device BUS:ADDRESS --port BUS-PORT power-on\n"
+        << "  " << argv0 << " --device BUS:ADDRESS --port BUS-PORT restore-sibling\n"
+        << "  " << argv0 << " --device BUS:ADDRESS --port BUS-PORT [--shared-demod] init\n"
+        << "  " << argv0 << " --device BUS:ADDRESS --port BUS-PORT --frequency-khz N tune\n"
+        << "  " << argv0 << " --device BUS:ADDRESS --port BUS-PORT --frequency-khz N lock\n"
         << "  " << argv0
         << " --device BUS:ADDRESS --port BUS-PORT --frequency-khz N [--shared-demod] terrestrial\n"
         << "  " << argv0
@@ -97,45 +98,50 @@ void usage(const char* argv0) {
         << "  " << argv0
         << " --device BUS:ADDRESS --port BUS-PORT --reg R [--local L] [--length N]"
            " demod-read\n"
+        << "  " << argv0 << " --device BUS:ADDRESS --port BUS-PORT [--local 1] gain-once\n"
         << "  " << argv0
-        << " --device BUS:ADDRESS --port BUS-PORT [--local 1] gain-once\n"
-        << "  " << argv0
-        << " --device BUS:ADDRESS --port BUS-PORT --reset-state 0|1 [--local L] [--output PATH|-]"
-           " [--seconds N] [--packet-count N] [--queue-depth 1|4] capture\n"
+        << " --device BUS:ADDRESS --port BUS-PORT --reset-state 0|1 [--local L] --output PATH"
+           " --seconds 1..30 [--packet-count N] [--queue-depth 1|4] capture\n"
         << "\n"
         << "options: --timeout-ms N (frontend setup deadline, default 20000)\n"
         << "         --lock-timeout-ms N (post-tune lock poll, default 3000)\n"
         << "         --reset-state 0|1 (required: fourth USB_FilterReset argument)\n"
         << "         --queue-depth 1|4 (capture only; default 1, 4 queues async reads before DSC)\n"
         << "         --filter-start (capture only; local 1 + queue depth 4, restore CF40)\n"
-        << "         --filter-repeat before|after (experimental A/B; requires --filter-start, local 1, reset 1, queue 4)\n"
-        << "         --queue-diagnostics (capture only; queue depth 4, bounded callback trace to stderr)\n"
-        << "         --link-seed-file PATH (experimental capture only; exact 16-byte owner-private file, mode 0600)\n"
+        << "         --filter-repeat before|after (experimental A/B; requires --filter-start, "
+           "local 1, reset 1, queue 4)\n"
+        << "         --queue-diagnostics (capture only; queue depth 4, bounded callback trace to "
+           "stderr)\n"
+        << "         --link-seed-file PATH (experimental capture only; exact 16-byte owner-private "
+           "file, mode 0600)\n"
         << "         gain-once (one source-recovered terrestrial FC0012 feedback step)\n"
-        << "         --shared-demod (init/terrestrial only; also initialize satellite demod over I2C)\n"
+        << "         --shared-demod (init/terrestrial only; also initialize satellite demod over "
+           "I2C)\n"
         << "\n"
+        << "Validated reception probes: " << argv0 << " frontend-probe --help or " << argv0
+        << " ts-probe --help\n"
         << "Explicit-target frontend diagnostics. Every write verifies the fresh\n"
         << "BUS:ADDRESS, expected USB port path, VID/PID and interface 0 exclusive\n"
         << "ownership first. No hub reset, kernel-driver detach, LNB20 clear or\n"
         << "DTV_Start replay is performed.\n";
 }
 
-bool parse_uint(const std::string& text, unsigned long long max,
-                unsigned long long* out) {
+bool parse_uint(const std::string& text, unsigned long long max, unsigned long long* out)
+{
     if (out == nullptr || text.empty()) {
         return false;
     }
-    errno = 0;
-    char* end = nullptr;
-    const unsigned long long parsed = std::strtoull(text.c_str(), &end, 0);
-    if (end == nullptr || *end != '\0' || errno != 0 || parsed > max) {
+    unsigned long long parsed = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || parsed > max) {
         return false;
     }
     *out = parsed;
     return true;
 }
 
-bool parse_u8(const std::string& text, std::uint8_t* out) {
+bool parse_u8(const std::string& text, std::uint8_t* out)
+{
     unsigned long long value = 0;
     if (!parse_uint(text, 255, &value)) {
         return false;
@@ -144,18 +150,22 @@ bool parse_u8(const std::string& text, std::uint8_t* out) {
     return true;
 }
 
-struct FileIdentity { dev_t device = 0; ino_t inode = 0; };
+struct FileIdentity {
+    dev_t device = 0;
+    ino_t inode = 0;
+};
 
-bool read_private_link_seed(const std::string& path,
-                            std::array<std::uint8_t, 16>* seed,
-                            FileIdentity* identity) {
-    if (seed == nullptr || path.empty() || path.front() != '/') return false;
+bool read_private_link_seed(const std::string& path, std::array<std::uint8_t, 16>* seed,
+                            FileIdentity* identity)
+{
+    if (seed == nullptr || path.empty() || path.front() != '/')
+        return false;
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    struct stat info {};
-    bool ok = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
-              info.st_uid == ::geteuid() && (info.st_mode & 0777) == 0600 &&
-              info.st_size == 16;
+    if (fd < 0)
+        return false;
+    struct stat info{};
+    bool ok = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == ::geteuid() &&
+              (info.st_mode & 0777) == 0600 && info.st_size == 16;
     if (ok && identity != nullptr) {
         identity->device = info.st_dev;
         identity->inode = info.st_ino;
@@ -163,7 +173,8 @@ bool read_private_link_seed(const std::string& path,
     std::size_t received = 0;
     while (ok && received < seed->size()) {
         const ssize_t rc = ::read(fd, seed->data() + received, seed->size() - received);
-        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0 && errno == EINTR)
+            continue;
         if (rc <= 0) {
             ok = false;
             break;
@@ -173,25 +184,33 @@ bool read_private_link_seed(const std::string& path,
     unsigned char extra = 0;
     if (ok) {
         ssize_t rc = -1;
-        do { rc = ::read(fd, &extra, 1); } while (rc < 0 && errno == EINTR);
+        do {
+            rc = ::read(fd, &extra, 1);
+        } while (rc < 0 && errno == EINTR);
         ok = rc == 0;
     }
-    ::close(fd);
-    if (!ok) std::fill(seed->begin(), seed->end(), 0);
+    if (::close(fd) != 0)
+        ok = false;
+    if (!ok)
+        std::fill(seed->begin(), seed->end(), 0);
     return ok;
 }
 
 struct SeedWiper {
     std::array<std::uint8_t, 16>* value;
-    ~SeedWiper() { if (value != nullptr) value->fill(0); }
+    ~SeedWiper()
+    {
+        if (value != nullptr)
+            value->fill(0);
+    }
 };
 
-const char* kCommands[] = {"power-on",     "restore-sibling", "init",
-                           "tune",         "lock",            "terrestrial",
-                           "demod-read",   "capture",         "stream-setup",
-                           "gain-once"};
+const char* kCommands[] = {"power-on",     "restore-sibling", "init",       "tune",
+                           "lock",         "terrestrial",     "demod-read", "capture",
+                           "stream-setup", "gain-once"};
 
-bool is_command(const std::string& value) {
+bool is_command(const std::string& value)
+{
     for (const char* command : kCommands) {
         if (value == command) {
             return true;
@@ -200,115 +219,195 @@ bool is_command(const std::string& value) {
     return false;
 }
 
-bool parse_arguments(int argc, char** argv, Arguments* out) {
+bool parse_arguments(int argc, char** argv, Arguments* out)
+{
+    if (out == nullptr || argc < 1 || argv == nullptr)
+        return false;
     for (int i = 1; i < argc; ++i) {
+        if (argv[i] == nullptr)
+            return false;
         const std::string arg = argv[i];
-        if (arg == "-h" || arg == "--help") {
+        if (arg == "--help") {
+            if (argc != 2) {
+                out->error = "--help cannot be combined with other arguments";
+                return false;
+            }
             out->help = true;
             return true;
         }
+        if (i + 1 < argc && argv[i + 1] == nullptr)
+            return false;
         if (arg == "--device") {
+            if (out->have_device) {
+                out->error = "duplicate --device";
+                return false;
+            }
             if (++i >= argc) {
                 return false;
             }
-            if (!asicen::parse_usb_location(argv[i], &out->bus, &out->address)) {
+            const std::string location(argv[i]);
+            const auto colon = location.find(':');
+            if (colon == std::string::npos || !parse_u8(location.substr(0, colon), &out->bus) ||
+                !parse_u8(location.substr(colon + 1), &out->address) || out->bus == 0 ||
+                out->address == 0) {
                 return false;
             }
             out->have_device = true;
         } else if (arg == "--port") {
+            if (out->have_port) {
+                out->error = "duplicate --port";
+                return false;
+            }
             if (++i >= argc || !asicen::parse_port_path(argv[i])) {
                 return false;
             }
             out->port = argv[i];
             out->have_port = true;
         } else if (arg == "--local") {
+            if (out->have_local) {
+                out->error = "duplicate --local";
+                return false;
+            }
             if (++i >= argc || !parse_u8(argv[i], &out->local) || out->local > 1) {
                 return false;
             }
             out->have_local = true;
         } else if (arg == "--reset-state") {
-            if (++i >= argc || !parse_u8(argv[i], &out->reset_state) ||
-                out->reset_state > 1) {
+            if (out->have_reset_state) {
+                out->error = "duplicate --reset-state";
+                return false;
+            }
+            if (++i >= argc || !parse_u8(argv[i], &out->reset_state) || out->reset_state > 1) {
                 return false;
             }
             out->have_reset_state = true;
         } else if (arg == "--reg") {
+            if (out->have_reg) {
+                out->error = "duplicate --reg";
+                return false;
+            }
             if (++i >= argc || !parse_u8(argv[i], &out->reg)) {
                 return false;
             }
             out->have_reg = true;
         } else if (arg == "--length") {
+            if (out->have_length) {
+                out->error = "duplicate --length";
+                return false;
+            }
             unsigned long long length = 0;
-            if (++i >= argc || !parse_uint(argv[i], 0xffff, &length) ||
-                length == 0) {
+            if (++i >= argc || !parse_uint(argv[i], 0xffff, &length) || length == 0) {
                 return false;
             }
             out->length = static_cast<std::uint16_t>(length);
             out->have_length = true;
         } else if (arg == "--frequency-khz") {
+            if (out->have_frequency) {
+                out->error = "duplicate --frequency-khz";
+                return false;
+            }
             unsigned long long frequency = 0;
-            if (++i >= argc || !parse_uint(argv[i], 0xffffffffu, &frequency) ||
-                frequency == 0) {
+            if (++i >= argc || !parse_uint(argv[i], 0xffffffffu, &frequency) || frequency == 0) {
                 return false;
             }
             out->frequency_khz = static_cast<std::uint32_t>(frequency);
             out->have_frequency = true;
         } else if (arg == "--output") {
-            if (++i >= argc) {
+            if (out->have_output) {
+                out->error = "duplicate --output";
+                return false;
+            }
+            if (++i >= argc || argv[i][0] == '\0') {
                 return false;
             }
             out->output = argv[i];
             out->have_output = true;
         } else if (arg == "--seconds") {
+            if (out->have_seconds) {
+                out->error = "duplicate --seconds";
+                return false;
+            }
             unsigned long long seconds = 0;
-            if (++i >= argc || !parse_uint(argv[i], 3600, &seconds) ||
-                seconds == 0) {
+            if (++i >= argc || !parse_uint(argv[i], 30, &seconds) || seconds == 0) {
                 return false;
             }
             out->seconds = static_cast<unsigned>(seconds);
             out->have_seconds = true;
         } else if (arg == "--packet-count") {
+            if (out->have_packet_count) {
+                out->error = "duplicate --packet-count";
+                return false;
+            }
             unsigned long long packets = 0;
-            if (++i >= argc || !parse_uint(argv[i], 1000000000ULL, &packets) ||
-                packets == 0) {
+            if (++i >= argc || !parse_uint(argv[i], 1000000000ULL, &packets) || packets == 0) {
                 return false;
             }
             out->packet_count = packets;
             out->have_packet_count = true;
         } else if (arg == "--queue-depth") {
+            if (out->have_queue_depth) {
+                out->error = "duplicate --queue-depth";
+                return false;
+            }
             unsigned long long depth = 0;
-            if (++i >= argc || !parse_uint(argv[i], 4, &depth) ||
-                (depth != 1 && depth != 4)) {
+            if (++i >= argc || !parse_uint(argv[i], 4, &depth) || (depth != 1 && depth != 4)) {
                 return false;
             }
             out->queue_depth = static_cast<unsigned>(depth);
             out->have_queue_depth = true;
         } else if (arg == "--filter-start") {
+            if (out->filter_start) {
+                out->error = "duplicate --filter-start";
+                return false;
+            }
             out->filter_start = true;
         } else if (arg == "--filter-repeat") {
-            if (++i >= argc || (std::string(argv[i]) != "before" &&
-                                std::string(argv[i]) != "after"))
+            if (!out->filter_repeat.empty()) {
+                out->error = "duplicate --filter-repeat";
+                return false;
+            }
+            if (++i >= argc ||
+                (std::string(argv[i]) != "before" && std::string(argv[i]) != "after"))
                 return false;
             out->filter_repeat = argv[i];
         } else if (arg == "--queue-diagnostics") {
+            if (out->queue_diagnostics) {
+                out->error = "duplicate --queue-diagnostics";
+                return false;
+            }
             out->queue_diagnostics = true;
         } else if (arg == "--link-seed-file") {
-            if (++i >= argc || argv[i][0] == '\0') return false;
+            if (!out->link_seed_file.empty()) {
+                out->error = "duplicate --link-seed-file";
+                return false;
+            }
+            if (++i >= argc || argv[i][0] == '\0')
+                return false;
             out->link_seed_file = argv[i];
         } else if (arg == "--shared-demod") {
+            if (out->shared_demod) {
+                out->error = "duplicate --shared-demod";
+                return false;
+            }
             out->shared_demod = true;
         } else if (arg == "--timeout-ms") {
+            if (out->have_timeout) {
+                out->error = "duplicate --timeout-ms";
+                return false;
+            }
             unsigned long long timeout = 0;
-            if (++i >= argc || !parse_uint(argv[i], 600000, &timeout) ||
-                timeout == 0) {
+            if (++i >= argc || !parse_uint(argv[i], 600000, &timeout) || timeout == 0) {
                 return false;
             }
             out->timeout_ms = static_cast<unsigned>(timeout);
             out->have_timeout = true;
         } else if (arg == "--lock-timeout-ms") {
+            if (out->have_lock_timeout) {
+                out->error = "duplicate --lock-timeout-ms";
+                return false;
+            }
             unsigned long long timeout = 0;
-            if (++i >= argc || !parse_uint(argv[i], 600000, &timeout) ||
-                timeout == 0) {
+            if (++i >= argc || !parse_uint(argv[i], 600000, &timeout) || timeout == 0) {
                 return false;
             }
             out->lock_timeout_ms = static_cast<unsigned>(timeout);
@@ -322,10 +421,47 @@ bool parse_arguments(int argc, char** argv, Arguments* out) {
             return false;
         }
     }
+    const bool capture = out->command == "capture";
+    const bool tune = out->command == "tune" || out->command == "terrestrial";
+    const bool frequency = tune || out->command == "lock";
+    const bool read = out->command == "demod-read";
+    const bool reset = capture || out->command == "stream-setup";
+    if (out->have_frequency && !frequency) {
+        out->error = "--frequency-khz is only valid for tune, lock or terrestrial";
+        return false;
+    }
+    if ((out->have_reg || out->have_length) && !read) {
+        out->error = "--reg and --length are only valid for demod-read";
+        return false;
+    }
+    if (out->have_reset_state && !reset) {
+        out->error = "--reset-state is only valid for capture or stream-setup";
+        return false;
+    }
+    if ((out->have_output || out->have_seconds || out->have_packet_count || out->have_queue_depth ||
+         out->filter_start || !out->filter_repeat.empty() || out->queue_diagnostics ||
+         !out->link_seed_file.empty()) &&
+        !capture) {
+        out->error = "capture options require capture";
+        return false;
+    }
+    if (capture && (!out->have_output || !out->have_seconds)) {
+        out->error = "capture requires --output PATH and --seconds 1..30";
+        return false;
+    }
+    if (out->have_lock_timeout && !tune) {
+        out->error = "--lock-timeout-ms is only valid for tune or terrestrial";
+        return false;
+    }
+    if (out->have_local && !frequency && !read && !reset && out->command != "gain-once") {
+        out->error = "--local is not applicable to this command";
+        return false;
+    }
     return true;
 }
 
-int remaining_ms(std::chrono::steady_clock::time_point deadline) {
+int remaining_ms(std::chrono::steady_clock::time_point deadline)
+{
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) {
         return 0;
@@ -334,7 +470,8 @@ int remaining_ms(std::chrono::steady_clock::time_point deadline) {
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
 }
 
-std::string port_path(libusb_device* device) {
+std::string port_path(libusb_device* device)
+{
     std::uint8_t ports[8]{};
     const int count = libusb_get_port_numbers(device, ports, sizeof(ports));
     if (count <= 0) {
@@ -352,15 +489,19 @@ std::string port_path(libusb_device* device) {
 }
 
 class LibusbFrontendTransport final : public asicen::FrontendTransport {
-public:
-    explicit LibusbFrontendTransport(asicen::LibusbDevice* device) : device_(device) {}
+  public:
+    explicit LibusbFrontendTransport(asicen::LibusbDevice* device) : device_(device)
+    {
+    }
 
-    void set_deadline(std::chrono::steady_clock::time_point deadline) {
+    void set_deadline(std::chrono::steady_clock::time_point deadline)
+    {
         deadline_ = deadline;
         deadline_active_ = true;
     }
 
-    int control(const asicen::ControlTransfer& transfer, unsigned char* data) override {
+    int control(const asicen::ControlTransfer& transfer, unsigned char* data) override
+    {
         asicen::ControlTransfer bounded = transfer;
         if (deadline_active_) {
             const int remaining = remaining_ms(deadline_);
@@ -368,8 +509,7 @@ public:
                 return LIBUSB_ERROR_TIMEOUT;
             }
             if (bounded.timeout_ms == 0 || bounded.timeout_ms > remaining) {
-                bounded.timeout_ms = static_cast<std::uint16_t>(
-                    std::min<int>(remaining, 0xffff));
+                bounded.timeout_ms = static_cast<std::uint16_t>(std::min<int>(remaining, 0xffff));
             }
         }
         const int rc = device_->control(bounded, data);
@@ -377,8 +517,8 @@ public:
         // no random-key/card/crypto material is ever transferred here.
         std::cerr << "xfer req=0x" << std::hex
                   << static_cast<unsigned>(static_cast<std::uint8_t>(bounded.request))
-                  << " value=0x" << bounded.value << " index=0x" << bounded.index
-                  << std::dec << " len=" << bounded.length
+                  << " value=0x" << bounded.value << " index=0x" << bounded.index << std::dec
+                  << " len=" << bounded.length
                   << " dir=" << (bounded.direction == asicen::Direction::In ? "in" : "out")
                   << " rc=" << rc;
         if (rc >= 1 && data != nullptr && bounded.direction == asicen::Direction::In) {
@@ -388,7 +528,8 @@ public:
         return rc;
     }
 
-    void delay_ms(unsigned ms) override {
+    void delay_ms(unsigned ms) override
+    {
         unsigned sleep_ms = ms;
         if (deadline_active_) {
             const int remaining = remaining_ms(deadline_);
@@ -400,64 +541,69 @@ public:
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
     }
 
-    bool cancelled() const override { return g_stop != 0; }
+    bool cancelled() const override
+    {
+        return g_stop != 0;
+    }
 
-    bool expired() const override {
+    bool expired() const override
+    {
         return deadline_active_ && std::chrono::steady_clock::now() >= deadline_;
     }
 
-private:
+  private:
     asicen::LibusbDevice* device_;
     bool deadline_active_ = false;
     std::chrono::steady_clock::time_point deadline_{};
 };
 
-asicen::FrontendPlan concat(asicen::FrontendPlan base, const asicen::FrontendPlan& extra) {
+asicen::FrontendPlan concat(asicen::FrontendPlan base, const asicen::FrontendPlan& extra)
+{
     base.insert(base.end(), extra.begin(), extra.end());
     return base;
 }
 
-asicen::FrontendPlan terrestrial_path_plan(std::uint32_t frequency_khz,
-                                           bool shared_demod) {
+asicen::FrontendPlan terrestrial_path_plan(std::uint32_t frequency_khz, bool shared_demod)
+{
     asicen::FrontendPlan plan = asicen::plan_startup_subset();
     plan = concat(plan, asicen::plan_safe_power_on());
-    plan = concat(plan, shared_demod
-                            ? asicen::plan_terrestrial_init_with_satellite_demod()
-                            : asicen::plan_terrestrial_init());
+    plan = concat(plan, shared_demod ? asicen::plan_terrestrial_init_with_satellite_demod()
+                                     : asicen::plan_terrestrial_init());
     plan = concat(plan, asicen::plan_terrestrial_tune_full(frequency_khz, 6));
     return plan;
 }
 
-const char* run_result_name(asicen::FrontendRunResult result) {
+const char* run_result_name(asicen::FrontendRunResult result)
+{
     switch (result) {
-        case asicen::FrontendRunResult::Completed:
-            return "completed";
-        case asicen::FrontendRunResult::FailedTransfer:
-            return "failed-transfer";
-        case asicen::FrontendRunResult::ShortTransfer:
-            return "short-transfer";
-        case asicen::FrontendRunResult::InvalidArgument:
-            return "invalid-argument";
-        case asicen::FrontendRunResult::Cancelled:
-            return "cancelled";
-        case asicen::FrontendRunResult::DeadlineExceeded:
-            return "deadline-exceeded";
+    case asicen::FrontendRunResult::Completed:
+        return "completed";
+    case asicen::FrontendRunResult::FailedTransfer:
+        return "failed-transfer";
+    case asicen::FrontendRunResult::ShortTransfer:
+        return "short-transfer";
+    case asicen::FrontendRunResult::InvalidArgument:
+        return "invalid-argument";
+    case asicen::FrontendRunResult::Cancelled:
+        return "cancelled";
+    case asicen::FrontendRunResult::DeadlineExceeded:
+        return "deadline-exceeded";
     }
     return "unknown";
 }
 
 int verify_target(asicen::LibusbDevice* device, const Arguments& args,
-                  const asicen::DeviceProfile** profile) {
+                  const asicen::DeviceProfile** profile)
+{
     libusb_device* raw = device->device();
     if (raw == nullptr) {
         std::cerr << "selected device is not available\n";
         return 1;
     }
     libusb_device_descriptor desc{};
-    const int desc_rc = libusb_get_device_descriptor(raw, &desc);
+    const int desc_rc = device->descriptor(&desc);
     if (desc_rc != 0) {
-        std::cerr << "libusb_get_device_descriptor: " << libusb_error_name(desc_rc)
-                  << '\n';
+        std::cerr << "libusb_get_device_descriptor: " << libusb_error_name(desc_rc) << '\n';
         return 1;
     }
     *profile = asicen::find_profile(desc.idVendor, desc.idProduct);
@@ -489,14 +635,14 @@ int verify_target(asicen::LibusbDevice* device, const Arguments& args,
     return 0;
 }
 
-int run_plan(asicen::LibusbDevice* device, const asicen::FrontendPlan& plan,
-             unsigned timeout_ms, std::uint8_t* last_read, bool* have_last_read) {
+int run_plan(asicen::LibusbDevice* device, const asicen::FrontendPlan& plan, unsigned timeout_ms,
+             std::uint8_t* last_read, bool* have_last_read)
+{
     LibusbFrontendTransport transport(device);
     transport.set_deadline(std::chrono::steady_clock::now() +
                            std::chrono::milliseconds(timeout_ms));
     asicen::FrontendRunReport report{};
-    const asicen::FrontendRunResult result =
-        asicen::run_frontend_plan(plan, &transport, &report);
+    const asicen::FrontendRunResult result = asicen::run_frontend_plan(plan, &transport, &report);
     std::cerr << "plan_ops=" << plan.size() << " completed=" << report.ops_completed
               << " result=" << run_result_name(result) << '\n';
     if (last_read != nullptr) {
@@ -512,11 +658,11 @@ int run_plan(asicen::LibusbDevice* device, const asicen::FrontendPlan& plan,
 }
 
 // Post-tune lock poll with its own wall-clock timeout.
-int poll_lock(asicen::LibusbDevice* device, std::uint32_t frequency_khz,
-              unsigned timeout_ms, bool* locked, std::uint8_t* last_byte) {
+int poll_lock(asicen::LibusbDevice* device, std::uint32_t frequency_khz, unsigned timeout_ms,
+              bool* locked, std::uint8_t* last_byte)
+{
     LibusbFrontendTransport transport(device);
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(timeout_ms);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     transport.set_deadline(deadline);
     *locked = false;
     while (true) {
@@ -558,22 +704,30 @@ int poll_lock(asicen::LibusbDevice* device, std::uint32_t frequency_khz,
 
 class LibusbCaptureBackend final : public asicen::CaptureBackend,
                                    public asicen::LinkSeedDiagnosticIo {
-public:
-    explicit LibusbCaptureBackend(asicen::LibusbDevice* device) : device_(device) {}
-    ~LibusbCaptureBackend() override { link_seed_.fill(0); }
+  public:
+    explicit LibusbCaptureBackend(asicen::LibusbDevice* device) : device_(device)
+    {
+    }
+    ~LibusbCaptureBackend() override
+    {
+        link_seed_.fill(0);
+    }
 
-    bool dsc_start(std::uint8_t local) override {
+    bool dsc_start(std::uint8_t local) override
+    {
         unsigned char status = 0;
         return device_->control(asicen::make_dsc_control(local, false), &status) == 1;
     }
 
-    bool dsc_stop(std::uint8_t local) override {
+    bool dsc_stop(std::uint8_t local) override
+    {
         unsigned char status = 0;
         return device_->control(asicen::make_dsc_control(local, true), &status) == 1;
     }
 
     asicen::CaptureIo bulk_read(std::uint8_t endpoint, unsigned char* data, int length,
-                                int* transferred, unsigned timeout_ms) override {
+                                int* transferred, unsigned timeout_ms) override
+    {
         const int rc = device_->bulk_read(endpoint, data, length, transferred, timeout_ms);
         if (rc == 0) {
             return asicen::CaptureIo::Ok;
@@ -584,46 +738,52 @@ public:
         return asicen::CaptureIo::Error;
     }
 
-    bool read_cf40(std::uint8_t local, std::uint8_t* value) override {
-        if (value == nullptr || local > 1) return false;
+    bool read_cf40(std::uint8_t local, std::uint8_t* value) override
+    {
+        if (value == nullptr || local > 1)
+            return false;
         unsigned char response[2]{};
         const int rc = device_->control(asicen::make_cf_read(local, 0x40, 1), response);
         return asicen::parse_cf40_read_response(rc, response, value);
     }
 
-    bool write_cf40(std::uint8_t local, std::uint8_t value) override {
-        if (local > 1) return false;
+    bool write_cf40(std::uint8_t local, std::uint8_t value) override
+    {
+        if (local > 1)
+            return false;
         asicen::ControlTransfer transfer{};
-        if (!asicen::make_cf_write(local, 0x40, &value, 1, &transfer)) return false;
+        if (!asicen::make_cf_write(local, 0x40, &value, 1, &transfer))
+            return false;
         unsigned char response[2]{};
         return asicen::cf40_write_response_complete(device_->control(transfer, response));
     }
 
-    bool read_cf_block(std::uint8_t local, std::uint8_t* data,
-                       std::size_t size) override {
+    bool read_cf_block(std::uint8_t local, std::uint8_t* data, std::size_t size) override
+    {
         if (local > 1 || data == nullptr || size != asicen::CaptureBackend::kCfBlockSize)
             return false;
         std::size_t offset = 0;
         while (offset < size) {
             const std::size_t chunk = std::min<std::size_t>(0x20, size - offset);
-            const auto transfer = asicen::make_cf_read(
-                local, static_cast<std::uint8_t>(offset),
-                static_cast<std::uint16_t>(chunk));
+            const auto transfer = asicen::make_cf_read(local, static_cast<std::uint8_t>(offset),
+                                                       static_cast<std::uint16_t>(chunk));
             std::vector<unsigned char> response(transfer.length);
             const int rc = device_->control(transfer, response.data());
-            if (rc != transfer.length) return false;
+            if (rc != transfer.length)
+                return false;
             std::copy_n(response.begin() + 1, chunk, data + offset);
             offset += chunk;
         }
         return true;
     }
 
-    bool write_cf_block(std::uint8_t local, const std::uint8_t* data,
-                        std::size_t size) override {
+    bool write_cf_block(std::uint8_t local, const std::uint8_t* data, std::size_t size) override
+    {
         if (local > 1 || data == nullptr || size != asicen::CaptureBackend::kCfBlockSize)
             return false;
         const auto plan = asicen::build_cf_block_write_plan(local, data, size);
-        if (plan.empty()) return false;
+        if (plan.empty())
+            return false;
         for (const auto& transfer : plan) {
             std::vector<unsigned char> response(transfer.length);
             const std::size_t chunk = transfer.length - 1U;
@@ -637,13 +797,15 @@ public:
     }
 
     bool terrestrial_locked(std::uint8_t local, bool* locked,
-                            std::chrono::steady_clock::time_point deadline) override {
-        if (local != 1 || locked == nullptr) return false;
+                            std::chrono::steady_clock::time_point deadline) override
+    {
+        if (local != 1 || locked == nullptr)
+            return false;
         LibusbFrontendTransport transport(device_);
         transport.set_deadline(deadline);
         asicen::FrontendRunReport report{};
-        const auto result = asicen::run_frontend_plan(
-            asicen::plan_terrestrial_lock_read(473142U), &transport, &report);
+        const auto result = asicen::run_frontend_plan(asicen::plan_terrestrial_lock_read(473142U),
+                                                      &transport, &report);
         if (result != asicen::FrontendRunResult::Completed || !report.have_last_read)
             return false;
         *locked = (report.last_read & 0x0fU) == 0x09U;
@@ -654,33 +816,36 @@ public:
     }
 
     bool filter_repeat_pulse(std::uint8_t local, std::uint8_t reset_state,
-                             std::chrono::steady_clock::time_point deadline) override {
-        if (local != 1 || reset_state != 1) return false;
+                             std::chrono::steady_clock::time_point deadline) override
+    {
+        if (local != 1 || reset_state != 1)
+            return false;
         const auto begin = std::chrono::steady_clock::now();
         std::array<std::uint8_t, 0x45> before{};
         std::array<std::uint8_t, 0x45> reset_values{};
         LibusbFrontendTransport transport(device_);
         transport.set_deadline(deadline);
-        const auto reset_result = asicen::run_filter_reset_operation(
-            &transport, local, reset_state, &before, &reset_values);
+        const auto reset_result = asicen::run_filter_reset_operation(&transport, local, reset_state,
+                                                                     &before, &reset_values);
         std::uint8_t cf40_rmw_before = 0;
         std::uint8_t cf40_after = 0;
         unsigned char response[2]{};
         bool ok = reset_result == asicen::FrontendRunResult::Completed &&
                   asicen::parse_cf40_read_response(
-                      transport.control(asicen::make_cf_read(local, 0x40, 1), response),
-                      response, &cf40_rmw_before);
+                      transport.control(asicen::make_cf_read(local, 0x40, 1), response), response,
+                      &cf40_rmw_before);
         const std::uint8_t cf40_target = static_cast<std::uint8_t>(cf40_rmw_before | 0x03U);
         asicen::ControlTransfer write{};
         unsigned char write_response[2]{};
-        if (ok) ok = asicen::make_cf_write(local, 0x40, &cf40_target, 1, &write) &&
-                     asicen::cf40_write_response_complete(
-                         transport.control(write, write_response));
+        if (ok)
+            ok = asicen::make_cf_write(local, 0x40, &cf40_target, 1, &write) &&
+                 asicen::cf40_write_response_complete(transport.control(write, write_response));
         unsigned char verify_response[2]{};
-        if (ok) ok = asicen::parse_cf40_read_response(
-                         transport.control(asicen::make_cf_read(local, 0x40, 1),
-                                           verify_response),
-                         verify_response, &cf40_after) && cf40_after == cf40_target;
+        if (ok)
+            ok = asicen::parse_cf40_read_response(
+                     transport.control(asicen::make_cf_read(local, 0x40, 1), verify_response),
+                     verify_response, &cf40_after) &&
+                 cf40_after == cf40_target;
         std::array<std::uint8_t, 0x45> after{};
         bool after_read_ok = false;
         if (ok) {
@@ -688,9 +853,8 @@ public:
             std::size_t offset = 0;
             while (offset < after.size()) {
                 const std::size_t chunk = std::min<std::size_t>(0x20, after.size() - offset);
-                const auto transfer = asicen::make_cf_read(
-                    local, static_cast<std::uint8_t>(offset),
-                    static_cast<std::uint16_t>(chunk));
+                const auto transfer = asicen::make_cf_read(local, static_cast<std::uint8_t>(offset),
+                                                           static_cast<std::uint16_t>(chunk));
                 std::vector<unsigned char> block_response(transfer.length);
                 const int rc = transport.control(transfer, block_response.data());
                 if (rc != transfer.length) {
@@ -703,110 +867,115 @@ public:
             ok = after_read_ok;
         }
         const auto end = std::chrono::steady_clock::now();
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 end - begin).count();
-        std::cerr << "filter-repeat P begin_ns="
-                  << std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         begin.time_since_epoch()).count()
-                  << " end_ns="
-                  << std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         end.time_since_epoch()).count()
-                  << " elapsed_us=" << elapsed
-                  << " block_first_before=0x" << std::hex
-                  << static_cast<unsigned>(before.front())
-                  << " block_last_before=0x" << static_cast<unsigned>(before.back())
-                  << " block_cf40_before=0x" << static_cast<unsigned>(before[0x40])
-                  << " block_cf40_reset=0x" << static_cast<unsigned>(reset_values[0x40])
-                  << " block_cf40_after=0x" << static_cast<unsigned>(after[0x40])
-                  << " block_41_44_before="
-                  << static_cast<unsigned>(before[0x41]) << ','
-                  << static_cast<unsigned>(before[0x42]) << ','
-                  << static_cast<unsigned>(before[0x43]) << ','
-                  << static_cast<unsigned>(before[0x44])
-                  << " block_41_44_after="
-                  << static_cast<unsigned>(after[0x41]) << ','
-                  << static_cast<unsigned>(after[0x42]) << ','
-                  << static_cast<unsigned>(after[0x43]) << ','
-                  << static_cast<unsigned>(after[0x44])
-                  << " cf40_rmw_before=0x" << static_cast<unsigned>(cf40_rmw_before)
-                  << " cf40_target=0x" << static_cast<unsigned>(cf40_target)
-                  << " cf40_after=0x" << static_cast<unsigned>(cf40_after)
-                  << std::dec << " result=" << (ok ? "ok" : "failed") << '\n';
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+        std::cerr
+            << "filter-repeat P begin_ns="
+            << std::chrono::duration_cast<std::chrono::nanoseconds>(begin.time_since_epoch())
+                   .count()
+            << " end_ns="
+            << std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count()
+            << " elapsed_us=" << elapsed << " block_first_before=0x" << std::hex
+            << static_cast<unsigned>(before.front()) << " block_last_before=0x"
+            << static_cast<unsigned>(before.back()) << " block_cf40_before=0x"
+            << static_cast<unsigned>(before[0x40]) << " block_cf40_reset=0x"
+            << static_cast<unsigned>(reset_values[0x40]) << " block_cf40_after=0x"
+            << static_cast<unsigned>(after[0x40])
+            << " block_41_44_before=" << static_cast<unsigned>(before[0x41]) << ','
+            << static_cast<unsigned>(before[0x42]) << ',' << static_cast<unsigned>(before[0x43])
+            << ',' << static_cast<unsigned>(before[0x44])
+            << " block_41_44_after=" << static_cast<unsigned>(after[0x41]) << ','
+            << static_cast<unsigned>(after[0x42]) << ',' << static_cast<unsigned>(after[0x43])
+            << ',' << static_cast<unsigned>(after[0x44]) << " cf40_rmw_before=0x"
+            << static_cast<unsigned>(cf40_rmw_before) << " cf40_target=0x"
+            << static_cast<unsigned>(cf40_target) << " cf40_after=0x"
+            << static_cast<unsigned>(cf40_after) << std::dec << " result=" << (ok ? "ok" : "failed")
+            << '\n';
         return ok;
     }
 
-    void set_link_seed(const std::array<std::uint8_t, 16>& seed) { link_seed_ = seed; }
+    void set_link_seed(const std::array<std::uint8_t, 16>& seed)
+    {
+        link_seed_ = seed;
+    }
 
-    bool link_guard() {
-        asicen::ControlTransfer transfer{
-            0, asicen::Request::SysCtrlRead, 2, 0, 3,
-            asicen::Direction::In, 1000};
+    bool link_guard()
+    {
+        asicen::ControlTransfer transfer{0, asicen::Request::SysCtrlRead, 2,   0,
+                                         3, asicen::Direction::In,        1000};
         std::array<unsigned char, 3> response{};
         const int rc = device_->control(transfer, response.data());
         std::uint8_t type_byte = 0;
         const bool type_read = read_i2c(0x4a, 0x09, 1, &type_byte);
         const std::uint8_t type = static_cast<std::uint8_t>((type_byte & 0x3eU) >> 1U);
-        const bool valid = rc == transfer.length && response[1] == 0x11 &&
-                           response[2] == 0x52 && type_read && type == 0x0f;
-        std::cerr << "link guard revision=0x" << std::hex
-                  << static_cast<unsigned>(response[1])
-                  << " tag=0x" << static_cast<unsigned>(response[2])
-                  << " controller_type=0x" << static_cast<unsigned>(type)
-                  << std::dec << " transform=v7-selected valid="
-                  << (valid ? "yes" : "no") << '\n';
+        const bool valid = rc == transfer.length && response[1] == 0x11 && response[2] == 0x52 &&
+                           type_read && type == 0x0f;
+        std::cerr << "link guard revision=0x" << std::hex << static_cast<unsigned>(response[1])
+                  << " tag=0x" << static_cast<unsigned>(response[2]) << " controller_type=0x"
+                  << static_cast<unsigned>(type) << std::dec
+                  << " transform=v7-selected valid=" << (valid ? "yes" : "no") << '\n';
         return valid;
     }
 
-    bool snapshot_link_diagnostic() override {
+    bool snapshot_link_diagnostic() override
+    {
         const bool idle = link_diagnostic_.snapshot_idle(this);
         if (!idle)
             std::cerr << "link diagnostic idle check failed (controller05 must read 0x00); "
                          "no seed writes were issued\n";
         return idle;
     }
-    bool apply_link_seed() override {
+    bool apply_link_seed() override
+    {
         return link_diagnostic_.apply(this, link_seed_.data(), link_seed_.size());
     }
-    bool clear_link_seed_and_verify_controller() override {
+    bool clear_link_seed_and_verify_controller() override
+    {
         return link_diagnostic_.clear_and_verify_controller(this);
     }
-    bool read_controller05(std::uint8_t* value) override {
+    bool read_controller05(std::uint8_t* value) override
+    {
         return read_i2c(0x4a, 0x05, 1, value);
     }
-    bool write_controller05(std::uint8_t value) override {
+    bool write_controller05(std::uint8_t value) override
+    {
         return write_i2c_byte(0x4a, 0x05, value);
     }
-    bool write_link_seed_byte(std::uint8_t reg, std::uint8_t value) override {
+    bool write_link_seed_byte(std::uint8_t reg, std::uint8_t value) override
+    {
         return reg >= 0x10 && reg <= 0x1f && write_i2c_byte(0x4a, reg, value);
     }
 
-    bool cancelled() const override { return g_stop != 0; }
+    bool cancelled() const override
+    {
+        return g_stop != 0;
+    }
 
-private:
-    bool read_i2c(std::uint8_t slave, std::uint8_t reg, std::uint16_t length,
-                  std::uint8_t* output) {
-        if (output == nullptr || length == 0 || length > 0x20) return false;
+  private:
+    bool read_i2c(std::uint8_t slave, std::uint8_t reg, std::uint16_t length, std::uint8_t* output)
+    {
+        if (output == nullptr || length == 0 || length > 0x20)
+            return false;
         const auto transfer = asicen::make_i2c_read(slave, reg, length, 0, 1000);
         std::array<unsigned char, 0x21> response{};
         const int rc = device_->control(transfer, response.data());
-        if (rc != transfer.length ||
-            !asicen::parse_status_response(response.data(),
-                                           static_cast<std::size_t>(rc), nullptr, 0))
+        if (rc != transfer.length || !asicen::parse_status_response(
+                                         response.data(), static_cast<std::size_t>(rc), nullptr, 0))
             return false;
         std::copy_n(response.begin() + 1, length, output);
         return true;
     }
 
-    bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value) {
+    bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value)
+    {
         asicen::ControlTransfer transfer{};
-        if (!asicen::make_i2c_write_chunk(slave, reg, &value, 1, false,
-                                          &transfer, 1000))
+        if (!asicen::make_i2c_write_chunk(slave, reg, &value, 1, false, &transfer, 1000))
             return false;
         std::array<unsigned char, 2> response{};
         const int rc = device_->control(transfer, response.data());
         return rc == transfer.length &&
-               asicen::parse_status_response(response.data(),
-                                             static_cast<std::size_t>(rc), nullptr, 0);
+               asicen::parse_status_response(response.data(), static_cast<std::size_t>(rc), nullptr,
+                                             0);
     }
 
     asicen::LibusbDevice* device_;
@@ -815,21 +984,41 @@ private:
 };
 
 class LibusbQueuedCaptureIo final : public asicen::QueuedCaptureIo {
-public:
-    LibusbQueuedCaptureIo(libusb_context* context, libusb_device_handle* handle)
-        : context_(context), handle_(handle) {}
+  public:
+    struct Operations final {
+        decltype(&libusb_alloc_transfer) allocate = libusb_alloc_transfer;
+        decltype(&libusb_submit_transfer) submit = libusb_submit_transfer;
+        decltype(&libusb_cancel_transfer) cancel = libusb_cancel_transfer;
+        decltype(&libusb_handle_events_timeout_completed) events =
+            libusb_handle_events_timeout_completed;
+        decltype(&libusb_free_transfer) free = libusb_free_transfer;
+    };
 
-    ~LibusbQueuedCaptureIo() override {
+    LibusbQueuedCaptureIo(libusb_context* context, libusb_device_handle* handle,
+                          const Operations* operations = nullptr)
+        : context_(context), handle_(handle),
+          operations_(operations != nullptr ? *operations : Operations{})
+    {
+    }
+
+    ~LibusbQueuedCaptureIo() override
+    {
         // The deadline governs capture, not ownership cleanup: cancellation is
         // drained before transfers or callback buffers can be destroyed.
-        if (has_pending()) cancel_and_drain();
+        if (has_pending())
+            cancel_and_drain();
         release();
     }
 
-    bool prepare(std::uint8_t endpoint, std::size_t depth,
-                 std::size_t chunk_size) override {
-        if (context_ == nullptr || handle_ == nullptr || endpoint == 0 ||
-            depth == 0 || depth > 4 || chunk_size == 0 ||
+    bool drain_complete() const noexcept override
+    {
+        return !quarantined_;
+    }
+
+    bool prepare(std::uint8_t endpoint, std::size_t depth, std::size_t chunk_size) override
+    {
+        if (context_ == nullptr || handle_ == nullptr || endpoint == 0 || depth == 0 || depth > 4 ||
+            chunk_size == 0 ||
             chunk_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             return false;
         }
@@ -840,49 +1029,68 @@ public:
             slot->owner = this;
             slot->index = i;
             slot->buffer.resize(chunk_size);
-            slot->transfer = libusb_alloc_transfer(0);
-            if (slot->transfer == nullptr) return false;
-            libusb_fill_bulk_transfer(slot->transfer, handle_, endpoint_,
-                                      slot->buffer.data(),
-                                      static_cast<int>(slot->buffer.size()),
-                                      transfer_complete, slot.get(), 0);
+            slot->transfer = operations_.allocate(0);
+            if (slot->transfer == nullptr)
+                return false;
+            libusb_fill_bulk_transfer(slot->transfer, handle_, endpoint_, slot->buffer.data(),
+                                      static_cast<int>(slot->buffer.size()), transfer_complete,
+                                      slot.get(), 0);
             slots_.push_back(std::move(slot));
         }
         return true;
     }
 
-    bool submit(std::size_t index) override {
+    bool submit(std::size_t index) override
+    {
         Slot* slot = get_slot(index);
-        if (slot == nullptr || slot->transfer == nullptr || slot->pending) return false;
+        if (slot == nullptr || slot->transfer == nullptr || slot->pending || slot->queued)
+            return false;
         slot->pending = true;
         slot->queued = false;
         ++slot->generation;
-        const int rc = libusb_submit_transfer(slot->transfer);
-        if (rc != 0) slot->pending = false;
+        const int rc = operations_.submit(slot->transfer);
+        if (rc != 0)
+            slot->pending = false;
+        else
+            submission_order_.push_back(index);
         return rc == 0;
     }
 
-    asicen::QueueWait wait(unsigned timeout_ms,
-                           asicen::QueueCompletion* completion) override {
-        if (completion == nullptr) return asicen::QueueWait::Error;
-        if (ready_.empty()) {
+    asicen::QueueWait wait(unsigned timeout_ms, asicen::QueueCompletion* completion) override
+    {
+        if (completion == nullptr)
+            return asicen::QueueWait::Error;
+        if (submission_order_.empty())
+            return asicen::QueueWait::Timeout;
+        if (!slots_[submission_order_.front()]->queued) {
             timeval timeout{};
             timeout.tv_sec = static_cast<long>(timeout_ms / 1000U);
             timeout.tv_usec = static_cast<long>((timeout_ms % 1000U) * 1000U);
-            const int rc = libusb_handle_events_timeout_completed(context_, &timeout,
-                                                                   nullptr);
-            if (rc < 0) return asicen::QueueWait::Error;
-            if (ready_.empty()) return asicen::QueueWait::Timeout;
+            const int rc = operations_.events(context_, &timeout, nullptr);
+            if (rc < 0)
+                return asicen::QueueWait::Error;
+            if (!slots_[submission_order_.front()]->queued)
+                return asicen::QueueWait::Timeout;
         }
-        const std::size_t index = ready_.front();
-        ready_.pop_front();
+        const std::size_t index = submission_order_.front();
+        submission_order_.pop_front();
+        const auto ready = std::find(ready_.begin(), ready_.end(), index);
+        if (ready == ready_.end())
+            return asicen::QueueWait::Error;
+        ready_.erase(ready);
         Slot* slot = get_slot(index);
-        if (slot == nullptr || !slot->queued) return asicen::QueueWait::Error;
+        if (slot == nullptr || !slot->queued)
+            return asicen::QueueWait::Error;
         slot->queued = false;
+        if (slot->transfer->actual_length < 0 || slot->transfer->length < 0 ||
+            slot->transfer->actual_length > slot->transfer->length ||
+            static_cast<std::size_t>(slot->transfer->actual_length) > slot->buffer.size()) {
+            return asicen::QueueWait::Error;
+        }
         completion->slot = index;
         completion->io = slot->io;
         completion->data = slot->buffer.data();
-        completion->size = slot->transfer->actual_length > 0
+        completion->size = slot->io == asicen::CaptureIo::Ok && slot->transfer->actual_length > 0
                                ? static_cast<std::size_t>(slot->transfer->actual_length)
                                : 0;
         completion->generation = slot->generation;
@@ -892,58 +1100,82 @@ public:
         return asicen::QueueWait::Completion;
     }
 
-    bool resubmit(std::size_t slot) override { return submit(slot); }
+    bool resubmit(std::size_t slot) override
+    {
+        return submit(slot);
+    }
 
-    void set_observation(asicen::QueueObservation* observation) override {
+    void set_observation(asicen::QueueObservation* observation) override
+    {
         observation_ = observation;
-        if (observation_ != nullptr) observation_->set_phase(phase_);
+        if (observation_ != nullptr)
+            observation_->set_phase(phase_);
     }
 
-    void set_phase(asicen::QueuePhase phase) override {
+    void set_phase(asicen::QueuePhase phase) override
+    {
         phase_ = phase;
-        if (observation_ != nullptr) observation_->set_phase(phase);
+        if (observation_ != nullptr)
+            observation_->set_phase(phase);
     }
 
-    void snapshot_before_stop() override {
-        if (observation_ == nullptr) return;
+    void snapshot_before_stop() override
+    {
+        if (observation_ == nullptr)
+            return;
         std::size_t pending = 0;
-        for (const auto& slot : slots_) if (slot->pending) ++pending;
+        for (const auto& slot : slots_)
+            if (slot->pending)
+                ++pending;
         observation_->record_before_stop(pending, ready_.size());
     }
 
-    void cancel_and_drain() override {
+    void cancel_and_drain() override
+    {
         for (const auto& slot : slots_) {
             if (slot->pending) {
-                const int rc = libusb_cancel_transfer(slot->transfer);
+                const int rc = operations_.cancel(slot->transfer);
                 if (observation_ != nullptr)
                     observation_->record_cancel(slot->index, slot->generation, rc);
-                (void)rc;  // NOT_FOUND means completion is already being delivered.
+                (void)rc; // NOT_FOUND means completion is already being delivered.
             }
         }
-        while (has_pending()) {
+        for (unsigned attempt = 0U; attempt < 8U && has_pending(); ++attempt) {
             timeval timeout{};
-            timeout.tv_sec = 0;
-            timeout.tv_usec = 100000;
-            const int rc = libusb_handle_events_timeout_completed(context_, &timeout,
-                                                                   nullptr);
-            if (rc < 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            timeout.tv_sec = 1;
+            timeout.tv_usec = 0;
+            const int rc = operations_.events(context_, &timeout, nullptr);
+            if (rc < 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (has_pending()) {
+            // The caller retains this heap owner, all buffers and the
+            // handle/context together. No callback may retain stack data.
+            observation_ = nullptr;
+            quarantined_ = true;
+            std::fputs("capture callback drain deadline exceeded; USB state quarantined\n", stderr);
+            return;
         }
         ready_.clear();
+        submission_order_.clear();
     }
 
-    void release() override {
-        if (has_pending()) return;
+    void release() override
+    {
+        if (has_pending())
+            return;
         for (auto& slot : slots_) {
             if (slot->transfer != nullptr) {
-                libusb_free_transfer(slot->transfer);
+                operations_.free(slot->transfer);
                 slot->transfer = nullptr;
             }
         }
         slots_.clear();
         ready_.clear();
+        submission_order_.clear();
     }
 
-private:
+  private:
     struct Slot {
         LibusbQueuedCaptureIo* owner = nullptr;
         std::size_t index = 0;
@@ -955,56 +1187,67 @@ private:
         std::uint64_t generation = 0;
     };
 
-    static void LIBUSB_CALL transfer_complete(libusb_transfer* transfer) {
+    static void LIBUSB_CALL transfer_complete(libusb_transfer* transfer)
+    {
         auto* slot = static_cast<Slot*>(transfer->user_data);
-        if (slot == nullptr || slot->owner == nullptr) return;
+        if (slot == nullptr || slot->owner == nullptr)
+            return;
         if (slot->owner->observation_ != nullptr)
-            slot->owner->observation_->record_callback(
-                slot->index, slot->generation, static_cast<int>(transfer->status),
-                transfer->length, transfer->actual_length);
+            slot->owner->observation_->record_callback(slot->index, slot->generation,
+                                                       static_cast<int>(transfer->status),
+                                                       transfer->length, transfer->actual_length);
         slot->pending = false;
         switch (transfer->status) {
-            case LIBUSB_TRANSFER_COMPLETED:
-                slot->io = asicen::CaptureIo::Ok;
-                break;
-            case LIBUSB_TRANSFER_TIMED_OUT:
-                slot->io = asicen::CaptureIo::Timeout;
-                break;
-            default:
-                slot->io = asicen::CaptureIo::Error;
-                break;
+        case LIBUSB_TRANSFER_COMPLETED:
+            slot->io = asicen::CaptureIo::Ok;
+            break;
+        case LIBUSB_TRANSFER_TIMED_OUT:
+            slot->io = asicen::CaptureIo::Timeout;
+            break;
+        default:
+            slot->io = asicen::CaptureIo::Error;
+            break;
         }
         slot->queued = true;
         slot->owner->ready_.push_back(slot->index);
     }
 
-    Slot* get_slot(std::size_t index) {
+    Slot* get_slot(std::size_t index)
+    {
         return index < slots_.size() ? slots_[index].get() : nullptr;
     }
 
-    bool has_pending() const {
+    bool has_pending() const
+    {
         for (const auto& slot : slots_) {
-            if (slot->pending) return true;
+            if (slot->pending)
+                return true;
         }
         return false;
     }
 
     libusb_context* context_;
     libusb_device_handle* handle_;
+    Operations operations_;
     asicen::QueueObservation* observation_ = nullptr;
     asicen::QueuePhase phase_ = asicen::QueuePhase::Normal;
     std::uint8_t endpoint_ = 0;
     std::vector<std::unique_ptr<Slot>> slots_;
     std::deque<std::size_t> ready_;
+    std::deque<std::size_t> submission_order_;
+    bool quarantined_ = false;
 };
 
 // Bounded, nonblocking, deadline/cancellation-aware output sink.
 class PosixCaptureOutput final : public asicen::CaptureOutput {
-public:
+  public:
     PosixCaptureOutput(int fd, std::chrono::steady_clock::time_point deadline)
-        : fd_(fd), deadline_(deadline) {}
+        : fd_(fd), deadline_(deadline)
+    {
+    }
 
-    bool write(const unsigned char* data, std::size_t size) override {
+    bool write(const unsigned char* data, std::size_t size) override
+    {
         std::size_t offset = 0;
         while (offset < size) {
             if (g_stop != 0) {
@@ -1027,6 +1270,9 @@ public:
                 descriptor.fd = fd_;
                 descriptor.events = POLLOUT;
                 const int polled = ::poll(&descriptor, 1, remaining);
+                if (polled < 0 && errno == EINTR) {
+                    continue;
+                }
                 if (polled < 0) {
                     return false;
                 }
@@ -1043,33 +1289,44 @@ public:
         return true;
     }
 
-private:
+  private:
     int fd_;
     std::chrono::steady_clock::time_point deadline_;
 };
 
 class CfBlockRestoreGuard {
-public:
+  public:
     CfBlockRestoreGuard(asicen::CaptureBackend* backend, std::uint8_t local,
                         const std::array<std::uint8_t, 0x45>* snapshot)
-        : backend_(backend), local_(local), snapshot_(snapshot), active_(snapshot != nullptr) {}
-    ~CfBlockRestoreGuard() {
+        : backend_(backend), local_(local), snapshot_(snapshot), active_(snapshot != nullptr)
+    {
+    }
+    ~CfBlockRestoreGuard()
+    {
         if (active_ && !restore_once())
             std::cerr << "CF block emergency restore failed\n";
     }
-    bool restore() {
-        if (!active_) return true;
+    bool restore()
+    {
+        if (!active_)
+            return true;
         const bool ok = restore_once();
-        if (ok) active_ = false;
+        if (ok)
+            active_ = false;
         return ok;
     }
-    void disarm() { active_ = false; }
+    void disarm()
+    {
+        active_ = false;
+    }
 
-private:
-    bool restore_once() {
+  private:
+    bool restore_once()
+    {
         const bool ok = backend_ != nullptr && snapshot_ != nullptr &&
                         backend_->write_cf_block(local_, snapshot_->data(), snapshot_->size());
-        if (!ok) std::cerr << "CF full-block restore failed\n";
+        if (!ok)
+            std::cerr << "CF full-block restore failed\n";
         return ok;
     }
     asicen::CaptureBackend* backend_;
@@ -1078,8 +1335,8 @@ private:
     bool active_;
 };
 
-int run_capture(libusb_context* context, asicen::LibusbDevice* device,
-                const Arguments& args) {
+int run_capture(libusb_context* context, asicen::LibusbDevice* device, const Arguments& args)
+{
     const std::uint8_t endpoint = asicen::bulk_endpoint_for_lane(args.local);
     if (endpoint == 0) {
         std::cerr << "invalid local lane\n";
@@ -1100,58 +1357,44 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
     if (link_seed_mode) {
         backend.set_link_seed(link_seed);
         if (!backend.link_guard()) {
-            std::cerr << "link seed diagnostic requires revision 0x11/0x52 and controller type 0x0f\n";
+            std::cerr
+                << "link seed diagnostic requires revision 0x11/0x52 and controller type 0x0f\n";
             return 2;
         }
     }
 
-    int out_fd = STDOUT_FILENO;
+    int out_fd = -1;
     int close_fd = -1;
-    bool restore_flags = false;
-    int saved_flags = 0;
-    if (args.output != "-") {
-        int output_flags = O_WRONLY | O_CREAT | O_NONBLOCK;
-        if (link_seed_mode) output_flags |= O_NOFOLLOW | O_EXCL;
+    {
+        int output_flags = O_WRONLY | O_CREAT | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW;
+        if (link_seed_mode)
+            output_flags |= O_EXCL;
         out_fd = ::open(args.output.c_str(), output_flags, 0644);
         if (out_fd < 0) {
-            std::cerr << "cannot open output " << args.output << ": "
-                      << std::strerror(errno) << '\n';
-            return 1;
+            std::cerr << "cannot open output " << args.output << ": " << std::strerror(errno)
+                      << '\n';
+            return 8;
         }
         close_fd = out_fd;
-        struct stat info {};
-        if (::fstat(out_fd, &info) != 0 || S_ISDIR(info.st_mode) ||
-            (link_seed_mode && S_ISREG(info.st_mode) &&
-             info.st_dev == seed_identity.device && info.st_ino == seed_identity.inode) ||
+        struct stat info{};
+        if (::fstat(out_fd, &info) != 0 || (!S_ISREG(info.st_mode) && !S_ISFIFO(info.st_mode)) ||
+            (link_seed_mode && S_ISREG(info.st_mode) && info.st_dev == seed_identity.device &&
+             info.st_ino == seed_identity.inode) ||
             (S_ISREG(info.st_mode) && ::ftruncate(out_fd, 0) != 0)) {
             std::cerr << "output is not a regular file or pipe\n";
             ::close(out_fd);
-            return 1;
+            return 8;
         }
-    } else {
-        saved_flags = ::fcntl(out_fd, F_GETFL, 0);
-        if (saved_flags < 0) {
-            std::cerr << "fcntl(F_GETFL) on stdout failed: " << std::strerror(errno)
-                      << '\n';
-            return 1;  // before DSC start
-        }
-        if (::fcntl(out_fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
-            std::cerr << "fcntl(O_NONBLOCK) on stdout failed: " << std::strerror(errno)
-                      << '\n';
-            return 1;  // before DSC start
-        }
-        restore_flags = true;
     }
 
     auto finish_output = [&]() {
         bool close_ok = true;
         if (close_fd >= 0) {
-            if (::close(close_fd) != 0) close_ok = false;
+            if (::close(close_fd) != 0) {
+                std::cerr << "output close failed: " << std::strerror(errno) << '\n';
+                close_ok = false;
+            }
             close_fd = -1;
-        }
-        if (restore_flags) {
-            ::fcntl(out_fd, F_SETFL, saved_flags);
-            restore_flags = false;
         }
         return close_ok;
     };
@@ -1164,7 +1407,7 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
                                    original_cf_block.size())) {
             std::cerr << "cannot snapshot full CF block before filter-repeat setup\n";
             finish_output();
-            return 1;
+            return g_stop != 0 ? 9 : 7;
         }
         cf_block_to_restore = &original_cf_block;
     }
@@ -1178,7 +1421,7 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         } else if (!backend.read_cf40(args.local, &saved_cf40)) {
             std::cerr << "cannot snapshot CF40 before filter-start capture\n";
             finish_output();
-            return 1;
+            return g_stop != 0 ? 9 : 7;
         } else {
             cf40_to_restore = &saved_cf40;
         }
@@ -1186,20 +1429,21 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
 
     // Capture setup resets the CF block, so the optional diagnostic snapshots
     // CF40 first and restores that original byte on every outcome.
-    const int setup_result = run_plan(
-        device, asicen::plan_stream_setup(args.local, args.reset_state),
-        args.timeout_ms, nullptr, nullptr);
+    const int setup_result =
+        run_plan(device, asicen::plan_stream_setup(args.local, args.reset_state), args.timeout_ms,
+                 nullptr, nullptr);
     if (setup_result != 0) {
         bool restored = true;
         if (filter_repeat) {
             restored = cf_block_guard.restore();
         } else if (args.filter_start && cf40_to_restore != nullptr &&
-            !backend.write_cf40(args.local, *cf40_to_restore)) {
+                   !backend.write_cf40(args.local, *cf40_to_restore)) {
             std::cerr << "CF40 restore failed after stream setup failure\n";
             restored = false;
         }
         finish_output();
-        return restored ? setup_result : 1;
+        (void)restored;
+        return g_stop != 0 ? 9 : 7;
     }
 
     if (link_seed_mode) {
@@ -1209,24 +1453,23 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         std::cerr << "RAW_UNVALIDATED: link transform is not implemented; saved bytes are "
                      "raw bulk endpoint output, not validated MPEG-TS\n";
     }
-    std::cerr << "capture lane=" << static_cast<unsigned>(args.local)
-              << " endpoint=0x" << std::hex << static_cast<unsigned>(endpoint)
-              << std::dec << " seconds=" << args.seconds
+    std::cerr << "capture lane=" << static_cast<unsigned>(args.local) << " endpoint=0x" << std::hex
+              << static_cast<unsigned>(endpoint) << std::dec << " seconds=" << args.seconds
               << " queue_depth=" << args.queue_depth;
-    if (args.filter_start) std::cerr << " filter_start=yes";
-    if (filter_repeat) std::cerr << " filter_repeat=" << args.filter_repeat;
+    if (args.filter_start)
+        std::cerr << " filter_start=yes";
+    if (filter_repeat)
+        std::cerr << " filter_repeat=" << args.filter_repeat;
     if (args.have_packet_count) {
         std::cerr << " packet_count=" << args.packet_count;
     }
     std::cerr << '\n';
 
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(args.seconds);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(args.seconds);
     asicen::CaptureRequest request{};
     request.local = args.local;
     request.endpoint = endpoint;
-    request.byte_limit =
-        args.have_packet_count ? args.packet_count * asicen::kTsPacketBytes : 0;
+    request.byte_limit = args.have_packet_count ? args.packet_count * asicen::kTsPacketBytes : 0;
     request.deadline = deadline;
     request.chunk_size = 4096;
 
@@ -1235,18 +1478,26 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
     asicen::QueueObservation queue_observation{};
     asicen::CaptureOutcome outcome = asicen::CaptureOutcome::InvalidArgument;
     if (args.queue_depth == 4) {
-        LibusbQueuedCaptureIo queued(context, device->handle());
-        outcome = asicen::run_queued_capture(&backend, &queued, &output, request,
-                                             args.queue_depth, &stats,
-                                             args.filter_start, cf40_to_restore,
-                                             args.queue_diagnostics ? &queue_observation : nullptr,
-                                             args.filter_repeat == "before"
-                                                 ? asicen::FilterRepeat::BeforeQueue
-                                                 : (args.filter_repeat == "after"
-                                                        ? asicen::FilterRepeat::AfterPostStartBit
-                                                        : asicen::FilterRepeat::None),
-                                             args.reset_state, original_cf_block.data(),
-                                             link_seed_mode);
+        auto queued = std::make_unique<LibusbQueuedCaptureIo>(context, device->handle());
+        outcome = asicen::run_queued_capture(
+            &backend, queued.get(), &output, request, args.queue_depth, &stats, args.filter_start,
+            cf40_to_restore, args.queue_diagnostics ? &queue_observation : nullptr,
+            args.filter_repeat == "before"
+                ? asicen::FilterRepeat::BeforeQueue
+                : (args.filter_repeat == "after" ? asicen::FilterRepeat::AfterPostStartBit
+                                                 : asicen::FilterRepeat::None),
+            args.reset_state, original_cf_block.data(), link_seed_mode);
+        if (!queued->drain_complete()) {
+            // Pending libusb callbacks still own the transfer buffers. Retain
+            // the complete ownership graph until process exit, as the shared
+            // transport does, rather than free it or retry teardown forever.
+            asicen::quarantine_libusb_context(context);
+            device->abandon();
+            (void)queued.release();
+            cf_block_guard.disarm();
+            (void)finish_output();
+            return 7;
+        }
     } else {
         outcome = asicen::run_raw_capture(&backend, &output, request, &stats);
     }
@@ -1271,36 +1522,32 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         std::cerr << "queue diagnostics callbacks=" << queue_observation.callback_count
                   << " actual_bytes=" << queue_observation.callback_actual_bytes
                   << " normal_handoffs=" << queue_observation.normal_delivery_count
-                  << " normal_handoff_bytes="
-                  << queue_observation.normal_delivery_actual_bytes
+                  << " normal_handoff_bytes=" << queue_observation.normal_delivery_actual_bytes
                   << " before_stop_pending=" << queue_observation.pending_before_stop
                   << " before_stop_ready=" << queue_observation.ready_before_stop
                   << " retained=" << queue_observation.event_count
                   << " overflow=" << queue_observation.event_overflow
-                  << " duplicate_or_stale="
-                  << queue_observation.duplicate_or_stale_callbacks << '\n';
+                  << " duplicate_or_stale=" << queue_observation.duplicate_or_stale_callbacks
+                  << '\n';
         for (std::size_t i = 0; i < queue_observation.event_count; ++i) {
             const auto& event = queue_observation.events[i];
-            std::cerr << "queue event slot=" << event.slot
-                      << " generation=" << event.generation
+            std::cerr << "queue event slot=" << event.slot << " generation=" << event.generation
                       << " monotonic_ns=" << event.monotonic_ns
                       << " phase=" << static_cast<unsigned>(event.phase)
-                      << " status=" << event.raw_status
-                      << " requested=" << event.requested_length
+                      << " status=" << event.raw_status << " requested=" << event.requested_length
                       << " actual=" << event.actual_length << '\n';
         }
         for (std::size_t i = 0; i < queue_observation.cancellation_count; ++i) {
             const auto& event = queue_observation.cancellations[i];
-            std::cerr << "queue cancel slot=" << event.slot
-                      << " generation=" << event.generation
+            std::cerr << "queue cancel slot=" << event.slot << " generation=" << event.generation
                       << " rc=" << event.return_code << '\n';
         }
         std::cerr << "queue phase_legend=0:Normal,1:StoppingDsc,2:CancelDrain"
                   << " counts normal=" << queue_observation.phase_counts[0]
                   << " stopping_dsc=" << queue_observation.phase_counts[1]
                   << " cancel_drain=" << queue_observation.phase_counts[2]
-                  << " phase_actual_bytes=" << queue_observation.phase_actual_bytes[0]
-                  << ',' << queue_observation.phase_actual_bytes[1] << ','
+                  << " phase_actual_bytes=" << queue_observation.phase_actual_bytes[0] << ','
+                  << queue_observation.phase_actual_bytes[1] << ','
                   << queue_observation.phase_actual_bytes[2] << " status=count:bytes:";
         for (std::size_t i = 0; i < queue_observation.status_counts.size(); ++i)
             std::cerr << queue_observation.status_counts[i] << ':'
@@ -1310,7 +1557,6 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
     }
 
     const bool close_ok = finish_output();
-    if (!close_ok) std::cerr << "output close failed: " << std::strerror(errno) << '\n';
 
     std::cerr << "capture outcome=" << asicen::capture_outcome_name(outcome)
               << " bytes=" << stats.bytes
@@ -1320,24 +1566,37 @@ int run_capture(libusb_context* context, asicen::LibusbDevice* device,
         std::cerr << "CF40 restore failed; device filter state may remain modified\n";
     }
 
-    if (outcome != asicen::CaptureOutcome::Completed || !close_ok) {
-        return 1;
-    }
-    return 0;
+    if (g_stop != 0)
+        return 9;
+    if (outcome == asicen::CaptureOutcome::OutputFailed)
+        return 8;
+    if (outcome != asicen::CaptureOutcome::Completed)
+        return 7;
+    return close_ok ? 0 : 8;
 }
 
-}  // namespace
+} // namespace
 
-int main(int argc, char** argv) {
-    std::signal(SIGPIPE, SIG_IGN);
+int main(int argc, char** argv)
+{
+    if (argc > 1 &&
+        (std::string(argv[1]) == "ts-probe" || std::string(argv[1]) == "frontend-probe")) {
+        return asicen::run_diagnostic_probe(std::string(argv[1]) == "ts-probe"
+                                                ? asicen::DiagnosticProbeRole::transport
+                                                : asicen::DiagnosticProbeRole::frontend,
+                                            argc - 1, const_cast<const char* const*>(argv + 1));
+    }
     Arguments args{};
     if (!parse_arguments(argc, argv, &args)) {
+        if (!args.error.empty())
+            std::cerr << args.error << '\n';
         usage(argv[0]);
         return 2;
     }
     if (args.help) {
-        usage(argv[0]);
-        return 0;
+        usage(argv[0], std::cout);
+        std::cout.flush();
+        return std::cout ? 0 : 8;
     }
 
     if (!args.have_device || !args.have_port || args.command.empty()) {
@@ -1357,28 +1616,27 @@ int main(int argc, char** argv) {
     } else if (args.command == "restore-sibling") {
         plan = asicen::plan_sibling40_restore();
     } else if (args.command == "init") {
-        plan = args.shared_demod
-                   ? asicen::plan_terrestrial_init_with_satellite_demod()
-                   : asicen::plan_terrestrial_init();
+        plan = args.shared_demod ? asicen::plan_terrestrial_init_with_satellite_demod()
+                                 : asicen::plan_terrestrial_init();
     } else if (args.command == "tune") {
-        if (!args.have_frequency || args.frequency_khz < 40000U ||
-            args.frequency_khz > 1002000U || (args.have_local && args.local != 1)) {
+        if (!args.have_frequency || args.frequency_khz < 40000U || args.frequency_khz > 1002000U ||
+            (args.have_local && args.local != 1)) {
             std::cerr << "tune requires --frequency-khz in 40000..1002000 on local 1\n";
             return 2;
         }
         plan = asicen::plan_terrestrial_tune_full(args.frequency_khz, 6);
         poll_lock_after = true;
     } else if (args.command == "lock") {
-        if (!args.have_frequency || args.frequency_khz < 40000U ||
-            args.frequency_khz > 1002000U || (args.have_local && args.local != 1)) {
+        if (!args.have_frequency || args.frequency_khz < 40000U || args.frequency_khz > 1002000U ||
+            (args.have_local && args.local != 1)) {
             std::cerr << "lock requires --frequency-khz in 40000..1002000 on local 1\n";
             return 2;
         }
         plan = asicen::plan_terrestrial_lock_read(args.frequency_khz);
         lock_command = true;
     } else if (args.command == "terrestrial") {
-        if (!args.have_frequency || args.frequency_khz < 40000U ||
-            args.frequency_khz > 1002000U || (args.have_local && args.local != 1)) {
+        if (!args.have_frequency || args.frequency_khz < 40000U || args.frequency_khz > 1002000U ||
+            (args.have_local && args.local != 1)) {
             std::cerr << "terrestrial requires --frequency-khz in 40000..1002000 on "
                          "local 1\n";
             return 2;
@@ -1424,18 +1682,17 @@ int main(int argc, char** argv) {
     if (!args.filter_repeat.empty() &&
         (args.command != "capture" || !args.filter_start || args.local != 1 ||
          args.queue_depth != 4 || !args.have_reset_state || args.reset_state != 1)) {
-        std::cerr << "--filter-repeat requires capture with --filter-start, --reset-state 1, local 1 and --queue-depth 4\n";
+        std::cerr << "--filter-repeat requires capture with --filter-start, --reset-state 1, local "
+                     "1 and --queue-depth 4\n";
         return 2;
     }
-    if (args.queue_diagnostics &&
-        (args.command != "capture" || args.queue_depth != 4)) {
+    if (args.queue_diagnostics && (args.command != "capture" || args.queue_depth != 4)) {
         std::cerr << "--queue-diagnostics requires capture with --queue-depth 4\n";
         return 2;
     }
     if (!args.link_seed_file.empty() &&
-        (args.command != "capture" || !args.filter_start ||
-         !args.have_reset_state || args.reset_state != 1 || args.local != 1 ||
-         args.queue_depth != 4 || args.seconds > 20 ||
+        (args.command != "capture" || !args.filter_start || !args.have_reset_state ||
+         args.reset_state != 1 || args.local != 1 || args.queue_depth != 4 || args.seconds > 20 ||
          !args.filter_repeat.empty())) {
         std::cerr << "--link-seed-file requires capture with --filter-start, "
                      "--reset-state 1, local 1, queue depth 4, at most 20 seconds, "
@@ -1452,11 +1709,23 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    libusb_context* context = nullptr;
-    const int init_rc = libusb_init(&context);
+    asicen::LibusbContext context_owner;
+    if (std::signal(SIGINT, handle_signal) == SIG_ERR)
+        return 10;
+    if (std::signal(SIGTERM, handle_signal) == SIG_ERR) {
+        (void)std::signal(SIGINT, SIG_DFL);
+        return 10;
+    }
+    if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        (void)std::signal(SIGINT, SIG_DFL);
+        (void)std::signal(SIGTERM, SIG_DFL);
+        return 10;
+    }
+    const int init_rc = context_owner.initialize();
+    libusb_context* context = context_owner.get();
     if (init_rc != 0) {
         std::cerr << "libusb_init: " << libusb_error_name(init_rc) << '\n';
-        return 1;
+        return 4;
     }
 
     asicen::LibusbDevice device;
@@ -1464,46 +1733,44 @@ int main(int argc, char** argv) {
     const int open_rc = device.open(context, location);
     if (open_rc != 0) {
         std::cerr << "open " << static_cast<unsigned>(args.bus) << ':'
-                  << static_cast<unsigned>(args.address) << ": "
-                  << libusb_error_name(open_rc) << '\n';
-        libusb_exit(context);
-        return 1;
+                  << static_cast<unsigned>(args.address) << ": " << libusb_error_name(open_rc)
+                  << '\n';
+
+        return 4;
     }
 
     const asicen::DeviceProfile* profile = nullptr;
     int result = verify_target(&device, args, &profile);
+    if (result != 0) {
+        result = 4;
+    }
     if (result == 0) {
         // Claim interface 0 for exclusive ownership before any transfer.
         const int claim = device.claim_interface(0);
         if (claim < 0) {
             std::cerr << "claim interface 0: " << libusb_error_name(claim) << '\n';
-            result = 1;
+            result = 4;
         }
     }
 
     if (result == 0) {
-        asicen::write_command_summary(std::cout, std::cerr, capture_command,
-                                      profile->model, args.port.c_str(), args.local);
+        asicen::write_command_summary(std::cout, std::cerr, capture_command, profile->model,
+                                      args.port.c_str(), args.local);
         // Cancellation applies to setup plans as well as capture.
-        std::signal(SIGINT, handle_signal);
-        std::signal(SIGTERM, handle_signal);
-        std::signal(SIGPIPE, SIG_IGN);
         if (capture_command) {
             result = run_capture(context, &device, args);
         } else {
             std::uint8_t last_read = 0;
             bool have_last_read = false;
-            result = run_plan(&device, plan, args.timeout_ms, &last_read,
-                              &have_last_read);
+            result = run_plan(&device, plan, args.timeout_ms, &last_read, &have_last_read);
             if (result == 0 && poll_lock_after) {
                 bool locked = false;
                 std::uint8_t lock_byte = 0;
-                result = poll_lock(&device, args.frequency_khz, args.lock_timeout_ms,
-                                   &locked, &lock_byte);
+                result = poll_lock(&device, args.frequency_khz, args.lock_timeout_ms, &locked,
+                                   &lock_byte);
                 if (result == 0) {
-                    std::cout << "lock_byte=0x" << std::hex
-                              << static_cast<unsigned>(lock_byte) << std::dec
-                              << " locked=" << (locked ? "yes" : "no") << '\n';
+                    std::cout << "lock_byte=0x" << std::hex << static_cast<unsigned>(lock_byte)
+                              << std::dec << " locked=" << (locked ? "yes" : "no") << '\n';
                 }
             }
             if (result == 0 && lock_command) {
@@ -1512,9 +1779,8 @@ int main(int argc, char** argv) {
                     result = 1;
                 } else {
                     const bool locked = (last_read & 0x0fU) == 0x09U;
-                    std::cout << "lock_byte=0x" << std::hex
-                              << static_cast<unsigned>(last_read) << std::dec
-                              << " locked=" << (locked ? "yes" : "no") << '\n';
+                    std::cout << "lock_byte=0x" << std::hex << static_cast<unsigned>(last_read)
+                              << std::dec << " locked=" << (locked ? "yes" : "no") << '\n';
                 }
             }
             if (result == 0 && read_command) {
@@ -1522,14 +1788,20 @@ int main(int argc, char** argv) {
                     std::cerr << "demod read produced no payload\n";
                     result = 1;
                 } else {
-                    std::cout << "demod_byte=0x" << std::hex
-                              << static_cast<unsigned>(last_read) << std::dec << '\n';
+                    std::cout << "demod_byte=0x" << std::hex << static_cast<unsigned>(last_read)
+                              << std::dec << '\n';
                 }
             }
         }
     }
 
     device.close();
-    libusb_exit(context);
+
+    if (!capture_command && result != 0 && result != 4)
+        result = g_stop != 0 ? 9 : 6;
+    std::cout.flush();
+    std::cerr.flush();
+    if (result == 0 && (!std::cout || !std::cerr))
+        result = 8;
     return result;
 }

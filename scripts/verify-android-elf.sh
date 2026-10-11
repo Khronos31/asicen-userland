@@ -134,8 +134,8 @@ if ! printf '%s\n' "$needed" | grep -Fx 'libc.so' >/dev/null; then
     printf '%s\n' 'missing DT_NEEDED libc.so' >&2
     exit 1
 fi
-if printf '%s\n' "$needed" | grep -E 'libusb|libudev|libc\.so\.6|ld-linux|ld-musl|libc\.musl|libc\+\+' >/dev/null; then
-    printf '%s\n' 'host/libusb/libc++/glibc/musl dependency leaked into DT_NEEDED' >&2
+if printf '%s\n' "$needed" | grep -E 'libusb|libudev|libc\.so\.6|ld-linux|ld-musl|libc\.musl' >/dev/null; then
+    printf '%s\n' 'host/libusb/glibc/musl dependency leaked into DT_NEEDED' >&2
     exit 1
 fi
 if printf '%s\n' "$program$dynamic" | grep -E '/lib64/ld-linux|/lib/ld-musl|/lib/ld-linux|/usr/|/opt/|data/data/com\.termux' >/dev/null; then

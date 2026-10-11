@@ -1,12 +1,30 @@
-/build/
-/out/
-/evidence/raw/
-/evidence/loader-task.md
-/evidence/loader-code.md
-
-# Additional local build directories
-/build-hw/
+# General compiler artifacts
+*.o
+*.a
+*.so
+*.d
 
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# IDE and local settings
+.vscode/
+/.vs/
+.codex*
+
+# CMake and Android build output
+/build-userland*/
+/build-android-*/
+
+# Windows cross-build output and downloaded toolchain cache
+/build-windows*/
+/.windows-toolchain/
+
+# ASICEN local capture and build evidence
+/build/
+/build-hw/
+/out/
+/evidence/raw/
+/evidence/loader-task.md
+/evidence/loader-code.md

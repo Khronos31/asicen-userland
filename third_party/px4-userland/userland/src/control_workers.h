@@ -14,6 +14,17 @@ namespace px4::userland::ipc::posix {
 
 inline constexpr std::size_t kControlWorkerQueueCapacity = 64U;
 
+// The worker wake handle is an int on POSIX and a pointer-width SOCKET on
+// Windows. Callers pass it to the platform poll without narrowing.
+#if defined(_WIN32)
+using WakeHandle = std::uintptr_t;
+inline constexpr WakeHandle kInvalidWakeHandle =
+    static_cast<WakeHandle>(~static_cast<std::uintptr_t>(0U));
+#else
+using WakeHandle = int;
+inline constexpr WakeHandle kInvalidWakeHandle = -1;
+#endif
+
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
 // Private construction seam used only by offline tests to exercise startup
 // rollback. Production callers use create(), with no failure injection.
@@ -140,7 +151,7 @@ public:
     std::size_t pending_completions_for_test(ControlWorkerLane lane) const noexcept;
 #endif
 
-    int wake_fd() const noexcept;
+    WakeHandle wake_fd() const noexcept;
     void drain_wake() noexcept;
     Error error() const noexcept;
     bool idle() const noexcept;

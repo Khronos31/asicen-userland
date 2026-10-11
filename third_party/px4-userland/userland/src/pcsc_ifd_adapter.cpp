@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-09: build-time IFD device-name prefix override.
+// ASICEN modification, 2026-10-10: ASICEN IFD prefix, model-independent reader name and
+// 19200 maximum baud, with capability independent of the naming override.
 // The original license notice is unchanged.
 #include "px4/pcsc_ifd_adapter.h"
 
@@ -525,8 +526,8 @@ IfdResult IfdAdapter::get_capability(std::uint64_t lun, std::uint32_t tag,
     std::lock_guard<std::mutex> lock(mutex_);
     if (!valid_lun(lun) || !channel_configured()) return IfdResult::no_such_device;
     static constexpr char vendor[] = "Khronos31";
-#if defined(ASICEN_PCSC_DEVICE_PREFIX)
-    static constexpr char type[] = "W3U3 card reader via asicend";
+#if defined(ASICEN_PROFILE_ASICEN)
+    static constexpr char type[] = "ASICEN card reader via asicend";
 #else
     static constexpr char type[] = "PX-Q3U4/PX-MLT5PE via px4d";
 #endif
@@ -557,11 +558,10 @@ IfdResult IfdAdapter::get_capability(std::uint64_t lun, std::uint32_t tag,
     case kAttrCurrentProtocolType:
         return copy_u32(kIfdSetProtocolT1, output, length);
     case kAttrDefaultDataRate: return copy_u32(9600U, output, length);
-    case kAttrMaxDataRate:
-#if defined(ASICEN_PCSC_DEVICE_PREFIX)
-        return copy_u32(19200U, output, length);
+#if defined(ASICEN_PROFILE_ASICEN)
+    case kAttrMaxDataRate: return copy_u32(19200U, output, length);
 #else
-        return copy_u32(38400U, output, length);
+    case kAttrMaxDataRate: return copy_u32(38400U, output, length);
 #endif
     case kAttrMaxIfsd: return copy_u32(251U, output, length);
     case kAttrMaxInput: return copy_u32(kIfdApduMaxLength, output, length);

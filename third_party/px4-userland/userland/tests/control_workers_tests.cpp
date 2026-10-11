@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-10: only the hardware lane split changes under
+// the product profile; all upstream assertions and queue/drain cases remain.
 #include "control_workers.h"
 
 #include <array>
@@ -10,7 +12,7 @@
 #include <memory>
 #include <condition_variable>
 #include <mutex>
-#include <poll.h>
+#include "test_poll_compat.h"
 #include <thread>
 
 namespace {
@@ -263,7 +265,11 @@ bool test_lane_routing(Fixture& fixture)
     const auto invalid_255 = workers->submit(ControlWorkerLane::tuner_dev2, receiver);
     CHECK(!invalid_255 && invalid_255.error() == Error::INVALID_ARGUMENT);
 
+#if defined(ASICEN_PROFILE_ASICEN)
+    receiver.receiver = 2U;
+#else
     receiver.receiver = 4U;
+#endif
     CHECK(!workers->submit(ControlWorkerLane::tuner_dev1, receiver) &&
           workers->submit(ControlWorkerLane::tuner_dev2, receiver));
     ControlWorkerTask status{};
@@ -302,7 +308,11 @@ bool test_independent_lanes_and_backpressure(Fixture& fixture)
     dev2.operation = ControlWorkerOperation::tuner_acquire;
     dev2.client_id = 2U;
     dev2.request_id = 201U;
+#if defined(ASICEN_PROFILE_ASICEN)
+    dev2.receiver = 2U;
+#else
     dev2.receiver = 4U;
+#endif
     ControlWorkerTask card{};
     card.operation = ControlWorkerOperation::card_status;
     card.client_id = 3U;
@@ -356,6 +366,33 @@ bool test_independent_lanes_and_backpressure(Fixture& fixture)
     return true;
 }
 
+#if defined(ASICEN_PROFILE_ASICEN)
+bool test_product_receiver_boundaries(Fixture& fixture)
+{
+    auto created = ControlWorkerLanes::create(fixture.card, fixture.tuner);
+    CHECK(created);
+    std::unique_ptr<ControlWorkerLanes> workers = std::move(created.value());
+    for (const std::uint8_t index : {0U, 1U, 2U, 3U, 4U, 5U, 7U, 8U, 255U}) {
+        ControlWorkerTask receiver{};
+        receiver.operation = ControlWorkerOperation::tuner_acquire;
+        receiver.client_id = 13U;
+        receiver.receiver = index;
+        const auto expected = index < 2U ? ControlWorkerLane::tuner_dev1 :
+                                          ControlWorkerLane::tuner_dev2;
+        const auto other = index < 2U ? ControlWorkerLane::tuner_dev2 :
+                                       ControlWorkerLane::tuner_dev1;
+        CHECK(workers->submit(other, receiver).error() == Error::INVALID_ARGUMENT);
+        const auto submitted = workers->submit(expected, receiver);
+        if (index < 4U) CHECK(submitted);
+        else CHECK(!submitted && submitted.error() == Error::INVALID_ARGUMENT);
+    }
+    std::size_t observed = 0U;
+    CHECK(drain_until_stopped(*workers, 4U, observed));
+    CHECK(fixture.tuner.disconnect_client(13U));
+    return true;
+}
+#endif
+
 bool test_completion_ring_backpressure(Fixture& fixture)
 {
     auto created = ControlWorkerLanes::create(fixture.card, fixture.tuner);
@@ -395,6 +432,9 @@ bool run_control_workers_tests()
     std::unique_ptr<Fixture> fixture(new Fixture());
     return test_startup_rollback(*fixture) && test_fifo_and_wakeup(*fixture) &&
            test_dequeue_active_visibility(*fixture) && test_lane_routing(*fixture) &&
+#if defined(ASICEN_PROFILE_ASICEN)
+           test_product_receiver_boundaries(*fixture) &&
+#endif
            test_independent_lanes_and_backpressure(*fixture) &&
            test_completion_ring_backpressure(*fixture);
 }

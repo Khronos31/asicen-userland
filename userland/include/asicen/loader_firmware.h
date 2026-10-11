@@ -1,9 +1,9 @@
-#pragma once
+#ifndef ASICEN_USERLAND_LOADER_FIRMWARE_H
+#define ASICEN_USERLAND_LOADER_FIRMWARE_H
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <vector>
 
 #include "asicen/device_profile.h"
@@ -49,7 +49,7 @@ bool loader_firmware_supports_model(ModelId model) noexcept;
 // Computes SHA-256 without retaining or logging the firmware bytes. A null
 // input is permitted only for an empty input; out must not be null.
 bool loader_firmware_fingerprint(const std::uint8_t* data, std::size_t length,
-                                std::array<std::uint8_t, 32>* out) noexcept;
+                                 std::array<std::uint8_t, 32>* out) noexcept;
 
 const std::array<LoaderFirmwareStage, 4>& loader_firmware_stages();
 std::vector<LoaderTransfer> build_loader_transfer_plan();
@@ -58,24 +58,18 @@ std::vector<LoaderTransfer> build_loader_transfer_plan(ModelId model);
 
 enum class LoaderFirmwareRead {
     Ok,
-    OpenFailed,
     WrongSize,
     FingerprintMismatch,
     UnsupportedModel,
 };
 
-// Size-only input reader, not sufficient authorization for a USB upload.
-// Reads path and requires exactly kLoaderFirmwareBlobSize bytes. On failure
-// out is left empty so a rejected file is never used for a USB transfer.
-LoaderFirmwareRead read_loader_firmware_file(const std::string& path,
-                                             std::vector<std::uint8_t>* out);
-
 // Explicit runtime-model selection is mandatory: never guess from a loader
 // VID/PID, and recheck the actual runtime VID/PID and port after uploading.
-LoaderFirmwareRead validate_loader_firmware(ModelId model,
-                                            const std::uint8_t* data,
+// File loading uses FirmwareProvider; this validates an in-memory image at
+// the hardware boundary without creating another file-reading contract.
+LoaderFirmwareRead validate_loader_firmware(ModelId model, const std::uint8_t* data,
                                             std::size_t length) noexcept;
-LoaderFirmwareRead read_verified_loader_firmware_file(
-    const std::string& path, ModelId model, std::vector<std::uint8_t>* out);
 
-}  // namespace asicen
+} // namespace asicen
+
+#endif // ASICEN_USERLAND_LOADER_FIRMWARE_H

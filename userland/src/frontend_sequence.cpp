@@ -27,6 +27,7 @@
 #include "asicen/frontend_sequence.h"
 
 #include <algorithm>
+#include <charconv>
 #include <array>
 #include <cctype>
 #include <cstdlib>
@@ -43,16 +44,16 @@ constexpr std::uint16_t kFc0012XtalKhz2 = 18000U;
 constexpr std::uint32_t kIsdbTDemodAgcBoundaryKhz = 260999U;
 constexpr std::uint32_t kTerrestrialLockMaxKhz = 1000000U;
 
-std::uint8_t demod_slave_for_source(std::uint8_t source) {
+std::uint8_t demod_slave_for_source(std::uint8_t source)
+{
     return source == 0 ? W3u3FrontendFacts::kTerrestrialDemodI2c
                        : W3u3FrontendFacts::kSatelliteDemodI2c;
 }
 
 // Tuner-through-demod bridge read (TunerRegRead, source 0/1).
-std::vector<ControlTransfer> build_tuner_read(std::uint8_t local,
-                                              std::uint8_t source,
-                                              std::uint8_t reg,
-                                              std::uint16_t length) {
+std::vector<ControlTransfer> build_tuner_read(std::uint8_t local, std::uint8_t source,
+                                              std::uint8_t reg, std::uint16_t length)
+{
     std::vector<ControlTransfer> result;
     if (local > 1 || source > 1 || length == 0) {
         return result;
@@ -75,10 +76,9 @@ std::vector<ControlTransfer> build_tuner_read(std::uint8_t local,
 }
 
 // Tuner-through-demod bridge write (TunerRegWrite, source 0 only here).
-std::vector<ControlTransfer> build_tuner_write(std::uint8_t local,
-                                               std::uint8_t source,
-                                               std::uint8_t reg,
-                                               std::uint8_t value) {
+std::vector<ControlTransfer> build_tuner_write(std::uint8_t local, std::uint8_t source,
+                                               std::uint8_t reg, std::uint8_t value)
+{
     if (local > 1 || source > 1) {
         return {};
     }
@@ -87,8 +87,9 @@ std::vector<ControlTransfer> build_tuner_write(std::uint8_t local,
     return build_i2c_write_sequence(slave, 0x00, payload, sizeof(payload), 2);
 }
 
-void append_control(FrontendPlan* plan, const ControlTransfer& transfer,
-                    bool require_status, const char* label) {
+void append_control(FrontendPlan* plan, const ControlTransfer& transfer, bool require_status,
+                    const char* label)
+{
     FrontendOp op{};
     op.kind = FrontendOpKind::Control;
     op.transfer = transfer;
@@ -98,13 +99,15 @@ void append_control(FrontendPlan* plan, const ControlTransfer& transfer,
 }
 
 void append_sequence(FrontendPlan* plan, const std::vector<ControlTransfer>& sequence,
-                     bool require_status, const char* label) {
+                     bool require_status, const char* label)
+{
     for (const ControlTransfer& transfer : sequence) {
         append_control(plan, transfer, require_status, label);
     }
 }
 
-void append_delay(FrontendPlan* plan, unsigned delay_ms) {
+void append_delay(FrontendPlan* plan, unsigned delay_ms)
+{
     FrontendOp op{};
     op.kind = FrontendOpKind::Delay;
     op.delay_ms = delay_ms;
@@ -112,14 +115,15 @@ void append_delay(FrontendPlan* plan, unsigned delay_ms) {
     plan->push_back(op);
 }
 
-void append_gpio(FrontendPlan* plan, std::uint8_t value, std::uint8_t mask,
-                 const char* label) {
+void append_gpio(FrontendPlan* plan, std::uint8_t value, std::uint8_t mask, const char* label)
+{
     append_control(plan, make_gpio_set(value, mask), false, label);
 }
 
 void append_i2c_mask(FrontendPlan* plan, std::uint8_t slave, std::uint8_t reg,
-                     std::uint8_t read_mode, std::uint8_t and_mask,
-                     std::uint8_t or_mask, const char* label) {
+                     std::uint8_t read_mode, std::uint8_t and_mask, std::uint8_t or_mask,
+                     const char* label)
+{
     FrontendOp op{};
     op.kind = FrontendOpKind::I2cMask;
     op.transfer = make_i2c_read(slave, reg, 1, read_mode);
@@ -132,7 +136,8 @@ void append_i2c_mask(FrontendPlan* plan, std::uint8_t slave, std::uint8_t reg,
 
 void append_tuner_mask(FrontendPlan* plan, std::uint8_t local, std::uint8_t source,
                        std::uint8_t reg, std::uint8_t and_mask, std::uint8_t or_mask,
-                       const char* label) {
+                       const char* label)
+{
     FrontendOp op{};
     op.kind = FrontendOpKind::TunerMask;
     op.require_status = true;
@@ -146,14 +151,15 @@ void append_tuner_mask(FrontendPlan* plan, std::uint8_t local, std::uint8_t sour
 }
 
 void append_tuner_write(FrontendPlan* plan, std::uint8_t local, std::uint8_t source,
-                        std::uint8_t reg, std::uint8_t value, const char* label) {
+                        std::uint8_t reg, std::uint8_t value, const char* label)
+{
     append_sequence(plan, build_tuner_write(local, source, reg, value), true, label);
 }
 
 FrontendRunResult run_sequence(FrontendTransport* transport,
                                const std::vector<ControlTransfer>& sequence,
-                               std::uint8_t* last_value,
-                               FrontendRunReport* report) {
+                               std::uint8_t* last_value, FrontendRunReport* report)
+{
     if (sequence.empty()) {
         return FrontendRunResult::InvalidArgument;
     }
@@ -187,7 +193,10 @@ FrontendRunResult run_sequence(FrontendTransport* transport,
 }
 
 FrontendRunResult run_control(FrontendTransport* transport, const FrontendOp& op,
-                              FrontendRunReport* report) {
+                              FrontendRunReport* report)
+{
+    if (!op.transfer.valid)
+        return FrontendRunResult::InvalidArgument;
     if (transport->cancelled()) {
         return FrontendRunResult::Cancelled;
     }
@@ -214,8 +223,9 @@ FrontendRunResult run_control(FrontendTransport* transport, const FrontendOp& op
     return FrontendRunResult::Completed;
 }
 
-FrontendRunResult run_i2c_mask(FrontendTransport* transport, const FrontendOp& op) {
-    if (op.transfer.length < 2) {
+FrontendRunResult run_i2c_mask(FrontendTransport* transport, const FrontendOp& op)
+{
+    if (!op.transfer.valid || op.transfer.length < 2) {
         return FrontendRunResult::InvalidArgument;
     }
     if (transport->cancelled()) {
@@ -239,8 +249,10 @@ FrontendRunResult run_i2c_mask(FrontendTransport* transport, const FrontendOp& o
     if (!make_i2c_write_chunk(slave, reg, &value, 1, false, &write)) {
         return FrontendRunResult::InvalidArgument;
     }
-    if (transport->cancelled()) return FrontendRunResult::Cancelled;
-    if (transport->expired()) return FrontendRunResult::DeadlineExceeded;
+    if (transport->cancelled())
+        return FrontendRunResult::Cancelled;
+    if (transport->expired())
+        return FrontendRunResult::DeadlineExceeded;
     std::vector<unsigned char> write_buffer(write.length);
     rc = transport->control(write, write_buffer.data());
     if (rc < 0) {
@@ -253,9 +265,9 @@ FrontendRunResult run_i2c_mask(FrontendTransport* transport, const FrontendOp& o
 }
 
 FrontendRunResult run_tuner_mask(FrontendTransport* transport, const FrontendOp& op,
-                                 FrontendRunReport* report) {
-    const std::vector<ControlTransfer> read =
-        build_tuner_read(op.local, op.source, op.reg, 1);
+                                 FrontendRunReport* report)
+{
+    const std::vector<ControlTransfer> read = build_tuner_read(op.local, op.source, op.reg, 1);
     std::uint8_t value = 0;
     FrontendRunResult result = run_sequence(transport, read, &value, report);
     if (result != FrontendRunResult::Completed) {
@@ -268,10 +280,10 @@ FrontendRunResult run_tuner_mask(FrontendTransport* transport, const FrontendOp&
 }
 
 FrontendRunResult run_vco_calibration(FrontendTransport* transport, const FrontendOp& op,
-                                      FrontendRunReport* report) {
+                                      FrontendRunReport* report)
+{
     const auto write = [&](std::uint8_t reg, std::uint8_t value) {
-        return run_sequence(transport, build_tuner_write(op.local, 0, reg, value),
-                            nullptr, report);
+        return run_sequence(transport, build_tuner_write(op.local, 0, reg, value), nullptr, report);
     };
 
     FrontendRunResult result = write(0x0e, 0x80);
@@ -311,7 +323,7 @@ FrontendRunResult run_vco_calibration(FrontendTransport* transport, const Fronte
             if (result != FrontendRunResult::Completed) {
                 return result;
             }
-            transport->delay_ms(1);  // shared vendor fallback tail at +0x3ee
+            transport->delay_ms(1); // shared vendor fallback tail at +0x3ee
         }
     } else if (tmp < 0x02U) {
         reg6 = static_cast<std::uint8_t>(reg6 | 0x08U);
@@ -332,45 +344,50 @@ FrontendRunResult run_vco_calibration(FrontendTransport* transport, const Fronte
     return FrontendRunResult::Completed;
 }
 
-FrontendRunResult run_fc0012_gain_once(FrontendTransport* transport,
-                                       const FrontendOp& op,
-                                       FrontendRunReport* report) {
+FrontendRunResult run_fc0012_gain_once(FrontendTransport* transport, const FrontendOp& op,
+                                       FrontendRunReport* report)
+{
     // Fiti_LAN_Gain returns success without tuner I/O for source 1. The
     // terrestrial CLI selects source 0; accepting source 1 here keeps the
     // recovered branch explicit and independently testable.
-    if (op.source == 1) return FrontendRunResult::Completed;
-    if (op.local > 1 || op.source != 0) return FrontendRunResult::InvalidArgument;
+    if (op.source == 1)
+        return FrontendRunResult::Completed;
+    if (op.local > 1 || op.source != 0)
+        return FrontendRunResult::InvalidArgument;
 
     const auto read = [&](std::uint8_t reg, std::uint8_t* value) {
-        return run_sequence(transport, build_tuner_read(op.local, 0, reg, 1),
-                            value, report);
+        return run_sequence(transport, build_tuner_read(op.local, 0, reg, 1), value, report);
     };
     const auto write = [&](std::uint8_t reg, std::uint8_t value) {
-        return run_sequence(transport, build_tuner_write(op.local, 0, reg, value),
-                            nullptr, report);
+        return run_sequence(transport, build_tuner_write(op.local, 0, reg, value), nullptr, report);
     };
     FrontendRunResult result = write(0x12, 0x00);
-    if (result != FrontendRunResult::Completed) return result;
+    if (result != FrontendRunResult::Completed)
+        return result;
     std::uint8_t r12 = 0, r13 = 0, r0d = 0, r10 = 0;
     result = read(0x12, &r12);
-    if (result != FrontendRunResult::Completed) return result;
+    if (result != FrontendRunResult::Completed)
+        return result;
     result = read(0x13, &r13);
-    if (result != FrontendRunResult::Completed) return result;
+    if (result != FrontendRunResult::Completed)
+        return result;
     r13 &= 0x1fU;
     result = read(0x0d, &r0d);
-    if (result != FrontendRunResult::Completed) return result;
+    if (result != FrontendRunResult::Completed)
+        return result;
     if ((r0d & 0x10U) == 0) {
         result = write(0x10, 0x00);
-        if (result != FrontendRunResult::Completed) return result;
+        if (result != FrontendRunResult::Completed)
+            return result;
     }
     result = read(0x10, &r10);
-    if (result != FrontendRunResult::Completed) return result;
+    if (result != FrontendRunResult::Completed)
+        return result;
 
     // The vendor calculates its scalar from the reg-0x12 sample, while the
     // reg-0x10 read above is part of the routine's observable I/O sequence.
     constexpr std::uint8_t kGainTable[8] = {10, 8, 6, 4, 2, 0, 0, 0};
-    const unsigned gain = static_cast<unsigned>(r12 & 0x1fU) * 2U +
-                          kGainTable[(r12 >> 5U) & 0x07U];
+    const unsigned gain = static_cast<unsigned>(r12 & 0x1fU) * 2U + kGainTable[(r12 >> 5U) & 0x07U];
     constexpr unsigned kLevel1 = 52;
     constexpr unsigned kLevel2 = 54;
     constexpr unsigned kLevel3 = 42;
@@ -383,44 +400,61 @@ FrontendRunResult run_fc0012_gain_once(FrontendTransport* transport,
     const auto adjust_gain = [&](std::uint8_t final_r13) {
         std::uint8_t current_d = 0, current_10 = 0;
         FrontendRunResult step = read(0x0d, &current_d);
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         step = write(0x0d, static_cast<std::uint8_t>(current_d & 0xefU));
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         step = write(0x10, 0x00);
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         step = read(0x10, &current_10);
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         const std::uint8_t adjusted = static_cast<std::uint8_t>(current_10 - 3U);
         step = read(0x0d, &current_d);
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         step = write(0x0d, static_cast<std::uint8_t>(current_d | 0x10U));
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         step = write(0x10, adjusted);
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         return write(0x13, final_r13);
     };
     const auto set_r13_after_clear = [&](std::uint8_t final_r13) {
         std::uint8_t current_d = 0;
         FrontendRunResult step = read(0x0d, &current_d);
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         step = write(0x0d, static_cast<std::uint8_t>(current_d & 0xefU));
-        if (step != FrontendRunResult::Completed) return step;
+        if (step != FrontendRunResult::Completed)
+            return step;
         return write(0x13, final_r13);
     };
 
     if (r13 == 0x0aU) {
-        if (gain > kLevel4) result = set_r13_after_clear(0x14);
-        else if (gain >= kLevel5) return FrontendRunResult::Completed;
-        else result = adjust_gain(0x02);
+        if (gain > kLevel4)
+            result = set_r13_after_clear(0x14);
+        else if (gain >= kLevel5)
+            return FrontendRunResult::Completed;
+        else
+            result = adjust_gain(0x02);
     } else if (r13 == 0x02U) {
-        if (gain <= kLevel6) return FrontendRunResult::Completed;
+        if (gain <= kLevel6)
+            return FrontendRunResult::Completed;
         result = adjust_gain(0x0a);
     } else if (r13 == 0x14U) {
-        if (gain > kLevel2) result = set_r13_after_clear(0x10);
-        else if (gain >= kLevel3) return FrontendRunResult::Completed;
-        else result = adjust_gain(0x0a);
+        if (gain > kLevel2)
+            result = set_r13_after_clear(0x10);
+        else if (gain >= kLevel3)
+            return FrontendRunResult::Completed;
+        else
+            result = adjust_gain(0x0a);
     } else if (r13 == 0x10U) {
-        if (gain >= kLevel1) return FrontendRunResult::Completed;
+        if (gain >= kLevel1)
+            return FrontendRunResult::Completed;
         result = set_r13_after_clear(0x14);
     } else {
         result = set_r13_after_clear(0x10);
@@ -436,11 +470,10 @@ struct RegisterValue {
 // InitDemod terrestrial table, TunerControl.o .rodata 0x220 (addresses) and
 // 0x200 (values), 22 entries.
 constexpr RegisterValue kTerrestrialDemodInit[] = {
-    {0x04, 0x00}, {0x11, 0x1a}, {0x12, 0x04}, {0x13, 0x33}, {0x14, 0x20},
-    {0x31, 0x00}, {0x32, 0x00}, {0x38, 0x00}, {0x39, 0xaa}, {0x47, 0x00},
-    {0x75, 0x02}, {0xb0, 0xa0}, {0xb2, 0x3d}, {0xb3, 0x25}, {0xb4, 0x8b},
-    {0xb5, 0x4b}, {0xb6, 0x3f}, {0xb7, 0xff}, {0xb8, 0xff}, {0x22, 0x8f},
-    {0x5f, 0x80}, {0xef, 0x01},
+    {0x04, 0x00}, {0x11, 0x1a}, {0x12, 0x04}, {0x13, 0x33}, {0x14, 0x20}, {0x31, 0x00},
+    {0x32, 0x00}, {0x38, 0x00}, {0x39, 0xaa}, {0x47, 0x00}, {0x75, 0x02}, {0xb0, 0xa0},
+    {0xb2, 0x3d}, {0xb3, 0x25}, {0xb4, 0x8b}, {0xb5, 0x4b}, {0xb6, 0x3f}, {0xb7, 0xff},
+    {0xb8, 0xff}, {0x22, 0x8f}, {0x5f, 0x80}, {0xef, 0x01},
 };
 
 // InitDemod SIG_SOURCE=1 table from the TunerControl.o object whose SHA-256 is
@@ -449,79 +482,87 @@ constexpr RegisterValue kTerrestrialDemodInit[] = {
 // (exactly 42 bytes). Only public register facts are represented; no vendor
 // object code or unrelated tables are copied.
 constexpr RegisterValue kSatelliteDemodInit[] = {
-    {0x01, 0x90}, {0x03, 0x00}, {0x04, 0x02}, {0x06, 0x00}, {0x07, 0x41},
-    {0x08, 0x00}, {0x09, 0x00}, {0x0a, 0xff}, {0x0c, 0x59}, {0x0d, 0xf2},
-    {0x0e, 0xf0}, {0x0f, 0x50}, {0x10, 0xb2}, {0x11, 0x00}, {0x12, 0x30},
-    {0x13, 0x80}, {0x14, 0x00}, {0x15, 0x00}, {0x17, 0x00}, {0x1a, 0x00},
-    {0x1b, 0x00}, {0x1c, 0x00}, {0x1d, 0x00}, {0x1e, 0x00}, {0x1f, 0x00},
-    {0x20, 0x00}, {0x38, 0x40}, {0x39, 0x10}, {0x3b, 0x90}, {0x51, 0xb0},
-    {0x52, 0x89}, {0x53, 0xb3}, {0x5a, 0x2d}, {0x5b, 0xd3}, {0x85, 0x69},
-    {0x87, 0x04}, {0x8d, 0x00}, {0x8e, 0x00}, {0xa3, 0x11}, {0xa4, 0x00},
-    {0xa5, 0x40}, {0xa6, 0x04},
+    {0x01, 0x90}, {0x03, 0x00}, {0x04, 0x02}, {0x06, 0x00}, {0x07, 0x41}, {0x08, 0x00},
+    {0x09, 0x00}, {0x0a, 0xff}, {0x0c, 0x59}, {0x0d, 0xf2}, {0x0e, 0xf0}, {0x0f, 0x50},
+    {0x10, 0xb2}, {0x11, 0x00}, {0x12, 0x30}, {0x13, 0x80}, {0x14, 0x00}, {0x15, 0x00},
+    {0x17, 0x00}, {0x1a, 0x00}, {0x1b, 0x00}, {0x1c, 0x00}, {0x1d, 0x00}, {0x1e, 0x00},
+    {0x1f, 0x00}, {0x20, 0x00}, {0x38, 0x40}, {0x39, 0x10}, {0x3b, 0x90}, {0x51, 0xb0},
+    {0x52, 0x89}, {0x53, 0xb3}, {0x5a, 0x2d}, {0x5b, 0xd3}, {0x85, 0x69}, {0x87, 0x04},
+    {0x8d, 0x00}, {0x8e, 0x00}, {0xa3, 0x11}, {0xa4, 0x00}, {0xa5, 0x40}, {0xa6, 0x04},
 };
 
 // InitRFDevice FC0012 table, TunerControl.o .text 0x1970, 21 entries. Matches
 // mainline fc0012_init() except vendor gain reg 0x12/0x13.
 constexpr RegisterValue kFc0012Init[] = {
-    {0x01, 0x05}, {0x02, 0x10}, {0x03, 0x00}, {0x04, 0x00}, {0x05, 0x0f},
-    {0x06, 0x00}, {0x07, 0x00}, {0x08, 0xff}, {0x09, 0x6e}, {0x0a, 0xb8},
-    {0x0b, 0x82}, {0x0c, 0xf8}, {0x0d, 0x02}, {0x0e, 0x00}, {0x0f, 0x00},
-    {0x10, 0x00}, {0x11, 0x00}, {0x12, 0x1b}, {0x13, 0x10}, {0x14, 0x00},
-    {0x15, 0x04},
+    {0x01, 0x05}, {0x02, 0x10}, {0x03, 0x00}, {0x04, 0x00}, {0x05, 0x0f}, {0x06, 0x00},
+    {0x07, 0x00}, {0x08, 0xff}, {0x09, 0x6e}, {0x0a, 0xb8}, {0x0b, 0x82}, {0x0c, 0xf8},
+    {0x0d, 0x02}, {0x0e, 0x00}, {0x0f, 0x00}, {0x10, 0x00}, {0x11, 0x00}, {0x12, 0x1b},
+    {0x13, 0x10}, {0x14, 0x00}, {0x15, 0x04},
 };
 
-bool parse_u8(const std::string& text, std::uint8_t* out) {
+bool parse_u8(const std::string& text, std::uint8_t* out)
+{
     if (out == nullptr || text.empty()) {
         return false;
     }
-    char* end = nullptr;
-    const unsigned long parsed = std::strtoul(text.c_str(), &end, 0);
-    if (end == nullptr || *end != '\0' || parsed > 255) {
+    unsigned parsed = 0U;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || parsed > 255U) {
         return false;
     }
     *out = static_cast<std::uint8_t>(parsed);
     return true;
 }
 
-}  // namespace
+} // namespace
 
-std::size_t terrestrial_demod_init_count() {
+std::size_t terrestrial_demod_init_count()
+{
     return sizeof(kTerrestrialDemodInit) / sizeof(kTerrestrialDemodInit[0]);
 }
 
-std::uint8_t terrestrial_demod_init_reg(std::size_t index) {
+std::uint8_t terrestrial_demod_init_reg(std::size_t index)
+{
     return index < terrestrial_demod_init_count() ? kTerrestrialDemodInit[index].reg : 0;
 }
 
-std::uint8_t terrestrial_demod_init_value(std::size_t index) {
+std::uint8_t terrestrial_demod_init_value(std::size_t index)
+{
     return index < terrestrial_demod_init_count() ? kTerrestrialDemodInit[index].value : 0;
 }
 
-std::size_t satellite_demod_init_count() {
+std::size_t satellite_demod_init_count()
+{
     return sizeof(kSatelliteDemodInit) / sizeof(kSatelliteDemodInit[0]);
 }
 
-std::uint8_t satellite_demod_init_reg(std::size_t index) {
+std::uint8_t satellite_demod_init_reg(std::size_t index)
+{
     return index < satellite_demod_init_count() ? kSatelliteDemodInit[index].reg : 0;
 }
 
-std::uint8_t satellite_demod_init_value(std::size_t index) {
+std::uint8_t satellite_demod_init_value(std::size_t index)
+{
     return index < satellite_demod_init_count() ? kSatelliteDemodInit[index].value : 0;
 }
 
-std::size_t fc0012_init_count() {
+std::size_t fc0012_init_count()
+{
     return sizeof(kFc0012Init) / sizeof(kFc0012Init[0]);
 }
 
-std::uint8_t fc0012_init_reg(std::size_t index) {
+std::uint8_t fc0012_init_reg(std::size_t index)
+{
     return index < fc0012_init_count() ? kFc0012Init[index].reg : 0;
 }
 
-std::uint8_t fc0012_init_value(std::size_t index) {
+std::uint8_t fc0012_init_value(std::size_t index)
+{
     return index < fc0012_init_count() ? kFc0012Init[index].value : 0;
 }
 
-Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz) {
+Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz)
+{
     Fc0012Pll pll{};
     if (freq_khz == 0) {
         return pll;
@@ -533,17 +574,15 @@ Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz) {
         std::uint8_t reg6;
     };
     static const Band kBands[] = {
-        {96, 0x82, 0x00}, {64, 0x82, 0x02}, {48, 0x42, 0x00}, {32, 0x42, 0x02},
-        {24, 0x22, 0x00}, {16, 0x22, 0x02}, {12, 0x12, 0x00}, {8, 0x12, 0x02},
-        {6, 0x0a, 0x00}, {4, 0x0a, 0x02},
+        {96, 0x82, 0x00}, {64, 0x82, 0x02}, {48, 0x42, 0x00}, {32, 0x42, 0x02}, {24, 0x22, 0x00},
+        {16, 0x22, 0x02}, {12, 0x12, 0x00}, {8, 0x12, 0x02},  {6, 0x0a, 0x00},  {4, 0x0a, 0x02},
     };
 
     std::uint32_t multi = 0;
     std::uint8_t reg5 = 0;
     std::uint8_t reg6 = 0;
     for (const Band& band : kBands) {
-        const std::uint64_t product =
-            static_cast<std::uint64_t>(freq_khz) * band.multi;
+        const std::uint64_t product = static_cast<std::uint64_t>(freq_khz) * band.multi;
         // Largest multi with multi*freq <= 0x36523f (3559999).
         if (product <= kFc0012BandProductLimit) {
             multi = band.multi;
@@ -564,8 +603,7 @@ Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz) {
     }
 
     std::uint16_t xdiv = static_cast<std::uint16_t>(f_vco / kFc0012XtalKhz2);
-    if ((f_vco - static_cast<std::uint64_t>(xdiv) * kFc0012XtalKhz2) >=
-        (kFc0012XtalKhz2 / 2U)) {
+    if ((f_vco - static_cast<std::uint64_t>(xdiv) * kFc0012XtalKhz2) >= (kFc0012XtalKhz2 / 2U)) {
         xdiv = static_cast<std::uint16_t>(xdiv + 1U);
     }
 
@@ -582,8 +620,7 @@ Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz) {
     }
 
     const std::uint64_t remainder = f_vco - (f_vco / kFc0012XtalKhz2) * kFc0012XtalKhz2;
-    std::uint16_t xin =
-        static_cast<std::uint16_t>((remainder << 15U) / kFc0012XtalKhz2);
+    std::uint16_t xin = static_cast<std::uint16_t>((remainder << 15U) / kFc0012XtalKhz2);
     if (xin >= 16384U) {
         xin = static_cast<std::uint16_t>(xin + 32768U);
     }
@@ -605,28 +642,29 @@ Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz) {
     return pll;
 }
 
-std::uint32_t terrestrial_tune_center_khz(std::uint32_t freq_khz) {
+std::uint32_t terrestrial_tune_center_khz(std::uint32_t freq_khz)
+{
     if (freq_khz == 0) {
         return 0;
     }
     // TunerControl.o .text 0x23bc-0x23f5: rdx = (freq>>3)/125*1000, i.e.
     // floor(freq/1000)*1000, then vendor-specific special ranges and a +143 kHz
     // offset before Adpater_SetFreqISDBT(rdx + 0x8f).
-    const std::uint64_t truncated =
-        static_cast<std::uint64_t>(freq_khz / 1000U) * 1000U;
+    const std::uint64_t truncated = static_cast<std::uint64_t>(freq_khz / 1000U) * 1000U;
     if (truncated >= 165000U && truncated <= 167000U) {
-        return 0x28ce7U;  // 167143
+        return 0x28ce7U; // 167143
     }
     if (truncated >= 195000U && truncated <= 197000U) {
-        return 0x2fa47U;  // 195143
+        return 0x2fa47U; // 195143
     }
     if (truncated >= 471000U && truncated <= 473000U) {
-        return 0x73837U;  // 473143
+        return 0x73837U; // 473143
     }
     return static_cast<std::uint32_t>(truncated + 0x8fU);
 }
 
-FrontendPlan plan_startup_subset() {
+FrontendPlan plan_startup_subset()
+{
     FrontendPlan plan;
     // DTV_Start GPIO value 0x27 mask 0xfb with the sibling bit 0x40 excluded:
     // mask 0xbb. Sets bits 0/1/5, clears 3/4/7, leaves 0x40 untouched.
@@ -634,7 +672,8 @@ FrontendPlan plan_startup_subset() {
     return plan;
 }
 
-FrontendPlan plan_safe_power_on() {
+FrontendPlan plan_safe_power_on()
+{
     FrontendPlan plan;
     append_gpio(&plan, 0x05, 0x05, "gpio set 0x05");
     append_delay(&plan, 10);
@@ -660,14 +699,15 @@ FrontendPlan plan_safe_power_on() {
     return plan;
 }
 
-FrontendPlan plan_sibling40_restore() {
+FrontendPlan plan_sibling40_restore()
+{
     FrontendPlan plan;
     append_gpio(&plan, 0x40, 0x40, "gpio set sibling 0x40");
     return plan;
 }
 
-FrontendPlan plan_demod_read(std::uint8_t local, std::uint8_t reg,
-                             std::uint16_t length) {
+FrontendPlan plan_demod_read(std::uint8_t local, std::uint8_t reg, std::uint16_t length)
+{
     FrontendPlan plan;
     if (local > 1 || length == 0 || length > 0x20) {
         return plan;
@@ -680,41 +720,42 @@ FrontendPlan plan_demod_read(std::uint8_t local, std::uint8_t reg,
     return plan;
 }
 
-FrontendPlan plan_demod_init_terrestrial() {
+FrontendPlan plan_demod_init_terrestrial()
+{
     FrontendPlan plan;
     for (std::size_t i = 0; i < terrestrial_demod_init_count(); ++i) {
         const std::uint8_t reg = terrestrial_demod_init_reg(i);
         const std::uint8_t value = terrestrial_demod_init_value(i);
         const std::uint8_t payload[1] = {value};
-        append_sequence(&plan,
-                        build_i2c_write_sequence(0x30, reg, payload, 1, 0), true,
+        append_sequence(&plan, build_i2c_write_sequence(0x30, reg, payload, 1, 0), true,
                         "demod init");
     }
     return plan;
 }
 
-FrontendPlan plan_demod_init_satellite() {
+FrontendPlan plan_demod_init_satellite()
+{
     FrontendPlan plan;
     for (std::size_t i = 0; i < satellite_demod_init_count(); ++i) {
         const std::uint8_t reg = satellite_demod_init_reg(i);
         const std::uint8_t payload[1] = {satellite_demod_init_value(i)};
-        append_sequence(&plan,
-                        build_i2c_write_sequence(0x32, reg, payload, 1, 0), true,
+        append_sequence(&plan, build_i2c_write_sequence(0x32, reg, payload, 1, 0), true,
                         "satellite demod init");
     }
     return plan;
 }
 
-FrontendPlan plan_fc0012_init() {
+FrontendPlan plan_fc0012_init()
+{
     FrontendPlan plan;
     for (std::size_t i = 0; i < fc0012_init_count(); ++i) {
-        append_tuner_write(&plan, 1, 0, fc0012_init_reg(i), fc0012_init_value(i),
-                           "fc0012 init");
+        append_tuner_write(&plan, 1, 0, fc0012_init_reg(i), fc0012_init_value(i), "fc0012 init");
     }
     return plan;
 }
 
-FrontendPlan plan_terrestrial_init() {
+FrontendPlan plan_terrestrial_init()
+{
     FrontendPlan plan = plan_demod_init_terrestrial();
     const FrontendPlan rf = plan_fc0012_init();
     plan.insert(plan.end(), rf.begin(), rf.end());
@@ -724,21 +765,22 @@ FrontendPlan plan_terrestrial_init() {
     return plan;
 }
 
-FrontendPlan plan_terrestrial_init_with_satellite_demod() {
+FrontendPlan plan_terrestrial_init_with_satellite_demod()
+{
     FrontendPlan plan = plan_terrestrial_init();
-    const std::size_t insert_at = plan_demod_init_terrestrial().size() +
-                                  plan_fc0012_init().size();
+    const std::size_t insert_at = plan_demod_init_terrestrial().size() + plan_fc0012_init().size();
     const FrontendPlan satellite = plan_demod_init_satellite();
-    if (plan.empty() || insert_at > plan.size() || satellite.empty()) return {};
-    plan.insert(plan.begin() + static_cast<std::ptrdiff_t>(insert_at),
-                satellite.begin(), satellite.end());
+    if (plan.empty() || insert_at > plan.size() || satellite.empty())
+        return {};
+    plan.insert(plan.begin() + static_cast<std::ptrdiff_t>(insert_at), satellite.begin(),
+                satellite.end());
     return plan;
 }
 
 namespace {
 
-FrontendPlan plan_fc0012_adapter(std::uint32_t freq_khz, std::uint8_t local,
-                                  bool demod_agc) {
+FrontendPlan plan_fc0012_adapter(std::uint32_t freq_khz, std::uint8_t local, bool demod_agc)
+{
     FrontendPlan plan;
     const Fc0012Pll pll = compute_fc0012_pll(freq_khz);
     if (!pll.valid) {
@@ -778,60 +820,65 @@ FrontendPlan plan_fc0012_adapter(std::uint32_t freq_khz, std::uint8_t local,
     return plan;
 }
 
-}  // namespace
+} // namespace
 
-FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz) {
+FrontendPlan plan_fc0012_tune(std::uint32_t freq_khz)
+{
     return plan_fc0012_adapter(freq_khz, 1, true);
 }
 
 namespace {
 
-bool valid_legacy_profile(LegacyFrontendProfile profile) {
-    return profile == LegacyFrontendProfile::S3u ||
-           profile == LegacyFrontendProfile::S3u2;
+bool valid_legacy_profile(LegacyFrontendProfile profile)
+{
+    return profile == LegacyFrontendProfile::S3u || profile == LegacyFrontendProfile::S3u2;
 }
 
-void append_plan(FrontendPlan* plan, const FrontendPlan& extra) {
+void append_plan(FrontendPlan* plan, const FrontendPlan& extra)
+{
     plan->insert(plan->end(), extra.begin(), extra.end());
 }
 
-void append_demod_byte(FrontendPlan* plan, std::uint8_t slave,
-                       std::uint8_t reg, std::uint8_t value, const char* label) {
-    append_sequence(plan, build_i2c_write_sequence(slave, reg, &value, 1, 0),
-                    true, label);
+void append_demod_byte(FrontendPlan* plan, std::uint8_t slave, std::uint8_t reg, std::uint8_t value,
+                       const char* label)
+{
+    append_sequence(plan, build_i2c_write_sequence(slave, reg, &value, 1, 0), true, label);
 }
 
-void append_legacy_terrestrial_init(FrontendPlan* plan) {
+void append_legacy_terrestrial_init(FrontendPlan* plan)
+{
     // Both S3U and S3U2 TunerControl.o: values .rodata 1fc, regs 209,
     // exactly 13 pairs. Do not add W3U3's preceding nine register writes.
     constexpr RegisterValue pairs[] = {
-        {0x47, 0x00}, {0x75, 0x02}, {0xb0, 0xa0}, {0xb2, 0x3d},
-        {0xb3, 0x25}, {0xb4, 0x8b}, {0xb5, 0x4b}, {0xb6, 0x3f},
-        {0xb7, 0xff}, {0xb8, 0xff}, {0x22, 0x8f}, {0x5f, 0x80},
-        {0xef, 0x01},
+        {0x47, 0x00}, {0x75, 0x02}, {0xb0, 0xa0}, {0xb2, 0x3d}, {0xb3, 0x25},
+        {0xb4, 0x8b}, {0xb5, 0x4b}, {0xb6, 0x3f}, {0xb7, 0xff}, {0xb8, 0xff},
+        {0x22, 0x8f}, {0x5f, 0x80}, {0xef, 0x01},
     };
     for (const auto& pair : pairs)
         append_demod_byte(plan, 0x30, pair.reg, pair.value, "legacy T demod init");
 }
 
-void append_legacy_rf_init(FrontendPlan* plan) {
+void append_legacy_rf_init(FrontendPlan* plan)
+{
     // Hardware index0 is intentional: S3U index1 would select slave0x34.
     for (const auto& pair : kFc0012Init)
         append_tuner_write(plan, 0, 0, pair.reg, pair.value, "legacy RF init");
 }
 
-void append_s3u2_rf_pulse(FrontendPlan* plan) {
+void append_s3u2_rf_pulse(FrontendPlan* plan)
+{
     // S3U2 InitRFDevice .text 1fb9/1ff0/2013 runs this source0 pulse
     // after BOTH source calls, including the satellite-source call.
     for (const std::uint8_t value : {0x00, 0x10, 0x00})
         append_tuner_write(plan, 0, 0, 0x10, value, "S3U2 RF10 pulse");
 }
 
-}  // namespace
+} // namespace
 
-FrontendPlan plan_legacy_frontend_startup(LegacyFrontendProfile profile,
-                                          bool silicon_16_52) {
-    if (!valid_legacy_profile(profile)) return {};
+FrontendPlan plan_legacy_frontend_startup(LegacyFrontendProfile profile, bool silicon_16_52)
+{
+    if (!valid_legacy_profile(profile))
+        return {};
     FrontendPlan plan;
     // DTV_Device.o DTV_Start .text15cc..16dd: complete ordinary11/52
     // cold-start branch, not merely its final GPIO tail. The preceding
@@ -867,8 +914,10 @@ FrontendPlan plan_legacy_frontend_startup(LegacyFrontendProfile profile,
     return plan;
 }
 
-FrontendPlan plan_legacy_frontend_startup_off(LegacyFrontendProfile profile) {
-    if (!valid_legacy_profile(profile)) return {};
+FrontendPlan plan_legacy_frontend_startup_off(LegacyFrontendProfile profile)
+{
+    if (!valid_legacy_profile(profile))
+        return {};
     // DTV_Device.o DTV_Start .text1742/1758: power off index0 then index1.
     // Preserve these source transitions separately from the final GPIO tail.
     auto plan = plan_legacy_frontend_power(profile, false);
@@ -877,8 +926,10 @@ FrontendPlan plan_legacy_frontend_startup_off(LegacyFrontendProfile profile) {
     return plan;
 }
 
-FrontendPlan plan_legacy_frontend_init_prelude(LegacyFrontendProfile profile) {
-    if (!valid_legacy_profile(profile)) return {};
+FrontendPlan plan_legacy_frontend_init_prelude(LegacyFrontendProfile profile)
+{
+    if (!valid_legacy_profile(profile))
+        return {};
     // DTV_Lib.o DTV_Init: S3U .text73a3..73bc; S3U2 .text7413..742c.
     // These execute before their DTV_TunerPower(on) calls73d4/7444.
     FrontendPlan plan;
@@ -887,17 +938,20 @@ FrontendPlan plan_legacy_frontend_init_prelude(LegacyFrontendProfile profile) {
     return plan;
 }
 
-FrontendPlan plan_legacy_frontend_power(LegacyFrontendProfile profile, bool on) {
-    if (!valid_legacy_profile(profile)) return {};
+FrontendPlan plan_legacy_frontend_power(LegacyFrontendProfile profile, bool on)
+{
+    if (!valid_legacy_profile(profile))
+        return {};
     FrontendPlan plan;
     const auto gpio = [&](std::uint8_t value, std::uint8_t mask, unsigned delay) {
         append_gpio(&plan, value, mask, "legacy vendor power GPIO");
-        if (delay != 0) append_delay(&plan, delay);
+        if (delay != 0)
+            append_delay(&plan, delay);
     };
     const auto gpio_ex = [&](std::uint8_t value, std::uint8_t mask, unsigned delay) {
-        append_control(&plan, make_gpio_ex_set(value, mask), false,
-                       "legacy vendor power GPIOEx");
-        if (delay != 0) append_delay(&plan, delay);
+        append_control(&plan, make_gpio_ex_set(value, mask), false, "legacy vendor power GPIOEx");
+        if (delay != 0)
+            append_delay(&plan, delay);
     };
     // Complete vendor-described sequences, not safety-filtered subsets.
     // Select these by model; do not apply W3U3 GPIO/LNB meanings to them.
@@ -944,14 +998,15 @@ FrontendPlan plan_legacy_frontend_power(LegacyFrontendProfile profile, bool on) 
     gpio(0x80, 0x80, 10);
     gpio(0x00, 0x80, 10);
     gpio_ex(0x00, 0x02, 0);
-    append_control(&plan, make_i2c_read(0xa8, 0, 1, 0), false,
-                   "legacy discarded RF probe");
+    append_control(&plan, make_i2c_read(0xa8, 0, 1, 0), false, "legacy discarded RF probe");
     append_delay(&plan, 100);
     return plan;
 }
 
-FrontendPlan plan_legacy_frontend_init(LegacyFrontendProfile profile) {
-    if (!valid_legacy_profile(profile)) return {};
+FrontendPlan plan_legacy_frontend_init(LegacyFrontendProfile profile)
+{
+    if (!valid_legacy_profile(profile))
+        return {};
     FrontendPlan plan;
     if (profile == LegacyFrontendProfile::S3u) {
         // S3U TC_Initialise1bb0 -> InitDemod1130 -> InitRFDevice1a50.
@@ -970,8 +1025,8 @@ FrontendPlan plan_legacy_frontend_init(LegacyFrontendProfile profile) {
     return plan;
 }
 
-FrontendPlan plan_legacy_fc0012_tune(LegacyFrontendProfile profile,
-                                     std::uint32_t center_khz) {
+FrontendPlan plan_legacy_fc0012_tune(LegacyFrontendProfile profile, std::uint32_t center_khz)
+{
     if (!valid_legacy_profile(profile) || !compute_fc0012_pll(center_khz).valid)
         return {};
     FrontendPlan plan;
@@ -992,19 +1047,20 @@ FrontendPlan plan_legacy_fc0012_tune(LegacyFrontendProfile profile,
 }
 
 FrontendPlan plan_legacy_terrestrial_tune(LegacyFrontendProfile profile,
-                                          std::uint32_t frequency_khz,
-                                          std::uint8_t bandwidth_mhz) {
-    if (!valid_legacy_profile(profile) || bandwidth_mhz != 6 ||
-        frequency_khz == 0 || frequency_khz > 999999U) return {};
-    const auto adapter = plan_legacy_fc0012_tune(
-        profile, terrestrial_tune_center_khz(frequency_khz));
-    if (adapter.empty()) return {};
+                                          std::uint32_t frequency_khz, std::uint8_t bandwidth_mhz)
+{
+    if (!valid_legacy_profile(profile) || bandwidth_mhz != 6 || frequency_khz == 0 ||
+        frequency_khz > 999999U)
+        return {};
+    const auto adapter =
+        plan_legacy_fc0012_tune(profile, terrestrial_tune_center_khz(frequency_khz));
+    if (adapter.empty())
+        return {};
     FrontendPlan plan;
     append_demod_byte(&plan, 0x30, 0x25, 0x00, "legacy T acquisition prefix25");
     append_demod_byte(&plan, 0x30, 0x23, 0x4d, "legacy T acquisition prefix23");
     append_plan(&plan, adapter);
-    append_demod_byte(&plan, 0x30, 0x0f,
-                      profile == LegacyFrontendProfile::S3u ? 0x14 : 0x34,
+    append_demod_byte(&plan, 0x30, 0x0f, profile == LegacyFrontendProfile::S3u ? 0x14 : 0x34,
                       "legacy T source finalization");
     append_demod_byte(&plan, 0x30, 0x01, 0x40, "legacy T reacquire");
     append_demod_byte(&plan, 0x30, 0x23, 0x4c, "legacy T acquisition complete");
@@ -1012,14 +1068,17 @@ FrontendPlan plan_legacy_terrestrial_tune(LegacyFrontendProfile profile,
 }
 
 FrontendPlan plan_legacy_terrestrial_lock(LegacyFrontendProfile profile,
-                                          std::uint32_t frequency_khz) {
-    if (!valid_legacy_profile(profile) || frequency_khz > 999999U) return {};
+                                          std::uint32_t frequency_khz)
+{
+    if (!valid_legacy_profile(profile) || frequency_khz > 999999U)
+        return {};
     return plan_terrestrial_lock_read(frequency_khz);
 }
 
-FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile,
-                                      bool source_default) {
-    if (!valid_legacy_profile(profile) || !source_default) return {};
+FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile, bool source_default)
+{
+    if (!valid_legacy_profile(profile) || !source_default)
+        return {};
     if (profile == LegacyFrontendProfile::S3u)
         return plan_fc0012_gain_once(0, 0);
     // S3U2 Fiti_LAN_Gain1630 checks cached field+8 at1658. The default
@@ -1030,8 +1089,8 @@ FrontendPlan plan_legacy_default_gain(LegacyFrontendProfile profile,
     return plan;
 }
 
-FrontendPlan plan_terrestrial_tune_full(std::uint32_t freq_khz,
-                                        std::uint8_t bandwidth_mhz) {
+FrontendPlan plan_terrestrial_tune_full(std::uint32_t freq_khz, std::uint8_t bandwidth_mhz)
+{
     FrontendPlan plan;
     if (freq_khz == 0 || bandwidth_mhz == 0) {
         return plan;
@@ -1056,7 +1115,8 @@ FrontendPlan plan_terrestrial_tune_full(std::uint32_t freq_khz,
     return plan;
 }
 
-FrontendPlan plan_terrestrial_lock_read(std::uint32_t freq_khz) {
+FrontendPlan plan_terrestrial_lock_read(std::uint32_t freq_khz)
+{
     FrontendPlan plan;
     // Terrestrial-only: reject zero and out-of-range (satellite) frequencies so
     // a >1 MHz request cannot silently read the satellite lock register.
@@ -1067,9 +1127,11 @@ FrontendPlan plan_terrestrial_lock_read(std::uint32_t freq_khz) {
     return plan;
 }
 
-FrontendPlan plan_fc0012_gain_once(std::uint8_t local, std::uint8_t source) {
+FrontendPlan plan_fc0012_gain_once(std::uint8_t local, std::uint8_t source)
+{
     FrontendPlan plan;
-    if (local > 1 || source > 1) return plan;
+    if (local > 1 || source > 1)
+        return plan;
     FrontendOp op{};
     op.kind = FrontendOpKind::Fc0012GainOnce;
     op.local = local;
@@ -1079,11 +1141,13 @@ FrontendPlan plan_fc0012_gain_once(std::uint8_t local, std::uint8_t source) {
     return plan;
 }
 
-FrontendPlan plan_stream_setup(std::uint8_t local) {
+FrontendPlan plan_stream_setup(std::uint8_t local)
+{
     return plan_stream_setup(local, 1);
 }
 
-FrontendPlan plan_stream_setup(std::uint8_t local, std::uint8_t reset_state) {
+FrontendPlan plan_stream_setup(std::uint8_t local, std::uint8_t reset_state)
+{
     FrontendPlan plan;
     if (local > 1 || reset_state > 1) {
         return plan;
@@ -1091,8 +1155,8 @@ FrontendPlan plan_stream_setup(std::uint8_t local, std::uint8_t reset_state) {
     FrontendOp reset{};
     reset.kind = FrontendOpKind::FilterReset;
     reset.local = local;
-    reset.block_rmw = true;  // third USB_FilterReset argument
-    reset.flag = reset_state;  // fourth argument, reset state
+    reset.block_rmw = true;   // third USB_FilterReset argument
+    reset.flag = reset_state; // fourth argument, reset state
     reset.label = "usb filter reset";
     plan.push_back(reset);
 
@@ -1117,7 +1181,8 @@ FrontendRunResult run_plan_ops(const FrontendPlan& plan, FrontendTransport* tran
 // deterministic demod 0x25=0x00 / demod 0x23=0x4d prefix is emitted by
 // plan_terrestrial_tune_full before this op.
 FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const FrontendOp& op,
-                                       FrontendRunReport* report) {
+                                       FrontendRunReport* report)
+{
     const std::uint8_t local = 1;
     const std::uint8_t source = 0;
     const std::uint32_t center = terrestrial_tune_center_khz(op.frequency_khz);
@@ -1134,22 +1199,20 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
     };
     const auto demod_write = [&](std::uint8_t reg, std::uint8_t value) {
         const std::uint8_t payload[1] = {value};
-        return run_sequence(transport,
-                            build_i2c_write_sequence(0x30, reg, payload, 1, 0), nullptr,
+        return run_sequence(transport, build_i2c_write_sequence(0x30, reg, payload, 1, 0), nullptr,
                             report);
     };
     const auto tuner_write = [&](std::uint8_t reg, std::uint8_t value) {
-        return run_sequence(transport, build_tuner_write(local, source, reg, value),
-                            nullptr, report);
+        return run_sequence(transport, build_tuner_write(local, source, reg, value), nullptr,
+                            report);
     };
 
-
     for (int count = 0;; ++count) {
-        FrontendRunResult result = tuner_write(0x13, 0x02);  // table[ptr[0x18]=0]
+        FrontendRunResult result = tuner_write(0x13, 0x02); // table[ptr[0x18]=0]
         if (result != FrontendRunResult::Completed) {
             return result;
         }
-        result = single_control(make_gpio_set(0x00, 0x01), false);  // LNA off
+        result = single_control(make_gpio_set(0x00, 0x01), false); // LNA off
         if (result != FrontendRunResult::Completed) {
             return result;
         }
@@ -1162,8 +1225,7 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
             return result;
         }
         std::uint8_t reg0e = 0;
-        result = run_sequence(transport, build_tuner_read(local, source, 0x0e, 1),
-                              &reg0e, report);
+        result = run_sequence(transport, build_tuner_read(local, source, 0x0e, 1), &reg0e, report);
         if (result != FrontendRunResult::Completed) {
             return result;
         }
@@ -1176,9 +1238,9 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
         // TC_SetFrequency .text 0x2493..0x252a reads 1c once; its second
         // write uses the SAME saved byte, not a second device sample.
         std::uint8_t saved_1c = 0;
-        result = run_sequence(transport, {make_i2c_read(0x30, 0x1c, 1, 0)},
-                              &saved_1c, report);
-        if (result != FrontendRunResult::Completed) return result;
+        result = run_sequence(transport, {make_i2c_read(0x30, 0x1c, 1, 0)}, &saved_1c, report);
+        if (result != FrontendRunResult::Completed)
+            return result;
         saved_1c = static_cast<std::uint8_t>(saved_1c | 0x30U);
         result = demod_write(0x1c, saved_1c);
         if (result != FrontendRunResult::Completed) {
@@ -1190,7 +1252,7 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
             return result;
         }
         transport->delay_ms(10);
-        result = run_plan_ops(plan_fc0012_init(), transport, report);  // InitRFDevice
+        result = run_plan_ops(plan_fc0012_init(), transport, report); // InitRFDevice
         if (result != FrontendRunResult::Completed) {
             return result;
         }
@@ -1200,7 +1262,7 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
     if (result != FrontendRunResult::Completed) {
         return result;
     }
-    result = demod_write(0x01, 0x40);  // ReAcqDemod (terrestrial, source 0)
+    result = demod_write(0x01, 0x40); // ReAcqDemod (terrestrial, source 0)
     if (result != FrontendRunResult::Completed) {
         return result;
     }
@@ -1211,10 +1273,10 @@ FrontendRunResult run_terrestrial_tune(FrontendTransport* transport, const Front
 // byte 0x40 bit2 by `flag`, FUSBDTV_Cmd_Reset_Channel(local, flag), write the
 // block back with all-zero 3-byte chunks skipped (as the vendor USB_CF_Write
 // does). The block contents come from the device, not a copied vendor table.
-FrontendRunResult run_filter_reset(
-    FrontendTransport* transport, const FrontendOp& op,
-    std::array<std::uint8_t, 0x45>* block_before = nullptr,
-    std::array<std::uint8_t, 0x45>* block_after = nullptr) {
+FrontendRunResult run_filter_reset(FrontendTransport* transport, const FrontendOp& op,
+                                   std::array<std::uint8_t, 0x45>* block_before = nullptr,
+                                   std::array<std::uint8_t, 0x45>* block_after = nullptr)
+{
     const std::uint8_t local = op.local;
     if (local > 1) {
         return FrontendRunResult::InvalidArgument;
@@ -1242,8 +1304,8 @@ FrontendRunResult run_filter_reset(
     if (op.block_rmw) {
         while (offset < block.size()) {
             const std::size_t chunk = std::min<std::size_t>(0x20, block.size() - offset);
-            const ControlTransfer read = make_cf_read(
-                local, static_cast<std::uint8_t>(offset), static_cast<std::uint16_t>(chunk));
+            const ControlTransfer read = make_cf_read(local, static_cast<std::uint8_t>(offset),
+                                                      static_cast<std::uint16_t>(chunk));
             if (transport->cancelled()) {
                 return FrontendRunResult::Cancelled;
             }
@@ -1262,14 +1324,16 @@ FrontendRunResult run_filter_reset(
             offset += chunk;
         }
 
-        if (block_before != nullptr) *block_before = block;
+        if (block_before != nullptr)
+            *block_before = block;
 
         if (op.flag == 0) {
             block[0x40] = static_cast<std::uint8_t>(block[0x40] & 0xfbU);
         } else {
             block[0x40] = static_cast<std::uint8_t>(block[0x40] | 0x04U);
         }
-        if (block_after != nullptr) *block_after = block;
+        if (block_after != nullptr)
+            *block_after = block;
     }
 
     FrontendRunResult result = run_one(make_reset_channel(local, op.flag));
@@ -1288,8 +1352,8 @@ FrontendRunResult run_filter_reset(
         }
         if (!all_zero) {
             ControlTransfer write{};
-            if (!make_cf_write(local, static_cast<std::uint8_t>(offset),
-                               block.data() + offset, chunk, &write)) {
+            if (!make_cf_write(local, static_cast<std::uint8_t>(offset), block.data() + offset,
+                               chunk, &write)) {
                 return FrontendRunResult::InvalidArgument;
             }
             result = run_one(write);
@@ -1305,7 +1369,8 @@ FrontendRunResult run_filter_reset(
 namespace {
 
 FrontendRunResult run_plan_ops(const FrontendPlan& plan, FrontendTransport* transport,
-                               FrontendRunReport* report) {
+                               FrontendRunReport* report)
+{
     for (const FrontendOp& op : plan) {
         if (transport->cancelled()) {
             return FrontendRunResult::Cancelled;
@@ -1315,30 +1380,32 @@ FrontendRunResult run_plan_ops(const FrontendPlan& plan, FrontendTransport* tran
         }
         FrontendRunResult result = FrontendRunResult::Completed;
         switch (op.kind) {
-            case FrontendOpKind::Control:
-                result = run_control(transport, op, report);
-                break;
-            case FrontendOpKind::Delay:
-                transport->delay_ms(op.delay_ms);
-                break;
-            case FrontendOpKind::I2cMask:
-                result = run_i2c_mask(transport, op);
-                break;
-            case FrontendOpKind::TunerMask:
-                result = run_tuner_mask(transport, op, report);
-                break;
-            case FrontendOpKind::Fc0012VcoCalibrate:
-                result = run_vco_calibration(transport, op, report);
-                break;
-            case FrontendOpKind::TerrestrialTune:
-                result = run_terrestrial_tune(transport, op, report);
-                break;
-            case FrontendOpKind::Fc0012GainOnce:
-                result = run_fc0012_gain_once(transport, op, report);
-                break;
-            case FrontendOpKind::FilterReset:
-                result = run_filter_reset(transport, op);
-                break;
+        case FrontendOpKind::Control:
+            result = run_control(transport, op, report);
+            break;
+        case FrontendOpKind::Delay:
+            transport->delay_ms(op.delay_ms);
+            break;
+        case FrontendOpKind::I2cMask:
+            result = run_i2c_mask(transport, op);
+            break;
+        case FrontendOpKind::TunerMask:
+            result = run_tuner_mask(transport, op, report);
+            break;
+        case FrontendOpKind::Fc0012VcoCalibrate:
+            result = run_vco_calibration(transport, op, report);
+            break;
+        case FrontendOpKind::TerrestrialTune:
+            result = run_terrestrial_tune(transport, op, report);
+            break;
+        case FrontendOpKind::Fc0012GainOnce:
+            result = run_fc0012_gain_once(transport, op, report);
+            break;
+        case FrontendOpKind::FilterReset:
+            result = run_filter_reset(transport, op);
+            break;
+        default:
+            return FrontendRunResult::InvalidArgument;
         }
         if (result != FrontendRunResult::Completed) {
             return result;
@@ -1350,11 +1417,11 @@ FrontendRunResult run_plan_ops(const FrontendPlan& plan, FrontendTransport* tran
     return FrontendRunResult::Completed;
 }
 
-}  // namespace
+} // namespace
 
-FrontendRunResult run_frontend_plan(const FrontendPlan& plan,
-                                    FrontendTransport* transport,
-                                    FrontendRunReport* report) {
+FrontendRunResult run_frontend_plan(const FrontendPlan& plan, FrontendTransport* transport,
+                                    FrontendRunReport* report)
+{
     if (transport == nullptr) {
         return FrontendRunResult::InvalidArgument;
     }
@@ -1362,10 +1429,11 @@ FrontendRunResult run_frontend_plan(const FrontendPlan& plan,
     return run_plan_ops(plan, transport, report != nullptr ? report : &local_report);
 }
 
-FrontendRunResult run_filter_reset_operation(
-    FrontendTransport* transport, std::uint8_t local, std::uint8_t reset_state,
-    std::array<std::uint8_t, 0x45>* block_before,
-    std::array<std::uint8_t, 0x45>* block_after) {
+FrontendRunResult run_filter_reset_operation(FrontendTransport* transport, std::uint8_t local,
+                                             std::uint8_t reset_state,
+                                             std::array<std::uint8_t, 0x45>* block_before,
+                                             std::array<std::uint8_t, 0x45>* block_after)
+{
     if (transport == nullptr || local > 1 || reset_state > 1)
         return FrontendRunResult::InvalidArgument;
     FrontendOp op{};
@@ -1376,8 +1444,8 @@ FrontendRunResult run_filter_reset_operation(
     return run_filter_reset(transport, op, block_before, block_after);
 }
 
-bool parse_usb_location(const std::string& text, std::uint8_t* bus,
-                        std::uint8_t* address) {
+bool parse_usb_location(const std::string& text, std::uint8_t* bus, std::uint8_t* address)
+{
     if (bus == nullptr || address == nullptr) {
         return false;
     }
@@ -1385,18 +1453,17 @@ bool parse_usb_location(const std::string& text, std::uint8_t* bus,
     if (colon == std::string::npos || text.find(':', colon + 1) != std::string::npos) {
         return false;
     }
-    return parse_u8(text.substr(0, colon), bus) &&
-           parse_u8(text.substr(colon + 1), address);
+    return parse_u8(text.substr(0, colon), bus) && parse_u8(text.substr(colon + 1), address);
 }
 
-bool parse_port_path(const std::string& text) {
+bool parse_port_path(const std::string& text)
+{
     if (text.empty()) {
         return false;
     }
     std::size_t index = 0;
     std::size_t run = 0;
-    while (index < text.size() &&
-           std::isdigit(static_cast<unsigned char>(text[index])) != 0) {
+    while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index])) != 0) {
         ++index;
         ++run;
     }
@@ -1406,8 +1473,7 @@ bool parse_port_path(const std::string& text) {
     ++index;
     while (true) {
         run = 0;
-        while (index < text.size() &&
-               std::isdigit(static_cast<unsigned char>(text[index])) != 0) {
+        while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index])) != 0) {
             ++index;
             ++run;
         }
@@ -1424,4 +1490,4 @@ bool parse_port_path(const std::string& text) {
     }
 }
 
-}  // namespace asicen
+} // namespace asicen

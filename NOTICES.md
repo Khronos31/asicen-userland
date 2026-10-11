@@ -7,7 +7,7 @@ notice keeps that notice. Where a file in this repository has no more specific
 notice, it is part of the GPL-2.0-only product work. These locations are
 specific:
 
-- `third_party/px4-userland/` is GPL-2.0-only, from px4-userland `d51c83e1`.
+- `third_party/px4-userland/` is GPL-2.0-only, from px4-userland `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
   Local changes are marked in the modified files and in `UPSTREAM.md`.
 - The FC0012 tuner implementation is GPL-2.0-or-later.
 - `userland/src/v2_frontend.cpp` and `userland/src/v2_nmi.cpp` are the
@@ -28,15 +28,18 @@ both files; the GPL version2 text is supplied in `COPYING.gpl2`.
 The short demodulator/tuner register-value lists and USB request layouts are
 protocol facts recovered by static inspection of the original PLEX driver
 artifacts. Source files and hardware reports name the object members and
-function offsets used. Vendor object code, firmware, application license seeds
-and cryptographic tables are not included in this repository.
+function offsets used. Vendor object code, application license seeds and proprietary cryptographic
+tables are not included. The separately tracked loader firmware and its
+unresolved redistribution status are described below. Historical USB traces
+may retain truncated firmware payload bytes; they are not a new source license.
 
 The portable CLI/IPC/service subset of px4-userland is incorporated from
-revision `d51c83e1d7eeb829fd61f87f6ea93ad2043b9d00` under GPL-2.0-only.
+revision `1a1485d0c3e972e0a47be907edb67949564aa9a7` under GPL-2.0-only.
 Imported files retain their SPDX notices; its license is reproduced in
 `third_party/px4-userland/LICENSE`. The file inventory and local changes are
 recorded in [docs/cli-adaptation.md](docs/cli-adaptation.md). The adapted CLI
-entry points `asicenctl.cpp` and `asicen_ts_portable.cpp` retain that license.
+entry points `userland/tools/asicenctl.cpp`, `userland/tools/asicen_ts.cpp`,
+and `userland/tools/asicen_ts_windows.cpp` retain that GPL-2.0-only license.
 The combined CLI executables therefore use GPL version2; existing
 GPL-2.0-or-later source notices remain unchanged. No IT930x hardware backend
 is linked into the ASICEN commands.
@@ -86,6 +89,11 @@ GitHub-hosted runners can copy it. The file is `firmware/asicen-loader.bin`
 `b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`).
 Corresponding-source archives and `git archive` omit `firmware/`.
 
+The user reaffirmed this ASICEN-specific preservation and redistribution policy
+on 2026-10-11 JST because continued availability from PLEX is uncertain.
+This is an explicit project-policy difference from px4-userland, not evidence
+of a redistribution grant. The existing image and provenance remain preserved.
+
 The firmware is a separate vendor component: this project's GPL license and
 any licenses on newly written packaging code do not grant rights to it.
 Redistribution rights have not been established. A vendor-component notice
@@ -102,6 +110,9 @@ whether the extracted firmware is a GPL work or is outside the GPL. The
 inspected official Linux and Windows packages do not contain an explicit
 firmware redistribution permission. This project's GPL notice cannot grant
 that permission.
+An accompanying full license text establishing the official firmware's grant
+was not found in that inspection. Module metadata is recorded as evidence,
+not as confirmation that the firmware itself is GPL-licensed.
 
 ## NMI / TDA2014x frontend adaptation
 

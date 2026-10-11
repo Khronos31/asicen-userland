@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-09: under ASICEN_PROFILE_ASICEN, runtime-path
-// and product-instance checks differ from px4-userland d51c83e1.
+// ASICEN modification, 2026-10-10: runtime/lock literals and exclusive
+// serial-free identity entry sharing the pinned lease implementation.
 // The original license notice is unchanged.
 #include "px4/posix_ipc.h"
-#if defined(ASICEN_PROFILE_ASICEN)
-#include "asicen/product_profile.h"
-#endif
 
 #if defined(PX4_POSIX_IPC_TEST_ACCESS)
 #include "posix_ipc_test_access.h"
@@ -39,11 +36,9 @@ constexpr mode_t kPrivateSocketMode = 0600;
 constexpr mode_t kGroupDirectoryMode = 0750;
 constexpr mode_t kGroupSocketMode = 0660;
 #if defined(ASICEN_PROFILE_ASICEN)
-constexpr const char* kProductDirectoryName = asicen::profile::kRuntimeDirectoryName;
-constexpr const char* kLockPrefix = ".asicen-userland-";
+constexpr const char* kProductDirectoryName = "asicen-userland";
 #else
 constexpr const char* kProductDirectoryName = "px4-userland";
-constexpr const char* kLockPrefix = ".px4-userland-";
 #endif
 // Keep credential queries bounded even if a platform reports an unexpectedly
 // large supplementary-group count.  This covers the supported POSIX targets;
@@ -550,6 +545,28 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire(
                      [](char character) { return character >= '0' && character <= '9'; })) {
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
     }
+    return acquire_validated(endpoint, observed_serial, false);
+}
+
+Result<SerialEndpointLease> SerialEndpointLease::acquire_identity(
+    const EndpointConfig& endpoint, std::string_view observed_identity) noexcept
+{
+    std::array<char, kStoredPathCapacity> identity{};
+    if (observed_identity.empty() || observed_identity.size() >= identity.size()) {
+        return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+    }
+    std::copy(observed_identity.begin(), observed_identity.end(), identity.begin());
+    if (!valid_component(identity.data()) ||
+        std::strlen(identity.data()) != observed_identity.size()) {
+        return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+    }
+    return acquire_validated(endpoint, observed_identity, true);
+}
+
+Result<SerialEndpointLease> SerialEndpointLease::acquire_validated(
+    const EndpointConfig& endpoint, std::string_view observed_serial,
+    bool force_exclusive) noexcept
+{
     const auto layout_result = make_layout(endpoint);
     if (!layout_result) return Result<SerialEndpointLease>::failure(layout_result.error());
     const Layout& layout = layout_result.value();
@@ -559,7 +576,11 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire(
 
     SerialEndpointLease lease;
     const int length = std::snprintf(lease.filename_.data(), lease.filename_.size(),
-                                     "%s%.*s.lock", kLockPrefix,
+#if defined(ASICEN_PROFILE_ASICEN)
+                                     ".asicen-userland-%.*s.lock",
+#else
+                                     ".px4-userland-%.*s.lock",
+#endif
                                      static_cast<int>(observed_serial.size()),
                                      observed_serial.data());
     if (length <= 0 || static_cast<std::size_t>(length) >= lease.filename_.size())
@@ -574,7 +595,7 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire(
         return Result<SerialEndpointLease>::failure(Error::BUSY);
 
     const bool serial_instance =
-        std::string_view(endpoint.instance) == observed_serial;
+        force_exclusive || std::string_view(endpoint.instance) == observed_serial;
     const int operation = (serial_instance ? LOCK_EX : LOCK_SH) | LOCK_NB;
     constexpr std::size_t kMaxStaleInodeRetries = 8U;
     for (std::size_t attempt = 0U; attempt < kMaxStaleInodeRetries; ++attempt) {

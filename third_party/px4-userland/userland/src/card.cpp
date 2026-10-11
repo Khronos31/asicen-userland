@@ -7,10 +7,13 @@
 // winusb/src/WinSCard_PX4/bcas_atr.hpp.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-09: initialize_with_atr() validation, and
-// It930xCardHardware is omitted under ASICEN_PROFILE_ASICEN or
-// PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION. The 2026-09-03 notice above is unchanged.
+// ASICEN modification, 2026-10-10: probe-only acquired ATR initialization and IT930x
+// adapter exclusion; the live initialize() body follows the pinned reference.
+// The original license notice is unchanged.
 #include "px4/card.h"
+#if defined(_WIN32)
+#include "px4/platform_sleep.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -117,7 +120,11 @@ std::uint64_t SystemCardTime::monotonic_ms() noexcept
 
 void SystemCardTime::sleep_ms(std::uint32_t milliseconds) noexcept
 {
+#if defined(_WIN32)
+    (void)platform::sleep_milliseconds(milliseconds);
+#else
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+#endif
 }
 
 #if !defined(ASICEN_PROFILE_ASICEN) && \
@@ -330,7 +337,20 @@ Result<void> CardSession::initialize() noexcept
         return Result<void>::failure(atr.error());
     }
 
-    return initialize_with_atr(atr.value());
+    atr_ = atr.value();
+    use_crc_ = atr_.edc == CardEdc::crc;
+    card_ifsc_ = atr_.ifsc;
+    block_timeout_ms_ = atr_.block_timeout_ms;
+    const bool is_acas = atr_.baud_rate == It930xCardBaudRate::baud_38400;
+    const std::uint8_t ifsd = is_acas ? 254U : (use_crc_ ? 250U : 251U);
+    const auto initialized = initialize_t1(!is_acas, ifsd);
+    if (!initialized) {
+        const Error error = initialized.error();
+        invalidate();
+        return Result<void>::failure(error);
+    }
+    initialized_ = true;
+    return Result<void>::success();
 }
 
 Result<void> CardSession::initialize_with_atr(const CardAtr& atr) noexcept

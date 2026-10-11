@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_FRONTEND_FACTS_H
+#define ASICEN_USERLAND_FRONTEND_FACTS_H
 
 #include <cstdint>
 
@@ -28,4 +29,6 @@ struct W3u3FrontendFacts {
 BroadcastSystem w3u3_system_for_local_lane(std::uint8_t lane);
 std::uint8_t w3u3_demod_i2c_for_local_lane(std::uint8_t lane);
 
-}  // namespace asicen
+} // namespace asicen
+
+#endif // ASICEN_USERLAND_FRONTEND_FACTS_H

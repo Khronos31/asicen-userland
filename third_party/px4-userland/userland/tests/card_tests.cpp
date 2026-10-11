@@ -556,6 +556,23 @@ bool test_initialize_from_prevalidated_atr()
     const auto invalid = invalid_session.initialize_with_atr(altered);
     CHECK(!invalid && invalid.error() == Error::PROTOCOL_ERROR);
     CHECK(invalid_hardware.reset_count == 0U);
+
+    CardAtr empty{};
+    CHECK(session.initialize_with_atr(empty).error() == Error::INVALID_ARGUMENT);
+    CHECK(!session.initialized());
+    CardAtr oversized = atr.value();
+    oversized.length = oversized.bytes.size() + 1U;
+    CHECK(session.initialize_with_atr(oversized).error() == Error::INVALID_ARGUMENT);
+    CHECK(!session.initialized());
+    CHECK(session.initialize_with_atr(atr.value()));
+    CHECK(session.initialized());
+    CHECK(hardware.detect_count == 0U && hardware.reset_count == 0U);
+    CHECK((hardware.written_pcbs ==
+           std::vector<std::uint8_t>{0xc0U, 0xc1U, 0xc0U, 0xc1U}));
+    CHECK(session.initialize());
+    CHECK(hardware.detect_count == 1U && hardware.reset_count == 1U);
+    CHECK((hardware.written_pcbs ==
+           std::vector<std::uint8_t>{0xc0U, 0xc1U, 0xc0U, 0xc1U, 0xc0U, 0xc1U}));
     return true;
 }
 

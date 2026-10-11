@@ -1,0 +1,13 @@
+#!/bin/sh
+# Synthetic strip used only by test-packaging.sh; it is not a release tool.
+for argument in "$@"; do
+    case "$argument" in
+    -x|-S) ;;
+    *)
+        [ -f "$argument" ] || exit 1
+        ;;
+    esac
+done
+if [ -n "${ASICEN_TEST_STRIP_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$ASICEN_TEST_STRIP_LOG"
+fi

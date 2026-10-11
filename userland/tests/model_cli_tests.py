@@ -45,7 +45,7 @@ if (build / 'asicen-probe').exists():
         for model in ('s3u', 's3u2', 'w3u2', 'w3u3', 'w3u3-v2'):
             result = run('asicen-probe', '--device', '1:1', '--model', model,
                          '--firmware', str(path), 'load-firmware')
-            check(result.returncode == 1 and 'firmware rejected' in result.stderr,
+            check(result.returncode == 10 and 'firmware load failed: FIRMWARE_REJECTED' in result.stderr,
                   result.stderr)
             check('libusb_init' not in result.stderr and 'open 1:1' not in result.stderr,
                   'rejected firmware must not reach USB access')

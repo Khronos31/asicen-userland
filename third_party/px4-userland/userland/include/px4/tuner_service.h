@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// ASICEN modification, 2026-10-10: cancellation notifications for the native
+// tuner/stream adapters before the reference worker drain and cleanup sequence.
 #ifndef PX4_USERLAND_TUNER_SERVICE_H
 #define PX4_USERLAND_TUNER_SERVICE_H
 

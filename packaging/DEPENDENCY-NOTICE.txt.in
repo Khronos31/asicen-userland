@@ -1,0 +1,7 @@
+IMPORTANT DEPENDENCY NOTICE
+
+asicen-userland @VERSION@ dependency notice for @PLATFORM@
+
+Every binary archive (Linux, macOS, Android, and Windows) includes the exact libusb 1.0.30 license text at `libusb/COPYING`.
+
+@DEPENDENCY_TEXT@

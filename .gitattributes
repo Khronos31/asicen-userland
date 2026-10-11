@@ -1,3 +1,8 @@
+# 通常のテキストは LF で保存・チェックアウト
+* text=auto eol=lf
+packaging/libusb/COPYING whitespace=-blank-at-eol,-blank-at-eof
+
+# ASICEN vendor firmware remains tracked separately from corresponding source.
 firmware/ export-ignore
 firmware/** export-ignore
 firmware/asicen-loader.bin binary

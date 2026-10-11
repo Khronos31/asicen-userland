@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <ostream>
+#include <limits>
 #include <vector>
 
 namespace asicen {
 namespace {
 
-int remaining_ms(std::chrono::steady_clock::time_point deadline) {
+int remaining_ms(std::chrono::steady_clock::time_point deadline)
+{
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) {
         return 0;
@@ -18,21 +20,26 @@ int remaining_ms(std::chrono::steady_clock::time_point deadline) {
 
 }  // namespace
 
-bool parse_cf40_read_response(int transferred, const unsigned char* response,
-                              std::uint8_t* value) {
-    if (transferred != 2 || response == nullptr || value == nullptr) return false;
+bool parse_cf40_read_response(int transferred, const unsigned char* response, std::uint8_t* value)
+{
+    if (transferred != 2 || response == nullptr || value == nullptr) {
+        return false;
+    }
     *value = response[1];
     return true;
 }
 
-bool cf40_write_response_complete(int transferred) {
+bool cf40_write_response_complete(int transferred)
+{
     return transferred == 2;
 }
 
 CaptureOutcome run_raw_capture(CaptureBackend* backend, CaptureOutput* output,
-                               const CaptureRequest& request, CaptureStats* stats) {
-    if (backend == nullptr || output == nullptr || request.endpoint == 0 ||
-        request.local > 1 || request.chunk_size == 0) {
+                               const CaptureRequest& request, CaptureStats* stats)
+{
+    if (backend == nullptr || output == nullptr || request.endpoint == 0 || request.local > 1 ||
+        request.chunk_size == 0 ||
+        request.chunk_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return CaptureOutcome::InvalidArgument;
     }
 
@@ -63,14 +70,21 @@ CaptureOutcome run_raw_capture(CaptureBackend* backend, CaptureOutput* output,
         int transferred = 0;
         const int timeout = std::min(1000, std::max(1, remaining_ms(request.deadline)));
         const CaptureIo io =
-            backend->bulk_read(request.endpoint, buffer.data(),
-                               static_cast<int>(buffer.size()), &transferred,
-                               static_cast<unsigned>(timeout));
+            backend->bulk_read(request.endpoint, buffer.data(), static_cast<int>(buffer.size()),
+                               &transferred, static_cast<unsigned>(timeout));
 
-        // Always account for transferred bytes before classifying completion.
+        if (transferred < 0 || static_cast<std::size_t>(transferred) > buffer.size() ||
+            io == CaptureIo::Error) {
+            usb_failed = true;
+            break;
+        }
+        // Error and timeout completions do not publish partial bytes.
+        if (io == CaptureIo::Timeout) {
+            continue;
+        }
         if (transferred > 0) {
             std::size_t to_write = static_cast<std::size_t>(transferred);
-            if (request.byte_limit != 0 && total + to_write > request.byte_limit) {
+            if (request.byte_limit != 0 && to_write > request.byte_limit - total) {
                 to_write = static_cast<std::size_t>(request.byte_limit - total);
             }
             if (!output->write(buffer.data(), to_write)) {
@@ -80,10 +94,6 @@ CaptureOutcome run_raw_capture(CaptureBackend* backend, CaptureOutput* output,
             total += to_write;
         }
 
-        if (io == CaptureIo::Error) {
-            usb_failed = true;
-            break;
-        }
         // Classify completion only after an explicit error check, so an error
         // carrying bytes at the exact limit cannot be hidden.
         if (request.byte_limit != 0 && total >= request.byte_limit) {
@@ -120,36 +130,37 @@ CaptureOutcome run_raw_capture(CaptureBackend* backend, CaptureOutput* output,
     return CaptureOutcome::Completed;
 }
 
-const char* capture_outcome_name(CaptureOutcome outcome) {
+const char* capture_outcome_name(CaptureOutcome outcome)
+{
     switch (outcome) {
-        case CaptureOutcome::Completed:
-            return "completed";
-        case CaptureOutcome::ZeroBytes:
-            return "zero-bytes";
-        case CaptureOutcome::LimitNotReached:
-            return "limit-not-reached";
-        case CaptureOutcome::OutputFailed:
-            return "output-failed";
-        case CaptureOutcome::UsbFailed:
-            return "usb-failed";
-        case CaptureOutcome::StartFailed:
-            return "start-failed";
-        case CaptureOutcome::StopFailed:
-            return "stop-failed";
-        case CaptureOutcome::Cancelled:
-            return "cancelled";
-        case CaptureOutcome::InvalidArgument:
-            return "invalid-argument";
+    case CaptureOutcome::Completed:
+        return "completed";
+    case CaptureOutcome::ZeroBytes:
+        return "zero-bytes";
+    case CaptureOutcome::LimitNotReached:
+        return "limit-not-reached";
+    case CaptureOutcome::OutputFailed:
+        return "output-failed";
+    case CaptureOutcome::UsbFailed:
+        return "usb-failed";
+    case CaptureOutcome::StartFailed:
+        return "start-failed";
+    case CaptureOutcome::StopFailed:
+        return "stop-failed";
+    case CaptureOutcome::Cancelled:
+        return "cancelled";
+    case CaptureOutcome::InvalidArgument:
+        return "invalid-argument";
     }
     return "unknown";
 }
 
-void write_command_summary(std::ostream& normal, std::ostream& diagnostic,
-                           bool capture_command, const char* model,
-                           const char* port, std::uint8_t local) {
+void write_command_summary(std::ostream& normal, std::ostream& diagnostic, bool capture_command,
+                           const char* model, const char* port, std::uint8_t local)
+{
     std::ostream& output = capture_command ? diagnostic : normal;
-    output << "model=\"" << model << "\" port=" << port << " local="
-           << static_cast<unsigned>(local) << '\n';
+    output << "model=\"" << model << "\" port=" << port << " local=" << static_cast<unsigned>(local)
+           << '\n';
 }
 
 }  // namespace asicen

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // ASICEN modification, 2026-10-08 through 2026-10-09: under ASICEN_PROFILE_ASICEN,
 // the wire magic, receiver count and USB-function inventory differ from
-// px4-userland d51c83e1. The original license notice is unchanged.
+// px4-userland 1a1485d0. The original license notice is unchanged.
 #include "px4/ipc.h"
 #if defined(ASICEN_PROFILE_ASICEN)
 #include "asicen/product_profile.h"
@@ -363,14 +363,12 @@ ReceiverRecord expected_receiver_record(std::uint8_t count, std::size_t global,
     const auto id = static_cast<std::uint8_t>(global);
 #if defined(ASICEN_PROFILE_ASICEN)
     (void)dual_system;
-    if (asicen::profile::is_combined_receiver(count, id))
-        return ReceiverRecord{id, 1U, 0U, System::ISDB_T_OR_S};
-    const auto dev = static_cast<std::uint8_t>(
-        asicen::profile::usb_function_for_receiver(id) + 1U);
-    const auto local = asicen::profile::local_receiver_for(id);
-    const auto system = asicen::profile::is_satellite_receiver(id)
-        ? System::ISDB_S : System::ISDB_T;
-    return ReceiverRecord{id, dev, local, system};
+    if (count == 1U) {
+        return ReceiverRecord{id, 1U, id, System::ISDB_T_OR_S};
+    }
+    const auto local = static_cast<std::uint8_t>(global % 2U);
+    return ReceiverRecord{id, static_cast<std::uint8_t>((global / 2U) + 1U), local,
+                          local < 1U ? System::ISDB_S : System::ISDB_T};
 #else
     if (dual_system || count == kMlt3PeReceiverCount ||
         count == kMlt5PeReceiverCount) {

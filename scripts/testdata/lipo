@@ -1,0 +1,4 @@
+#!/bin/sh
+# Synthetic lipo used only by test-packaging.sh; it is not a release tool.
+test "${1:-}" = -archs || exit 1
+printf '%s\n' "${ASICEN_TEST_MACHO_ARCH:-arm64}"

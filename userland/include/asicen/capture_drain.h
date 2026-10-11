@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#pragma once
+#ifndef ASICEN_USERLAND_CAPTURE_DRAIN_H
+#define ASICEN_USERLAND_CAPTURE_DRAIN_H
 
 #include <chrono>
 #include <cstdint>
@@ -26,8 +27,7 @@ public:
     virtual bool has_pending() const noexcept = 0;
     virtual void pump_events(unsigned timeout_ms) noexcept = 0;
     virtual void release_transfers() noexcept = 0;
-    virtual CaptureRunResult cleanup_after_drain(bool dsc_stopped,
-                                                 bool dsc_attempted) noexcept = 0;
+    virtual CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept = 0;
 };
 
 class CaptureCleanupOps {
@@ -41,7 +41,7 @@ public:
 
 // Shutdown cleanup is deliberately best-effort after an ordinary stop error:
 // independent restoration (for example the GPIO snapshot) must still run.
-// Fatal callback-drain failures never return from stop_capture_safely().
+// Callback-drain failures retain unsafe callback ownership in quarantine.
 class HardwareShutdownOps {
 public:
     virtual ~HardwareShutdownOps() noexcept = default;
@@ -51,21 +51,20 @@ public:
 
 // Cleanup uncertainty quarantines normal frontend work. Shutdown cleanup
 // routines remain callable so they can still retry safe restoration.
-constexpr bool frontend_io_allowed_after_cleanup(bool cleanup_failed) noexcept {
+constexpr bool frontend_io_allowed_after_cleanup(bool cleanup_failed) noexcept
+{
     return !cleanup_failed;
 }
 
-CaptureRunResult drain_capture_callbacks(CaptureDrainOps& ops,
-                                         bool dsc_attempted,
+CaptureRunResult drain_capture_callbacks(CaptureDrainOps& ops, bool dsc_attempted,
                                          bool dsc_already_stopped,
                                          std::chrono::milliseconds limit) noexcept;
-CaptureRunResult cleanup_capture_state(CaptureCleanupOps& ops,
-                                       bool dsc_stopped, bool dsc_attempted,
-                                       bool link_apply_attempted,
-                                       bool output_start_attempted,
+CaptureRunResult cleanup_capture_state(CaptureCleanupOps& ops, bool dsc_stopped, bool dsc_attempted,
+                                       bool link_apply_attempted, bool output_start_attempted,
                                        bool cf_snapshot_valid) noexcept;
-bool attempt_hardware_shutdown_cleanup(HardwareShutdownOps& ops,
-                                      bool stop_needed,
-                                      bool gpio_snapshot_valid) noexcept;
+bool attempt_hardware_shutdown_cleanup(HardwareShutdownOps& ops, bool stop_needed,
+                                       bool gpio_snapshot_valid) noexcept;
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_CAPTURE_DRAIN_H

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+{
+    global:
+        IFDHCreateChannel;
+        IFDHCreateChannelByName;
+        IFDHCloseChannel;
+        IFDHGetCapabilities;
+        IFDHSetCapabilities;
+        IFDHSetProtocolParameters;
+        IFDHPowerICC;
+        IFDHTransmitToICC;
+        IFDHControl;
+        IFDHICCPresence;
+    local:
+        *;
+};

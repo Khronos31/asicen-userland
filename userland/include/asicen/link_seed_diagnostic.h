@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#pragma once
+#ifndef ASICEN_USERLAND_LINK_SEED_DIAGNOSTIC_H
+#define ASICEN_USERLAND_LINK_SEED_DIAGNOSTIC_H
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +8,7 @@
 namespace asicen {
 
 class LinkSeedDiagnosticIo {
-public:
+  public:
     virtual ~LinkSeedDiagnosticIo() = default;
     virtual bool read_controller05(std::uint8_t* value) = 0;
     virtual bool write_controller05(std::uint8_t value) = 0;
@@ -19,15 +20,19 @@ public:
 // sends zero writes and verifies only controller05=0. It never claims that
 // the prior seed was saved or that the zero writes erased the hardware latch.
 class LinkSeedDiagnostic final {
-public:
+  public:
     bool snapshot_idle(LinkSeedDiagnosticIo* io);
-    bool apply(LinkSeedDiagnosticIo* io, const std::uint8_t* seed,
-               std::size_t size);
+    bool apply(LinkSeedDiagnosticIo* io, const std::uint8_t* seed, std::size_t size);
     bool clear_and_verify_controller(LinkSeedDiagnosticIo* io);
-    bool active() const { return active_; }
+    bool active() const
+    {
+        return active_;
+    }
 
-private:
+  private:
     bool active_ = false;
 };
 
-}  // namespace asicen
+} // namespace asicen
+
+#endif // ASICEN_USERLAND_LINK_SEED_DIAGNOSTIC_H

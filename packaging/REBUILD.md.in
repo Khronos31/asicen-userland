@@ -1,0 +1,147 @@
+# Rebuilding asicen-userland @VERSION@
+
+This corresponding-source archive records repository commit `@COMMIT@` and
+tree `@TREE@`. The `repository/` directory is the exact tracked source tree;
+`third_party/libusb-1.0.30/` and its original verified source archive are the
+libusb sources used for the static Linux, macOS, and Android binaries.
+
+The existing `firmware/` export-ignore policy excludes vendor firmware from
+this source archive. Building and LGPL relinking do not require firmware.
+To assemble a binary archive, supply the separately obtained, exact
+`repository/firmware/asicen-loader.bin` (16384 bytes, SHA-256
+`b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`).
+The packager rejects a missing, changed, or symlinked image and includes its
+separate vendor-component notice. Redistribution rights remain unresolved;
+the project license does not grant firmware rights.
+
+All Linux binary archives retain the complete pinned musl and GCC runtime
+license texts from `repository/distribution/licenses/` under `toolchain/`.
+The GCC Runtime Library Exception and upstream attribution remain intact.
+
+## Linux static build and IFD variants
+
+Build the production executables in Alpine/musl, then build the matching PC/SC
+IFD in a host-libc environment. The glibc IFD must be built in Debian 11 or an
+equivalent glibc 2.31 baseline; the musl IFD must be built in the matching
+Alpine environment. From this archive root:
+
+```sh
+cd repository
+scripts/build-linux-static.sh --output build-linux-static \
+  --libusb-source-archive ../third_party/libusb-1.0.30.tar.bz2
+scripts/build-linux-ifd.sh --libc glibc --output build-linux-ifd-glibc
+scripts/build-linux-ifd.sh --libc musl --output build-linux-ifd-musl
+scripts/test-static-relink.sh \
+  --libusb-source-archive ../third_party/libusb-1.0.30.tar.bz2
+```
+
+Package each libc-qualified archive with the same static executable directory:
+
+```sh
+version=$(tr -d '\n' < VERSION)
+scripts/package-artifact.py --platform linux-glibc-x86_64 --version "$version" \
+  --static-build-dir build-linux-static --ifd-library build-linux-ifd-glibc/asicen-userland-ifd.so \
+  --reader-template packaging/pcsc/reader.conf.d/asicen-userland.conf.in \
+  --source-ref SOURCE_COMMIT --output-dir dist
+scripts/package-artifact.py --platform linux-musl-x86_64 --version "$version" \
+  --static-build-dir build-linux-static --ifd-library build-linux-ifd-musl/asicen-userland-ifd.so \
+  --reader-template packaging/pcsc/reader.conf.d/asicen-userland.conf.in \
+  --source-ref SOURCE_COMMIT --output-dir dist
+```
+
+The aarch64 commands are identical on a native aarch64 build host. The four
+archive names are libc-qualified; a generic Linux archive is not produced.
+
+## Android rebuild and LGPL relink
+
+Install Android NDK r27, CMake, Ninja, a POSIX shell, Python 3, Autoconf build
+tools, and set `ANDROID_NDK_HOME` to the NDK root. From this archive root:
+
+```sh
+cd repository
+scripts/build-android.sh \
+  --abi arm64-v8a \
+  --libusb-source ../third_party/libusb-1.0.30 \
+  --output ../rebuilt-android-aarch64
+scripts/build-android.sh \
+  --abi armeabi-v7a \
+  --libusb-source ../third_party/libusb-1.0.30 \
+  --output ../rebuilt-android-armv7a
+scripts/build-android.sh \
+  --abi x86_64 \
+  --libusb-source ../third_party/libusb-1.0.30 \
+  --output ../rebuilt-android-x86_64
+```
+
+The Android archive also contains the architecture-independent `asicen-termux`
+launcher. It uses the Termux-provided shell and supervised `termux-usb` calls to
+pass the model's explicitly selected USB device FDs to `asicend`; it is not linked with
+libusb and is not part of the ELF static-link inventory.
+
+To relink with a modified LGPL libusb, modify a copy of
+`third_party/libusb-1.0.30/` and pass that directory to `--libusb-source`.
+The production release evidence path intentionally accepts only the pinned,
+checksum-verified libusb source archive; local relink builds do not emit that
+release evidence.
+
+## macOS arm64 rebuild and LGPL relink
+
+Install the Xcode command line tools, CMake, Ninja, and Homebrew pcsc-lite
+(for the IFD headers only). From this archive root, build libusb 1.0.30 as a
+static library from the verified source archive, then `asicend` linked against
+it together with `asicen-ts`, `asicenctl`, and the IFD bundle:
+
+```sh
+cd repository
+scripts/build-macos-static.sh --build-dir ../build-macos \
+  --pcsc-include-dir "$(brew --prefix pcsc-lite)/include/PCSC" \
+  --libusb-source-archive ../third_party/libusb-1.0.30.tar.bz2
+scripts/test-static-relink.sh \
+  --libusb-source-archive ../third_party/libusb-1.0.30.tar.bz2
+```
+
+To relink with a modified LGPL libusb, modify a copy of
+`third_party/libusb-1.0.30/` and pass that directory to
+`scripts/build-macos-static.sh --libusb-source-dir` instead of
+`--libusb-source-archive`. The script links libusb's `Libs.private` system
+frameworks (IOKit, CoreFoundation, Security) and `libobjc`. The IFD bundle
+does not link libusb. Firmware is neither required to compile nor present in
+this archive.
+
+## Windows x64 rebuild and LGPL static relink
+
+Install CMake, Ninja (or samurai/samu), Make, a POSIX shell, Python 3, curl, `tar`, `xz`, `sha256sum`, and `strings`.
+All commands below run from this archive root (the directory containing `repository/` and `third_party/`).
+
+`scripts/build-windows.sh` verifies and extracts the pinned toolchain and libusb source archives into a private
+temporary work directory that it removes on exit. Its `--cache` directory holds only the downloaded archives,
+not an extracted toolchain tree. Preseed the bundled, already-verified libusb archive so the production rebuild
+uses the corresponding source instead of downloading it, then cross-build the Phase 1 executables:
+
+```sh
+mkdir -p toolchain-cache
+cp third_party/libusb-1.0.30.tar.bz2 toolchain-cache/
+repository/scripts/build-windows.sh --output build-windows --cache "$PWD/toolchain-cache"
+```
+
+The toolchain and libusb versions and their SHA-256 values are fixed in the script. The archive ships the exact
+narrow llvm-mingw runtime license texts under `toolchain/`; no compiler binary or toolchain source bulk is
+included.
+
+`asicend.exe` statically includes libusb 1.0.30, which remains LGPL-2.1-or-later. `asicen-ts.exe` and `asicenctl.exe` do
+not link libusb. The executables still dynamically load Windows system libraries, including the UCRT and the
+WinUSB, SetupAPI, Cfgmgr32, AdvAPI32, and hid libraries that libusb loads at runtime. `libusb-1.0.dll` is not
+produced or shipped. To relink with a modified copy of the bundled source:
+
+```sh
+cp -R third_party/libusb-1.0.30 build-libusb
+# Modify build-libusb, then rebuild. This path skips the archive checksum.
+repository/scripts/build-windows.sh --output build-windows-relink \
+  --cache "$PWD/toolchain-cache" \
+  --libusb-source-dir "$PWD/build-libusb"
+strings build-windows-relink/asicend.exe | grep -F 'the marker you added'
+```
+
+`build-windows-relink/` must contain `asicend.exe`, `asicen-ts.exe`, and `asicenctl.exe`, and must not contain
+`libusb-1.0.dll`. The production release path accepts only the pinned, checksum-verified libusb source archive;
+local relink builds do not emit release evidence. Firmware is neither required nor present in this archive.

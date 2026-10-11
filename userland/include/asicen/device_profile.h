@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_DEVICE_PROFILE_H
+#define ASICEN_USERLAND_DEVICE_PROFILE_H
 
 #include <cstddef>
 #include <cstdint>
@@ -48,3 +49,5 @@ const DeviceProfile* profiles();
 std::size_t profile_count();
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_DEVICE_PROFILE_H

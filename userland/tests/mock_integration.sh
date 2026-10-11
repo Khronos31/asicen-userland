@@ -3,8 +3,21 @@ set -euo pipefail
 
 daemon="$1"
 client="$2"
-work="$(mktemp -d)"
-sock="$work/asicen.sock"
+instance="mock-integration"
+temporary_root="${TMPDIR:-/tmp}"
+[[ "$temporary_root" == /* ]] || temporary_root=/tmp
+while [[ "$temporary_root" != / && "$temporary_root" == */ ]]; do
+  temporary_root="${temporary_root%/}"
+done
+work="$(mktemp -d "${temporary_root%/}/asicen-mock.XXXXXX")"
+# Match the pinned fixture policy, including the complete endpoint suffix.
+# macOS has the smallest supported sun_path (104 bytes, including its NUL).
+endpoint="$work/asicen-userland/$instance/control.sock"
+if [[ "$(printf '%s' "$endpoint" | LC_ALL=C wc -c)" -ge 103 ]]; then
+  rmdir "$work"
+  work="$(mktemp -d /tmp/asicen-mock.XXXXXX)"
+fi
+sock="$work/asicen-userland/$instance/control.sock"
 out="$work/out.ts"
 log="$work/daemon.log"
 
@@ -17,7 +30,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$daemon" --socket "$sock" > /dev/null 2>"$log" &
+"$daemon" --runtime-dir "$work" --instance "$instance" > /dev/null 2>"$log" &
 pid=$!
 
 for _ in $(seq 1 100); do
@@ -26,7 +39,8 @@ for _ in $(seq 1 100); do
 done
 [[ -S "$sock" ]]
 
-"$client" --socket "$sock" --receiver 1 --packet-count 32 > "$out"
+"$client" --runtime-dir "$work" --instance "$instance" --receiver 1 \
+  --channel T27 --packet-count 32 --output - > "$out"
 
 python3 - "$out" <<'PY'
 import sys

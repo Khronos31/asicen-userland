@@ -2,6 +2,8 @@
 
 #include <array>
 #include <cctype>
+#include <charconv>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -11,6 +13,8 @@
 #include <vector>
 
 #include "asicen/device_profile.h"
+#include "asicen/diagnostic_probe.h"
+#include "asicen/firmware.h"
 #include "asicen/libusb_transport.h"
 #include "asicen/loader_firmware.h"
 #include "asicen/protocol.h"
@@ -18,40 +22,51 @@
 namespace {
 
 struct Arguments {
+    bool help = false;
     std::string command = "list";
+    bool have_command = false;
+    bool claim = false;
+    bool initialize = false;
+    bool require_cold = false;
     bool have_device = false;
     asicen::UsbLocation location{};
     std::string firmware;
     bool have_firmware = false;
     const asicen::DeviceProfile* firmware_model = nullptr;
+    std::string error;
 };
 
-void usage(const char* argv0) {
-    std::cerr
-        << "usage:\n"
-        << "  " << argv0 << " list\n"
-        << "  " << argv0 << " --device BUS:ADDRESS describe\n"
-        << "  " << argv0 << " --device BUS:ADDRESS high-speed\n"
-        << "  " << argv0 << " --device BUS:ADDRESS customer-info\n"
-        << "  " << argv0 << " --device BUS:ADDRESS random-key\n"
-        << "  " << argv0
-        << " --device BUS:ADDRESS --model MODEL --firmware PATH load-firmware\n";
+void usage(const char* argv0, std::ostream& output = std::cerr)
+{
+    output << "usage:\n"
+           << "  " << argv0 << " list\n"
+           << "  " << argv0 << " --device BUS:ADDRESS describe\n"
+           << "  " << argv0 << " --device BUS:ADDRESS --claim\n"
+           << "  " << argv0 << " --device BUS:ADDRESS high-speed\n"
+           << "  " << argv0 << " --device BUS:ADDRESS customer-info\n"
+           << "  " << argv0 << " --device BUS:ADDRESS random-key\n"
+           << "  " << argv0 << " --device BUS:ADDRESS --model MODEL --firmware PATH load-firmware\n"
+           << "  " << argv0
+           << " --device BUS:ADDRESS --model MODEL --firmware PATH --initialize [--require-cold]\n"
+           << "  " << argv0 << " card-probe --help\n";
 }
 
-bool parse_u8(const std::string& value, std::uint8_t* out) {
+bool parse_u8(const std::string& value, std::uint8_t* out)
+{
     if (out == nullptr || value.empty()) {
         return false;
     }
-    char* end = nullptr;
-    const unsigned long parsed = std::strtoul(value.c_str(), &end, 0);
-    if (end == nullptr || *end != '\0' || parsed > 255) {
+    unsigned parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || parsed > 255) {
         return false;
     }
     *out = static_cast<std::uint8_t>(parsed);
     return true;
 }
 
-bool parse_location(const std::string& value, asicen::UsbLocation* out) {
+bool parse_location(const std::string& value, asicen::UsbLocation* out)
+{
     const std::size_t colon = value.find(':');
     if (colon == std::string::npos || value.find(':', colon + 1) != std::string::npos) {
         return false;
@@ -60,43 +75,121 @@ bool parse_location(const std::string& value, asicen::UsbLocation* out) {
            parse_u8(value.substr(colon + 1), &out->address);
 }
 
-bool parse_arguments(int argc, char** argv, Arguments* out) {
+bool parse_arguments(int argc, char** argv, Arguments* out)
+{
+    if (argc < 1 || argv == nullptr || out == nullptr)
+        return false;
     for (int i = 1; i < argc; ++i) {
+        if (argv[i] == nullptr)
+            return false;
         const std::string arg = argv[i];
+        if (arg == "--help") {
+            if (argc != 2) {
+                out->error = "--help cannot be combined with other arguments";
+                return false;
+            }
+            out->help = true;
+            return true;
+        }
+        if (i + 1 < argc && argv[i + 1] == nullptr)
+            return false;
         if (arg == "--device") {
-            if (++i >= argc || !parse_location(argv[i], &out->location)) {
+            if (out->have_device) {
+                out->error = "duplicate --device";
+                return false;
+            }
+            if (++i >= argc || !parse_location(argv[i], &out->location) || out->location.bus == 0 ||
+                out->location.address == 0) {
                 return false;
             }
             out->have_device = true;
         } else if (arg == "--model") {
-            if (++i >= argc) return false;
+            if (out->firmware_model != nullptr) {
+                out->error = "duplicate --model";
+                return false;
+            }
+            if (++i >= argc)
+                return false;
             out->firmware_model = asicen::find_profile_by_model(argv[i]);
-            if (out->firmware_model == nullptr) return false;
+            if (out->firmware_model == nullptr)
+                return false;
         } else if (arg == "--firmware") {
-            if (++i >= argc) {
+            if (out->have_firmware) {
+                out->error = "duplicate --firmware";
+                return false;
+            }
+            if (++i >= argc || argv[i][0] == '\0') {
                 return false;
             }
             out->firmware = argv[i];
             out->have_firmware = true;
+        } else if (arg == "--claim") {
+            if (out->claim) {
+                out->error = "duplicate --claim";
+                return false;
+            }
+            out->claim = true;
+        } else if (arg == "--initialize") {
+            if (out->initialize) {
+                out->error = "duplicate --initialize";
+                return false;
+            }
+            out->initialize = true;
+        } else if (arg == "--require-cold") {
+            if (out->require_cold) {
+                out->error = "duplicate --require-cold";
+                return false;
+            }
+            out->require_cold = true;
         } else if (arg == "list" || arg == "describe" || arg == "high-speed" ||
-                   arg == "customer-info" || arg == "random-key" ||
-                   arg == "load-firmware") {
+                   arg == "customer-info" || arg == "random-key" || arg == "load-firmware") {
+            if (out->have_command) {
+                out->error = "only one command is allowed";
+                return false;
+            }
             out->command = arg;
-        } else if (arg == "-h" || arg == "--help") {
-            usage(argv[0]);
-            std::exit(0);
+            out->have_command = true;
         } else {
             return false;
         }
     }
 
-    if (out->command == "load-firmware" && (!out->have_firmware || out->firmware_model == nullptr)) {
+    if (out->initialize) {
+        if (out->have_command || out->claim) {
+            out->error = "--initialize cannot be combined with a command or --claim";
+            return false;
+        }
+        out->command = "load-firmware";
+    }
+    if (out->require_cold && out->command != "load-firmware") {
+        out->error = "--require-cold requires --initialize or load-firmware";
+        return false;
+    }
+    if (out->command == "load-firmware" &&
+        (!out->have_firmware || out->firmware_model == nullptr)) {
+        return false;
+    }
+    if (out->command != "load-firmware" && (out->have_firmware || out->firmware_model != nullptr)) {
+        out->error = "--model and --firmware are only valid for load-firmware";
+        return false;
+    }
+    if (out->claim) {
+        if (out->have_command && out->command != "describe") {
+            out->error = "--claim cannot be combined with this command";
+            return false;
+        }
+        if (!out->have_command)
+            out->command = "claim";
+    }
+    if (out->command == "list" && out->have_device) {
+        out->error = "--device requires a device command or --claim";
         return false;
     }
     return out->command == "list" || out->have_device;
 }
 
-std::string port_path(libusb_device* device) {
+std::string port_path(libusb_device* device)
+{
     std::uint8_t ports[8]{};
     const int count = libusb_get_port_numbers(device, ports, sizeof(ports));
     if (count <= 0) {
@@ -114,16 +207,18 @@ std::string port_path(libusb_device* device) {
     return out.str();
 }
 
-bool is_loader(const libusb_device_descriptor& desc) {
-    return desc.idVendor == 0x1738 &&
-           (desc.idProduct == 0x5211 || desc.idProduct == 0x5216);
+bool is_loader(const libusb_device_descriptor& desc)
+{
+    return desc.idVendor == 0x1738 && (desc.idProduct == 0x5211 || desc.idProduct == 0x5216);
 }
 
-int list_devices(libusb_context* context) {
+int list_devices(libusb_context* context)
+{
     libusb_device** list = nullptr;
     const ssize_t count = libusb_get_device_list(context, &list);
     if (count < 0) {
-        std::cerr << "libusb_get_device_list: " << libusb_error_name(static_cast<int>(count)) << '\n';
+        std::cerr << "libusb_get_device_list: " << libusb_error_name(static_cast<int>(count))
+                  << '\n';
         return 1;
     }
 
@@ -139,8 +234,7 @@ int list_devices(libusb_context* context) {
             continue;
         }
 
-        std::cout << std::hex << std::setfill('0')
-                  << "usb=" << std::setw(4) << desc.idVendor << ':'
+        std::cout << std::hex << std::setfill('0') << "usb=" << std::setw(4) << desc.idVendor << ':'
                   << std::setw(4) << desc.idProduct << std::dec
                   << " bus=" << static_cast<unsigned>(libusb_get_bus_number(list[i]))
                   << " address=" << static_cast<unsigned>(libusb_get_device_address(list[i]))
@@ -148,10 +242,13 @@ int list_devices(libusb_context* context) {
 
         if (profile != nullptr) {
             std::cout << " model=\"" << profile->model << "\""
-                      << " runtime=" << (asicen::profile_runtime_supported(*profile)
-                          ? "source-backed-experimental" : "not-enabled")
-                      << " enclosure_receivers=" << static_cast<unsigned>(profile->enclosure_receiver_count)
-                      << " expected_functions=" << static_cast<unsigned>(profile->expected_runtime_functions)
+                      << " runtime="
+                      << (asicen::profile_runtime_supported(*profile) ? "source-backed-experimental"
+                                                                      : "not-enabled")
+                      << " enclosure_receivers="
+                      << static_cast<unsigned>(profile->enclosure_receiver_count)
+                      << " expected_functions="
+                      << static_cast<unsigned>(profile->expected_runtime_functions)
                       << " local_lanes=" << static_cast<unsigned>(profile->local_lane_count)
                       << " status=runtime";
         } else {
@@ -164,7 +261,8 @@ int list_devices(libusb_context* context) {
     return 0;
 }
 
-int describe_device(libusb_device* device) {
+int describe_device(libusb_device* device)
+{
     if (device == nullptr) {
         return 1;
     }
@@ -179,15 +277,14 @@ int describe_device(libusb_device* device) {
     std::cout << "configurations=" << static_cast<unsigned>(desc.bNumConfigurations)
               << " device_class=" << static_cast<unsigned>(desc.bDeviceClass)
               << " device_subclass=" << static_cast<unsigned>(desc.bDeviceSubClass)
-              << " device_protocol=" << static_cast<unsigned>(desc.bDeviceProtocol)
-              << '\n';
+              << " device_protocol=" << static_cast<unsigned>(desc.bDeviceProtocol) << '\n';
 
     for (std::uint8_t config_index = 0; config_index < desc.bNumConfigurations; ++config_index) {
         libusb_config_descriptor* config = nullptr;
         rc = libusb_get_config_descriptor(device, config_index, &config);
         if (rc != 0 || config == nullptr) {
-            std::cerr << "config " << static_cast<unsigned>(config_index)
-                      << ": " << libusb_error_name(rc) << '\n';
+            std::cerr << "config " << static_cast<unsigned>(config_index) << ": "
+                      << libusb_error_name(rc) << '\n';
             continue;
         }
 
@@ -206,18 +303,15 @@ int describe_device(libusb_device* device) {
                           << " class=" << static_cast<unsigned>(alt.bInterfaceClass)
                           << " subclass=" << static_cast<unsigned>(alt.bInterfaceSubClass)
                           << " protocol=" << static_cast<unsigned>(alt.bInterfaceProtocol)
-                          << " endpoints=" << static_cast<unsigned>(alt.bNumEndpoints)
-                          << '\n';
+                          << " endpoints=" << static_cast<unsigned>(alt.bNumEndpoints) << '\n';
 
                 for (std::uint8_t ep_index = 0; ep_index < alt.bNumEndpoints; ++ep_index) {
                     const libusb_endpoint_descriptor& ep = alt.endpoint[ep_index];
                     std::cout << "  endpoint=0x" << std::hex
-                              << static_cast<unsigned>(ep.bEndpointAddress)
-                              << " attributes=0x" << static_cast<unsigned>(ep.bmAttributes)
-                              << std::dec
+                              << static_cast<unsigned>(ep.bEndpointAddress) << " attributes=0x"
+                              << static_cast<unsigned>(ep.bmAttributes) << std::dec
                               << " max_packet=" << ep.wMaxPacketSize
-                              << " interval=" << static_cast<unsigned>(ep.bInterval)
-                              << '\n';
+                              << " interval=" << static_cast<unsigned>(ep.bInterval) << '\n';
                 }
             }
         }
@@ -228,26 +322,22 @@ int describe_device(libusb_device* device) {
     return 0;
 }
 
-bool runtime_profile(asicen::LibusbDevice* device, const asicen::DeviceProfile** profile) {
+bool runtime_profile(asicen::LibusbDevice* device, const asicen::DeviceProfile** profile)
+{
     libusb_device_descriptor desc{};
     if (device == nullptr || device->device() == nullptr ||
-        libusb_get_device_descriptor(device->device(), &desc) != 0) {
+        device->descriptor(&desc) != 0) {
         return false;
     }
     *profile = asicen::find_profile(desc.idVendor, desc.idProduct);
     return *profile != nullptr;
 }
 
-int exact_in(asicen::LibusbDevice* device, asicen::Request request,
-             unsigned char* data, std::uint16_t length) {
+int exact_in(asicen::LibusbDevice* device, asicen::Request request, unsigned char* data,
+             std::uint16_t length)
+{
     const asicen::ControlTransfer transfer{
-        0,
-        request,
-        0,
-        0,
-        length,
-        asicen::Direction::In,
-        1000,
+        0, request, 0, 0, length, asicen::Direction::In, 1000,
     };
     const int rc = device->control(transfer, data);
     if (rc < 0) {
@@ -261,7 +351,8 @@ int exact_in(asicen::LibusbDevice* device, asicen::Request request,
     return 0;
 }
 
-std::string fixed_ascii(const std::uint8_t* data, std::size_t size) {
+std::string fixed_ascii(const std::uint8_t* data, std::size_t size)
+{
     std::string result;
     for (std::size_t i = 0; i < size; ++i) {
         const unsigned char value = data[i];
@@ -276,13 +367,13 @@ std::string fixed_ascii(const std::uint8_t* data, std::size_t size) {
     return result;
 }
 
-template <std::size_t N>
-std::string fixed_ascii(const std::array<std::uint8_t, N>& data) {
+template <std::size_t N> std::string fixed_ascii(const std::array<std::uint8_t, N>& data)
+{
     return fixed_ascii(data.data(), data.size());
 }
 
-template <std::size_t N>
-void print_hex(const std::array<std::uint8_t, N>& data) {
+template <std::size_t N> void print_hex(const std::array<std::uint8_t, N>& data)
+{
     std::cout << std::hex << std::setfill('0');
     for (std::uint8_t value : data) {
         std::cout << std::setw(2) << static_cast<unsigned>(value);
@@ -290,7 +381,8 @@ void print_hex(const std::array<std::uint8_t, N>& data) {
     std::cout << std::dec;
 }
 
-int run_runtime_command(asicen::LibusbDevice* device, const std::string& command) {
+int run_runtime_command(asicen::LibusbDevice* device, const std::string& command)
+{
     const asicen::DeviceProfile* profile = nullptr;
     if (!runtime_profile(device, &profile)) {
         std::cerr << "selected device is not a supported ASICEN runtime device\n";
@@ -320,23 +412,16 @@ int run_runtime_command(asicen::LibusbDevice* device, const std::string& command
             return 1;
         }
 
-        const std::uint16_t vid =
-            (static_cast<std::uint16_t>(info.vid[0]) << 8) |
-            static_cast<std::uint16_t>(info.vid[1]);
-        const std::uint16_t pid =
-            (static_cast<std::uint16_t>(info.pid[0]) << 8) |
-            static_cast<std::uint16_t>(info.pid[1]);
-
-        std::cout << "use=" << static_cast<unsigned>(info.use_customer_info)
-                  << " vid=0x" << std::hex << std::setw(4) << std::setfill('0') << vid
-                  << " pid=0x" << std::setw(4) << pid << std::dec
-                  << " manufacturer=\"" << fixed_ascii(info.manufacturer) << "\""
+        std::cout << "use=" << static_cast<unsigned>(info.use_customer_info) << " vid_bytes=";
+        print_hex(info.vid);
+        std::cout << " pid_bytes=";
+        print_hex(info.pid);
+        std::cout << " manufacturer=\"" << fixed_ascii(info.manufacturer) << "\""
                   << " product=\"" << fixed_ascii(info.product) << "\""
                   << " hid=\"" << fixed_ascii(info.hid) << "\""
                   << " remote=" << static_cast<unsigned>(info.remote_control_number)
                   << " support_feature=0x" << std::hex
-                  << static_cast<unsigned>(info.support_feature) << std::dec
-                  << " raw=";
+                  << static_cast<unsigned>(info.support_feature) << std::dec << " raw=";
         print_hex(data);
         std::cout << '\n';
         return 0;
@@ -357,7 +442,8 @@ int run_runtime_command(asicen::LibusbDevice* device, const std::string& command
     return 1;
 }
 
-bool loader_interface_ready(libusb_device* device) {
+bool loader_interface_ready(libusb_device* device)
+{
     libusb_config_descriptor* config = nullptr;
     const int rc = libusb_get_active_config_descriptor(device, &config);
     if (rc != 0 || config == nullptr) {
@@ -375,8 +461,7 @@ bool loader_interface_ready(libusb_device* device) {
             for (std::uint8_t e = 0; e < alt.bNumEndpoints; ++e) {
                 const libusb_endpoint_descriptor& ep = alt.endpoint[e];
                 if (ep.bEndpointAddress == 0x01 &&
-                    (ep.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) ==
-                        LIBUSB_TRANSFER_TYPE_BULK &&
+                    (ep.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK &&
                     ep.wMaxPacketSize == 512) {
                     ready = true;
                     break;
@@ -389,8 +474,9 @@ bool loader_interface_ready(libusb_device* device) {
     return ready;
 }
 
-int load_firmware(asicen::LibusbDevice* device,
-                  const std::vector<std::uint8_t>& firmware, asicen::ModelId model) {
+int load_firmware(asicen::LibusbDevice* device, const asicen::FirmwareImage& firmware,
+                  asicen::ModelId model)
+{
     libusb_device* raw = device->device();
     if (raw == nullptr) {
         std::cerr << "selected device is not available\n";
@@ -398,10 +484,9 @@ int load_firmware(asicen::LibusbDevice* device,
     }
 
     libusb_device_descriptor desc{};
-    const int desc_rc = libusb_get_device_descriptor(raw, &desc);
+    const int desc_rc = device->descriptor(&desc);
     if (desc_rc != 0) {
-        std::cerr << "libusb_get_device_descriptor: "
-                  << libusb_error_name(desc_rc) << '\n';
+        std::cerr << "libusb_get_device_descriptor: " << libusb_error_name(desc_rc) << '\n';
         return 1;
     }
     if (!is_loader(desc) || (model == asicen::ModelId::W3u3V2 && desc.idProduct != 0x5211U)) {
@@ -430,26 +515,18 @@ int load_firmware(asicen::LibusbDevice* device,
         return 1;
     }
 
-    const std::vector<asicen::LoaderTransfer> plan =
-        asicen::build_loader_transfer_plan(model);
+    const std::vector<asicen::LoaderTransfer> plan = asicen::build_loader_transfer_plan(model);
     for (std::size_t i = 0; i < plan.size(); ++i) {
         const asicen::LoaderTransfer& transfer = plan[i];
         const bool final_transfer = (i + 1 == plan.size());
-        const int rc = device->vendor_out(
-            transfer.request,
-            transfer.value,
-            transfer.index,
-            firmware.data() + transfer.blob_offset,
-            transfer.length,
-            1000);
+        const int rc =
+            device->vendor_out(transfer.request, transfer.value, transfer.index,
+                               firmware.data() + transfer.blob_offset, transfer.length, 1000);
 
-        std::cout << "transfer=" << (i + 1)
-                  << " request=0x" << std::hex << std::setw(2) << std::setfill('0')
-                  << static_cast<unsigned>(transfer.request)
-                  << " value=0x" << std::setw(4) << transfer.value
-                  << " index=0x" << transfer.index
-                  << " length=" << std::dec << transfer.length
-                  << " returned=" << rc << '\n';
+        std::cout << "transfer=" << (i + 1) << " request=0x" << std::hex << std::setw(2)
+                  << std::setfill('0') << static_cast<unsigned>(transfer.request) << " value=0x"
+                  << std::setw(4) << transfer.value << " index=0x" << transfer.index
+                  << " length=" << std::dec << transfer.length << " returned=" << rc << '\n';
 
         if (rc == LIBUSB_ERROR_NO_DEVICE && final_transfer) {
             std::cout << "final AC transfer returned NO_DEVICE; firmware "
@@ -462,8 +539,8 @@ int load_firmware(asicen::LibusbDevice* device,
             return 1;
         }
         if (rc != transfer.length) {
-            std::cerr << "short control transfer: expected=" << transfer.length
-                      << " actual=" << rc << '\n';
+            std::cerr << "short control transfer: expected=" << transfer.length << " actual=" << rc
+                      << '\n';
             return 1;
         }
     }
@@ -473,38 +550,55 @@ int load_firmware(asicen::LibusbDevice* device,
     return 0;
 }
 
-}  // namespace
+} // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
+    if (argc > 1 && std::string(argv[1]) == "card-probe") {
+        return asicen::run_diagnostic_probe(asicen::DiagnosticProbeRole::card, argc - 1,
+                                            const_cast<const char* const*>(argv + 1));
+    }
     Arguments args{};
     if (!parse_arguments(argc, argv, &args)) {
+        if (!args.error.empty())
+            std::cerr << args.error << '\n';
         usage(argv[0]);
         return 2;
     }
+    if (args.help) {
+        usage(argv[0], std::cout);
+        std::cout.flush();
+        return std::cout ? 0 : 8;
+    }
+    if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        return 10;
 
-    std::vector<std::uint8_t> firmware;
+    auto firmware = px4::userland::Result<asicen::FirmwareImage>::failure(
+        px4::userland::Error::NOT_READY);
     if (args.command == "load-firmware") {
-        const asicen::LoaderFirmwareRead read =
-            asicen::read_verified_loader_firmware_file(args.firmware, args.firmware_model->model_id, &firmware);
-        if (read == asicen::LoaderFirmwareRead::OpenFailed) {
-            std::cerr << "cannot read firmware: " << args.firmware << '\n';
-            return 1;
-        }
-        if (read == asicen::LoaderFirmwareRead::WrongSize) {
-            std::cerr << "firmware must be exactly "
-                      << asicen::kLoaderFirmwareBlobSize << " bytes\n";
-            return 1;
-        }
-        if (read != asicen::LoaderFirmwareRead::Ok) {
-            std::cerr << "firmware rejected: model applicability or SHA-256 fingerprint mismatch\n";
-            return 1;
+        asicen::FirmwareProvider provider(args.firmware, args.firmware_model->model_id);
+        firmware = provider.load();
+        if (!firmware) {
+            std::cerr << "firmware load failed: "
+                      << px4::userland::error_string(firmware.error()) << '\n';
+            switch (firmware.error()) {
+            case px4::userland::Error::INVALID_ARGUMENT:
+                return 2;
+            case px4::userland::Error::NOT_FOUND:
+                return 3;
+            case px4::userland::Error::FIRMWARE_REJECTED:
+                return 10;
+            default:
+                return 70;
+            }
         }
         std::cerr << "verified firmware for " << args.firmware_model->model
                   << "; runtime identity must be rechecked after re-enumeration\n";
     }
 
-    libusb_context* context = nullptr;
-    const int init_rc = libusb_init(&context);
+    asicen::LibusbContext context_owner;
+    const int init_rc = context_owner.initialize();
+    libusb_context* context = context_owner.get();
     if (init_rc != 0) {
         std::cerr << "libusb_init: " << libusb_error_name(init_rc) << '\n';
         return 1;
@@ -512,8 +606,10 @@ int main(int argc, char** argv) {
 
     if (args.command == "list") {
         const int rc = list_devices(context);
-        libusb_exit(context);
-        return rc;
+
+        std::cout.flush();
+        std::cerr.flush();
+        return rc != 0 ? rc : (!std::cout || !std::cerr ? 8 : 0);
     }
 
     asicen::LibusbDevice device;
@@ -522,13 +618,33 @@ int main(int argc, char** argv) {
         std::cerr << "open " << static_cast<unsigned>(args.location.bus) << ':'
                   << static_cast<unsigned>(args.location.address) << ": "
                   << libusb_error_name(open_rc) << '\n';
-        libusb_exit(context);
+
         return 1;
     }
 
     int result = 1;
-    if (args.command == "load-firmware") {
-        result = load_firmware(&device, firmware, args.firmware_model->model_id);
+    if (args.claim) {
+        const asicen::DeviceProfile* profile = nullptr;
+        if (!runtime_profile(&device, &profile)) {
+            std::cerr << "selected device is not a supported ASICEN runtime device\n";
+        } else if (device.claim_interface(0) < 0) {
+            std::cerr << "claim interface 0 failed\n";
+        } else {
+            result = args.command == "describe" ? describe_device(device.device()) : 0;
+        }
+    } else if (args.command == "load-firmware") {
+        const asicen::DeviceProfile* profile = nullptr;
+        if (args.initialize && !args.require_cold && runtime_profile(&device, &profile)) {
+            if (profile->model_id != args.firmware_model->model_id) {
+                std::cerr << "runtime model does not match --model\n";
+                result = 4;
+            } else {
+                std::cout << "already runtime; no firmware upload performed\n";
+                result = 0;
+            }
+        } else {
+            result = load_firmware(&device, firmware.value(), args.firmware_model->model_id);
+        }
     } else if (args.command == "describe") {
         result = describe_device(device.device());
     } else {
@@ -536,6 +652,10 @@ int main(int argc, char** argv) {
     }
 
     device.close();
-    libusb_exit(context);
+
+    std::cout.flush();
+    std::cerr.flush();
+    if (result == 0 && (!std::cout || !std::cerr))
+        result = 8;
     return result;
 }

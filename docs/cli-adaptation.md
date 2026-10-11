@@ -1,8 +1,18 @@
 # px4-userland CLI adaptation boundary
 
-Current compatibility verdict: see the
-[2026-10-09 audit](compatibility-audit-2026-10-09.md).
-This historical increment record does not establish distribution parity.
+Current comparison baseline is PX4
+`1a1485d0c3e972e0a47be907edb67949564aa9a7` and ASICEN starting point
+`42c92a6b27247498f1c2920fd98bb20a346e59e4`.
+The exhaustive discrepancy record is [Issue #4](https://github.com/Khronos31/asicen-userland/issues/4).
+The Issue #4 implementation supersedes the historical `--socket` 24-byte
+research protocol. Mock and hardware modes use the canonical runtime/instance
+control and stream service; obsolete `--socket` arguments fail with usage exit 2.
+The partial-frame, blocked-output, packet and shutdown tests are retained on
+that shared protocol. The historical descriptions below are not current CLI
+instructions.
+The text below is the historical increment record, including its original
+reference revision and old mock-only limitations; it does not describe the
+current product or establish distribution parity.
 Primary satellite and live internal-card use were added after its original
 hardware section; see the [live trial](reverse-engineering/live-card-stream-trial-2026-10-09.md).
 
@@ -181,10 +191,15 @@ to the named revision. The local `tests/imported_tests_main.cpp` only calls
 those test entry points; it does not edit or weaken their expectations.
 `px4_portable_reference` builds the reference behavior without product profile
 defines. `asicen_px4_mock` builds the same service sources with the local
-mapping and magic. Product targets compile the local `userland/tools/asicend.cpp`,
-`asicend_research.cpp`, `asicenctl.cpp`, `asicen_ts.cpp`,
-`asicen_ts_research.cpp`, and `asicen_ts_portable.cpp`, plus imported
-`px4_ts_core.cpp`, `px4_ts_posix.cpp`, and formatting code as appropriate.
+mapping and magic. The `asicend` product target compiles
+`userland/tools/asicend.cpp`, adding `userland/tools/asicend_hardware.cpp` when
+libusb is enabled. `asicenctl` compiles `userland/tools/asicenctl.cpp`.
+`asicen-ts` compiles `userland/tools/asicen_ts.cpp` on POSIX or
+`userland/tools/asicen_ts_windows.cpp` on Windows, with imported
+`px4_ts_core.cpp` and the corresponding platform support; the commands also
+use imported signal and formatting code as appropriate. The separate UNIX
+offline target `asicend-mock` compiles `userland/tools/asicend_mock.cpp` when
+tools or tests are enabled and is not part of the distributed product.
 
 The copied `src/ipc.cpp`, `src/posix_ipc.cpp`, `src/control_server.cpp`,
 `src/control_workers.cpp`, and `include/px4/tuner_service.h` carry the product

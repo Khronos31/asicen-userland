@@ -35,8 +35,8 @@ public:
     // observation interval.
     Result<void> poll_once(Timeout timeout) noexcept;
     Result<void> shutdown() noexcept;
-    const char* endpoint_path() const noexcept;
-    const char* stream_endpoint_path() const noexcept;
+    const PathChar* endpoint_path() const noexcept;
+    const PathChar* stream_endpoint_path() const noexcept;
     std::size_t connection_count() const noexcept;
 
 private:

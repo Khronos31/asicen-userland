@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#pragma once
+#ifndef ASICEN_USERLAND_HARDWARE_OWNERSHIP_H
+#define ASICEN_USERLAND_HARDWARE_OWNERSHIP_H
 
 #include "asicen/device_profile.h"
 
@@ -23,6 +24,7 @@ struct UsbFunctionSnapshot {
     bool endpoint81_bulk_in_alt0 = false;
     bool endpoint82_in_alt0 = false;
     bool endpoint82_bulk_in_alt0 = false;
+    int transport_error = 0;
 };
 
 // Narrow ownership surface so topology and rollback can be exercised without
@@ -46,6 +48,7 @@ enum class OwnershipError : std::uint8_t {
     sibling_claim_failed,
     release_failed,
     unsupported_profile,
+    snapshot_failed,
 };
 
 class EnclosureOwnership final {
@@ -58,19 +61,19 @@ public:
     // Validate identity/topology before any claim. Single-function models must
     // not supply a sibling; dual-function models reserve both ordered ports.
     // This is ownership only: callers must separately gate frontend support.
-    OwnershipError claim_profile(const DeviceProfile& profile,
-                                  UsbFunctionClaim& primary,
-                                  UsbFunctionClaim* sibling,
-                                  const std::vector<std::uint8_t>& primary_path,
-                                  const std::vector<std::uint8_t>& sibling_path = {});
-    OwnershipError claim_w3u3(UsbFunctionClaim& primary,
-                              UsbFunctionClaim& sibling,
+    OwnershipError claim_profile(const DeviceProfile& profile, UsbFunctionClaim& primary,
+                                 UsbFunctionClaim* sibling,
+                                 const std::vector<std::uint8_t>& primary_path,
+                                 const std::vector<std::uint8_t>& sibling_path = {});
+    OwnershipError claim_w3u3(UsbFunctionClaim& primary, UsbFunctionClaim& sibling,
                               const std::vector<std::uint8_t>& primary_path,
                               const std::vector<std::uint8_t>& sibling_path);
     OwnershipError release() noexcept;
+    void abandon() noexcept;
     bool owns_both() const noexcept;
     bool owns_required_functions() const noexcept;
     bool primary_supports_bulk_endpoint(std::uint8_t endpoint) const noexcept;
+    int last_transport_error() const noexcept { return last_transport_error_; }
 
 private:
     UsbFunctionClaim* primary_ = nullptr;
@@ -78,6 +81,7 @@ private:
     bool primary_endpoint81_bulk_ = false;
     bool primary_endpoint82_bulk_ = false;
     std::uint8_t required_function_count_ = 0;
+    int last_transport_error_ = 0;
 };
 
 enum class ReceiverReservationResult : std::uint8_t {
@@ -102,3 +106,5 @@ private:
 };
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_HARDWARE_OWNERSHIP_H

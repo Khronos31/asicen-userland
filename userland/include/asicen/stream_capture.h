@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASICEN_USERLAND_STREAM_CAPTURE_H
+#define ASICEN_USERLAND_STREAM_CAPTURE_H
 
 #include <chrono>
 #include <cstddef>
@@ -46,8 +47,7 @@ struct CaptureStats {
     bool link_seed_state_unverifiable = false;
 };
 
-bool parse_cf40_read_response(int transferred, const unsigned char* response,
-                              std::uint8_t* value);
+bool parse_cf40_read_response(int transferred, const unsigned char* response, std::uint8_t* value);
 bool cf40_write_response_complete(int transferred);
 
 class CaptureBackend {
@@ -60,31 +60,47 @@ public:
                                 int* transferred, unsigned timeout_ms) = 0;
     // Explicitly opt-in CF40 diagnostic controls. Implementations should use
     // the recovered channel-filter protocol and require a complete transfer.
-    virtual bool read_cf40(std::uint8_t local, std::uint8_t* value) {
+    virtual bool read_cf40(std::uint8_t local, std::uint8_t* value)
+    {
         (void)local;
         (void)value;
         return false;
     }
-    virtual bool write_cf40(std::uint8_t local, std::uint8_t value) {
+    virtual bool write_cf40(std::uint8_t local, std::uint8_t value)
+    {
         (void)local;
         (void)value;
         return false;
     }
-    virtual bool read_cf_block(std::uint8_t local, std::uint8_t* data,
-                               std::size_t size) {
-        (void)local; (void)data; (void)size; return false;
+    virtual bool read_cf_block(std::uint8_t local, std::uint8_t* data, std::size_t size)
+    {
+        (void)local;
+        (void)data;
+        (void)size;
+        return false;
     }
-    virtual bool write_cf_block(std::uint8_t local, const std::uint8_t* data,
-                                std::size_t size) {
-        (void)local; (void)data; (void)size; return false;
+    virtual bool write_cf_block(std::uint8_t local, const std::uint8_t* data, std::size_t size)
+    {
+        (void)local;
+        (void)data;
+        (void)size;
+        return false;
     }
     virtual bool terrestrial_locked(std::uint8_t local, bool* locked,
-                                    std::chrono::steady_clock::time_point deadline) {
-        (void)local; (void)locked; (void)deadline; return false;
+                                    std::chrono::steady_clock::time_point deadline)
+    {
+        (void)local;
+        (void)locked;
+        (void)deadline;
+        return false;
     }
     virtual bool filter_repeat_pulse(std::uint8_t local, std::uint8_t reset_state,
-                                     std::chrono::steady_clock::time_point deadline) {
-        (void)local; (void)reset_state; (void)deadline; return false;
+                                     std::chrono::steady_clock::time_point deadline)
+    {
+        (void)local;
+        (void)reset_state;
+        (void)deadline;
+        return false;
     }
     // Explicit experimental write-only link diagnostic. The hardware seed
     // latch cannot be read back; implementations must never claim restoration.
@@ -109,8 +125,9 @@ const char* capture_outcome_name(CaptureOutcome outcome);
 
 // Keep capture command metadata on the diagnostic stream so stdout can carry
 // only raw capture bytes. Other frontend commands retain their text summary.
-void write_command_summary(std::ostream& normal, std::ostream& diagnostic,
-                           bool capture_command, const char* model,
-                           const char* port, std::uint8_t local);
+void write_command_summary(std::ostream& normal, std::ostream& diagnostic, bool capture_command,
+                           const char* model, const char* port, std::uint8_t local);
 
 }  // namespace asicen
+
+#endif  // ASICEN_USERLAND_STREAM_CAPTURE_H
