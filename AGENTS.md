@@ -38,6 +38,8 @@
 
 ## Release notes
 
+- 正本は `release-notes/vX.Y.Z.md` にコミットする。必要な実機・仕様変更試験と再現性確認の完了後、ユーザーから明示的に作成を依頼されてから本文を書く。候補固定前は同名 `.md` / `.json` の無効な placeholder だけを準備する（`release-notes/README.md`）。
+- ノート作成・commit と「タグ＋リリース」の依頼は別の判断とする。後者を明示的に依頼されるまでタグを push しない。追加の GitHub Environment 手動承認は設けず、承認後の tag workflow が照合・Draft・公開・公開後照合を行う。手順は `docs/releasing.md`。
 - GitHub Release のタイトルは `vX.Y.Z` のみとし、先頭に製品名などを付けない。
 - 本文の先頭見出しは `asicen-userland vX.Y.Z` とする。
 - 概要は敬体（です・ます調）で簡潔に書く。
@@ -65,6 +67,7 @@
 
 ## Stable release validation
 
+- Use the shared matrix and candidate/run/hash/evidence structure in `docs/release-record.md`. The machine-readable sidecar attests completed gates; offline verification cannot establish physical measurements or the user's decisions. Preserve historical evidence and model/platform/feature support boundaries.
 - Follow ASICEN's `SPEC.md`, `docs/release-validation.md` and recorded hardware acceptance conditions. The parity update does not replace earlier release evidence or certify new binaries.
 - Preserve recorded user choices about soak duration and platforms. Do not import PX4-specific physical-action deadlines, notification commands or section numbers as new ASICEN requirements.
 - Build/offline test success is not hardware verification. Keep changed candidate binaries unverified until their required real-device evidence exists.

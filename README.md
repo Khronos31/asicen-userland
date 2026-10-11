@@ -258,6 +258,10 @@ cmake --build build --parallel 2
 
 実機でのキャプチャには Release ビルドを推奨します。同一ソースコードを用いた比較において、最適化なしのビルドでは両レーンで TS エラーが発生したのに対し、Release ビルドではレーンあたり 30,000 パケットで TEI（Transport Error Indicator）および連続性エラーが 0 であったという開発時の記録に基づきます。ただし、この記録は本 0.1.0 配布候補の実機合格を証明するものではありません。
 
+## リリース作業
+
+検証する candidate と公開する tag CI の成果物を区別し、必要試験、依頼後のノート作成、別の「タグ＋リリース」依頼の順に進めます。[公開手順](docs/releasing.md)、[実機検証手順](docs/release-validation.md)、[matrix・記録形式](docs/release-record.md)、[コミット済みノートの方針](release-notes/README.md)を参照してください。公開workflowの成功は新しい機種・環境の実機認定を意味しません。
+
 ## ライセンス
 
 本ソフトウェアのライセンスは GPLv2 です（px4 由来の GPL-2.0-only と FC0012 の GPL-2.0-or-later を含んでいるため、MIT ではありません）。

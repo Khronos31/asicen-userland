@@ -17,6 +17,16 @@
 
 ## 主な変更
 
+### リリース手順の追加整合（2026-10-11）
+
+Issue #4 / PR #5 後の別作業として、PX4 [Issue #55](https://github.com/Khronos31/px4-userland/issues/55) の公開自動化を共有する。`release_tag.yml` は PX4 の共通 workflow/helper を full commit SHA に固定して呼び、共通手順を `docs/releasing.md`、matrix・候補/run/hash/証拠の構造を `docs/release-record.md` に揃える。上記の C++ 比較基準・import は変更しない。
+
+ノートは必要試験後の明示的な作成依頼で `release-notes/vX.Y.Z.md` に書き、別の「タグ＋リリース」依頼を公開の開始条件とする。追加の Environment 手動承認は設けない。自動照合は候補2runの再現性、候補/tag payload、Draft/公開後の再取得を扱い、実機・物理操作・利用者判断は自動認定しない。過去の実測、8 binary の配布、Windows 0.1.0 除外、firmware の binary 同梱/source 除外と未解決の権利、ASICEN 0.1.0 の固定 soak/LNB/全チャンネル条件を保持する。
+
+ASICEN の既存 Linux build evidence 2 ファイル（`evidence/linux-static-build.json` / `evidence/linux-ifd-build.json`）は docs-only tag でも `source_ref` が変わるため、その exact SHA identity と対応する manifest hash/size・checksum のみを比較時の例外とする。ほかの provenance field、実行ファイル・IFD・firmware の bytes は例外としない。これは現行 schema に必要な明示差であり、provenance 全体の比較を免除するものではない。今回の実装はタグ作成・実機合格・リリース公開を行った記録ではない。
+
+### PR #5 の実装
+
 - 共通 IPC、card、worker、lease、Windows platform、TS client を固定 PX4 へ更新。必要差は `third_party/px4-userland/UPSTREAM.md` に記録。
 - 列挙・選択・再列挙・runtime lock・引数・エラー・signal・出力・クリーンアップを共通契約へ整合。
 - 旧研究用 24-byte IPC の実行経路を廃止し、mock も canonical runtime/instance サービスへ統一。旧 `--socket` は usage 2。

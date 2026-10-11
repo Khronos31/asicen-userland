@@ -4,6 +4,8 @@
 
 この文書は手順である。ここに書いた項目を、実施済みの検証結果として読まない。
 
+公開までの共通工程は [`releasing.md`](releasing.md)、candidate/run/hash/証拠と matrix の記録構造は [`release-record.md`](release-record.md) に従う。候補固定前に同版の `release-notes/vX.Y.Z.md` / `.json` の無効な placeholder だけを用意する。必要試験後に利用者から明示的に作成を依頼されてからノート本文を書き、結果・ノート・記録を文書だけのコミットへまとめる。さらに別の「タグ＋リリース」依頼の後だけタグを push する。追加の GitHub Environment 手動承認は設けない。
+
 ## 今回の 0.1.0 で決まった範囲
 
 2026-10-09〜10 に決めた Linux・macOS・Android の 8 アーカイブの実機条件を以下に残す。今回の parity 修正はこれらの過去の実測結果を新しいバイナリへ引き継がない。Windows は 0.1.0 の配布・実機認定対象には含めない。
@@ -33,7 +35,9 @@
 
 実施するホスト名、OS の版、CPU アーキテクチャ（POSIX では `uname -m`）は各行の記録に書く。上の環境が用意できない行は未完了であり、他の行の成功で埋めない。Windows バイナリ、FreeBSD、Android APK は 0.1.0 の配布対象外。
 
-物理操作は利用者が行う。依頼してから 5 分待ち、超えればその操作を未完了として、そのアーカイブの実機工程を止める。依頼の直前に、この環境では `vibe` を一度だけ鳴らす。
+各行の archive 名・SHA-256・候補 source SHA・run/attempt/artifact ID、model/USB topology、実際の host/access path、日時・コマンド・結果・証拠を独立に残す。記録状態は PX4 と同じ `継承` / `今回再検証` / `未認定` / `対象外` を使い、合格・失敗・判定保留は別欄とする。`build-tested` は実機認定を意味しない。手順を共通化しても、下記の ASICEN 固有の試験と既決定の soak を変えず、PX4 の試験結果や新しい通知コマンドを移植しない。
+
+物理操作は利用者が行う。以下は既存の 0.1.0 手順として保持する条件であり、PX4 から新たに取り込む規則ではない。依頼してから 5 分待ち、超えればその操作を未完了として、そのアーカイブの実機工程を止める。依頼の直前に、この環境では `vibe` を一度だけ鳴らす。
 
 ## 各アーカイブの順序
 
@@ -106,8 +110,8 @@ USB 転送の成功や GPIO の読み戻しを、端子電圧の合格にしな�
 
 1. 同じソースコミットの独立した 2 回の CI candidate run を比較する。0.1.0 の 8 バイナリ＋対応ソースの全 9 アーカイブと外側 `SHA256SUMS` が byte-identical であることを確認し、runner image、toolchain、実効 build input を記録する。入力が違う、または比較不能なら未確定として扱う。
 2. 実機確認した候補を exact commit とハッシュで記録する。結果記録だけの後続コミットでは、文書以外のコード・設定・workflow・ビルド入力が変わっていないことを確認する。
-3. タグ CI の成果物と実機確認候補を展開して比較する。inventory、type、mode、symlink target と実行ファイル・共有ライブラリ・ランチャー・ファームウェアの全 bytes が一致することを確認する。許す差は更新文書、文書・commit/tree に由来する manifest 項目と checksum のみ。これ以外の差は公開を止めて調査する。
-4. 公開が別途承認された場合に限り Draft Release を用意し、添付した 10 ファイル（9 アーカイブ＋`SHA256SUMS`）を新しいディレクトリへ再取得する。タグ CI 成果物との byte 一致、checksum 9 件、本文を確認する。
+3. タグ CI の成果物と実機確認候補を展開して比較する。inventory、type、mode、symlink target と実行ファイル・共有ライブラリ・ランチャー・ファームウェアの全 bytes が一致することを確認する。許す差は明示的な更新文書、文書・commit/tree に由来する manifest 項目と checksum。加えて ASICEN 固有の既存 `evidence/linux-static-build.json` / `evidence/linux-ifd-build.json` は、候補/タグの SHA と一致する `source_ref` だけと、その変更に対応する manifest hash/size・checksum を許す。他の provenance field や実行ファイル・IFD の bytes は変えない。これ以外の差は公開を止めて調査する。
+4. 全必要試験の完了後、利用者の依頼を受けてコミットした `release-notes/vX.Y.Z.md` と記録 `.json` を使う。さらに別の「タグ＋リリース」依頼の後にだけタグを push する。共通 workflow が Draft Release を用意し、添付した 10 ファイル（9 アーカイブ＋`SHA256SUMS`）を新しいディレクトリへ再取得する。タグ CI 成果物との byte 一致、checksum 9 件、本文を確認する。
 5. 公開後にも別の新しいディレクトリへ再取得して同じ照合を行い、run ID、入力、比較結果、公開日時を記録する。公開済みタグ・アセットは固定として扱う。
 
 Windows のビルド・テスト・パッケージ生成は CI 用として残す。0.1.0 の配布集約への追加だけを workflow でコメントアウトしてあり、WinSCard 対応後の 0.2.x で再開するときは inventory・監査・checksum の該当箇所も同時に戻す。

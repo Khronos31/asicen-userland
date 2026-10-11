@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0-only
+name: Shared release automation offline tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/**
+      - scripts/**
+      - docs/releasing.md
+  push:
+    paths:
+      - .github/workflows/**
+      - scripts/**
+      - docs/releasing.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-shared-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Read the same immutable shared implementation used for publishing
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: Khronos31/px4-userland
+          ref: b4635226082161ce09f811b1571c9dd25f40cf03
+          persist-credentials: false
+      - name: Run both product profiles and mocked GitHub safety tests
+        run: python3 -m unittest discover -s tests -p 'test_release_*.py' -v
