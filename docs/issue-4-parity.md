@@ -17,6 +17,12 @@
 
 ## 主な変更
 
+### Issue #7 の同期切り分け（2026-10-11）
+
+候補 `432684cc5c9919e1e3379d7ba64db7d6ebb7795c` の同期証明長を 4 から旧実装の 8 packet に戻す。4～7 packet にわたって payload 内の同じ位置に同期候補 byte が続き、その位置から入力が始まる合成 fixture では、4 packet の判定が真の header より手前の偽境界を選択する。8 packet ではこの fixture の真の境界を選び、完全な出力 bytes と discard/sync-loss 等の計数を回帰試験で検証する。初期取得と同期喪失後の再取得、chunk 境界、mode 0/3 の marked sync、mode 7 の transform 統合も対象とする。
+
+これは観測済みの出力 byte 回帰だけを切り分ける診断変更であり、CS2 実測の原因確定や実機修正完了を意味しない。8 個以上の偽同期が並ぶ入力を排除する保証もない。PX4 の 4 packet との差は今回の再現に基づく比較上の未解決点として残し、ハードウェア固有値と認定しない。新しい品質 counters、CC 判定、ASICEN の開始・安定化処理と USB 処理は変更しない。実機 A/B は同じ新 counters を持つ固定候補と、この同期条件だけを変更した候補で比較する。
+
 ### リリース手順の追加整合（2026-10-11）
 
 Issue #4 / PR #5 後の別作業として、PX4 [Issue #55](https://github.com/Khronos31/px4-userland/issues/55) の公開自動化を共有する。0.1.0 ではレビュー済み publisher/verifier・テストを出典と GPL-2.0-only 表示付きで一時的に内包し、`release_tag.yml` は同じ ASICEN tag commit のローカル workflow/helper を使用する。ASICEN 0.1.0 は PX4 の次回 WinSCard リリースを待たず、その後に正式公開された PX4 tag の full commit SHA を確認して外部依存へ切り替える。取得元・hash・最小差分と切替条件は `docs/release-automation-provenance.md` に記録する。共通手順を `docs/releasing.md`、matrix・候補/run/hash/証拠の構造を `docs/release-record.md` に揃え、上記の C++ 比較基準・import は変更しない。
@@ -74,7 +80,7 @@ ASICEN の既存 Linux build evidence 2 ファイル（`evidence/linux-static-bu
 | N02 | detach後のqueued tailとfinal identityの寿命が不一致 | 188-byte 単位、最大長、detach 後 tail/final identity を共通契約へ変更。境界と最終 drain の回帰を追加。 |
 | N03 | TS統計が同じfield名でも違う事象を数える | TS 品質・受理済 input・実出力・discard の意味を揃えて計数。0 の値だけで無誤りとは判定しない。 |
 | N04 | queue/framerは同じbounded stream処理へ寄せられる | Result/ByteView/sink と bounded carry、packet-count ring/min/max、retry に統一。attach 前配送を防止。 |
-| N05 | 初期TS安定化閾値と同期証明長はhardware値と汎用処理を分離する | 汎用同期証明を完全な4 packet に整合。ASICEN 固有の開始・安定化条件は根拠のない IT930x 値で置換しない。 |
+| N05 | 初期TS安定化閾値と同期証明長はhardware値と汎用処理を分離する | PR #5 で完全な 4 packet に整合後、Issue #7 の偽境界回帰を切り分けるため 8 packet へ復元。PX4 との差は未解決点として記録し、CS2 原因・hardware 値とは未認定。ASICEN 固有の開始・安定化条件は保持。 |
 | N06 | firmwareのpath・I/O error・hash実装をhardware imageから分離して揃える | FirmwareProvider/Image、正確な共有 SHA、共有 OS nonce provider に統一。旧 file-read/RNG 実装を除去し、境界・エラー・partial seed 非公開を検証。 |
 | N07 | native daemon引数parserのportable contractと分離構造を揃える | 製品入口・列挙・parser・error・platform lifecycle を共通化。tools/parser/firmware preflight 回帰を追加。プロセス間実行は CI で確認。 |
 | N08 | LoggerとMockTransportはportable source/API/test欠落として扱う | 固定 PX4 の Logger/MockTransport API・実装と同等testを導入。ASICEN raw capture は endpoint0x81/0x82 の実 wire adapter で試験。 |
@@ -198,4 +204,4 @@ macOS の長い TMPDIR では、製品名・instance・endpoint suffix を足し
 
 AN019 の shared seed/controller05 と最後の peer 停止時の規則は、複数ストリームの安全な同時開始・停止を確定する根拠が不足している。物理的に不可能とは判断せず、未実装・未検証として現状の能力上限を明示する。汎用の経路・ownership テストを省略する理由にはしない。
 
-N05 の 4 完全 packet 同期は汎用フレーミングの整合である。ASICEN 側の開始直後の stale data や安定化バッファ条件が解明されたという意味ではなく、IT930x の固有 drop/閾値を根拠なくそのまま移さない。次の実機確認や公式トレース照合では、この開始条件と AN019 の peer 開始・停止・最後のowner解放を分けて観測する。
+N05 は PR #5 で 4 完全 packet 同期へ整合したが、Issue #7 の診断変更では上記の偽境界回帰に基づいて 8 packet に戻す。いずれも ASICEN 側の開始直後の stale data や安定化バッファ条件が解明されたという意味ではなく、IT930x の固有 drop/閾値を根拠なくそのまま移さない。次の実機確認や公式トレース照合では、この開始条件と AN019 の peer 開始・停止・最後のowner解放を分けて観測する。
