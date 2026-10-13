@@ -77,9 +77,11 @@ themselves as CC errors. Keep the separate TEI counter. A later trusted packet
 can still expose a gap. This is a bounded CC observer, not full MPEG conformance
 validation or proof of clean reception.
 
-Allocate one checker before capture outside the callback stack (about 1.56 MiB
-on the tested 64-bit ABI). Allocation failure returns INTERNAL before source
-preparation. Reset it at each accepted fresh capture attempt. Preserve all TS
+Allocate one checker before capture outside the callback stack. The released
+[upstream checker documentation](https://github.com/Khronos31/px4-userland/blob/dd1c1bea16a5871085d5f2a42c009364c1ec7345/docs/ts-continuity.md)
+reports 1,638,408 bytes (about 1.56 MiB) on its tested 64-bit ABI; this is upstream
+size evidence, not a measurement of the ASICEN candidate. Allocation failure
+returns INTERNAL before source preparation. Reset it at each accepted fresh capture attempt. Preserve all TS
 bytes, enqueue/count ordering, source/framer counters, detach/final snapshots,
 ASICEN transform, sync probe and native start/stop behavior. Do not import
 IT930x startup suppression or treat a lower CC count as a CS2 hardware fix.
