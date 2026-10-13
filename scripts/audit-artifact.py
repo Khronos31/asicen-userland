@@ -173,6 +173,7 @@ WINDOWS_SOURCE_ALLOWED = re.compile(
     r"^repository/(?:"
     r"third_party/px4-userland/userland/src/windows/[\w./+-]+"
     r"|userland/src/windows/libusb_stream_policy\.(?:h|cpp)"
+    r"|userland/src/windows/windows_receive_diagnostic\.cpp"
     r"|userland/tools/[\w.+-]*windows[\w.+-]*"
     r"|userland/tests/windows_[\w./+-]+"
     r"|third_party/px4-userland/userland/include/px4/[\w.+-]*windows[\w.+-]*"
@@ -193,6 +194,7 @@ WINDOWS_SOURCE_REQUIRED = {
     "repository/third_party/px4-userland/userland/include/px4/windows_tuner_nonce.h",
     "repository/userland/src/windows/libusb_stream_policy.h",
     "repository/userland/src/windows/libusb_stream_policy.cpp",
+    "repository/userland/src/windows/windows_receive_diagnostic.cpp",
     "repository/userland/tests/windows_libusb_stream_policy_tests.cpp",
 }
 

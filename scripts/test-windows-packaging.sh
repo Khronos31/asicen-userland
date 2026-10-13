@@ -54,6 +54,7 @@ WINDOWS = {
     "userland/tools/asicen_ts_windows.cpp": "// ts\n",
     "userland/src/windows/libusb_stream_policy.cpp": "// native stream policy\n",
     "userland/src/windows/libusb_stream_policy.h": "// native stream policy header\n",
+    "userland/src/windows/windows_receive_diagnostic.cpp": "// private diagnostic file creation\n",
     "userland/tests/windows_libusb_stream_policy_tests.cpp": "// policy tests\n",
     "third_party/px4-userland/userland/tools/px4_windows_args.h": "// args\n",
     "third_party/px4-userland/userland/tests/windows_platform_tests.cpp": "// tests\n",
@@ -116,6 +117,12 @@ legacy_out = test_root / "legacy-out"
 if package(legacy_repo, legacy_out).returncode == 0:
     raise SystemExit("legacy Windows driver tree was accepted")
 print("legacy Windows driver tree rejected")
+
+unexpected_repo = make_repo("unexpected-adapter", {
+    **WINDOWS, "userland/src/windows/unreviewed_adapter.cpp": "// not allowlisted\n"})
+if package(unexpected_repo, test_root / "unexpected-adapter-out").returncode == 0:
+    raise SystemExit("unlisted native Windows adapter was accepted")
+print("unlisted native Windows adapter rejected")
 
 win32_repo = make_repo("win32", {"win32/host.c": "int x;\n"})
 win32_out = test_root / "win32-out"
