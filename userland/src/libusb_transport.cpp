@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdio>
 #include <mutex>
 #include <new>
 
@@ -553,6 +554,13 @@ int LibusbDevice::bulk_read(std::uint8_t endpoint_address, unsigned char* data, 
 
 UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const
 {
+    bus_valid_ = false;
+    address_valid_ = false;
+    ids_valid_ = false;
+    ports_valid_ = false;
+    cached_port_count_ = 0U;
+    claim_attempted_ = false;
+    claim_result_ = 0;
     UsbFunctionSnapshot result{};
     libusb_device* dev = device_.device();
     if (dev == nullptr) {
@@ -561,6 +569,10 @@ UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const
     }
     result.bus = device_.api_.get_bus_number(dev);
     result.address = device_.api_.get_device_address(dev);
+    cached_bus_ = result.bus;
+    cached_address_ = result.address;
+    bus_valid_ = true;
+    address_valid_ = true;
     libusb_device_descriptor descriptor{};
     result.transport_error = device_.api_.get_device_descriptor(dev, &descriptor);
     if (result.transport_error != 0) {
@@ -568,9 +580,13 @@ UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const
     }
     result.vendor_id = descriptor.idVendor;
     result.product_id = descriptor.idProduct;
+    cached_vendor_id_ = result.vendor_id;
+    cached_product_id_ = result.product_id;
+    ids_valid_ = true;
 
     std::uint8_t ports[8]{};
-    const int port_count = device_.api_.get_port_numbers(dev, ports, static_cast<int>(sizeof(ports)));
+    const int port_count = device_.api_.get_port_numbers(
+        dev, ports, static_cast<int>(sizeof(ports)));
     if (port_count < 0 || port_count > static_cast<int>(sizeof(ports))) {
         result.transport_error = port_count < 0 ? port_count : LIBUSB_ERROR_OVERFLOW;
         return result;
@@ -578,6 +594,9 @@ UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const
     if (port_count > 0 && port_count <= static_cast<int>(sizeof(ports))) {
         result.port_path.assign(ports, ports + port_count);
     }
+    std::copy(ports, ports + port_count, cached_ports_.begin());
+    cached_port_count_ = static_cast<std::uint8_t>(port_count);
+    ports_valid_ = true;
 
     libusb_config_descriptor* config = nullptr;
     result.transport_error = device_.api_.get_active_config_descriptor(dev, &config);
@@ -633,12 +652,66 @@ UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const
 
 int LibusbFunctionClaim::claim_interface0()
 {
-    return device_.claim_interface(0);
+    claim_attempted_ = true;
+    claim_result_ = device_.claim_interface(0);
+    return claim_result_;
 }
 
 int LibusbFunctionClaim::release_interface0() noexcept
 {
-    return device_.release_interface(0);
+    const int result = device_.release_interface(0);
+    log_diagnostic("release", true, result);
+    return result;
+}
+
+void LibusbFunctionClaim::log_claim_diagnostic() const noexcept
+{
+    log_diagnostic("claim", claim_attempted_, claim_result_);
+}
+
+void LibusbFunctionClaim::log_diagnostic(const char* phase, bool result_valid,
+                                         int result) const noexcept
+{
+    if (diagnostic_role_ == nullptr || diagnostic_stream_ == nullptr) {
+        return;
+    }
+    char bus[8] = "unknown";
+    char address[8] = "unknown";
+    char vid[8] = "unknown";
+    char pid[8] = "unknown";
+    char port[64] = "unknown";
+    if (bus_valid_) std::snprintf(bus, sizeof(bus), "%u", static_cast<unsigned>(cached_bus_));
+    if (address_valid_) {
+        std::snprintf(address, sizeof(address), "%u", static_cast<unsigned>(cached_address_));
+    }
+    if (ids_valid_) {
+        std::snprintf(vid, sizeof(vid), "%04x", static_cast<unsigned>(cached_vendor_id_));
+        std::snprintf(pid, sizeof(pid), "%04x", static_cast<unsigned>(cached_product_id_));
+    }
+    if (ports_valid_ && bus_valid_) {
+        int used = std::snprintf(port, sizeof(port), "%u-", static_cast<unsigned>(cached_bus_));
+        for (std::uint8_t i = 0U; i < cached_port_count_ && used > 0 &&
+                                  static_cast<std::size_t>(used) < sizeof(port) - 4U;
+             ++i) {
+            const int written = std::snprintf(port + used, sizeof(port) - used, "%s%u",
+                                              i == 0U ? "" : ".",
+                                              static_cast<unsigned>(cached_ports_[i]));
+            if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(port) - used) break;
+            used += written;
+        }
+    }
+    if (result_valid) {
+        std::fprintf(diagnostic_stream_,
+                     "asicend usb-claim phase=%s role=%s bus=%s address=%s port=%s "
+                     "vid=%s pid=%s interface=0 rc=%d name=%s\n",
+                     phase, diagnostic_role_, bus, address, port, vid, pid, result,
+                     libusb_error_name(result));
+    } else {
+        std::fprintf(diagnostic_stream_,
+                     "asicend usb-claim phase=%s role=%s bus=%s address=%s port=%s "
+                     "vid=%s pid=%s interface=0 attempt=no rc=unknown name=unknown\n",
+                     phase, diagnostic_role_, bus, address, port, vid, pid);
+    }
 }
 
 } // namespace asicen

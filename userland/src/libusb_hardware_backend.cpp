@@ -332,7 +332,7 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, UsbLocation prim
                                        UsbLocation sibling, std::vector<std::uint8_t> primary_path,
                                        std::vector<std::uint8_t> sibling_path,
                                        const DeviceProfile* expected_profile)
-    : context_(context), primary_claim_(primary_), sibling_claim_(sibling_),
+    : context_(context), primary_claim_(primary_, "primary"), sibling_claim_(sibling_, "sibling"),
       primary_path_(std::move(primary_path)), sibling_path_(std::move(sibling_path)),
       async_(new (std::nothrow) AsyncState()), decoder_(nullptr, 0U)
 {
@@ -366,7 +366,8 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, UsbLocation prim
 LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, int primary_fd, int sibling_fd,
                                        const DeviceProfile* expected_profile,
                                        LibusbAcquisitionApi& api)
-    : context_(context), primary_(api), sibling_(api), primary_claim_(primary_), sibling_claim_(sibling_),
+    : context_(context), primary_(api), sibling_(api), primary_claim_(primary_, "primary"),
+      sibling_claim_(sibling_, "sibling"),
       async_(new (std::nothrow) AsyncState()), decoder_(nullptr, 0U)
 {
     if (expected_profile != nullptr) {
@@ -443,6 +444,10 @@ Result<void> LibusbW3u3Hardware::claim()
         *profile_, primary_claim_,
         profile_->expected_runtime_functions == 2U ? &sibling_claim_ : nullptr, primary_path_,
         sibling_path_);
+    primary_claim_.log_claim_diagnostic();
+    if (profile_->expected_runtime_functions == 2U) {
+        sibling_claim_.log_claim_diagnostic();
+    }
     if (result != OwnershipError::none) {
         return Result<void>::failure(
             result == OwnershipError::primary_claim_failed ||

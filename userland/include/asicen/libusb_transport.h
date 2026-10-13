@@ -4,6 +4,8 @@
 
 #include <libusb.h>
 
+#include <array>
+#include <cstdio>
 #include <cstdint>
 #include <vector>
 
@@ -151,13 +153,33 @@ class LibusbDevice final {
 
 class LibusbFunctionClaim final : public UsbFunctionClaim {
   public:
-    explicit LibusbFunctionClaim(LibusbDevice& device) : device_(device) {}
+    explicit LibusbFunctionClaim(LibusbDevice& device, const char* diagnostic_role = nullptr,
+                                 std::FILE* diagnostic_stream = stderr)
+        : device_(device), diagnostic_role_(diagnostic_role),
+          diagnostic_stream_(diagnostic_stream) {}
     UsbFunctionSnapshot snapshot() const override;
     int claim_interface0() override;
     int release_interface0() noexcept override;
+    void log_claim_diagnostic() const noexcept;
 
   private:
+    void log_diagnostic(const char* phase, bool result_valid, int result) const noexcept;
+
     LibusbDevice& device_;
+    const char* diagnostic_role_ = nullptr;
+    std::FILE* diagnostic_stream_ = stderr;
+    mutable std::uint8_t cached_bus_ = 0U;
+    mutable std::uint8_t cached_address_ = 0U;
+    mutable std::uint16_t cached_vendor_id_ = 0U;
+    mutable std::uint16_t cached_product_id_ = 0U;
+    mutable std::array<std::uint8_t, 8> cached_ports_{};
+    mutable std::uint8_t cached_port_count_ = 0U;
+    mutable bool bus_valid_ = false;
+    mutable bool address_valid_ = false;
+    mutable bool ids_valid_ = false;
+    mutable bool ports_valid_ = false;
+    mutable bool claim_attempted_ = false;
+    mutable int claim_result_ = 0;
 };
 
 } // namespace asicen
