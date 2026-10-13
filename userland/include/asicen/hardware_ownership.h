@@ -51,6 +51,11 @@ enum class OwnershipError : std::uint8_t {
     snapshot_failed,
 };
 
+enum class SiblingIdentityPolicy : std::uint8_t {
+    reservation_allowed,
+    runtime_required,
+};
+
 class EnclosureOwnership final {
 public:
     EnclosureOwnership() = default;
@@ -64,7 +69,9 @@ public:
     OwnershipError claim_profile(const DeviceProfile& profile, UsbFunctionClaim& primary,
                                  UsbFunctionClaim* sibling,
                                  const std::vector<std::uint8_t>& primary_path,
-                                 const std::vector<std::uint8_t>& sibling_path = {});
+                                 const std::vector<std::uint8_t>& sibling_path = {},
+                                 SiblingIdentityPolicy sibling_policy =
+                                     SiblingIdentityPolicy::reservation_allowed);
     OwnershipError claim_w3u3(UsbFunctionClaim& primary, UsbFunctionClaim& sibling,
                               const std::vector<std::uint8_t>& primary_path,
                               const std::vector<std::uint8_t>& sibling_path);

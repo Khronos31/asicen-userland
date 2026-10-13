@@ -9,6 +9,7 @@
 #include "asicen/libusb_hardware_backend.h"
 #include "asicen/libusb_transport.h"
 #include "asicen/loader_firmware.h"
+#include "asicen/startup_readiness.h"
 #include "asicen/firmware.h"
 #include "px4/posix_ipc.h"
 #include "px4/platform_sleep.h"
@@ -284,7 +285,8 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
 // addressed devices were already runtime, or the mapped public error class.
 int load_loader_firmware(libusb_context* context, const Options& options,
                          const asicen::FirmwareImage& firmware,
-                         LoaderIdentity* loader_identity) {
+                         LoaderIdentity* loader_identity,
+                         std::vector<asicen::UploadedRuntimeIdentity>* uploaded_identities) {
     const asicen::DeviceProfile* model = options.expected_model;
     if (model == nullptr) {
         std::fprintf(stderr, "--firmware requires --model to verify the loader image\n");
@@ -356,23 +358,31 @@ int load_loader_firmware(libusb_context* context, const Options& options,
             any_warm = true;
             continue;
         }
-        // Record the primary loader's topology (prefer the port ending in 1).
+        // Freeze the selected loader topology before transfer changes its
+        // address. Only successful uploads enter the final readiness set.
+        std::uint8_t ports[8]{};
+        const int nports = libusb_get_port_numbers(
+            device.device(), ports, static_cast<int>(sizeof(ports)));
+        if (nports <= 0 || nports > static_cast<int>(sizeof(ports))) {
+            std::fprintf(stderr, "firmware: loader topology unavailable before transfer\n");
+            return exit_status(px4::userland::Error::NOT_READY);
+        }
+        asicen::UploadedRuntimeIdentity uploaded{};
+        uploaded.selected_index = i;
+        uploaded.bus = static_cast<std::uint8_t>(libusb_get_bus_number(device.device()));
+        uploaded.port_path.assign(ports, ports + nports);
+        uploaded.vendor_id = model->vid;
+        uploaded.product_id = model->pid;
         if (loader_identity != nullptr) {
-            std::uint8_t ports[8]{};
-            const int nports = libusb_get_port_numbers(
-                device.device(), ports, static_cast<int>(sizeof(ports)));
-            std::vector<std::uint8_t> path;
-            if (nports > 0 && nports <= static_cast<int>(sizeof(ports)))
-                path.assign(ports, ports + nports);
-            const bool primary = !path.empty() && path.back() == 1U;
+            const bool primary = uploaded.port_path.back() == 1U;
             if (loader_identity->port_path.empty() || primary) {
-                loader_identity->bus =
-                    static_cast<std::uint8_t>(libusb_get_bus_number(device.device()));
-                loader_identity->port_path = std::move(path);
+                loader_identity->bus = uploaded.bus;
+                loader_identity->port_path = uploaded.port_path;
             }
         }
         const int rc = transfer_firmware_to_loader(device, *model, firmware);
         if (rc != 0) return rc;
+        if (uploaded_identities != nullptr) uploaded_identities->push_back(uploaded);
         any_transferred = true;
         if (!dual_functions) continue;
         // Stage two: after the first (primary) transfer the device resolves as
@@ -432,25 +442,18 @@ int load_loader_firmware(libusb_context* context, const Options& options,
     return 3;
 }
 
-// Poll one observed topology until its runtime identity appears or shutdown
-// is requested. Every poll starts fresh; stale candidates never survive it.
-px4::userland::Result<asicen::UsbLocation> wait_for_runtime(
+// Validate the current runtime match for one successfully uploaded topology.
+// The readiness helper re-resolves every identity on each polling pass.
+px4::userland::Error probe_uploaded_runtime(
     libusb_context* context, const asicen::DeviceProfile* expected_model,
-    const LoaderIdentity& loader)
+    const asicen::UploadedRuntimeIdentity& uploaded)
 {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (px4::userland::px4d::stop_requested())
-            return px4::userland::Result<asicen::UsbLocation>::failure(
-                px4::userland::Error::NOT_READY);
-        const auto candidate = resolve_runtime_at_parent(
-            context, loader.bus, loader.port_path, expected_model);
-        if (candidate || candidate.error() != px4::userland::Error::NOT_FOUND)
-            return candidate;
-        sleep_ms(250U);
-    }
-    return px4::userland::Result<asicen::UsbLocation>::failure(
-        px4::userland::Error::TIMEOUT);
+    if (expected_model == nullptr || uploaded.vendor_id != expected_model->vid ||
+        uploaded.product_id != expected_model->pid)
+        return px4::userland::Error::INVALID_ARGUMENT;
+    const auto candidate = resolve_runtime_at_parent(
+        context, uploaded.bus, uploaded.port_path, expected_model);
+    return candidate ? px4::userland::Error::OK : candidate.error();
 }
 }  // namespace
 
@@ -554,14 +557,16 @@ int run_asicend_hardware(int argc, char** argv) {
     }
     // Native selectors are now observed port paths, so address changes after
     // firmware transfer cannot redirect the later hardware claim.
+    bool sibling_firmware_uploaded = false;
     if (!options.firmware.empty()) {
         // px4-compatible --firmware: upload the verified loader image, then
         // wait for the runtime to re-enumerate at the same topology before
         // claiming. A non-loader addressed device is treated as a warm runtime
         // (firmware already present) and claim proceeds without an upload.
         LoaderIdentity loader_identity;
+        std::vector<asicen::UploadedRuntimeIdentity> uploaded_identities;
         const int loaded = load_loader_firmware(context, options, firmware.value(),
-                                                &loader_identity);
+                                                &loader_identity, &uploaded_identities);
         if (loaded == kLoadFirmwareWarm) {
             // warm runtime: addressed device is not a loader, firmware is present
             std::fprintf(stderr, "firmware: addressed device is already runtime; skipping upload\n");
@@ -577,12 +582,26 @@ int run_asicend_hardware(int argc, char** argv) {
 
             return 3;
         } else {
-            const auto runtime = wait_for_runtime(context, options.expected_model,
-                                                  loader_identity);
-            if (!runtime) {
+            sibling_firmware_uploaded = std::any_of(
+                uploaded_identities.begin(), uploaded_identities.end(),
+                [](const asicen::UploadedRuntimeIdentity& identity) {
+                    return identity.selected_index == 1U;
+                });
+            const auto readiness = asicen::wait_for_uploaded_runtimes(
+                uploaded_identities,
+                [context, model = options.expected_model](
+                    const asicen::UploadedRuntimeIdentity& identity) {
+                    return probe_uploaded_runtime(context, model, identity);
+                },
+                [] { return std::chrono::steady_clock::now(); },
+                [](std::chrono::milliseconds interval) {
+                    sleep_ms(static_cast<std::uint32_t>(interval.count()));
+                },
+                [] { return px4::userland::px4d::stop_requested(); });
+            if (readiness != px4::userland::Error::OK) {
                 std::fprintf(stderr, "firmware: runtime did not re-enumerate: %s\n",
-                             px4::userland::error_string(runtime.error()));
-                return exit_status(runtime.error());
+                             px4::userland::error_string(readiness));
+                return exit_status(readiness);
             }
         }
     }
@@ -624,7 +643,8 @@ int run_asicend_hardware(int argc, char** argv) {
             }
             hardware.reset(new (std::nothrow) asicen::LibusbW3u3Hardware(
                 context, primary_location, sibling_location,
-                std::move(primary_path), std::move(sibling_path), options.expected_model));
+                std::move(primary_path), std::move(sibling_path), options.expected_model,
+                sibling_firmware_uploaded));
         }
         if (!hardware) return 70;
         hardware->set_allow_lnb_power(options.allow_lnb_power);
