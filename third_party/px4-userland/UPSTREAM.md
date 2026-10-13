@@ -1,8 +1,10 @@
 # Vendored px4-userland source manifest
 
 Source repository: `Khronos31/px4-userland`
-Source revision: `1a1485d0c3e972e0a47be907edb67949564aa9a7`
-Refreshed for ASICEN issue #4 on 2026-10-10.
+Source release: [v0.2.1](https://github.com/Khronos31/px4-userland/releases/tag/v0.2.1)
+Source revision: `dd1c1bea16a5871085d5f2a42c009364c1ec7345`
+Annotated tag object: `4939fdec32900a807252586e807e97f19e6b6612`.
+Refreshed from the official release for ASICEN 0.1.0 on 2026-10-13.
 License: GPL-2.0-only; the full license text is `LICENSE`.
 
 The upstream checkout is read-only and was not modified. Except for the
@@ -32,6 +34,7 @@ userland/include/px4/platform_sleep.h
 userland/include/px4/posix_ipc.h
 userland/include/px4/posix_tuner_nonce.h
 userland/include/px4/transport.h
+userland/include/px4/ts_continuity.h
 userland/include/px4/tuner_service.h
 userland/include/px4/windows_tuner_nonce.h
 userland/src/card.cpp
@@ -57,6 +60,7 @@ userland/src/windows/windows_ipc.cpp
 userland/src/windows/windows_security.h
 userland/src/windows/windows_sleep.cpp
 userland/src/windows/windows_tuner_nonce.cpp
+userland/tests/card_client_contract_tests.h
 userland/tests/card_service_tests.cpp
 userland/tests/card_tests.cpp
 userland/tests/control_integration_tests.cpp
@@ -73,6 +77,7 @@ userland/tests/px4d_signal_tests.cpp
 userland/tests/test_main.cpp
 userland/tests/test_poll_compat.h
 userland/tests/test_temp_directory.h
+userland/tests/ts_continuity_tests.cpp
 userland/tests/tuner_service_settle_tests.cpp
 userland/tests/tuner_service_tests.cpp
 userland/tests/windows_control_tests.cpp
@@ -99,6 +104,33 @@ userland/tools/px4d_signals.h
 userland/tools/px4d_windows_stdin.cpp
 userland/tools/px4d_windows_stdin.h
 ```
+
+## Official v0.2.1 refresh
+
+The prior code pin was `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
+Comparing all 84 previously imported files, upstream changed 12 and left 72
+byte-identical. Seven changed files are refreshed exactly; five retain their
+existing ASICEN delta. The two new CARD_HANDLE_STATUS golden frames select
+the existing product-magic macro just like all other frames. The shared
+checker, its complete standalone fixtures and the shared card-client contract
+fixtures are added exactly, giving 87 imported files (70 exact and 17 with the
+local deltas below). File-level mapping and scope are recorded in
+`../../docs/px4-v0.2.1-reuse.md`.
+
+The refresh includes opt-in generation-bound card handles, owned handle-status
+snapshots, full capability-mask validation and the Windows worker's explicit
+runtime-directory propagation. Existing clients do not opt in implicitly.
+The common IPC changes are portable; they do not add a WinSCard DLL, change
+ASICEN's supported platforms or authorize Windows 0.1.0 release assets.
+
+`ts_continuity.h` is header-only C++17 with only standard-library dependencies.
+There is no new common-core library, network build fetch or hardware import.
+ASICEN's native HardwareStreamService owns one nothrow heap-allocated checker,
+resets it for each accepted capture attempt and maps only `error` into its
+continuity counter. Its separate TEI counter, packet publication and queue
+contracts remain native. The standalone upstream fixtures and native service
+counter/byte-preservation regressions cover this adapter; their presence is not
+a statement that the new candidate has passed execution or hardware checks.
 
 ## ASICEN-only test glue and regression tests
 
@@ -183,8 +215,10 @@ The imported Windows IPC/security/nonce/sleep, socket wake, TS sink, UTF-8 argv,
 console shutdown and stdin helpers are portable OS adapters, not IT930x device
 implementations. Their existing LOCALAPPDATA/USERPROFILE policy, private DACL,
 random names, bounded socket waits, noninheritance and identity-safe cleanup are
-retained. Product path literals differ only where documented above. The pinned
-worker-Winsock initialization observation PC-U01 is not silently changed here.
+retained. Product path literals differ only where documented above. The official v0.2.1 worker fix now forwards an explicit UTF-8 runtime parent
+through the server into wake-socket creation; only a null parent selects
+LOCALAPPDATA. Trust, encoding and length validation remain fail-closed. The
+upstream native Windows regression is imported unchanged.
 
 Windows build/offline testing and physical-device validation remain separate;
 importing these files does not establish native Windows hardware support.

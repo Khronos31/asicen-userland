@@ -164,6 +164,21 @@ bool test_control_happy_path_and_interleaved_event()
 
 bool test_hello_negotiation_and_unknown_capabilities()
 {
+    // New clients can distinguish a strict-capable daemon from a legacy one;
+    // legacy clients never opt in just because the server supports the bit.
+    for (const bool server_supports : {false, true}) {
+        for (const bool client_requests : {false, true}) {
+            ConnectionStateMachine client(ConnectionRole::control_client);
+            const auto supported = kCapabilityCard |
+                (server_supports ? kCapabilityCardGenerationBinding : 0U);
+            const auto requested = kCapabilityCard |
+                (client_requests ? kCapabilityCardGenerationBinding : 0U);
+            ConnectionStateMachine server(ConnectionRole::control_server, supported);
+            CHECK(establish_control(client, server, requested, supported & requested, 0x200U));
+            CHECK(client.negotiated_capabilities() == (supported & requested));
+            CHECK(server.negotiated_capabilities() == (supported & requested));
+        }
+    }
     {
         ConnectionStateMachine client(ConnectionRole::control_client);
         ConnectionStateMachine server(ConnectionRole::control_server,
@@ -330,6 +345,7 @@ std::vector<std::uint8_t> card_request(MessageType type, std::uint32_t id)
             CardDispositionRequestPayload{1U, Disposition::leave});
     case MessageType::CARD_RESET:
     case MessageType::BEGIN_TRANSACTION:
+    case MessageType::CARD_HANDLE_STATUS:
         return make_typed_frame(type, MessageKind::request, id,
                                 CardHandleRequestPayload{1U});
     case MessageType::CARD_TRANSMIT:
@@ -346,6 +362,20 @@ std::vector<std::uint8_t> card_request(MessageType type, std::uint32_t id)
 
 bool test_capability_gating()
 {
+    // Both CARD and the opt-in generation contract are mandatory. Test both
+    // halves independently so an any-bit mask check cannot authorize the op.
+    for (const std::uint32_t capabilities :
+         {0U, kCapabilityCard, kCapabilityCardGenerationBinding,
+          kCapabilityCard | kCapabilityCardGenerationBinding}) {
+        ConnectionStateMachine client(ConnectionRole::control_client);
+        ConnectionStateMachine server(ConnectionRole::control_server, capabilities);
+        CHECK(establish_control(client, server, capabilities, capabilities));
+        const auto frame = card_request(MessageType::CARD_HANDLE_STATUS, 2U);
+        const bool allowed = capabilities == (kCapabilityCard | kCapabilityCardGenerationBinding);
+        CHECK(static_cast<bool>(process(client, frame, true)) == allowed);
+        CHECK(static_cast<bool>(process(server, frame, false)) == allowed);
+        if (!allowed) CHECK(client.poisoned() && server.poisoned());
+    }
     constexpr std::array<MessageType, 8U> card_types{
         MessageType::CARD_STATUS,      MessageType::CARD_CONNECT,
         MessageType::CARD_RECONNECT,   MessageType::CARD_DISCONNECT,

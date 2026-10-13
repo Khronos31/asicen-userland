@@ -1,7 +1,7 @@
 # ASICEN userland development contract
 
-Status: acceptance plan, updated 2026-10-11 for Issue #4 parity against
-px4-userland `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
+Status: acceptance plan, updated 2026-10-13 for reuse of official
+px4-userland v0.2.1 `dd1c1bea16a5871085d5f2a42c009364c1ec7345`.
 This is not a release/support claim.
 
 Release-procedure change (2026-10-11): share PX4's release verification and
@@ -11,7 +11,15 @@ Windows distribution exclusion. For 0.1.0, embed the reviewed GPL-2.0-only
 automation locally with recorded provenance; do not wait for PX4's next
 WinSCard release. A future external dependency must use the full commit SHA
 resolved from an official PX4 release tag. This change does not authorize a release or
-complete a hardware gate. The pinned code-parity reference above is unchanged.
+complete a hardware gate. The code-parity pin used by that earlier change was
+`1a1485d0c3e972e0a47be907edb67949564aa9a7`.
+
+Reusable-code change (2026-10-13): refresh the existing portable PX4 subset to
+the official v0.2.1 commit above, including its shared CC checker and opt-in
+card-generation IPC contract. This is an implementation/observation change
+before the next candidate is frozen. The product VERSION stays 0.1.0; historical
+hardware evidence does not qualify the changed binaries. The embedded release
+automation has its own provenance and remains separate from this C++ pin.
 
 ## Objective
 
@@ -56,6 +64,35 @@ source. recisdb remains an external downstream program.
   reject its obsolete CLI route explicitly rather than keeping two protocols.
   Mock success must never claim real tuning or card success.
 
+## Shared packet and card contracts (2026-10-13)
+
+Use the exact v0.2.1 `TsContinuityChecker` on complete, transformed 188-byte
+packets at the existing HardwareStreamService observation point. Only its
+`error` classification increments continuity-errors. One legal same-PID
+payload duplicate is accepted; further same-CC packets and byte conflicts are
+errors. Adaptation-only packets retain CC, and a valid discontinuity marker
+rebases it. Null packets do not affect CC state. TEI and invalid headers retain
+the trusted CC baseline and invalidate duplicate adjacency; they do not count
+themselves as CC errors. Keep the separate TEI counter. A later trusted packet
+can still expose a gap. This is a bounded CC observer, not full MPEG conformance
+validation or proof of clean reception.
+
+Allocate one checker before capture outside the callback stack (about 1.56 MiB
+on the tested 64-bit ABI). Allocation failure returns INTERNAL before source
+preparation. Reset it at each accepted fresh capture attempt. Preserve all TS
+bytes, enqueue/count ordering, source/framer counters, detach/final snapshots,
+ASICEN transform, sync probe and native start/stop behavior. Do not import
+IT930x startup suppression or treat a lower CC count as a CS2 hardware fix.
+
+Keep IPC version 1 and the existing ASCN identity/topology. The portable card
+service now supports opt-in `kCapabilityCardGenerationBinding` (bit 3) and
+`CARD_HANDLE_STATUS` (0x0038). The latter requires both CARD and generation
+capabilities. Bound handles remain stale after observed card loss until their
+owner explicitly reconnects/resets successfully; legacy clients retain the
+existing recovery contract. The status operation checks ownership and does not
+initialize or rebind a session. These shared service/codec changes do not add
+an ASICEN WinSCard adapter or expand hardware-support claims.
+
 ## Acceptance increments
 
 ### Distribution contract (clarified 2026-10-09)
@@ -63,8 +100,9 @@ source. recisdb remains an external downstream program.
 px4-userland compatibility includes its distribution targets and dependency
 contract, not only CLI spelling. This requirement is currently **UNMET**;
 successful native development builds and TS trials do not satisfy it.
-The current parity baseline is px4-userland
-`1a1485d0c3e972e0a47be907edb67949564aa9a7` and its release-candidate workflow.
+The current reusable-code parity baseline is official px4-userland v0.2.1
+`dd1c1bea16a5871085d5f2a42c009364c1ec7345`. Preserve ASICEN's candidate workflow and
+the product-specific distribution matrix below.
 The earlier audit used `3de7d512cef11756e6f033557ee49917cad2f11c`.
 Windows Phase 1 is now an ASICEN development and build-verification target: the three
 product commands and same-host IPC including card operations. Windows real-device

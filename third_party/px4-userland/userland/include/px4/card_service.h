@@ -96,9 +96,13 @@ public:
     CardService& operator=(const CardService&) = delete;
 
     Result<CardServiceStatus> status() noexcept;
+    // Read-only, owned-handle snapshot. Never initializes or rebinds a session.
+    Result<CardServiceStatus> handle_status(CardClientId client,
+                                           std::uint64_t handle) noexcept;
     Result<CardPresenceChange> poll_presence() noexcept;
     Result<CardServiceConnectResult> connect(
-        CardClientId client, ipc::ShareMode share_mode) noexcept;
+        CardClientId client, ipc::ShareMode share_mode,
+        bool generation_bound = false) noexcept;
     Result<CardAtr> reconnect(CardClientId client, std::uint64_t handle,
                               ipc::ShareMode share_mode,
                               ipc::Disposition disposition) noexcept;
@@ -132,11 +136,14 @@ private:
         std::uint64_t handle;
         CardClientId client;
         ipc::ShareMode share_mode;
+        bool generation_bound;
+        bool stale;
     };
 
     Result<void> power_up() noexcept;
     Result<void> power_down() noexcept;
     Result<void> ensure_session() noexcept;
+    Result<void> ensure_handle_session(std::size_t index) noexcept;
     Result<CardAtr> reset_session(bool preserve_transaction = false) noexcept;
     Result<bool> detect_and_record(bool report_initial_change,
                                    CardPresenceChange* change) noexcept;
@@ -149,6 +156,7 @@ private:
     bool transaction_allows(std::uint64_t handle) const noexcept;
     std::uint64_t allocate_handle() noexcept;
     void invalidate_session() noexcept;
+    void invalidate_bound_handles() noexcept;
     void abandon_disconnected_hardware() noexcept;
 
     CardServiceBackend& backend_;

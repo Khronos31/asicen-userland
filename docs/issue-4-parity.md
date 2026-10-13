@@ -15,6 +15,27 @@
 3. firmware/asicen-loader.bin は保持・再配布する。PLEX からの継続入手が不確実なことへの備えであり、PX4 の非同梱方針には揃えない。公式モジュールに GPL メタデータはあるが、ファームウェアへの適用範囲・全文の根拠・再配布許諾は確定していない。既存のバイナリ同梱／対応ソース除外を維持する。
 4. 過去の測定値・usbmon・機種別検証結果を PX4 の結果で置き換えない。試験の履歴と新候補の認定を分ける。
 
+## 正式 v0.2.1 参照への更新（2026-10-13）
+
+現在の再利用コードの参照は、正式公開済み PX4 v0.2.1
+`dd1c1bea16a5871085d5f2a42c009364c1ec7345` とする。上の旧 pin は PR #5 の履歴として保持する。
+既存 84 import のうち上流変更 12 ファイルを反映し、共通 CC checker・
+全 standalone fixture・card-client contract fixture の 3 ファイルを追加する。
+既存の ASICEN 差分は保持し、追加の wire golden 2 件にも同じ製品 magic を適用する。
+詳細は [更新対応表](px4-v0.2.1-reuse.md) と [UPSTREAM manifest](../third_party/px4-userland/UPSTREAM.md)。
+
+native HardwareStreamService の品質観測を共通 checker へ接続する。
+TEI と不正 header をそれ自体の CC エラーに数えず、信頼できる packet 間の
+不連続を判定する。packet bytes・queue・framer・probe 4・変換・USB・選局は変更しない。
+約 1.56 MiB の checker は heap に一度確保し、capture attempt ごとに reset する。
+portable CARD 世代束縛契約と Windows worker の明示 runtime 修正も反映する。
+WinSCard DLL は追加せず、Windows 0.1.0 配布除外と firmware 方針は維持する。
+
+この段階では新候補の build/実行試験/実機認定を記録しない。
+下の過去 CI・測定は当時のコミットの結果として保持する。PR #8 の probe-8 診断は
+未統合のままであり、Issue #7 の CS2 原因解決や受信品質改善は主張しない。
+リリースノート作成とタグ・公開はそれぞれ試験後の別の明示依頼を必要とする。
+
 ## 主な変更
 
 ### リリース手順の追加整合（2026-10-11）

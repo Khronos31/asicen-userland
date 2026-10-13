@@ -19,6 +19,15 @@ void CardService::invalidate_session() noexcept
     transaction_handle_ = 0U;
 }
 
+void CardService::invalidate_bound_handles() noexcept
+{
+    // Sticky per-handle invalidation cannot accidentally match a later card
+    // after reader_generation wraps. Legacy handles retain transparent recovery.
+    for (HandleRecord& record : handles_) {
+        if (record.generation_bound) record.stale = true;
+    }
+}
+
 void CardService::abandon_disconnected_hardware() noexcept
 {
     // Once the USB device reports removal, SPEC 5.2 forbids issuing a
@@ -26,6 +35,7 @@ void CardService::abandon_disconnected_hardware() noexcept
     // owns the detached USB resources and tears them down separately.
     powered_ = false;
     uart_initialized_ = false;
+    invalidate_bound_handles();
     invalidate_session();
 }
 
@@ -81,6 +91,8 @@ Result<bool> CardService::detect_and_record(bool report_initial_change,
     }
     const auto detected = backend_.detect_card();
     if (!detected) {
+        if (detected.error() == Error::NO_CARD ||
+            detected.error() == Error::CARD_REMOVED) invalidate_bound_handles();
         if (detected.error() == Error::DISCONNECTED) {
             abandon_disconnected_hardware();
         } else {
@@ -93,6 +105,7 @@ Result<bool> CardService::detect_and_record(bool report_initial_change,
     const bool previous = present_;
     presence_known_ = true;
     present_ = detected.value();
+    if (!present_) invalidate_bound_handles();
     const bool changed = was_known ? previous != present_ : report_initial_change;
     if (changed) {
         ++reader_generation_;
@@ -127,6 +140,8 @@ Result<void> CardService::ensure_session() noexcept
     }
     const auto initialized = session_.initialize();
     if (!initialized) {
+        if (initialized.error() == Error::NO_CARD ||
+            initialized.error() == Error::CARD_REMOVED) invalidate_bound_handles();
         if (initialized.error() == Error::DISCONNECTED) {
             abandon_disconnected_hardware();
         } else {
@@ -144,6 +159,25 @@ Result<void> CardService::ensure_session() noexcept
     present_ = true;
     cached_atr_ = session_.atr();
     return Result<void>::success();
+}
+
+Result<void> CardService::ensure_handle_session(std::size_t index) noexcept
+{
+    const HandleRecord& record = handles_[index];
+    if (record.stale) return Result<void>::failure(Error::CARD_REMOVED);
+    // An uninitialized protocol session may follow a previous I/O failure.
+    // Detect an absent card before reinitializing it for a bound handle.
+    if (record.generation_bound && !session_.initialized()) {
+        const auto power = power_up();
+        if (!power) return power;
+        const auto detected = detect_and_record(false, nullptr);
+        if (!detected) return Result<void>::failure(detected.error());
+        if (!detected.value()) return Result<void>::failure(Error::CARD_REMOVED);
+    }
+    const auto ready = ensure_session();
+    if (!ready) return ready;
+    return record.stale ? Result<void>::failure(Error::CARD_REMOVED) :
+                          Result<void>::success();
 }
 
 Result<CardAtr> CardService::reset_session(bool preserve_transaction) noexcept
@@ -182,6 +216,26 @@ Result<CardServiceStatus> CardService::status() noexcept
     }
     return error == Error::OK ? Result<CardServiceStatus>::success(result) :
                                Result<CardServiceStatus>::failure(error);
+}
+
+Result<CardServiceStatus> CardService::handle_status(CardClientId client,
+                                                     std::uint64_t handle) noexcept
+{
+    const auto found = find_handle(client, handle);
+    if (!found) return Result<CardServiceStatus>::failure(found.error());
+    if (handles_[found.value()].stale)
+        return Result<CardServiceStatus>::failure(Error::CARD_REMOVED);
+    const auto snapshot = status();
+    // status() may observe loss and invalidate the handle. This whole call is
+    // serialized on the same card lane as connect/transmit/removal polling.
+    if (handles_[found.value()].stale)
+        return Result<CardServiceStatus>::failure(Error::CARD_REMOVED);
+    if (!snapshot) return snapshot;
+    if (!snapshot.value().present)
+        return Result<CardServiceStatus>::failure(Error::CARD_REMOVED);
+    if (!snapshot.value().initialized)
+        return Result<CardServiceStatus>::failure(Error::NOT_READY);
+    return snapshot;
 }
 
 Result<CardPresenceChange> CardService::poll_presence() noexcept
@@ -246,7 +300,7 @@ std::uint64_t CardService::allocate_handle() noexcept
 }
 
 Result<CardServiceConnectResult> CardService::connect(
-    CardClientId client, ipc::ShareMode share_mode) noexcept
+    CardClientId client, ipc::ShareMode share_mode, bool generation_bound) noexcept
 {
     if (client == 0U ||
         (share_mode != ipc::ShareMode::shared &&
@@ -269,7 +323,7 @@ Result<CardServiceConnectResult> CardService::connect(
         return Result<CardServiceConnectResult>::failure(initialized.error());
     }
     const std::uint64_t handle = allocate_handle();
-    handles_.push_back(HandleRecord{handle, client, share_mode});
+    handles_.push_back(HandleRecord{handle, client, share_mode, generation_bound, false});
     return Result<CardServiceConnectResult>::success(
         CardServiceConnectResult{handle, cached_atr_});
 }
@@ -339,6 +393,7 @@ Result<CardAtr> CardService::reconnect(CardClientId client, std::uint64_t handle
         return Result<CardAtr>::failure(ready.error());
     }
     handles_[found.value()].share_mode = share_mode;
+    handles_[found.value()].stale = false;
     return Result<CardAtr>::success(cached_atr_);
 }
 
@@ -365,12 +420,15 @@ Result<void> CardService::disconnect(CardClientId client, std::uint64_t handle,
     if (!found) {
         return Result<void>::failure(found.error());
     }
-    if (disposition == ipc::Disposition::reset &&
+    if (!handles_[found.value()].stale && disposition == ipc::Disposition::reset &&
         !transaction_allows(handle)) {
         return Result<void>::failure(Error::BUSY);
     }
     Error first = Error::OK;
-    const auto applied = apply_disposition(disposition);
+    // Cleanup of a stale handle must not reset a replacement card, including
+    // when a different handle currently owns its transaction.
+    const auto applied = handles_[found.value()].stale ? Result<void>::success() :
+                                                       apply_disposition(disposition);
     if (!applied) {
         first = applied.error();
     }
@@ -391,7 +449,9 @@ Result<CardAtr> CardService::reset(CardClientId client,
     if (!transaction_allows(handle)) {
         return Result<CardAtr>::failure(Error::BUSY);
     }
-    return reset_session(transaction_handle_ == handle);
+    const auto result = reset_session(transaction_handle_ == handle);
+    if (result) handles_[found.value()].stale = false;
+    return result;
 }
 
 Result<std::size_t> CardService::transmit(CardClientId client,
@@ -407,16 +467,21 @@ Result<std::size_t> CardService::transmit(CardClientId client,
     if (!found) {
         return Result<std::size_t>::failure(found.error());
     }
+    if (handles_[found.value()].stale) {
+        return Result<std::size_t>::failure(Error::CARD_REMOVED);
+    }
     if (!transaction_allows(handle)) {
         return Result<std::size_t>::failure(Error::BUSY);
     }
-    const auto initialized = ensure_session();
+    const auto initialized = ensure_handle_session(found.value());
     if (!initialized) {
         transaction_handle_ = 0U;
         return Result<std::size_t>::failure(initialized.error());
     }
     const auto result = session_.transmit(apdu, response);
     if (!result) {
+        if (result.error() == Error::NO_CARD ||
+            result.error() == Error::CARD_REMOVED) invalidate_bound_handles();
         if (result.error() == Error::DISCONNECTED) {
             abandon_disconnected_hardware();
         } else {
@@ -434,10 +499,11 @@ Result<void> CardService::begin_transaction(CardClientId client,
     if (!found) {
         return Result<void>::failure(found.error());
     }
+    if (handles_[found.value()].stale) return Result<void>::failure(Error::CARD_REMOVED);
     if (transaction_handle_ != 0U) {
         return Result<void>::failure(Error::BUSY);
     }
-    const auto initialized = ensure_session();
+    const auto initialized = ensure_handle_session(found.value());
     if (!initialized) {
         return initialized;
     }
@@ -453,6 +519,7 @@ Result<void> CardService::end_transaction(CardClientId client,
     if (!found) {
         return Result<void>::failure(found.error());
     }
+    if (handles_[found.value()].stale) return Result<void>::failure(Error::CARD_REMOVED);
     if (transaction_handle_ != handle) {
         return Result<void>::failure(Error::BUSY);
     }

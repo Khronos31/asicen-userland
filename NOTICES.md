@@ -7,7 +7,7 @@ notice keeps that notice. Where a file in this repository has no more specific
 notice, it is part of the GPL-2.0-only product work. These locations are
 specific:
 
-- `third_party/px4-userland/` is GPL-2.0-only, from px4-userland `1a1485d0c3e972e0a47be907edb67949564aa9a7`.
+- `third_party/px4-userland/` is GPL-2.0-only, from px4-userland `dd1c1bea16a5871085d5f2a42c009364c1ec7345`.
   Local changes are marked in the modified files and in `UPSTREAM.md`.
 - The embedded release publisher/verifier, tests and adapted workflows are
   GPL-2.0-only from px4-userland `b4635226082161ce09f811b1571c9dd25f40cf03`.
@@ -38,8 +38,9 @@ tables are not included. The separately tracked loader firmware and its
 unresolved redistribution status are described below. Historical USB traces
 may retain truncated firmware payload bytes; they are not a new source license.
 
-The portable CLI/IPC/service subset of px4-userland is incorporated from
-revision `1a1485d0c3e972e0a47be907edb67949564aa9a7` under GPL-2.0-only.
+The portable CLI/IPC/service subset and header-only TS continuity checker of
+px4-userland are incorporated from official release v0.2.1,
+revision `dd1c1bea16a5871085d5f2a42c009364c1ec7345` under GPL-2.0-only.
 Imported files retain their SPDX notices; its license is reproduced in
 `third_party/px4-userland/LICENSE`. The file inventory and local changes are
 recorded in [docs/cli-adaptation.md](docs/cli-adaptation.md). The adapted CLI

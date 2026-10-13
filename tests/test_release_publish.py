@@ -496,6 +496,23 @@ class HTTPTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(pub.ReleaseError):
                 api.api_url(path)
 
+    def test_real_github_api_url_allows_only_canonical_compare_paths(self):
+        api = pub.GitHub(REPOSITORY, "secret")
+        left, right = "a" * 40, "b" * 40
+        compare = f"{PREFIX}/compare/{left}...{right}"
+        self.assertEqual(api.api_url(compare), "https://api.github.com" + compare)
+        for path in (
+            f"{PREFIX}/compare/{left}....{right}",
+            f"{PREFIX}/compare/{left.upper()}...{right}",
+            f"{PREFIX}/compare/{left}...{right}/../releases",
+            f"{PREFIX}/compare/{left}...%2e%2e/{right}",
+            f"/repos/other/repo/compare/{left}...{right}",
+            f"https://api.github.com{compare}",
+            f"{PREFIX}/contents/..%2freleases",
+        ):
+            with self.subTest(path=path), self.assertRaises(pub.ReleaseError):
+                api.api_url(path)
+
     def test_unsafe_redirects_rejected(self):
         for url in ("http://release-assets.githubusercontent.com/file", "https://evil.test/file",
                     "https://release-assets.githubusercontent.com.evil.test/file", "https://127.0.0.1/file",
@@ -516,7 +533,64 @@ class HTTPTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             api.download(PREFIX + "/releases/assets/1", Path(directory) / "asset")
         self.assertEqual(requests[0].get_header("Authorization"), "Bearer secret")
+        self.assertEqual(requests[0].get_header("Accept"), "application/octet-stream")
         self.assertIsNone(requests[1].get_header("Authorization"))
+        self.assertEqual(requests[1].get_header("Accept"), "application/octet-stream")
+
+    def test_actions_artifact_download_uses_json_accept_before_binary_redirect(self):
+        requests = []
+        signed_url = "https://example.blob.core.windows.net/artifact?sig=offline"
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                if len(requests) == 1:
+                    if request.get_header("Accept") != "application/vnd.github+json":
+                        raise HTTPError(request.full_url, 415, "Unsupported Media Type", {}, None)
+                    raise HTTPError(request.full_url, 302, "Found", {"Location": signed_url}, None)
+                return BytesIO(b"artifact bytes")
+        api = pub.GitHub(REPOSITORY, "secret", opener=Opener())
+        path = PREFIX + "/actions/artifacts/11782910579/zip"
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "artifact.zip"
+            api.download(path, destination)
+            self.assertEqual(destination.read_bytes(), b"artifact bytes")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0].full_url, "https://api.github.com" + path)
+        self.assertEqual(requests[0].get_header("Authorization"), "Bearer secret")
+        self.assertEqual(requests[0].get_header("Accept"), "application/vnd.github+json")
+        self.assertEqual(requests[1].full_url, signed_url)
+        self.assertIsNone(requests[1].get_header("Authorization"))
+        self.assertEqual(requests[1].get_header("Accept"), "application/octet-stream")
+
+    def test_release_asset_direct_download_keeps_binary_accept(self):
+        requests = []
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                return BytesIO(b"release bytes")
+        api = pub.GitHub(REPOSITORY, "secret", opener=Opener())
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "asset"
+            api.download(PREFIX + "/releases/assets/1", destination)
+            self.assertEqual(destination.read_bytes(), b"release bytes")
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].get_header("Accept"), "application/octet-stream")
+        self.assertEqual(requests[0].get_header("Authorization"), "Bearer secret")
+
+    def test_actions_artifact_redirect_rejects_unapproved_origin(self):
+        requests = []
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                raise HTTPError(request.full_url, 302, "Found",
+                                {"Location": "https://evil.test/artifact"}, None)
+        api = pub.GitHub(REPOSITORY, "secret", opener=Opener())
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "artifact.zip"
+            with self.assertRaisesRegex(pub.ReleaseError, "approved GitHub download host"):
+                api.download(PREFIX + "/actions/artifacts/11782910579/zip", destination)
+            self.assertFalse(destination.exists())
+        self.assertEqual(len(requests), 1)
 
     def test_mutation_not_retried_on_server_failure(self):
         calls = []

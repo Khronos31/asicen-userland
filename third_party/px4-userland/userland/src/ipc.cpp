@@ -465,6 +465,7 @@ bool is_control_request(MessageType type) noexcept
     case MessageType::CARD_TRANSMIT:
     case MessageType::BEGIN_TRANSACTION:
     case MessageType::END_TRANSACTION:
+    case MessageType::CARD_HANDLE_STATUS:
         return true;
     case MessageType::HELLO:
     case MessageType::ATTACH_STREAM:
@@ -479,6 +480,8 @@ bool is_control_request(MessageType type) noexcept
 std::uint32_t required_capability(MessageType type) noexcept
 {
     switch (type) {
+    case MessageType::CARD_HANDLE_STATUS:
+        return kCapabilityCard | kCapabilityCardGenerationBinding;
     case MessageType::CARD_STATUS:
     case MessageType::CARD_CONNECT:
     case MessageType::CARD_RECONNECT:
@@ -1362,6 +1365,7 @@ bool is_known_message_type(MessageType type) noexcept
     case MessageType::CARD_TRANSMIT:
     case MessageType::BEGIN_TRANSACTION:
     case MessageType::END_TRANSACTION:
+    case MessageType::CARD_HANDLE_STATUS:
     case MessageType::ATTACH_STREAM:
     case MessageType::TS_DATA:
     case MessageType::DEVICE_EVENT:
@@ -1450,6 +1454,11 @@ Result<void> validate_payload(MessageType type, MessageKind kind, ByteView paylo
         break;
     case MessageType::CARD_STATUS:
         valid = kind == MessageKind::request ? static_cast<bool>(decode_empty_payload(payload)) :
+                    static_cast<bool>(decode_card_status_response_payload(payload));
+        break;
+    case MessageType::CARD_HANDLE_STATUS:
+        valid = kind == MessageKind::request ?
+                    static_cast<bool>(decode_card_handle_request_payload(payload)) :
                     static_cast<bool>(decode_card_status_response_payload(payload));
         break;
     case MessageType::CARD_CONNECT:
@@ -1840,7 +1849,7 @@ Result<ConnectionResult> ConnectionStateMachine::process_control_client(
             return violation();
         }
         const std::uint32_t capability = required_capability(frame.header.type);
-        if (capability != 0U && (negotiated_capabilities_ & capability) == 0U) {
+        if ((negotiated_capabilities_ & capability) != capability) {
             return violation();
         }
         set_pending(frame.header);
@@ -1931,7 +1940,7 @@ Result<ConnectionResult> ConnectionStateMachine::process_control_server(
             return violation();
         }
         const std::uint32_t capability = required_capability(frame.header.type);
-        if (capability != 0U && (negotiated_capabilities_ & capability) == 0U) {
+        if ((negotiated_capabilities_ & capability) != capability) {
             return violation();
         }
         set_pending(frame.header);

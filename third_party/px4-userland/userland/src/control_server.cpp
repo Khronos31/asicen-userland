@@ -72,7 +72,8 @@ namespace px4::userland::ipc::posix {
 namespace {
 
 constexpr std::uint32_t kServerCapabilities =
-    kCapabilityEvents | kCapabilityCard | kCapabilityStreamStats;
+    kCapabilityEvents | kCapabilityCard | kCapabilityStreamStats |
+    kCapabilityCardGenerationBinding;
 constexpr std::uint32_t kClientWriteTimeoutMs = 250U;
 constexpr std::uint32_t kPresencePollIntervalMs = 250U;
 constexpr std::size_t kMaxControlConnections = 32U;
@@ -232,6 +233,11 @@ struct PosixControlServer::Impl final {
         {
             return state_.phase() == ConnectionPhase::active &&
                    (state_.negotiated_capabilities() & kCapabilityEvents) != 0U;
+        }
+
+        bool card_generation_bound() const noexcept
+        {
+            return (state_.negotiated_capabilities() & kCapabilityCardGenerationBinding) != 0U;
         }
 
         Result<std::size_t> read_ready() noexcept
@@ -776,6 +782,7 @@ struct PosixControlServer::Impl final {
     static ControlWorkerLane lane_for(const ControlWorkerTask& task) noexcept
     {
         if (task.operation == ControlWorkerOperation::card_status ||
+            task.operation == ControlWorkerOperation::card_handle_status ||
             task.operation == ControlWorkerOperation::card_status_combined ||
             task.operation == ControlWorkerOperation::card_presence ||
             task.operation == ControlWorkerOperation::card_connect ||
@@ -835,6 +842,15 @@ struct PosixControlServer::Impl final {
             ControlWorkerTask task{};
             task.operation = ControlWorkerOperation::card_connect;
             task.share_mode = decoded.value().share_mode;
+            task.card_generation_bound = client.card_generation_bound();
+            return submit(client, request, task);
+        }
+        case MessageType::CARD_HANDLE_STATUS: {
+            const auto decoded = decode_card_handle_request_payload(request.payload);
+            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_handle_status;
+            task.card_handle = decoded.value().card_handle;
             return submit(client, request, task);
         }
         case MessageType::CARD_RECONNECT: {
@@ -1291,7 +1307,8 @@ struct PosixControlServer::Impl final {
                     outstanding.type, MessageKind::response, completion.request_id,
                     counters_payload(completion.stream_counters));
                 break;
-            case ControlWorkerOperation::card_status: {
+            case ControlWorkerOperation::card_status:
+            case ControlWorkerOperation::card_handle_status: {
                 observe_card_presence(completion.card_status.present);
                 sent = client.send_payload(
                     outstanding.type, MessageKind::response, completion.request_id,
@@ -2298,7 +2315,8 @@ Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
         return Result<std::unique_ptr<PosixControlServer>>::failure(
             stream_listener.error());
     }
-    auto workers = ControlWorkerLanes::create(card_service, tuner_service);
+    auto workers = ControlWorkerLanes::create(card_service, tuner_service,
+                                             endpoint.runtime_directory);
     if (!workers) {
         // listener remains owned here and therefore closes/unlinks the endpoint
         // transactionally before returning the worker startup error.

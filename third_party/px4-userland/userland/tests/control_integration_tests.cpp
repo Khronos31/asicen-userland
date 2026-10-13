@@ -3,6 +3,7 @@
 #include "px4/control_client.h"
 #include "px4/control_server.h"
 #include "px4/tuner_service.h"
+#include "card_client_contract_tests.h"
 #include "control_server_test_access.h"
 #include "control_workers.h"
 #include "test_temp_directory.h"
@@ -902,6 +903,44 @@ bool test_control_server_card_flow_and_shutdown()
     CHECK(!std::filesystem::exists(stream_socket_path));
     CHECK(!std::filesystem::exists(instance_path));
     CHECK(!std::filesystem::exists(product_path));
+    return true;
+}
+
+bool test_card_client_ownership_contract()
+{
+    TempRuntime runtime;
+    CHECK(runtime.valid());
+    const EndpointConfig endpoint{runtime.path().c_str(), "card-contract",
+                                  kControlEndpointName, EndpointAccess::private_user};
+    Backend backend;
+    Session session;
+    CardService service(backend, session);
+    TunerBackend tuner_backend;
+    TunerNonce tuner_nonce;
+    TunerTime tuner_time;
+    TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time);
+    auto server = PosixControlServer::create(
+        endpoint, service, tuner_service, "00001205000960");
+    CHECK(server);
+    std::atomic<bool> stop{false};
+    std::atomic<bool> server_ok{true};
+    std::thread poller([&]() noexcept {
+        while (!stop.load()) {
+            if (!server.value()->poll_once(Timeout{20U})) {
+                server_ok.store(false);
+                return;
+            }
+        }
+    });
+    ServerThreadGuard guard(stop, poller, *server.value());
+    CHECK(test::run_card_client_contract(endpoint));
+    CHECK(test::run_card_generation_contract(endpoint, backend.present));
+    stop.store(true);
+    poller.join();
+    CHECK(server_ok.load());
+    CHECK(server.value()->shutdown());
+    guard.dismiss();
+    CHECK(service.handle_count() == 0U && !service.powered());
     return true;
 }
 
@@ -2414,6 +2453,7 @@ bool test_stream_endpoint_nonreading_peer_isolated()
 bool run_control_integration_tests()
 {
     return test_control_server_card_flow_and_shutdown() &&
+           test_card_client_ownership_contract() &&
            test_no_hello_timeout_and_malformed_disconnect() &&
            test_control_server_tuner_flow() &&
            test_control_server_lanes_are_independent() &&
