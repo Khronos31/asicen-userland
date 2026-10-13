@@ -75,7 +75,8 @@ OwnershipError EnclosureOwnership::claim_profile(const DeviceProfile& profile,
                                                  UsbFunctionClaim& primary,
                                                  UsbFunctionClaim* sibling,
                                                  const std::vector<std::uint8_t>& primary_path,
-                                                 const std::vector<std::uint8_t>& sibling_path)
+                                                 const std::vector<std::uint8_t>& sibling_path,
+                                                 SiblingIdentityPolicy sibling_policy)
 {
     if (release() != OwnershipError::none) {
         return OwnershipError::release_failed;
@@ -109,7 +110,11 @@ OwnershipError EnclosureOwnership::claim_profile(const DeviceProfile& profile,
         if (last_transport_error_ != 0) {
             return OwnershipError::snapshot_failed;
         }
-        if (!is_permitted_sibling(s, profile) || s.port_path != sibling_path ||
+        const bool sibling_identity_ok =
+            sibling_policy == SiblingIdentityPolicy::runtime_required
+                ? matches_runtime(s, profile)
+                : is_permitted_sibling(s, profile);
+        if (!sibling_identity_ok || s.port_path != sibling_path ||
             p.address == s.address || !correct_ordered_siblings(p, s)) {
             return OwnershipError::sibling_mismatch;
         }

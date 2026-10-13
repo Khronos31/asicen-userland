@@ -149,6 +149,38 @@ bool known_loader_sibling_is_reserved_and_claimed()
     return true;
 }
 
+bool uploaded_sibling_requires_runtime_before_any_claim()
+{
+    std::vector<std::string> events;
+    FakeFunction primary(primary_snapshot(), &events, "primary");
+    auto loader = sibling_snapshot();
+    loader.vendor_id = 0x1738U;
+    loader.product_id = 0x5211U;
+    FakeFunction sibling(loader, &events, "sibling");
+    asicen::EnclosureOwnership owner;
+    CHECK(owner.claim_profile(*asicen::find_profile(asicen::ModelId::W3u3), primary,
+                              &sibling, {1, 2, 1}, {1, 2, 2},
+                              asicen::SiblingIdentityPolicy::runtime_required) ==
+              asicen::OwnershipError::sibling_mismatch,
+          "a still-visible loader is rejected after firmware upload");
+    CHECK(events.empty(), "strict sibling identity is checked before primary or sibling claims");
+
+    CHECK(owner.claim_profile(*asicen::find_profile(asicen::ModelId::W3u3), primary,
+                              &sibling, {1, 2, 1}, {1, 2, 2}) ==
+              asicen::OwnershipError::none,
+          "default reservation policy continues accepting a known loader sibling");
+    owner.release();
+    events.clear();
+    sibling.state = sibling_snapshot();
+    CHECK(owner.claim_profile(*asicen::find_profile(asicen::ModelId::W3u3), primary,
+                              &sibling, {1, 2, 1}, {1, 2, 2},
+                              asicen::SiblingIdentityPolicy::runtime_required) ==
+              asicen::OwnershipError::none,
+          "strict policy accepts the expected runtime sibling");
+    owner.release();
+    return true;
+}
+
 bool primary_endpoint81_capability_is_optional_and_measured()
 {
     CHECK(asicen::bulk_endpoint_for_local(0U) == 0x81U &&
@@ -468,6 +500,9 @@ int main()
         return 1;
     }
     if (!known_loader_sibling_is_reserved_and_claimed()) {
+        return 1;
+    }
+    if (!uploaded_sibling_requires_runtime_before_any_claim()) {
         return 1;
     }
     if (!primary_endpoint81_capability_is_optional_and_measured()) {

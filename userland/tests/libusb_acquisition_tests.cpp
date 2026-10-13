@@ -3,6 +3,7 @@
 #include "asicen/libusb_transport.h"
 #include "asicen/libusb_hardware_backend.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -33,10 +34,19 @@ public:
     int descriptor_failure = 0;
     int config_failure = 0;
     int claim_failure = 0;
+    int release_failure = 0;
+    int release_failure_device = 0;
     int alternate_error = 0;
     int wrap_error = 0;
     int wrap_calls = 0;
     int port_calls = 0;
+    int bus_calls = 0;
+    int address_calls = 0;
+    int descriptor_calls = 0;
+    int config_calls = 0;
+    int kernel_calls = 0;
+    int alternate_calls = 0;
+    int release_calls = 0;
     int port_result = 2;
     int port_result_call = 1;
     int retained_fd = -1;
@@ -44,6 +54,9 @@ public:
     bool empty_handle = false;
     bool handle_on_failure = false;
     bool no_discovery = false;
+    std::array<std::uint8_t, 2> addresses_{{2U, 3U}};
+    std::array<std::uint16_t, 2> vendors_{{0x0b06U, 0x0b06U}};
+    std::array<std::uint16_t, 2> products_{{0x0005U, 0x0005U}};
     std::vector<std::string> events;
 
     FakeApi()
@@ -87,9 +100,10 @@ public:
         verify(list == devices_.data() && unref_devices == 1, "list released with device refs");
         events.emplace_back("free-list");
     }
-    std::uint8_t get_bus_number(libusb_device*) noexcept override { return 1U; }
+    std::uint8_t get_bus_number(libusb_device*) noexcept override
+    { ++bus_calls; return 1U; }
     std::uint8_t get_device_address(libusb_device* device) noexcept override
-    { return static_cast<std::uint8_t>(id(device) + 1); }
+    { ++address_calls; return addresses_[static_cast<std::size_t>(id(device) - 1)]; }
     int open(libusb_device* device, libusb_device_handle** handle) noexcept override
     {
         const int number = id(device);
@@ -120,10 +134,11 @@ public:
     int get_device_descriptor(libusb_device* device,
                               libusb_device_descriptor* descriptor) noexcept override
     {
+        ++descriptor_calls;
         events.push_back("descriptor" + std::to_string(id(device)));
         if (descriptor_failure == id(device)) return LIBUSB_ERROR_IO;
-        descriptor->idVendor = 0x0b06U;
-        descriptor->idProduct = 0x0005U;
+        descriptor->idVendor = vendors_[static_cast<std::size_t>(id(device) - 1)];
+        descriptor->idProduct = products_[static_cast<std::size_t>(id(device) - 1)];
         return 0;
     }
     int get_port_numbers(libusb_device* device, std::uint8_t* ports, int capacity) noexcept override
@@ -137,6 +152,7 @@ public:
     int get_active_config_descriptor(libusb_device* device,
                                      libusb_config_descriptor** config) noexcept override
     {
+        ++config_calls;
         events.push_back("config" + std::to_string(id(device)));
         *config = nullptr;
         if (config_failure == id(device)) return LIBUSB_ERROR_IO;
@@ -148,7 +164,8 @@ public:
         verify(config == &config_, "free only acquired configuration");
         events.emplace_back("free-config");
     }
-    int kernel_driver_active(libusb_device_handle*, int) noexcept override { return 0; }
+    int kernel_driver_active(libusb_device_handle*, int) noexcept override
+    { ++kernel_calls; return 0; }
     int claim_interface(libusb_device_handle* handle, int interface_number) noexcept override
     {
         verify(interface_number == 0, "claim only interface zero");
@@ -159,14 +176,25 @@ public:
     {
         verify(interface_number == 0, "release only interface zero");
         events.push_back("release" + std::to_string(id(handle)));
-        return 0;
+        ++release_calls;
+        return release_failure != 0 &&
+                       (release_failure_device == 0 || release_failure_device == id(handle))
+                   ? release_failure
+                   : 0;
     }
     int set_interface_alt_setting(libusb_device_handle*, int, int) noexcept override
     {
+        ++alternate_calls;
         events.emplace_back("alternate");
         return alternate_error;
     }
     void use_alternate_one() noexcept { alternate_.bAlternateSetting = 1U; }
+
+    int snapshot_api_calls() const noexcept
+    {
+        return bus_calls + address_calls + descriptor_calls + port_calls + config_calls +
+               kernel_calls + alternate_calls;
+    }
 
 private:
     void verify(bool condition, const char* description) noexcept
@@ -292,6 +320,184 @@ bool ownership_failure_and_success_order()
         else if (failure == 4) CHECK(cleanup_order(api, {"release1", "close2", "close1", "exit"}), "cleanup order");
         else CHECK(cleanup_order(api, {"close2", "close1", "exit"}), "cleanup order");
     }
+    return true;
+}
+
+std::string contents(FILE* file)
+{
+    std::fflush(file);
+    std::rewind(file);
+    std::string output;
+    char buffer[512];
+    for (;;) {
+        const std::size_t count = std::fread(buffer, 1U, sizeof(buffer), file);
+        output.append(buffer, count);
+        if (count < sizeof(buffer)) break;
+    }
+    return output;
+}
+
+bool claim_diagnostics_are_cached_and_do_not_touch_usb()
+{
+    FILE* output = std::tmpfile();
+    CHECK(output != nullptr, "create diagnostic output stream");
+    FakeApi api;
+    api.vendors_[1] = 0x1738U;
+    api.products_[1] = 0x5211U;
+    api.addresses_[1] = 7U;
+    {
+        asicen::LibusbContext context(api);
+        CHECK(context.initialize() == 0, "initialize diagnostic context");
+        asicen::LibusbDevice primary(api);
+        asicen::LibusbDevice sibling(api);
+        CHECK(primary.open(context.get(), asicen::UsbLocation{1U, 2U}) == 0 &&
+                  sibling.open(context.get(), asicen::UsbLocation{1U, 7U}) == 0,
+              "diagnostic functions open");
+        asicen::LibusbFunctionClaim primary_claim(primary, "primary", output);
+        asicen::LibusbFunctionClaim sibling_claim(sibling, "sibling", output);
+        asicen::EnclosureOwnership ownership;
+        CHECK(ownership.claim_w3u3(primary_claim, sibling_claim, {2U, 1U}, {2U, 2U}) ==
+                  asicen::OwnershipError::none,
+              "runtime primary and loader sibling claim");
+        const int snapshot_calls = api.snapshot_api_calls();
+        const auto before_diagnostics = api.events;
+        primary_claim.log_claim_diagnostic();
+        sibling_claim.log_claim_diagnostic();
+        CHECK(api.events == before_diagnostics, "claim logging performs no USB calls");
+        CHECK(api.snapshot_api_calls() == snapshot_calls,
+              "claim logging calls no snapshot or identity getters");
+
+        // The loader returns as runtime at a new address after ownership was
+        // established. Diagnostics must retain its original loader identity.
+        api.vendors_[1] = 0x0b06U;
+        api.products_[1] = 0x0005U;
+        api.addresses_[1] = 9U;
+        api.release_failure = LIBUSB_ERROR_NO_DEVICE;
+        api.release_failure_device = 2;
+        const int calls_before_release = api.snapshot_api_calls();
+        CHECK(ownership.release() == asicen::OwnershipError::release_failed,
+              "release failure remains visible");
+        api.release_failure = 0;
+        CHECK(ownership.release() == asicen::OwnershipError::none,
+              "release retry preserves success result");
+        CHECK(api.snapshot_api_calls() == calls_before_release,
+              "release diagnostics make no snapshot or identity getter calls");
+        CHECK(api.events.size() >= 3U &&
+                  api.events[api.events.size() - 3U] == "release2" &&
+                  api.events[api.events.size() - 2U] == "release1" &&
+                  api.events[api.events.size() - 1U] == "release2" &&
+                  std::count(api.events.begin(), api.events.end(), "release1") == 1,
+              "primary releases once and failed sibling alone is retried");
+        CHECK(api.release_calls == 3, "only the failed sibling release is retried");
+    }
+    const std::string log = contents(output);
+    std::fclose(output);
+    CHECK(log.find("phase=claim role=primary bus=1 address=2 port=1-2.1 vid=0b06 "
+                   "pid=0005 interface=0 rc=0 name=LIBUSB_SUCCESS") != std::string::npos,
+          "primary claim records cached identity and raw result");
+    CHECK(log.find("phase=claim role=sibling bus=1 address=7 port=1-2.2 vid=1738 "
+                   "pid=5211 interface=0 rc=0 name=LIBUSB_SUCCESS") != std::string::npos,
+          "sibling claim records loader identity and raw result");
+    CHECK(log.find("phase=release role=sibling bus=1 address=7 port=1-2.2 vid=1738 "
+                   "pid=5211 interface=0 rc=-4 name=LIBUSB_ERROR_NO_DEVICE") != std::string::npos,
+          "failed release reports original loader identity and raw error");
+    CHECK(log.find("phase=release role=sibling bus=1 address=7 port=1-2.2 vid=1738 "
+                   "pid=5211 interface=0 rc=0 name=LIBUSB_SUCCESS") != std::string::npos,
+          "sibling retry reports cached loader identity");
+    CHECK(log.find("phase=release role=primary bus=1 address=2 port=1-2.1 vid=0b06 "
+                   "pid=0005 interface=0 rc=0 name=LIBUSB_SUCCESS") != std::string::npos,
+          "primary release succeeds once");
+    CHECK(log.find("address=9") == std::string::npos,
+          "release logs retain loader values after fake re-enumeration");
+    return true;
+}
+
+bool failed_claim_logs_raw_error()
+{
+    FILE* output = std::tmpfile();
+    CHECK(output != nullptr, "create failed-claim diagnostic stream");
+    FakeApi api;
+    api.claim_failure = 1;
+    {
+        asicen::LibusbContext context(api);
+        CHECK(context.initialize() == 0, "initialize failed-claim context");
+        asicen::LibusbDevice primary(api);
+        asicen::LibusbDevice sibling(api);
+        CHECK(primary.open(context.get(), asicen::UsbLocation{1U, 2U}) == 0 &&
+                  sibling.open(context.get(), asicen::UsbLocation{1U, 3U}) == 0,
+              "failed-claim functions open");
+        asicen::LibusbFunctionClaim primary_claim(primary, "primary", output);
+        asicen::LibusbFunctionClaim sibling_claim(sibling, "sibling", output);
+        asicen::EnclosureOwnership ownership;
+        CHECK(ownership.claim_w3u3(primary_claim, sibling_claim, {2U, 1U}, {2U, 2U}) ==
+                  asicen::OwnershipError::primary_claim_failed,
+              "primary claim failure remains visible");
+        const int calls = api.snapshot_api_calls();
+        primary_claim.log_claim_diagnostic();
+        sibling_claim.log_claim_diagnostic();
+        CHECK(api.snapshot_api_calls() == calls,
+              "failed claim logging performs no snapshot or identity getter calls");
+    }
+    const std::string log = contents(output);
+    std::fclose(output);
+    CHECK(log.find("phase=claim role=primary bus=1 address=2 port=1-2.1 vid=0b06 "
+                   "pid=0005 interface=0 rc=-6 name=LIBUSB_ERROR_BUSY") != std::string::npos,
+          "failed claim logs raw libusb error");
+    CHECK(log.find("phase=claim role=sibling") != std::string::npos &&
+              log.find("attempt=no rc=unknown name=unknown") != std::string::npos,
+          "sibling claim not attempted is not reported as success");
+    return true;
+}
+
+bool failed_second_snapshot_invalidates_cached_diagnostics()
+{
+    FILE* output = std::tmpfile();
+    CHECK(output != nullptr, "create failed-snapshot diagnostic stream");
+    FakeApi api;
+    {
+        asicen::LibusbContext context(api);
+        CHECK(context.initialize() == 0, "initialize failed-snapshot context");
+        asicen::LibusbDevice device(api);
+        CHECK(device.open(context.get(), asicen::UsbLocation{1U, 2U}) == 0,
+              "failed-snapshot device opens");
+        asicen::LibusbFunctionClaim claim(device, "primary", output);
+        CHECK(claim.snapshot().transport_error == 0, "first diagnostic snapshot succeeds");
+        CHECK(claim.claim_interface0() == 0, "claim attempt records a successful raw result");
+        api.descriptor_failure = 1;
+        CHECK(claim.snapshot().transport_error == LIBUSB_ERROR_IO,
+              "second diagnostic snapshot fails at descriptor read");
+        claim.log_claim_diagnostic();
+    }
+    const std::string log = contents(output);
+    std::fclose(output);
+    CHECK(log.find("bus=1 address=2 port=unknown vid=unknown pid=unknown") != std::string::npos,
+          "failed second snapshot invalidates stale identity fields");
+    CHECK(log.find("attempt=no rc=unknown name=unknown") != std::string::npos,
+          "failed second snapshot resets the previous claim attempt");
+    return true;
+}
+
+bool unattempted_claim_is_not_reported_as_success()
+{
+    FILE* output = std::tmpfile();
+    CHECK(output != nullptr, "create unattempted diagnostic stream");
+    FakeApi api;
+    {
+        asicen::LibusbContext context(api);
+        CHECK(context.initialize() == 0, "initialize unattempted diagnostic context");
+        asicen::LibusbDevice device(api);
+        CHECK(device.open(context.get(), asicen::UsbLocation{1U, 2U}) == 0,
+              "unattempted diagnostic device opens");
+        asicen::LibusbFunctionClaim claim(device, "primary", output);
+        const auto before_diagnostics = api.events;
+        claim.log_claim_diagnostic();
+        CHECK(api.events == before_diagnostics, "logging an unattempted claim makes no USB calls");
+    }
+    const std::string log = contents(output);
+    std::fclose(output);
+    CHECK(log.find("phase=claim role=primary") != std::string::npos &&
+              log.find("attempt=no rc=unknown name=unknown") != std::string::npos,
+          "unattempted claim has unknown result, never success");
     return true;
 }
 
@@ -478,6 +684,10 @@ bool quarantine_retains_context_and_handle()
 int main()
 {
     if (!initialization_and_open_failures() || !ownership_failure_and_success_order() ||
+        !claim_diagnostics_are_cached_and_do_not_touch_usb() ||
+        !failed_claim_logs_raw_error() ||
+        !failed_second_snapshot_invalidates_cached_diagnostics() ||
+        !unattempted_claim_is_not_reported_as_success() ||
         !alternate_failure_releases_once() || !granted_fd_failures_and_success() ||
         !port_accessor_preserves_errors_and_bounds() || !granted_fd_topology_failures() ||
         !quarantine_retains_context_and_handle()) {
