@@ -1015,7 +1015,14 @@ jobs:
           $failed = @()
           foreach ($suite in $suites) {
             Write-Host "== $($suite.Name) =="
-            & $suite.FullName
+            if ($suite.Name -eq 'asicen-receive-diagnostic-tests.exe') {
+              if (-not $env:ASICEN_CI_RUNTIME_FIXTURE) {
+                throw 'receive diagnostic tests require the isolated runtime fixture'
+              }
+              & $suite.FullName (Join-Path $env:ASICEN_CI_RUNTIME_FIXTURE 'receive-diagnostic')
+            } else {
+              & $suite.FullName
+            }
             if ($LASTEXITCODE -ne 0) {
               Write-Host "FAILED $($suite.Name) exit=$($LASTEXITCODE)"
               $failed += "$($suite.Name)=$($LASTEXITCODE)"
