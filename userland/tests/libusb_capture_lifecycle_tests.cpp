@@ -855,7 +855,7 @@ bool test_completion_order_and_length_contract()
         CHECK(hardware.source_counters().empty_intervals == 1U);
         CHECK(fake.free_count == 4);
     }
-    for (const int actual : {-1, 4097}) {
+    for (const bool oversized : {false, true}) {
         FakeUsb fake;
         LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
         Hooks hooks{};
@@ -864,7 +864,7 @@ bool test_completion_order_and_length_contract()
         CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
         auto* transfer = fake.submitted[0U];
         transfer->status = LIBUSB_TRANSFER_COMPLETED;
-        transfer->actual_length = actual;
+        transfer->actual_length = oversized ? transfer->length + 1 : -1;
         transfer->callback(transfer);
         CHECK(hardware.run(cancelled, discard_packets, nullptr) == CaptureRunResult::usb_error);
         CHECK(fake.submit_count == 4);
