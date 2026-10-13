@@ -1208,3 +1208,310 @@ short of declaring release acceptance; a code repair requires a replacement
 candidate and the corresponding revalidation. Keep raw TS, card responses,
 seeds and keys local; share counts, command/exit status, tool versions and
 non-sensitive evidence locations. The release-note placeholders remain pending.
+
+## 2026-10-13: receive-throughput fix and candidate f7352f4
+
+Recorded by dot. This section supersedes the candidate identity and pending
+status in the preceding `329a925` section; it preserves that section and the
+earlier hardware history. A successful short capture, CI run or reproduction
+check does not complete the eight-archive release gates.
+
+### Production change and diagnostic lineage
+
+[PR #11](https://github.com/Khronos31/asicen-userland/pull/11), production head
+[`764c6f3fc7a72a77799059fa10b5b4dc8d7fcf45`](https://github.com/Khronos31/asicen-userland/commit/764c6f3fc7a72a77799059fa10b5b4dc8d7fcf45),
+was merged into `release/0.1.0` as
+[`f7352f4dcc71b364638279b774da3727fdec2ff7`](https://github.com/Khronos31/asicen-userland/commit/f7352f4dcc71b364638279b774da3727fdec2ff7).
+The production change uses four 65,536-byte bulk-IN buffers and optimizes the
+ASICEN mode-7 DES transform with fixed bit extraction, generated S/P tables and
+decoder-local prepared key schedules. Independent scalar-oracle, lifecycle and
+packet/chunk equivalence tests accompany the change. The official PX4 v0.2.1
+pin `dd1c1bea16a5871085d5f2a42c009364c1ec7345`, shared packet/card contracts,
+CLI, IPC and firmware stay unchanged. This is an ASICEN receive-path change,
+not an update to the PX4 pin or a change to the four-packet sync probe.
+
+The separate diagnostic lineage was
+[`b7263c0a81ad632807f155aba2f6a6afb13ccf93`](https://github.com/Khronos31/asicen-userland/commit/b7263c0a81ad632807f155aba2f6a6afb13ccf93)
+and fast-transform comparison
+[`30486d0f5d33e3502fa06f2b1701be64e603ff87`](https://github.com/Khronos31/asicen-userland/commit/30486d0f5d33e3502fa06f2b1701be64e603ff87).
+Both diagnostic builds used four 64 KiB buffers. Their receive recorder is
+absent from the production source and binaries. The bounded captures and
+timing analysis are detailed in
+[Issue #7](https://github.com/Khronos31/asicen-userland/issues/7#issuecomment-6138823162).
+The earlier probe-only PR #8 is a separate experiment and is not this fix.
+
+### Fixed candidate and byte-identical reproduction
+
+- Source: `f7352f4dcc71b364638279b774da3727fdec2ff7`
+- Tree: `7d0091d0f3ff76601b21733d092a2b1716002291`
+- Candidate: [push run 38358322625](https://github.com/Khronos31/asicen-userland/actions/runs/38358322625), attempt 1, [release-candidate artifact 11793508253](https://github.com/Khronos31/asicen-userland/actions/runs/38358322625/artifacts/11793508253)
+- Reproduction: [workflow-dispatch run 38358427484](https://github.com/Khronos31/asicen-userland/actions/runs/38358427484), attempt 1, [release-candidate artifact 11794134216](https://github.com/Khronos31/asicen-userland/actions/runs/38358427484/artifacts/11794134216)
+- Release-provenance artifacts: candidate `11793413315`, reproduction `11794188969`
+
+Both runs completed all 20 jobs successfully on the exact same source/tree and
+`release/0.1.0` ref, without pull-request source context. The two artifact ZIP
+SHA-256 values are respectively
+`76214c1a166f34ae79c96441c5f6b943a43190d72d5414135bb575d68b93e716`
+and `e17ebe64897337208fc234ade150c46d36557c1abbf4bd039a814950b7d42925`.
+These transport wrappers and run-specific provenance are not asserted to be
+byte-identical. The ten distributed files inside were compared in full,
+without timestamp, signature, UUID or metadata normalization:
+
+| File | SHA-256 (both runs) |
+| --- | --- |
+| `asicen-userland-0.1.0-android-aarch64.tar.gz` | `dcae236704b7f863b67a086f9d582c4ba532edf8a224d3f693dd630b493fa5ee` |
+| `asicen-userland-0.1.0-android-armv7a.tar.gz` | `16948d8e7713367a1adaa023b3286b74fe1eabe91beef444e4cf8b9aa14eacb7` |
+| `asicen-userland-0.1.0-android-x86_64.tar.gz` | `d6df72f0ad51bc9b43e24755beae1359716e32a0b2a7a22f65ac781824b1b830` |
+| `asicen-userland-0.1.0-darwin-arm64.tar.gz` | `78dfc393a9359950ba70a40be2ab33dade16cafb7b07eb4bdd2099811874218c` |
+| `asicen-userland-0.1.0-linux-glibc-aarch64.tar.gz` | `43f45a4f33530df9e81b8bc7abc9ebf559465937fcca7ce042a11629bc585e6b` |
+| `asicen-userland-0.1.0-linux-glibc-x86_64.tar.gz` | `0f3b106e78ab55f824009f56a7eda8abd5ed06af5c0cc817338cd1612fe5e2a8` |
+| `asicen-userland-0.1.0-linux-musl-aarch64.tar.gz` | `f3f5dbbc1087b150db390d8ca0a8c7afcfdb58fe06aa6cc53ac10efe0b10fae1` |
+| `asicen-userland-0.1.0-linux-musl-x86_64.tar.gz` | `b186076a4fa90522eee452f0b54b12dd40ed363a4dcbb87099a695066b9618ac` |
+| `asicen-userland-0.1.0-source.tar.gz` | `68bae808503b89d53ebce93d04477c5659d61b3c2468cfd159a4869a50a0d35e` |
+| `SHA256SUMS` | `755f455e628046fde9a9a83551708cb3f968bd0afb94d0931e7a2197c8b1f8f8` |
+
+Offline inspection passed for exact bundle inventory, outer/inner checksums,
+manifests, modes, source commit/tree, Linux provenance, static libusb and pinned
+firmware identity. The source archive matched 402 repository blobs and their
+modes, excluding the two firmware paths by policy, and included the verified
+151-file pinned libusb source inventory. Archive executables were not executed
+by this static audit. The successful CI jobs include their own offline/start
+checks; they do not certify hardware. The release-helper workflow did not
+trigger for this merge's path set, rather than running and passing anew. No
+full publication entry point, completed hardware sidecar, tag or Release was
+created by this audit.
+
+### Observed build inputs and runner images
+
+All 40 job logs were retained. The 20 job names pair between runs, and every
+pair reported the same runner image/version:
+
+| Runner image | Observed version in both runs |
+| --- | --- |
+| `ubuntu-24.04` | `20261004.327.1` |
+| `ubuntu-24.04-arm` | `20261004.142.1` |
+| `macos-14-arm64` | `20260831.0302.1` |
+| `windows-2022` | `20261004.326.1` |
+
+The production build logs and packaged provenance also record these matching
+inputs, separately from the resulting archive-byte comparison:
+
+- Linux static programs and musl IFD: `alpine:3.22`, observed digest
+  `sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8`;
+  GCC/G++ `14.2.0-r6`, musl-dev `1.2.5-r12`, CMake `3.31.7-r1`, binutils
+  `2.44-r3`, pcsc-lite-dev `2.3.3-r0` and samurai `1.2-r7`.
+- Linux glibc IFD: Debian 11 image digest
+  `sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9`,
+  Debian snapshot `20260825T000000Z` (`bullseye` and `bullseye-security`);
+  GCC/G++ 10 `10.2.1-6`, CMake `3.18.4-2+deb11u1`, binutils `2.35.2-2`
+  and pcsc-lite `1.9.1-1`. The glibc/musl archive qualification refers to the
+  IFD; the packaged Linux command programs remain static musl binaries.
+- macOS `14.8.9` / `23J631`, Xcode `15.4` / `15F31d`, SDK `14.5`,
+  Apple Clang `15.0.0` / `clang-1500.3.9.4`, linker `ld-1053.12`,
+  CMake `4.4.3`, Ninja `1.13.2`, pcsc-lite `2.5.1`, pkgconf `3.0.6`.
+- All three Android ABIs: API 24, NDK `r27d`, packaged
+  `Pkg.Revision = 27.3.13750724`, Clang `18.0.4`.
+- Packaged libusb `1.0.30` source archive SHA-256
+  `fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf`.
+  The Alpine setup log also installs distribution libusb `1.0.28-r0`; that
+  package version is not the identity of the pinned packaged libusb source.
+- Loader: 16,384 bytes, SHA-256
+  `b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`.
+
+Alpine's tag, hosted-runner labels and some package feeds remain mutable.
+This proves the observed same-source push/dispatch pair and records its known
+inputs; it is not a complete compiler/runtime SBOM or an indefinite-future
+reproducibility promise. Windows passed build/offline checks but has no binary
+in the eight-archive 0.1.0 distribution and no hardware certification here.
+
+### Bounded CS2 diagnosis and production P0
+
+These were individual 10-second captures on the same Latitude x86_64 host
+(Intel Core i5-8265U, eight logical CPUs), PX-W3U3, primary receiver 0, CS2,
+wall-fed satellite input and LNB 0 V. USB paths were `1-3.1` / `1-3.2`, runtime
+`0b06:0005`, 480 Mbit/s. The comparison did not change USB/card/AC/antenna
+connections or authorize LNB power. D0/C2/D1/P0 found the functions already
+in runtime state and skipped firmware upload. No `USB_IO` error or residual
+test process was reported; each capture daemon exited 0.
+
+| Trial | UTC start–end, 2026-10-13 | Build / recording | Saved packets | TEI | Offline CC discontinuity + duplicate conflict | Stream sync errors | Client exit |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| C0 | See retained trial logs | `b7263c0`, off | 208548 | 6 | 4146 + 60 | 577 | 8 |
+| C1 | See retained trial logs | `b7263c0`, on | 200795 | 0 | 4261 + 132 | 558 | 8 |
+| D0 | 06:19:57–06:20:09 | `30486d0`, off | 236345 | 0 | 0 + 0 | 0 | 0 |
+| C2 | 06:21:35–06:21:47 | `b7263c0`, off | 218776 | 2 | 3322 + 6 | 584 | 8 |
+| D1 | 06:23:20–06:23:32 | `30486d0`, on | 235996 | 0 | 0 + 0 | 0 | 0 |
+| P0 | 06:35:47–06:35:59 | production `764c6f3`, no recorder | 235996 | 0 | 0 + 0 | 0 | 0 |
+
+The 12-second wall-clock windows include capture startup/cleanup around the
+requested 10 seconds. D0/D1/P0 also had zero discontinuity indicators, invalid
+packets, queue drops and USB errors. D0/D1 PAT/PMT CRC checks were clean. C0
+had three discontinuity indicators and C1 had one; neither had invalid saved
+packets or queue/USB errors. Their bad captures remain evidence, despite
+successful daemon cleanup.
+
+Failed preparation attempts are retained separately: the first C0 endpoint
+path was 114 bytes, exceeding Linux's 107-byte usable limit, and exited 2
+before capture. A shorter private `/tmp/arx.XXXXXX` runtime allowed the actual
+C0 trial. Before P0, an over-broad startup gate matched the benign message
+`skipping upload` and aborted before capture. Correcting that gate led to
+the single actual P0 capture above; the abort is not a second TS result.
+
+C1 recorded 37,945,344 decoder-input bytes and all 582 metadata rows, without
+dropped records, omitted raw bytes or invalid lengths. Its offline framer
+replay matched the 578 compared rows and reproduced 558 sync losses, but
+comparison stopped at `live_decoder_or_sink_failure`; it is not a full-period
+match. The terminal sink refusal occurred at the finite capture boundary.
+D1 recorded 44,367,872 bytes and all 681 rows; all 677 compared processing rows
+matched, with zero replay sync loss and zero raw-header CC transition
+candidates. Both recordings were finalized and passed the recorded
+completeness checks. Valid callback bytes not passed to the decoder were
+164,864 for C1 and 21,504 for D1; this includes termination/drain scope and is
+not by itself proof of an unreported mid-stream discard.
+
+| Recorded timing, milliseconds | C1 median | D1 median |
+| --- | ---: | ---: |
+| Decode excluding emit | 16.844630 | 2.093440 |
+| Callback to resubmit | 34.218090 | 2.149696 |
+| Ready to processing | 17.096341 | 0.001685 |
+
+The maximum decode times were 30.562978 ms (C1) and 5.659542 ms (D1). The
+fast/old/fast sequence and these timing changes strongly support inadequate
+receive-processing headroom as the cause of the observed failure. They do
+not locate a FIFO overflow or distinguish loss inside RF/device/USB. Callback
+times are host observations, not bus arrival times. Raw adaptation fields
+are still transformed, so raw CC transition candidates are not validated CC
+errors. Replay verifies framing over its stated prefix with an always-accepting
+sink, not transformed payload correctness or clean reception. Instrumentation
+adds copies and clock reads; the recorder-off trials remain important controls.
+Raw TS, raw USB-input captures, seeds, keys and card data remain local.
+
+### P0 identity boundary and remaining gates
+
+P0 used the pre-merge production source `764c6f3` from
+[run 38356826018](https://github.com/Khronos31/asicen-userland/actions/runs/38356826018),
+[Linux artifact 11793049429](https://github.com/Khronos31/asicen-userland/actions/runs/38356826018/artifacts/11793049429).
+Its glibc-x86_64 archive SHA-256 is
+`808ea441b75d1122e3bb000ee171a7f07e4b6da0e8df55fb31ebb6d3f586b9bd`,
+which differs from the final candidate archive above. The commits have the
+same tree, and exact archive-member comparison verified identical inventory,
+modes and runtime bytes for the production and final Linux x86_64 archives.
+In the glibc-x86_64 pair the verified SHA-256 values include:
+
+| Runtime member | SHA-256 (P0 production and final candidate) |
+| --- | --- |
+| `asicend` | `222afe26fa7c895f773c1e89766eb1839853738bb93dd451e5cd26e6459e8099` |
+| `asicen-ts` | `e91ff275470b54fa3d6d75f9aab53eb714d6f5f188989f11b8916ec67f3a475e` |
+| `asicenctl` | `35cac5d8c6d754344f1efca72ec91608aec5b4895e3e1dcc5e34b9842a7c0e3c` |
+| `ifd/asicen-userland-ifd.so` | `b0bbde616b2fee68cb94d6478bc0ae55e39db7e9597e4621d7a49fae4b7f1dd1` |
+| `firmware/asicen-loader.bin` | `b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8` |
+
+The differing members are `manifest.json`, inner `SHA256SUMS` and the two
+Linux build-provenance files, whose `source_ref` changes to the merge commit
+with the corresponding manifest/checksum changes. Other provenance fields
+and executable/library/firmware bytes remain equal. Thus P0 is a bounded
+CS2 observation of matching runtime bytes, not a claim that the P0 and final
+archives are identical or that every identical member was exercised by P0.
+
+### Exact-candidate E03 33-channel sweep: one failure
+
+The final `f7352f4` glibc-x86_64 candidate ran the existing 33-channel list on
+the Latitude from 06:56:46 to 07:04:22 UTC on 2026-10-13. The bounded runner
+finished `COMPLETED_WITH_FAILURES`, exit 1: 32 channels passed, and T27 failed.
+The daemon exited 0 after SIGTERM, with no residual test process. This is a
+completed sweep with a quality failure, not an all-channel pass.
+
+- Terrestrial: T16, T17, T19, T21, T22, T23, T24, T25, T26, T30, T31 and T32
+  passed; T27 failed.
+- BS: BS01_0, BS03_0, BS05_0, BS09_0, BS13_0, BS15_0, BS19_0, BS21_0 and
+  BS23_0 all passed.
+- CS: CS2, CS4, CS6, CS8, CS10, CS12, CS14, CS16, CS18, CS20 and CS22 all
+  passed.
+
+T27 saved 109,806 packets and exited 8, with one offline CC discontinuity.
+The saved-file validator reported zero sync errors, TEI, duplicate conflicts
+and invalid packets; queue drops and USB errors were also reported as zero.
+The stream log separately records `STREAM_END packets=109806 bytes=20643528
+sync-errors=0 tei=0 continuity-errors=1 queue-drops=0 usb-errors=0
+empty-intervals=0`, followed by `STREAM_END error=0`. Those stream counters and
+the client exit 8 are both retained. Production source tracing confirms that
+the backend [accumulates decoder/framer sync-loss deltas](https://github.com/Khronos31/asicen-userland/blob/f7352f4dcc71b364638279b774da3727fdec2ff7/userland/src/libusb_hardware_backend.cpp#L2437-L2451),
+exposes them as source counters, and the stream service
+[adds those counters](https://github.com/Khronos31/asicen-userland/blob/f7352f4dcc71b364638279b774da3727fdec2ff7/userland/src/hardware_stream_session.cpp#L646-L652)
+to the final snapshot after joining the worker. Thus the recorded stream
+sync 0 establishes no detected loss of already-acquired framing over consumed
+input. It does not account for initial alignment/search discards:
+[sync acquisition discards bytes without incrementing that loss counter](https://github.com/Khronos31/asicen-userland/blob/f7352f4dcc71b364638279b774da3727fdec2ff7/userland/src/ts_framer.cpp#L72-L84).
+No separate raw-framer `sync_loss_events`, `discarded_sync_search_bytes`,
+`pending_bytes` or first raw offset was saved; those separate observations
+are unavailable, not zero. PAT CRC passed 101/101 sections and PMT CRC passed
+232/232. Both validators exited 0, meaning analysis completed; their exit
+status does not turn the nonzero continuity count into a quality pass.
+
+Read-only inspection located the event at the beginning of the saved TS:
+PID `0x0100` payload packets at packet indexes 0 and 2 have CC 5 and 7;
+intervening packet 1 is PID `0x0900`, CC 12. None of the first 12 complete T27
+packets is byte-identical to any of the last 5,000 saved T26 packets. That
+negative match does not exclude hardware residue beyond T26's saved endpoint.
+Source tracing found a fresh host queue, CC checker and decoder for the
+capture, without a proven stale-host-data path; the DES transform preserves
+the first four TS header bytes. These observations do not establish the
+loss location or turn the failed channel into a pass. The original failure
+is retained separately from the bounded follow-up below.
+
+The bounded runner's SHA-256 is
+`5b797113e0ff002f9e04062bbb4473a7b8cf09b38f3eb3940f27f35cc8f8d6bd`.
+Commands, per-channel output and retained logs are under the host-local
+`/home/yunomin61/asicen-0.1.0/rc-f7352f4-20261013T064810Z/evidence-parent/e03-allch-1`.
+Raw TS stays on the Latitude. Satellite capture kept the existing wall feed
+at LNB 0 V. This current setup overrides the generic 15 V example only for
+these captures and does not authorize powering the wall input or waive the
+separate LNB measurements.
+
+### Bounded unchanged-candidate T26 → T27 → T27 follow-up
+
+One bounded follow-up ran on the same final candidate and unchanged setup.
+The input hashes matched the approved inputs. The runner reported `PASS` and
+exited 0; the daemon exited 0 after SIGTERM, without a timeout or residual
+test process. Each row was a requested 10-second capture:
+
+| Trial | UTC start–end, 2026-10-13 | Packets | Bytes | Client exit | Valid PAT / PMT sections |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `01_T26` | 07:25:26–07:25:37 | 111900 | 21037200 | 0 | 101 / 320 |
+| `02_T27` | 07:25:39–07:25:50 | 108602 | 20417176 | 0 | 101 / 231 |
+| `03_T27` | 07:25:52–07:26:03 | 110851 | 20839988 | 0 | 101 / 233 |
+
+Both analyzers exited 0 for every capture; their content checks reported
+zero CC discontinuities, TEI, duplicate conflicts, duplicate packets,
+discontinuity indicators and invalid packets. No PAT or PMT CRC failure was
+found. Every source `STREAM_END` reported zero sync errors, TEI, continuity
+errors, queue drops, USB errors and empty intervals. The source-sync meaning
+and unavailable initial-alignment/raw observations are as described above.
+
+Runner SHA-256:
+`7a8373bbce9d7a2d5e6f9d762e945e7cdf2ccb41d719cf638e9cd45cb3dcb3b0`.
+Evidence is retained at
+`/home/yunomin61/asicen-0.1.0/rc-f7352f4-20261013T064810Z/evidence-parent/e03-transition-t26-t27-t27-1`.
+The original sweep remains **32 PASS / 1 FAIL**. This follow-up did not
+reproduce the exact startup anomaly; it does not identify its cause, erase
+that failure or override the full-channel release gate. It gives no basis
+for blind startup-packet removal or a settings change. No further hardware
+operation is recorded for this increment.
+
+During the next normally planned validation, retain and inspect any startup
+recurrence. If it recurs, a matched raw-input diagnostic could help locate
+the loss; that would require its own agreed scope. This handoff adds no new
+repeat count, soak duration or release gate.
+
+### Release acceptance remains pending
+
+Candidate building and same-source byte-identical reproduction are complete;
+representative full-channel acceptance and overall release acceptance are not.
+The eight-archive short-regression matrix, LNB measurements, card/USB physical
+items and existing soak durations remain pending for this candidate. The
+representative glibc-x86_64 and macOS soaks remain two hours each, the other
+Linux archives 30 minutes each, and the three Android ABIs 10 minutes each.
+Past candidate measurements do not complete these gates for changed binaries.
+No formal release notes, completed sidecar, tag or Release is authorized or
+completed by this record. Follow [the unchanged acceptance procedure](docs/release-validation.md)
+and the separate user decisions required for release notes and tag/publication.
