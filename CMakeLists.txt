@@ -758,6 +758,12 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     asicen_enable_project_warnings(asicen-loader-firmware-tests)
     add_test(NAME asicen-loader-firmware-tests COMMAND asicen-loader-firmware-tests)
 
+    add_executable(asicen-loader-diagnostic-tests
+        userland/tests/loader_diagnostic_tests.cpp)
+    target_include_directories(asicen-loader-diagnostic-tests PRIVATE userland/tools)
+    asicen_enable_project_warnings(asicen-loader-diagnostic-tests)
+    add_test(NAME asicen-loader-diagnostic-tests COMMAND asicen-loader-diagnostic-tests)
+
     add_executable(asicen-frontend-sequence-tests userland/tests/frontend_sequence_tests.cpp)
     target_link_libraries(asicen-frontend-sequence-tests PRIVATE asicen_core)
     asicen_enable_project_warnings(asicen-frontend-sequence-tests)
