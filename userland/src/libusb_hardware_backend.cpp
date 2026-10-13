@@ -32,7 +32,7 @@ using px4::userland::Result;
 using px4::userland::ipc::System;
 
 constexpr std::size_t kQueueDepth = 4U;
-constexpr std::size_t kChunkSize = 4096U;
+constexpr std::size_t kChunkSize = 65536U;
 constexpr std::chrono::milliseconds kDrainLimit{8000};
 // TC_SetLNB for original W3U2/W3U3 is active-low GPIO20. The V2
 // Windows LNBONOFF path is active-high on that same bit; its verified

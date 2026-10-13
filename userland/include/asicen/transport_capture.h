@@ -14,8 +14,8 @@ class TransportCaptureDecoderV7 final {
 public:
     explicit TransportCaptureDecoderV7(const std::uint8_t* seed, std::size_t seed_size);
     ~TransportCaptureDecoderV7();
-    TransportCaptureDecoderV7(TransportCaptureDecoderV7&&) noexcept = default;
-    TransportCaptureDecoderV7& operator=(TransportCaptureDecoderV7&&) noexcept = default;
+    TransportCaptureDecoderV7(TransportCaptureDecoderV7&& other) noexcept;
+    TransportCaptureDecoderV7& operator=(TransportCaptureDecoderV7&& other) noexcept;
     void clear() noexcept;
     bool valid() const { return valid_; }
     px4::userland::Result<void> push(px4::userland::ByteView input, TsFramer::PacketSink sink,
@@ -28,6 +28,7 @@ public:
 private:
     TsFramer framer_{TransportMode::AsicenMode7};
     TransportMaterialV7 material_{};
+    TransportTransformV7 transform_{};
     bool valid_ = false;
 };
 
