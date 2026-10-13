@@ -1679,3 +1679,186 @@ scope. The eight-archive short tests, LNB measurements, card/USB physical
 items, representative full-channel sweep and existing soak durations remain
 subject to the unchanged acceptance procedure. No completed release sidecar,
 formal release notes, tag or publication is asserted here.
+
+## 2026-10-14 JST: fixed candidate b64577e and representative short regression
+
+Recorded by dot. These results apply to the representative E03 machine only:
+AnduinOS x86_64, PX-W3U3, primary/sibling USB paths `1-3.1` / `1-3.2`.
+The test sequence began on 2026-10-13 JST and ended after midnight on
+2026-10-14 JST. Times explicitly marked UTC below retain the execution clock.
+Raw TS and card payloads remain local; this record publishes summaries only.
+
+### Candidate and independent reproduction
+
+- Source: `b64577e94389fe479d573eed57c745e2eb5573ef`
+- Tree: `1f7ebf6a966656d747af7bf1a5feb619bcfffeb9`
+- Candidate run: [38408329934](https://github.com/Khronos31/asicen-userland/actions/runs/38408329934), attempt 1, 20/20 jobs successful.
+- Independent workflow-dispatch run: [38408518367](https://github.com/Khronos31/asicen-userland/actions/runs/38408518367), attempt 1, 20/20 jobs successful.
+- Assembled candidate/reproduction artifact IDs: `11820352523` / `11821410522`.
+- The nine distributed archives and `SHA256SUMS` were byte-identical across the two runs. Both manifests verified all nine archive hashes.
+- Tested archive: `asicen-userland-0.1.0-linux-glibc-x86_64.tar.gz`,
+  SHA-256 `a54f2e6f67a303fb4175dcaa6ee0d1dd0c31524fd45beabb024c939aa62298aa`.
+- Tested Linux artifact: `11820665690`; artifact ZIP SHA-256
+  `ed24e07da4a2a9cab5681cdf1df1e0d24d98cfb243265594ee833b73e9e768ca`.
+- Local tested package:
+  `/home/yunomin61/asicen-0.1.0/verified-artifact-38408329934-b64577e/package-glibc-x86_64`.
+- Executable hashes:
+  - `asicend`: `1fa0e9d3de1abfc019c453d41c0a0db1653282578d4b0bbe83339f93d92f1041`
+  - `asicen-ts`: `e91ff275470b54fa3d6d75f9aab53eb714d6f5f188989f11b8916ec67f3a475e`
+  - `asicenctl`: `35cac5d8c6d754344f1efca72ec91608aec5b4895e3e1dcc5e34b9842a7c0e3c`
+- Loader SHA-256: `b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`.
+- PX4 reference remains v0.2.1 `dd1c1bea16a5871085d5f2a42c009364c1ec7345`.
+
+Runner image versions matched between the two runs: Ubuntu x64
+`20261004.327.1`, Ubuntu arm64 `20261004.142.1`, macOS arm64
+`20260831.0302.1`, Windows 2022 `20261004.326.1`.
+Compared effective inputs also matched: Alpine 3.22 index digest
+`5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8`
+and 61 package versions per architecture; Debian 11 digest
+`6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9`
+with snapshot `20260825T000000Z`; Android NDK r27d / API 24 / Clang
+18.0.4; macOS Xcode 15.4 / SDK 14.5 / Apple Clang 15.0.0;
+Windows llvm-mingw 20250910-ucrt / Clang 21.1.1. This is not a complete
+SBOM or verification of every tool executable hash. Windows remains
+build-tested only and is not a 0.1.0 distributed binary.
+
+The prior b41ea41b cold-start trial is retained in its own section. Comparing
+that trial package to this fixed candidate found identical runtime binaries,
+IFD, firmware and binary audit; four manifest/checksum/provenance files differed
+with source identity. This bounded comparison does not certify the other seven
+platform archives or substitute for their hardware tests.
+
+### Representative full-channel regression: 33/33 passed
+
+Executed 2026-10-13 14:14:36–14:22:12 UTC. Each channel requested 10 seconds,
+one stream at a time. Terrestrial used receiver 1; satellite used receiver 0,
+`--lnb-voltage 0`, the existing wall-fed installation, and no
+`--allow-lnb-power`. No satellite-only LNB argument was passed to terrestrial.
+
+| Channels | Count | Result |
+|---|---:|---|
+| T16, T17, T19, T21, T22, T23, T24, T25, T26, T27, T30, T31, T32 | 13 | PASS |
+| BS01_0, BS03_0, BS05_0, BS09_0, BS13_0, BS15_0, BS19_0, BS21_0, BS23_0 | 9 | PASS |
+| CS2, CS4, CS6, CS8, CS10, CS12, CS14, CS16, CS18, CS20, CS22 | 11 | PASS |
+
+All 33 clients and both offline validators exited 0. All captures had zero
+sync/invalid-packet, TEI, CC-discontinuity, duplicate and invalid PAT/PMT counts.
+Daemon shutdown exited 0, without timeout or remaining processes; cached
+release diagnostics reported both runtime functions released successfully.
+Cleanliness here concerns saved TS and offline validators. It does not
+establish the absence of losses before initial framing/alignment; raw USB and
+framer discard counters were not independently captured for this sweep.
+This does not erase the old f7352f4 T27 CC failure or establish its cause.
+
+Evidence directory:
+`/home/yunomin61/asicen-0.1.0/b64577e-e03-allch-20261013/`.
+Summary SHA-256:
+`17f593e35c88277eef96c8c04f7d54aec42205469e8e3e8818e028e279108635`.
+Runner SHA-256:
+`5b797113e0ff002f9e04062bbb4473a7b8cf09b38f3eb3940f27f35cc8f8d6bd`.
+Shared validator SHA-256:
+`81d1d73804e0c6f6ee04994fd9d3f98f16b8ce64c6a29eab5042120fabcf4db5`;
+legacy validator SHA-256:
+`de2fbab94b119975bc088e1f345c38f20574ffa2549e109cbb9599d556ed8902`.
+The runner invocation was recorded; per-client argument descriptions were
+reconstructed from the runner/configuration, not claimed as separately
+captured argv arrays.
+
+### LNB tester observations
+
+The user disconnected the satellite coax from the wall-fed installation and
+measured the device connector with its AC adapter attached.
+
+- Explicit `--lnb-voltage 0`: user confirmed 0 V during the request.
+- Explicit `--lnb-voltage 15`, daemon `--allow-lnb-power`: user confirmed 15 V.
+- Both used receiver 0, `BS01_0`, `--tune-timeout-ms 30000`,
+  `--duration-seconds 1`, output `/dev/null`. Without the antenna,
+  client exit 5 was expected; daemon exit was 0 in both trials.
+- After the 15 V request ended, the user observed a gradual voltage decline.
+  The user then shorted the output to discharge it and reported 0 V.
+  **Natural decay all the way to 0 V was not observed in this trial.**
+  Do not record this as proof of an unassisted return to 0 V or of the
+  discharge/protection circuit's implementation.
+- The user reports that unassisted decay on this model takes over 90 seconds.
+  A capacitive/high-impedance-meter explanation is a hypothesis, not a
+  component-level finding from this trial. Shorting is not a prescribed
+  validation step.
+- The satellite coax was subsequently restored by the user. Later card/USB
+  tests did not enable LNB power.
+
+15 V evidence:
+`/home/yunomin61/asicen-0.1.0/b645-lnb15-q2gxd7jw`.
+The 0 V evidence is `/home/yunomin61/asicen-0.1.0/b645-lnb0-ocb8mjme`.
+Request start times: 0 V at 2026-10-13 14:33:19.254138 UTC;
+15 V at 14:39:21.019665 UTC.
+Saved argv and exit records were checked. Before the actual runs, blocked
+permission attempts did not reach device execution and are not extra trials.
+
+### Card removal and return: passed
+
+With one continuously running daemon, the user removed and reinserted the
+same internal B-CAS card:
+
+1. Present before removal; ATR retrieval exited 0, length 13 bytes.
+2. Removed: `present=no`; ATR command exited 9, no ATR data.
+3. Reinserted without daemon restart: `present=yes`; ATR retrieval exited
+   0, length 13 bytes.
+4. Harness reported `CARD_CYCLE_PASS`; daemon shutdown exited 0.
+
+Commands were `asicenctl --runtime-dir R --instance card-cycle card-status`
+and `card-atr` at each stage. The daemon used the two recorded USB paths,
+the fixed package and its loader, without `--allow-lnb-power`.
+Evidence:
+`/home/yunomin61/asicen-0.1.0/b645-card-cycle-989g_yis`.
+Raw ATR bytes remain local. This trial checked card presence/ATR recovery,
+not new APDU application semantics or PC/SC/IFD compatibility.
+The before/absent/restored status generation values were 1/2/3;
+status snapshots reported initialized=no before each ATR request.
+ATR observations were at 14:54:00.830643, 14:56:11.053131 and
+14:57:29.940376 UTC on 2026-10-13.
+
+### USB disconnect and fresh-daemon recovery: passed
+
+- While T27 receiver 1 was receiving, the user removed the USB cable, leaving
+  AC, antenna and card unchanged. The client reported `DISCONNECTED`,
+  exited 7, and the daemon exited 7. There were no remaining ASICEN processes.
+  A disconnect-related daemon exit 7 is recorded as such, not a normal
+  shutdown exit 0. Local TS size was 281,673,632 bytes.
+- After the user reconnected USB to the same port, the same candidate was
+  started as a **new daemon**. T27 requested 10 seconds; client and daemon
+  both exited 0, with no remaining processes.
+- Recovery capture: 20,119,384 bytes / 107,018 aligned 188-byte packets,
+  no trailing bytes; sync/invalid packets, TEI, CC discontinuities,
+  duplicates and conflicts all 0. PAT 101/101 and PMT 232/232 sections valid.
+  The 103,009 scrambled packets are not claimed as descrambled content.
+
+Disconnect evidence:
+`/home/yunomin61/asicen-0.1.0/b645-usb-unplug-y4s5upk0`.
+Recovery evidence:
+`/home/yunomin61/asicen-0.1.0/b645-usb-replug-5f0kbyi2`,
+including `ts-validation.json` (SHA-256
+`ded562cef99cce2e8a4f8b19fa52f4357ca15d9f27f45de3f02f4a2581740816`).
+Disconnect capture was ready at 14:58:58.224606 UTC and the client ended at
+15:01:17.183885 UTC. Recovery was ready at 15:03:47.616755 UTC and the client
+ended at 15:03:57.662830 UTC on 2026-10-13. These harnesses save daemon/client argv and
+exit records. The disconnect request used `--duration-seconds 360` with a
+bounded physical-operation window; the recovery request used
+`--duration-seconds 10`. No LNB permission or terrestrial LNB option was used.
+
+### Remaining work and handoff
+
+- This session owns the representative E03 regression only, not the other
+  seven platform environments.
+- The representative candidate's 2-hour soak has **not started**.
+  At the user's direction, all soaks of 30 minutes or longer are grouped
+  at the end, after short tests. This changes scheduling, not the required
+  durations or matrix.
+- LNB observations above remain qualified: natural decay to 0 V was not
+  completed in this trial. Do not silently mark that observation as passed.
+- Other platform hardware gates remain separate and are not certified here.
+- The user deleted the old 2026-10-10 `/home/yunomin61/asicen-rc/soak/soak-t27.ts`
+  after its 14,135,249,624-byte size/date matched the historical soak record.
+  The old aggregate record is retained; that raw capture is no longer available
+  for reanalysis and is not evidence for b64577e.
+- This is a documentation-only results update, not release-note, tag, or
+  publication approval.
