@@ -1515,3 +1515,167 @@ Past candidate measurements do not complete these gates for changed binaries.
 No formal release notes, completed sidecar, tag or Release is authorized or
 completed by this record. Follow [the unchanged acceptance procedure](docs/release-validation.md)
 and the separate user decisions required for release notes and tag/publication.
+
+## 2026-10-13 cold-start sibling readiness fix
+
+This section records a bounded repair verification on the PR #12 branch,
+not acceptance of a newly fixed release candidate. The previous `f7352f4`
+candidate and its failed trials above remain historical evidence. The changed
+daemon requires a new candidate and the applicable release gates.
+
+### Failure observed with cached USB identity diagnostics
+
+On the Latitude PX-W3U3, diagnostic commit
+`90778d0499da72b9c7ba39d0a945f46d82120389` completed firmware upload for both
+USB functions. At claim time the primary was runtime `0b06:0005`, bus 1,
+address 78, path `1-3.1`; the sibling was still loader `1738:5211`,
+address 79, path `1-3.2`. The normal shutdown released the primary
+successfully but the sibling returned `-4 / LIBUSB_ERROR_NO_DEVICE`, and the
+daemon exited 7. A later read-only snapshot found the sibling runtime at
+address 80. The cached claim/release logs add no USB transactions.
+
+That trial ran from 12:35:53 to 12:35:56 UTC. Its T27 command mistakenly
+included the satellite-only `--lnb-voltage 0` option and exited 2 before
+reception. Thus it supplied USB ownership evidence but no TS or card test.
+The failed harness trial is retained at
+`/home/yunomin61/asicen-0.1.0/cold-diag-d3ega40w/trial-01`; it is not a
+reception failure or pass. Earlier permission/preflight failures did not
+execute another firmware/receive trial.
+
+Static analysis found that the old post-upload wait checked only one
+function, while ordinary ownership permitted a known loader sibling for
+reservation. The diagnostic observation demonstrates the resulting stale
+loader-handle path in this trial. It does not establish the exact historical
+identity of every earlier shutdown error.
+
+### Repair and offline verification
+
+[PR #12](https://github.com/Khronos31/asicen-userland/pull/12), source
+`b41ea41b7cfe8f175dd52b90e8eabfdd498037b0`, tree
+`15118b2694c745bd5702d7a08db9aefe97eea6fe`, is based on `e58f316`.
+
+- Track every successfully uploaded function by bus, full port path and
+  expected runtime identity.
+- Re-resolve every uploaded identity on every pass under one 10-second
+  deadline, checking cancellation/deadline around each probe and before
+  success. Bound sleeps by the remaining time.
+- Require runtime identity when claiming an uploaded sibling. Preserve
+  ordinary warm loader reservation and Android fd re-grant behavior.
+- Retain cached claim/release diagnostics without changing USB return values
+  or adding device communication.
+- Keep pinned px4-userland v0.2.1
+  `dd1c1bea16a5871085d5f2a42c009364c1ec7345` unchanged. These changes are
+  ASICEN firmware/topology/backend handling, not a shared IPC/CLI contract.
+
+The final integrated Release build passed 74/74 CTests on Latitude and
+`git diff --check`. All 11 published Git blob hashes matched the tested local
+files. Independent review found no remaining blocker after the deadline and
+cancellation boundary fixes. Fake-probe tests exercise timing and identity
+value forwarding; they are not physical USB descriptor tests. The existing
+resolver performs VID/PID/bus/full-port matching, and fake ownership snapshots
+test the strict sibling policy.
+
+[Push run 38403124381](https://github.com/Khronos31/asicen-userland/actions/runs/38403124381)
+and [PR run 38403136194](https://github.com/Khronos31/asicen-userland/actions/runs/38403136194)
+each passed all 20 jobs. Ubuntu/Linux x86_64/Linux aarch64 passed 74/74 tests;
+macOS passed 75/75, 3 targeted checks and 20 additional capture-lifecycle
+iterations. Android, Windows offline builds/tests, source/relink, packaging
+and artifact smoke checks passed. This does not certify other hardware
+models or complete the eight-archive hardware matrix.
+
+### One fixed-build cold-start trial
+
+On 2026-10-13 the user reconnected the PX-W3U3 USB cable. The single fixed
+trial ran from `13:23:15.754171Z` to `13:23:42.529641Z`; the requested
+10-second T27 capture ran from `13:23:20.763501Z` to
+`13:23:31.814794Z`. The host was the same Latitude/AnduinOS x86_64 E03
+native libusb environment. Antenna/AC/card connections were unchanged.
+The daemon did not receive `--allow-lnb-power`; no LNB voltage measurement
+was performed, and disabled software permission is not a measured 0 V.
+
+The package came from push run `38403124381`, artifact `11816188753`.
+ZIP SHA-256:
+`f7eaf94e7e564c1441fc0e911d04debde02fa77b06915921ac8cdd2e8d38cce3`.
+The executed inner archive was
+`asicen-userland-0.1.0-linux-glibc-x86_64.tar.gz`, SHA-256
+`676abd3450f96b60d3abfdb6ca6ebbff289886ee16be7d11189a53e84b8f33b6`.
+Internal checksums and manifest source matched before execution.
+
+| Runtime member | SHA-256 |
+| --- | --- |
+| asicend | `1fa0e9d3de1abfc019c453d41c0a0db1653282578d4b0bbe83339f93d92f1041` |
+| asicen-ts | `e91ff275470b54fa3d6d75f9aab53eb714d6f5f188989f11b8916ec67f3a475e` |
+| asicenctl | `35cac5d8c6d754344f1efca72ec91608aec5b4895e3e1dcc5e34b9842a7c0e3c` |
+| firmware/asicen-loader.bin | `b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8` |
+
+The harness verified both loader identities, all four hashes, no competing
+ASICEN process and a new private runtime directory. Harness SHA-256:
+`32ed771765428891217f4fbead15ef6d81466b8a10a1c56079833f54c217ee5f`.
+Its earlier `ps -C` no-match handling was corrected to inspect a successful
+`ps -eo pid=,comm=` listing; fake-main tests covered the normal and rejected
+preflight paths. A denied evidence-directory write was retried through the
+supported approval path before the one actual hardware trial.
+
+Daemon options were `--model PX-W3U3 --usb-path 1-3.1 --usb-path 1-3.2
+--instance cold-diag-v2 --runtime-dir /tmp/cd41 --firmware
+<verified-package>/firmware/asicen-loader.bin`.
+T27 used receiver 1, duration 10 seconds and a local output file, without a
+satellite-only LNB argument. Ten card queries used `card-apdu 90:30:00:00:00`
+after successful capture, followed by normal daemon SIGTERM shutdown.
+
+| Observation | Result |
+| --- | --- |
+| Before firmware | Both loader `1738:5211`, addresses 85/86, paths `1-3.1`/`1-3.2`, 480 Mbit/s |
+| Claim primary / sibling | Both runtime `0b06:0005`, addresses 88/90; both rc 0 |
+| Release sibling / primary | Cached claim identities above; both rc 0 |
+| After shutdown | Both runtime, addresses 88/90, 480 Mbit/s |
+| Daemon / T27 / ten card client exits | All 0; no timeout or residual ASICEN process |
+| Saved TS | 16,777,120 bytes; 89,240 packets of 188 bytes; no trailing bytes |
+| Invalid packets / TEI / CC discontinuities / duplicates | 0 / 0 / 0 / 0 |
+| PAT / PMT | 100/100 and 230/230 valid sections |
+| Card transport and response format/length consistency | 10/10; status-word semantics not evaluated |
+
+The offline validator used `Path.read_bytes()` on the entire saved TS;
+`stat` and its `file_bytes` both report 16,777,120 bytes. It has no prefix
+analysis limit. The client stderr summary agrees: `stream packets=89240
+bytes=16777120 sync-errors=0 tei=0 continuity-errors=0 queue-drops=0
+usb-errors=0 empty-intervals=0`. This saved size is exactly the packet boundary
+below 16 MiB; the reason for that size is not established by these counts.
+The requested duration was 10 seconds. These clean counts establish only
+the recorded file and do not independently establish a full-bandwidth rate. Card transport/format success does not certify
+all command semantics or a new adapter path.
+
+Evidence is retained locally at
+`/home/yunomin61/asicen-0.1.0/cold-diag-b41ea41b-evidence/trial-01/`.
+The directory contains `daemon.argv.json`, `T27.argv.json`,
+`card-01.argv.json` through `card-10.argv.json`, per-process UTC/exit files,
+`sysfs-before.txt`, `sysfs-after.txt`, `subprocess-status.json`,
+`trial-summary.json` and `ts-validation.json`. Validation used
+`python3 <checkout>/userland/tools/ts_validation.py <trial>/T27.ts`;
+validator SHA-256 was
+`81d1d73804e0c6f6ee04994fd9d3f98f16b8ce64c6a29eab5042120fabcf4db5`.
+Raw TS and card response contents remain local.
+
+| Evidence file | SHA-256 |
+| --- | --- |
+| T27.ts | `af700d684fb6e6e567ef438a613b56341c5dd8134a601552ca00150c0bc5a765` |
+| ts-validation.json | `6b599009bd64cc44fa4f0db9edfd86c071471efd4e293a2401327d86da094041` |
+| trial-summary.json | `18b0f2e3cd0df6294d8fd5bbebe3a928fb7c4e31acd12abe5a177665a4bda9ea` |
+| subprocess-status.json | `6a409d61c7079948649d176c27a2cc0f6acb284f03f640ce21fbd5da16673a34` |
+| daemon.log | `a9ca0d4ad6bdb4bfa1d4f63dc38b005fb57f8702e69675001387881011ecdb15` |
+
+### Candidate and acceptance boundary
+
+The diagnostic build reproduced a stale loader claim/release failure; one
+fixed-build cold trial completed cleanly. This is bounded evidence for the
+repair, not a repeated cold-start reliability claim. It does not erase the
+old 33-channel T27 failure or establish its cause.
+
+After merging the repair, fix a new candidate SHA and verify two independent
+same-source builds, then run the required exact-candidate regressions.
+Branch artifact bytes must not silently become final-candidate evidence;
+any identical-runtime inheritance needs an explicit comparison and bounded
+scope. The eight-archive short tests, LNB measurements, card/USB physical
+items, representative full-channel sweep and existing soak durations remain
+subject to the unchanged acceptance procedure. No completed release sidecar,
+formal release notes, tag or publication is asserted here.
