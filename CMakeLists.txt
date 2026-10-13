@@ -236,6 +236,7 @@ add_library(asicen_core STATIC
     userland/src/link_seed_diagnostic.cpp
     userland/src/protocol.cpp
     userland/src/queued_capture.cpp
+    userland/src/receive_diagnostic.cpp
     userland/src/satellite_tune.cpp
     userland/src/stream_capture.cpp
     userland/src/ts_framer.cpp
@@ -243,6 +244,12 @@ add_library(asicen_core STATIC
     userland/src/transport_capture.cpp
     userland/src/write_protocol.cpp
 )
+if(WIN32)
+    target_sources(asicen_core PRIVATE userland/src/windows/windows_receive_diagnostic.cpp)
+    target_include_directories(asicen_core PRIVATE ${ASICEN_PX4_ROOT}/src)
+else()
+    target_sources(asicen_core PRIVATE userland/src/posix_receive_diagnostic.cpp)
+endif()
 target_include_directories(asicen_core PUBLIC userland/include ${ASICEN_PX4_ROOT}/include)
 target_link_libraries(asicen_core PUBLIC Threads::Threads)
 asicen_enable_project_warnings(asicen_core)
@@ -547,6 +554,13 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_test(NAME asicen-product-profile-tests COMMAND asicen-product-profile-tests)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_executable(asicen-rx-framer-oracle userland/tests/receive_diagnostic_framer_oracle.cpp)
+    target_link_libraries(asicen-rx-framer-oracle PRIVATE asicen_core)
+    asicen_enable_project_warnings(asicen-rx-framer-oracle)
+    add_test(NAME asicen-receive-diagnostic-analysis-tests
+        COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/receive_diagnostic_analysis_tests.py
+        $<TARGET_FILE:asicen-rx-framer-oracle>)
     add_test(NAME asicen-model-cli-tests
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/model_cli_tests.py $<TARGET_FILE_DIR:asicend>)
     if(ASICEN_ENABLE_LIBUSB)
@@ -853,7 +867,7 @@ if(WIN32)
         target_link_libraries(px4_portable_reference PUBLIC advapi32 bcrypt ws2_32)
     endif()
     target_link_libraries(asicen_portable_core PUBLIC advapi32 bcrypt ws2_32)
-    target_link_libraries(asicen_core PUBLIC bcrypt)
+    target_link_libraries(asicen_core PUBLIC advapi32 bcrypt)
 endif()
 
 if(ASICEN_BUILD_TESTS AND TARGET asicen_ifdhandler)
@@ -881,6 +895,12 @@ endif()
 
 if(ASICEN_BUILD_TESTS)
     enable_testing()
+    add_executable(asicen-receive-diagnostic-tests userland/tests/receive_diagnostic_tests.cpp)
+    target_link_libraries(asicen-receive-diagnostic-tests PRIVATE asicen_core)
+    asicen_enable_project_warnings(asicen-receive-diagnostic-tests)
+    add_test(NAME asicen-receive-diagnostic-tests
+        COMMAND asicen-receive-diagnostic-tests ${CMAKE_CURRENT_BINARY_DIR}/receive-diagnostic-tests)
+
     # The upstream header-only checker and its unchanged portable regression fixture.
     add_executable(asicen-ts-continuity-tests ${ASICEN_PX4_ROOT}/tests/ts_continuity_tests.cpp)
     target_include_directories(asicen-ts-continuity-tests PRIVATE ${ASICEN_PX4_ROOT}/include)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/libusb_hardware_backend.h"
+#include "asicen/receive_diagnostic.h"
 
 #include <algorithm>
 #include <array>
@@ -9,8 +10,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <mutex>
 #include <map>
+#include <sstream>
+#include <string>
 #include <tuple>
 #include <thread>
 #include <vector>
@@ -694,6 +698,398 @@ bool has_cf_request(const FakeUsb& fake, std::size_t local, Request request)
 
 bool discard_packets(void*, const std::uint8_t*, std::size_t)
 {
+    return true;
+}
+
+class ReceiveDiagnosticEnvironment final {
+public:
+    ReceiveDiagnosticEnvironment()
+    {
+        const char* value = std::getenv("ASICEN_RX_DIAGNOSTIC_PREFIX");
+        present_ = value != nullptr;
+        if (present_) previous_ = value;
+    }
+    ~ReceiveDiagnosticEnvironment() { (void)set(present_ ? previous_.c_str() : nullptr); }
+    bool set(const char* value) const
+    {
+#if defined(_WIN32)
+        return ::_putenv_s("ASICEN_RX_DIAGNOSTIC_PREFIX", value != nullptr ? value : "") == 0;
+#else
+        return value != nullptr ? ::setenv("ASICEN_RX_DIAGNOSTIC_PREFIX", value, 1) == 0
+                                : ::unsetenv("ASICEN_RX_DIAGNOSTIC_PREFIX") == 0;
+#endif
+    }
+
+private:
+    bool present_ = false;
+    std::string previous_;
+};
+
+struct ReceiveDiagnosticPaths {
+    explicit ReceiveDiagnosticPaths(const char* suffix)
+    {
+        static unsigned serial = 0U;
+        prefix = "asicen-rx-lifecycle-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
+            std::to_string(++serial) + "-" + suffix;
+    }
+    ~ReceiveDiagnosticPaths()
+    {
+        (void)std::remove((prefix + ".raw").c_str());
+        (void)std::remove((prefix + ".csv").c_str());
+    }
+    bool empty_reserved_files() const
+    {
+        for (const char* suffix : {".raw", ".csv"}) {
+            std::error_code error;
+            if (std::filesystem::file_size(prefix + suffix, error) != 0U || error) return false;
+        }
+        return true;
+    }
+    std::string prefix;
+};
+
+std::string read_diagnostic_file(const std::string& path)
+{
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr) return {};
+    std::string bytes;
+    std::array<char, 4096> buffer{};
+    std::size_t count = 0U;
+    while ((count = std::fread(buffer.data(), 1U, buffer.size(), file)) != 0U) {
+        bytes.append(buffer.data(), count);
+    }
+    (void)std::fclose(file);
+    return bytes;
+}
+
+using DiagnosticRow = std::map<std::string, std::int64_t>;
+
+bool read_diagnostic_rows(const ReceiveDiagnosticPaths& paths, std::vector<DiagnosticRow>& rows)
+{
+    std::istringstream input(read_diagnostic_file(paths.prefix + ".csv"));
+    std::vector<std::string> columns;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream values(line);
+        std::string value;
+        if (columns.empty()) {
+            while (std::getline(values, value, ',')) columns.push_back(value);
+            continue;
+        }
+        DiagnosticRow row;
+        std::size_t index = 0U;
+        while (std::getline(values, value, ',')) {
+            CHECK(index < columns.size());
+            char* end = nullptr;
+            const auto number = std::strtoll(value.c_str(), &end, 10);
+            CHECK(end != value.c_str() && *end == '\0');
+            row[columns[index++]] = number;
+        }
+        CHECK(index == columns.size());
+        rows.push_back(std::move(row));
+    }
+    CHECK(!columns.empty());
+    return true;
+}
+
+void complete_diagnostic_transfer(libusb_transfer* transfer, libusb_transfer_status status,
+                                  int size)
+{
+    transfer->status = status;
+    transfer->actual_length = size;
+    transfer->callback(transfer);
+}
+
+bool test_receive_diagnostic_order_bytes_and_timestamps()
+{
+    ReceiveDiagnosticPaths paths("ordered");
+    ReceiveDiagnosticEnvironment environment;
+    CHECK(environment.set(paths.prefix.c_str()));
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    const std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(fake.submit_count == 4 && paths.empty_reserved_files());
+    for (auto* transfer : fake.submitted) CHECK(transfer->length == 65536);
+
+    std::string raw(5U * kMpegTsPacketSize, '\x35');
+    for (std::size_t index = 0U; index < 5U; ++index) {
+        raw[index * kMpegTsPacketSize] = '\x47';
+        raw[index * kMpegTsPacketSize + 3U] = static_cast<char>(0x10U + index);
+    }
+    constexpr std::size_t split = 213U;
+    const auto initial = fake.submitted;
+    std::memcpy(initial[0]->buffer, raw.data(), split);
+    std::memcpy(initial[1]->buffer, raw.data() + split, raw.size() - split);
+    std::memset(initial[2]->buffer, 0xee, 7U);
+    std::memset(initial[3]->buffer, 0xff, 9U);
+    complete_diagnostic_transfer(initial[1], LIBUSB_TRANSFER_COMPLETED,
+                                 static_cast<int>(raw.size() - split));
+    complete_diagnostic_transfer(initial[0], LIBUSB_TRANSFER_COMPLETED, split);
+    complete_diagnostic_transfer(initial[2], LIBUSB_TRANSFER_TIMED_OUT, 7);
+    complete_diagnostic_transfer(initial[3], LIBUSB_TRANSFER_ERROR, 9);
+    CHECK(paths.empty_reserved_files());
+    struct Sink {
+        const ReceiveDiagnosticPaths* paths;
+        std::string bytes;
+        bool files_empty = true;
+    } sink{&paths, {}, true};
+    CHECK(hardware.run(cancelled, [](void* context, const std::uint8_t* bytes, std::size_t size) {
+        auto& sink = *static_cast<Sink*>(context);
+        sink.files_empty = sink.files_empty && sink.paths->empty_reserved_files();
+        sink.bytes.append(reinterpret_cast<const char*>(bytes), size);
+        return true;
+    }, &sink) == CaptureRunResult::usb_error);
+    CHECK(fake.submit_count == 7 && fake.cancel_count == 3 && fake.free_count == 4);
+    CHECK(sink.files_empty && sink.bytes.size() == raw.size() && sink.bytes != raw);
+    CHECK(hardware.source_counters().empty_intervals == 1U);
+    CHECK(read_diagnostic_file(paths.prefix + ".raw") == raw);
+    std::vector<DiagnosticRow> rows;
+    CHECK(read_diagnostic_rows(paths, rows) && rows.size() == 7U);
+    CHECK(rows[0]["completion_order"] == 2 && rows[1]["completion_order"] == 1);
+    for (std::size_t index = 0U; index < rows.size(); ++index) {
+        auto& row = rows[index];
+        CHECK(row["submission_order"] == static_cast<std::int64_t>(index));
+        CHECK(row["slot"] == static_cast<std::int64_t>(index % 4U));
+        CHECK(row["generation"] == (index < 4U ? 1 : 2));
+        CHECK(row["requested_bytes"] == 65536 && row["submit_result"] == 0);
+        CHECK(row["submit_begin_ns"] > 0 && row["submit_end_ns"] >= row["submit_begin_ns"]);
+        CHECK(row["callback_entry_ns"] >= row["submit_end_ns"]);
+        CHECK(row["callback_ready_ns"] >= row["callback_entry_ns"]);
+        CHECK(row["raw_dropped_bytes"] == 0);
+        if (index >= 4U) {
+            CHECK(row["status"] == LIBUSB_TRANSFER_CANCELLED);
+            CHECK(row["callback_during_drain"] == 1 && row["processing_begin_ns"] == 0);
+            CHECK(row["disposition"] == static_cast<int>(ReceiveDiagnostic::Disposition::not_decoded));
+        } else {
+            CHECK(row["callback_during_drain"] == 0);
+            CHECK(row["processing_begin_ns"] >= row["callback_ready_ns"]);
+            CHECK(row["processing_end_ns"] >= row["processing_begin_ns"]);
+        }
+        if (index < 2U) {
+            CHECK(row["disposition"] == static_cast<int>(ReceiveDiagnostic::Disposition::decoded));
+            CHECK(row["raw_bytes"] == static_cast<std::int64_t>(index == 0U ? split : raw.size() - split));
+            CHECK(row["raw_offset"] == static_cast<std::int64_t>(index == 0U ? 0U : split));
+            CHECK(row["input_offset"] == row["raw_offset"]);
+            CHECK(row["raw_copy_end_ns"] >= row["processing_begin_ns"]);
+            CHECK(row["decode_begin_ns"] >= row["raw_copy_end_ns"]);
+            CHECK(row["decode_end_ns"] >= row["decode_begin_ns"]);
+            CHECK(row["processing_end_ns"] >= row["decode_end_ns"]);
+            CHECK(row["framer_accepted_delta"] == row["raw_bytes"]);
+            CHECK(row["sync_loss_delta"] == 0 && row["decode_error"] == 0);
+        } else {
+            CHECK(row["raw_bytes"] == 0 && row["decode_begin_ns"] == 0);
+        }
+    }
+    CHECK(rows[0]["emit_calls"] == 0 && rows[0]["framer_pending_after"] == split);
+    CHECK(rows[1]["emit_calls"] == 5 && rows[1]["emit_accepted"] == 5);
+    CHECK(rows[1]["framer_emitted_delta"] == 5 && rows[1]["framer_pending_after"] == 0);
+    CHECK(rows[1]["emit_first_ns"] >= rows[1]["decode_begin_ns"]);
+    CHECK(rows[1]["emit_last_ns"] >= rows[1]["emit_first_ns"]);
+    CHECK(rows[1]["decode_end_ns"] >= rows[1]["emit_last_ns"]);
+    CHECK(rows[1]["emit_total_ns"] <= rows[1]["emit_last_ns"] - rows[1]["emit_first_ns"]);
+    CHECK(rows[2]["status"] == LIBUSB_TRANSFER_TIMED_OUT && rows[2]["actual_bytes"] == 7);
+    CHECK(rows[2]["disposition"] == static_cast<int>(ReceiveDiagnostic::Disposition::no_data));
+    CHECK(rows[3]["status"] == LIBUSB_TRANSFER_ERROR && rows[3]["actual_bytes"] == 9);
+    CHECK(rows[3]["disposition"] == static_cast<int>(ReceiveDiagnostic::Disposition::status_error));
+    const auto csv = read_diagnostic_file(paths.prefix + ".csv");
+    CHECK(csv.find("# observed_valid_bytes=956\n# decoder_input_bytes=940\n") != std::string::npos);
+    CHECK(csv.find("# terminal_result=2\n# finalized=1\n") != std::string::npos);
+    return true;
+}
+
+bool test_receive_diagnostic_repeated_capture_and_disabled_path()
+{
+    ReceiveDiagnosticPaths first("repeat"), second("fresh");
+    ReceiveDiagnosticEnvironment environment;
+    CHECK(environment.set(first.prefix.c_str()));
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    const std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.stop().has_value());
+    const auto saved = read_diagnostic_file(first.prefix + ".csv");
+    CHECK(saved.find("# finalized=1\n") != std::string::npos);
+    const auto controls = fake.controls.size();
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).error() == Error::INTERNAL);
+    CHECK(fake.submit_count == 4 && fake.controls.size() == controls);
+    CHECK(read_diagnostic_file(first.prefix + ".csv") == saved);
+    CHECK(environment.set(second.prefix.c_str()));
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.stop().has_value());
+    std::vector<DiagnosticRow> rows;
+    CHECK(read_diagnostic_rows(second, rows) && rows.size() == 4U);
+    CHECK(rows[0]["submission_order"] == 0 && rows[0]["generation"] == 1);
+    CHECK(environment.set(nullptr));
+    const auto second_saved = read_diagnostic_file(second.prefix + ".csv");
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    for (auto* transfer : fake.submitted) CHECK(transfer->length == 65536);
+    complete_diagnostic_transfer(fake.submitted[1], LIBUSB_TRANSFER_ERROR, 8);
+    complete_diagnostic_transfer(fake.submitted[0], LIBUSB_TRANSFER_COMPLETED, 0);
+    CHECK(hardware.run(cancelled, discard_packets, nullptr) == CaptureRunResult::usb_error);
+    CHECK(fake.submit_count == 13 && fake.free_count == 12);
+    CHECK(hardware.source_counters().empty_intervals == 1U);
+    CHECK(read_diagnostic_file(first.prefix + ".csv") == saved);
+    CHECK(read_diagnostic_file(second.prefix + ".csv") == second_saved);
+    return true;
+}
+
+bool test_receive_diagnostic_sink_stop_and_drain_discard()
+{
+    ReceiveDiagnosticPaths paths("sink-stop");
+    ReceiveDiagnosticEnvironment environment;
+    CHECK(environment.set(paths.prefix.c_str()));
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    hooks.cancel = [](void* context, libusb_transfer* transfer) {
+        auto& fake = *static_cast<FakeUsb*>(context);
+        ++fake.cancel_count;
+        // A completion can win the race against cancellation. Its data must
+        // remain visible as discarded metadata, never become decoder input.
+        std::memset(transfer->buffer, 0xee, 13U);
+        complete_diagnostic_transfer(transfer, LIBUSB_TRANSFER_COMPLETED, 13);
+        return 0;
+    };
+    const std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    std::string raw(4U * kMpegTsPacketSize, '\x35');
+    for (std::size_t offset = 0U; offset < raw.size(); offset += kMpegTsPacketSize) {
+        raw[offset] = '\x47';
+    }
+    std::memcpy(fake.submitted[0]->buffer, raw.data(), raw.size());
+    complete_diagnostic_transfer(fake.submitted[0], LIBUSB_TRANSFER_COMPLETED,
+                                 static_cast<int>(raw.size()));
+    std::memset(fake.submitted[1]->buffer, 0xff, 8U);
+    complete_diagnostic_transfer(fake.submitted[1], LIBUSB_TRANSFER_COMPLETED, 8);
+    CHECK(hardware.run(cancelled, [](void*, const std::uint8_t*, std::size_t) {
+        return false;
+    }, nullptr) == CaptureRunResult::cancelled);
+    CHECK(fake.submit_count == 4 && fake.cancel_count == 2 && fake.free_count == 4);
+    CHECK(read_diagnostic_file(paths.prefix + ".raw") == raw);
+    std::vector<DiagnosticRow> rows;
+    CHECK(read_diagnostic_rows(paths, rows) && rows.size() == 4U);
+    CHECK(rows[0]["emit_calls"] == 1 && rows[0]["emit_accepted"] == 0);
+    CHECK(rows[0]["decode_error"] == static_cast<int>(Error::SLOW_CONSUMER));
+    CHECK(rows[0]["framer_accepted_delta"] == static_cast<std::int64_t>(raw.size()));
+    CHECK(rows[0]["framer_emitted_delta"] == 0);
+    CHECK(rows[1]["actual_bytes"] == 8 && rows[1]["callback_during_drain"] == 0);
+    for (std::size_t index = 1U; index < rows.size(); ++index) {
+        CHECK(rows[index]["status"] == LIBUSB_TRANSFER_COMPLETED);
+        CHECK(rows[index]["disposition"] == static_cast<int>(ReceiveDiagnostic::Disposition::not_decoded));
+        CHECK(rows[index]["processing_begin_ns"] == 0 && rows[index]["raw_bytes"] == 0);
+        if (index >= 2U) {
+            CHECK(rows[index]["actual_bytes"] == 13 && rows[index]["callback_during_drain"] == 1);
+        }
+    }
+    const auto csv = read_diagnostic_file(paths.prefix + ".csv");
+    CHECK(csv.find("# observed_valid_bytes=786\n# decoder_input_bytes=752\n") != std::string::npos);
+    CHECK(csv.find("# terminal_result=1\n# finalized=1\n") != std::string::npos);
+    return true;
+}
+
+bool test_receive_diagnostic_destination_collision_precedes_usb()
+{
+    for (const char* suffix : {".raw", ".csv"}) {
+        ReceiveDiagnosticPaths paths("collision");
+        ReceiveDiagnosticEnvironment environment;
+        CHECK(environment.set(paths.prefix.c_str()));
+        std::FILE* file = std::fopen((paths.prefix + suffix).c_str(), "wb");
+        CHECK(file != nullptr);
+        CHECK(std::fputs("keep-existing", file) >= 0);
+        CHECK(std::fclose(file) == 0);
+        FakeUsb fake;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        const std::atomic<bool> cancelled{false};
+        CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).error() == Error::INTERNAL);
+        CHECK(fake.controls.empty() && fake.submit_count == 0 && fake.dsc_start_count == 0);
+        CHECK(read_diagnostic_file(paths.prefix + suffix) == "keep-existing");
+    }
+    return true;
+}
+
+bool test_receive_diagnostic_invalid_lengths_and_submit_failure()
+{
+    for (const int actual : {-1, 65537}) {
+        ReceiveDiagnosticPaths paths("invalid-length");
+        ReceiveDiagnosticEnvironment environment;
+        CHECK(environment.set(paths.prefix.c_str()));
+        FakeUsb fake;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        const std::atomic<bool> cancelled{false};
+        CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+        complete_diagnostic_transfer(fake.submitted[0], LIBUSB_TRANSFER_COMPLETED, actual);
+        CHECK(hardware.run(cancelled, discard_packets, nullptr) == CaptureRunResult::usb_error);
+        CHECK(fake.submit_count == 4 && fake.free_count == 4);
+        CHECK(read_diagnostic_file(paths.prefix + ".raw").empty());
+        std::vector<DiagnosticRow> rows;
+        CHECK(read_diagnostic_rows(paths, rows) && rows.size() == 4U);
+        CHECK(rows[0]["actual_bytes"] == actual && rows[0]["processing_begin_ns"] == 0);
+        CHECK(rows[0]["disposition"] == static_cast<int>(ReceiveDiagnostic::Disposition::invalid_length));
+        CHECK(read_diagnostic_file(paths.prefix + ".csv").find("# invalid_lengths=1\n") != std::string::npos);
+    }
+    ReceiveDiagnosticPaths paths("submit-failed");
+    ReceiveDiagnosticEnvironment environment;
+    CHECK(environment.set(paths.prefix.c_str()));
+    FakeUsb fake;
+    fake.fail_submit_number = 2;
+    fake.fail_submit_error = LIBUSB_ERROR_NO_MEM;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    const std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).error() == Error::INTERNAL);
+    CHECK(fake.cancel_count == 1 && fake.free_count == 4 && fake.dsc_start_count == 0);
+    std::vector<DiagnosticRow> rows;
+    CHECK(read_diagnostic_rows(paths, rows) && rows.size() == 2U);
+    CHECK(rows[1]["submit_result"] == LIBUSB_ERROR_NO_MEM);
+    CHECK(rows[1]["disposition"] == static_cast<int>(ReceiveDiagnostic::Disposition::submit_failed));
+    CHECK(rows[1]["completion_order"] == 0 && rows[1]["callback_entry_ns"] == 0);
+    CHECK(rows[0]["callback_during_drain"] == 1);
+    return true;
+}
+
+bool test_receive_diagnostic_fatal_drain_does_not_flush()
+{
+    ReceiveDiagnosticPaths paths("fatal-drain");
+    ReceiveDiagnosticEnvironment environment;
+    CHECK(environment.set(paths.prefix.c_str()));
+    FakeUsb fake;
+    fake.suppress_cancel_callbacks = true;
+    fake.fail_submit_number = 5;
+    {
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        // Exercise the existing bounded event-call limit without eight seconds
+        // of simulated event waits. All pending callbacks remain undelivered.
+        hooks.pump_events = FakeUsb::pump_hook;
+        const std::atomic<bool> cancelled{false};
+        CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+        std::memset(fake.submitted[0]->buffer, 0x35, 8U);
+        complete_diagnostic_transfer(fake.submitted[0], LIBUSB_TRANSFER_COMPLETED, 8);
+        CHECK(hardware.run(cancelled, discard_packets, nullptr) == CaptureRunResult::fatal_drain);
+        CHECK(fake.submit_count == 5 && fake.free_count == 0);
+        CHECK(paths.empty_reserved_files());
+        CHECK(hardware.stop().error() == Error::USB_IO);
+    }
+    for (std::size_t index = 1U; index < fake.submitted.size(); ++index) {
+        complete_diagnostic_transfer(fake.submitted[index], LIBUSB_TRANSFER_CANCELLED, 0);
+    }
+    CHECK(fake.free_count == 0 && paths.empty_reserved_files());
+    // Quarantine intentionally retains callbacks and open files until process
+    // exit. Windows cannot unlink those files while the handles remain open.
     return true;
 }
 
@@ -1683,11 +2079,26 @@ bool test_legacy_revision_guard_precedes_any_board_write()
 
 int main()
 {
+    // An opt-in intended for a hardware run must not affect offline fixtures.
+    ReceiveDiagnosticEnvironment environment;
+    if (!environment.set(nullptr)) return 1;
     struct TestCase {
         const char* name;
         bool (*run)();
     };
     const TestCase tests[] = {
+        {"test_receive_diagnostic_order_bytes_and_timestamps",
+         test_receive_diagnostic_order_bytes_and_timestamps},
+        {"test_receive_diagnostic_repeated_capture_and_disabled_path",
+         test_receive_diagnostic_repeated_capture_and_disabled_path},
+        {"test_receive_diagnostic_sink_stop_and_drain_discard",
+         test_receive_diagnostic_sink_stop_and_drain_discard},
+        {"test_receive_diagnostic_destination_collision_precedes_usb",
+         test_receive_diagnostic_destination_collision_precedes_usb},
+        {"test_receive_diagnostic_invalid_lengths_and_submit_failure",
+         test_receive_diagnostic_invalid_lengths_and_submit_failure},
+        {"test_receive_diagnostic_fatal_drain_does_not_flush",
+         test_receive_diagnostic_fatal_drain_does_not_flush},
         {"test_final_ready_read_keeps_bounded_selection_budget",
          test_final_ready_read_keeps_bounded_selection_budget},
         {"test_resubmit_disconnect_is_terminal_disconnect",

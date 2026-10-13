@@ -237,7 +237,8 @@ private:
                   std::uint8_t* output) noexcept;
     bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value) noexcept;
     bool set_cf_bit(std::uint8_t local, std::uint8_t mask, bool value) noexcept;
-    CaptureRunResult stop_and_drain(bool dsc_was_attempted) noexcept;
+    CaptureRunResult stop_and_drain(bool dsc_was_attempted,
+                                    CaptureRunResult capture_result = CaptureRunResult::cancelled) noexcept;
     CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept;
     bool handle_events(unsigned timeout_ms) noexcept;
     bool stop_capture_safely() noexcept override;

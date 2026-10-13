@@ -4,6 +4,7 @@
 #include "asicen/device_profile.h"
 #include "asicen/enclosure.h"
 #include "asicen/hardware_gpio_guard.h"
+#include "asicen/receive_diagnostic.h"
 #include "asicen/transport_transform.h"
 #include "asicen/write_protocol.h"
 #if defined(_WIN32)
@@ -17,6 +18,7 @@
 #include <array>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #if !defined(_WIN32)
@@ -174,6 +176,7 @@ struct LibusbW3u3Hardware::AsyncState {
         bool ready = false;
         std::uint64_t generation = 0;
         std::uint64_t submission_order = 0U;
+        ReceiveDiagnostic::Record* diagnostic_record = nullptr;
     };
     std::array<Slot, kQueueDepth> slots{};
     std::uint64_t next_submission_order = 0U;
@@ -181,7 +184,9 @@ struct LibusbW3u3Hardware::AsyncState {
     bool prepared = false;
     bool drain_failed = false;
     bool raw_io_enabled = false;
+    bool diagnostic_write_failed = false;
     std::uint8_t endpoint = 0U;
+    ReceiveDiagnostic diagnostic;
     std::mutex mutex;
 
     static void LIBUSB_CALL completed(libusb_transfer* transfer)
@@ -191,6 +196,8 @@ struct LibusbW3u3Hardware::AsyncState {
             return;
         }
         AsyncState& state = *slot->owner;
+        const std::uint64_t callback_entry = state.diagnostic.enabled()
+                                                   ? state.diagnostic.stamp() : 0U;
         {
             std::lock_guard<std::mutex> lock(state.mutex);
             if (!slot->pending || slot->transfer != transfer) {
@@ -201,8 +208,12 @@ struct LibusbW3u3Hardware::AsyncState {
             slot->status = static_cast<int>(transfer->status);
             slot->actual = transfer->actual_length;
             slot->ready = true;
-            if (slot->actual < 0 || static_cast<std::size_t>(slot->actual) > slot->buffer.size() ||
-                slot->actual > transfer->length) {
+            const bool valid_length = slot->actual >= 0 &&
+                static_cast<std::size_t>(slot->actual) <= slot->buffer.size() &&
+                slot->actual <= transfer->length;
+            state.diagnostic.completed(slot->diagnostic_record, slot->status, slot->actual,
+                                        valid_length, callback_entry);
+            if (!valid_length) {
                 state.drain_failed = true;
                 return;
             }
@@ -2234,6 +2245,25 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     if (endpoint == 0U) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
+    if (!async_) {
+        async_.reset(new (std::nothrow) AsyncState());
+        if (!async_) {
+            return Result<void>::failure(Error::INTERNAL);
+        }
+    }
+    AsyncState& state = *async_;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.prepared) {
+            return Result<void>::failure(Error::BUSY);
+        }
+    }
+    // Opt-in diagnostic setup precedes stream-side hardware changes and USB
+    // submissions. An invalid/colliding destination fails the capture clearly.
+    if (!state.diagnostic.initialize(std::getenv("ASICEN_RX_DIAGNOSTIC_PREFIX"))) {
+        return Result<void>::failure(Error::INTERNAL);
+    }
+    state.diagnostic_write_failed = false;
     source_receiver_ = receiver;
     dsc_attempted_ = false;
     dsc_stopped_ = true;
@@ -2243,7 +2273,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     output_start_attempted_ = false;
     const auto fail_prepare = [this](Error error) {
         error = transport_failure(error);
-        const CaptureRunResult cleanup = stop_and_drain(dsc_attempted_);
+        const CaptureRunResult cleanup = stop_and_drain(dsc_attempted_, CaptureRunResult::usb_error);
         if (cleanup == CaptureRunResult::fatal_drain) {
             return Result<void>::failure(Error::USB_IO);
         }
@@ -2289,13 +2319,6 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     if (!set_cf_bit(local, 0x03U, true)) {
         return fail_prepare(Error::USB_IO);
     }
-    if (!async_) {
-        async_.reset(new (std::nothrow) AsyncState());
-        if (!async_) {
-            return fail_prepare(Error::INTERNAL);
-        }
-    }
-    AsyncState& state = *async_;
     bool already_prepared = false;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -2309,6 +2332,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
             slot.pending = false;
             slot.ready = false;
             slot.generation = 0U;
+            slot.diagnostic_record = nullptr;
         }
     }
     if (already_prepared) {
@@ -2347,12 +2371,19 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
             slot.pending = true;
             ++slot.generation;
             slot.submission_order = state.next_submission_order++;
+            slot.diagnostic_record = state.diagnostic.begin_submission(
+                static_cast<std::uint32_t>(&slot - state.slots.data()), slot.generation,
+                slot.submission_order, static_cast<std::uint32_t>(slot.buffer.size()));
         }
-        if (submit_transfer(slot.transfer) != 0) {
-            {
-                std::lock_guard<std::mutex> lock(state.mutex);
+        const int submit_result = submit_transfer(slot.transfer);
+        if (state.diagnostic.enabled() || submit_result != 0) {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.diagnostic.submitted(slot.diagnostic_record, submit_result);
+            if (submit_result != 0) {
                 slot.pending = false;
             }
+        }
+        if (submit_result != 0) {
             return fail_prepare(Error::USB_IO);
         }
     }
@@ -2410,6 +2441,9 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
                     queued.ready = false;
                     slot_status = queued.status;
                     slot_actual = queued.actual;
+                    if (queued.diagnostic_record != nullptr) {
+                        queued.diagnostic_record->processing_begin_ns = state.diagnostic.stamp();
+                    }
                     break;
                 }
             }
@@ -2427,7 +2461,12 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
             continue;
         }
         AsyncState::Slot& slot = state.slots[index];
+        auto* record = slot.diagnostic_record;
         if (slot_status != LIBUSB_TRANSFER_COMPLETED && slot_status != LIBUSB_TRANSFER_TIMED_OUT) {
+            if (record != nullptr) {
+                record->disposition = ReceiveDiagnostic::Disposition::status_error;
+                record->processing_end_ns = state.diagnostic.stamp();
+            }
             outcome = slot_status == LIBUSB_TRANSFER_NO_DEVICE || disconnected_.load()
                           ? CaptureRunResult::disconnected
                           : CaptureRunResult::usb_error;
@@ -2435,19 +2474,54 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
         }
         if (slot_status == LIBUSB_TRANSFER_COMPLETED && slot_actual > 0) {
             const auto before = decoder_.sync_loss_events();
+            const auto framing_before = record != nullptr ? decoder_.counters()
+                                                          : TsFramer::Counters{};
+            state.diagnostic.decoder_input(record, slot.buffer.data(),
+                                            static_cast<std::size_t>(slot_actual));
             struct Sink {
                 bool (*emit)(void*, const std::uint8_t*, std::size_t);
                 void* context;
-            } sink{emit, context};
+                ReceiveDiagnostic* diagnostic;
+                ReceiveDiagnostic::Record* record;
+            } sink{emit, context, &state.diagnostic, record};
+            if (record != nullptr) {
+                record->decode_begin_ns = state.diagnostic.stamp();
+            }
             const auto delivered = decoder_.push(
                 {slot.buffer.data(), static_cast<std::size_t>(slot_actual)},
                 [](void* opaque, px4::userland::ByteView packet) noexcept {
                     auto& target = *static_cast<Sink*>(opaque);
-                    return target.emit(target.context, packet.data, packet.size)
-                               ? Result<void>::success()
-                               : Result<void>::failure(Error::SLOW_CONSUMER);
+                    const auto begin = target.record != nullptr ? target.diagnostic->stamp() : 0U;
+                    const bool accepted = target.emit(target.context, packet.data, packet.size);
+                    if (target.record != nullptr) {
+                        const auto end = target.diagnostic->stamp();
+                        if (target.record->emit_calls == 0U) {
+                            target.record->emit_first_ns = begin;
+                        }
+                        target.record->emit_last_ns = end;
+                        target.record->emit_total_ns += end - begin;
+                        ++target.record->emit_calls;
+                        target.record->emit_accepted += accepted ? 1U : 0U;
+                    }
+                    return accepted ? Result<void>::success()
+                                    : Result<void>::failure(Error::SLOW_CONSUMER);
                 },
                 &sink);
+            if (record != nullptr) {
+                record->decode_end_ns = state.diagnostic.stamp();
+                const auto framing_after = decoder_.counters();
+                record->sync_loss_delta = framing_after.sync_loss_events -
+                                           framing_before.sync_loss_events;
+                record->sync_discard_delta = framing_after.discarded_sync_search_bytes -
+                                             framing_before.discarded_sync_search_bytes;
+                record->framer_accepted_delta = framing_after.input_bytes_accepted -
+                                                framing_before.input_bytes_accepted;
+                record->framer_emitted_delta = framing_after.emitted_packets -
+                                                framing_before.emitted_packets;
+                record->framer_pending_after = framing_after.buffered_bytes;
+                record->decode_error = delivered ? 0 : static_cast<int>(delivered.error());
+                record->processing_end_ns = state.diagnostic.stamp();
+            }
             capture_sync_errors_.fetch_add(decoder_.sync_loss_events() - before);
             if (cleanup_failed_.load(std::memory_order_acquire)) {
                 outcome = CaptureRunResult::usb_error;
@@ -2460,6 +2534,10 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
             }
         } else {
             capture_empty_intervals_.fetch_add(1U);
+            if (record != nullptr) {
+                record->disposition = ReceiveDiagnostic::Disposition::no_data;
+                record->processing_end_ns = state.diagnostic.stamp();
+            }
         }
         {
             std::lock_guard<std::mutex> lock(state.mutex);
@@ -2472,10 +2550,19 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
             slot.pending = true;
             ++slot.generation;
             slot.submission_order = state.next_submission_order++;
+            slot.diagnostic_record = state.diagnostic.begin_submission(
+                static_cast<std::uint32_t>(index), slot.generation, slot.submission_order,
+                static_cast<std::uint32_t>(slot.buffer.size()));
         }
-        if (submit_transfer(slot.transfer) != 0) {
+        const int submit_result = submit_transfer(slot.transfer);
+        if (state.diagnostic.enabled() || submit_result != 0) {
             std::lock_guard<std::mutex> lock(state.mutex);
-            slot.pending = false;
+            state.diagnostic.submitted(slot.diagnostic_record, submit_result);
+            if (submit_result != 0) {
+                slot.pending = false;
+            }
+        }
+        if (submit_result != 0) {
             outcome =
                 disconnected_.load() ? CaptureRunResult::disconnected : CaptureRunResult::usb_error;
             break;
@@ -2484,7 +2571,7 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
     if (cleanup_failed_.load(std::memory_order_acquire)) {
         outcome = CaptureRunResult::usb_error;
     }
-    const CaptureRunResult cleanup = stop_and_drain(dsc_attempted_);
+    const CaptureRunResult cleanup = stop_and_drain(dsc_attempted_, outcome);
     if (cleanup == CaptureRunResult::fatal_drain) {
         return cleanup;
     }
@@ -2493,6 +2580,9 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
         return cleanup;
     }
     source_prepared_ = false;
+    if (state.diagnostic_write_failed) {
+        return CaptureRunResult::usb_error;
+    }
     if (outcome == CaptureRunResult::usb_error || outcome == CaptureRunResult::disconnected) {
         return outcome;
     }
@@ -2546,13 +2636,17 @@ Result<void> LibusbW3u3Hardware::stop() noexcept
         source_receiver_ = kNoActiveReceiver;
     }
     if (!cleanup_failed_.load()) {
+        if (async_ && async_->diagnostic_write_failed) {
+            return Result<void>::failure(Error::INTERNAL);
+        }
         return Result<void>::success();
     }
     const int stored = cleanup_failure_error_.load(std::memory_order_acquire);
     return Result<void>::failure(stored == 0 ? Error::USB_IO : static_cast<Error>(stored));
 }
 
-CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noexcept
+CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted,
+                                                  CaptureRunResult capture_result) noexcept
 {
     if (abandoned_) {
         return CaptureRunResult::fatal_drain;
@@ -2565,14 +2659,27 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
     // beginning cancellation. Never abandon an owner that still uses `this`.
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_);
     AtomicFlagScope cleanup_scope(cleanup_io_active_);
+    if (async_) {
+        std::lock_guard<std::mutex> lock(async_->mutex);
+        async_->diagnostic.begin_drain();
+    }
     DrainAdapter ops(*this);
     const CaptureRunResult result =
         drain_capture_callbacks(ops, dsc_was_attempted, dsc_stopped_, kDrainLimit);
     if (result == CaptureRunResult::fatal_drain) {
+        if (async_ && async_->diagnostic.enabled()) {
+            std::fprintf(stderr, "receive diagnostic: callback drain failed; output was not "
+                                 "flushed and reserved files are incomplete\n");
+        }
         quarantine_capture();
     }
     if (result != CaptureRunResult::cancelled) {
         mark_cleanup_failed(Error::USB_IO);
+    }
+    if (async_ && !async_->diagnostic.flush_after_drain(static_cast<unsigned>(
+                     result == CaptureRunResult::cancelled ? capture_result : result))) {
+        // Surface output failure without claiming hardware cleanup failed.
+        async_->diagnostic_write_failed = true;
     }
     return result;
 }

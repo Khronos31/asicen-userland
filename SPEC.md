@@ -23,6 +23,18 @@ automation has its own provenance and remains separate from this C++ pin.
 
 ## Objective
 
+Diagnostic branch exception (2026-10-13, Issue #7): the user requested bounded,
+opt-in receive timing and pre-transform input recording after the 64 KiB
+size-only comparison improved but did not eliminate CS errors. This branch
+keeps four 64 KiB transfers and the existing hardware protocol, decoder, framing,
+CC contract and resubmission ordering. The recorder is disabled by default and
+does not change the shared CLI or IPC. It captures no card traffic, link seeds
+or keys. File output occurs only after successful transfer draining; overflow
+and incomplete evidence must be explicit. See
+[the diagnostic procedure](docs/receive-timing-diagnostic.md). This exception is
+not a production specification change, a release-candidate replacement, or a
+hardware acceptance claim.
+
 Receive real PX-W3U3 MPEG-TS with a direct libusb userland implementation and
 decode it using recisdb-rs and a legitimately provisioned B-CAS reader. Provide
 the px4-userland CLI workflow as closely as the ASICEN hardware permits.
