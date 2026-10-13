@@ -9,7 +9,6 @@
 #include "asicen/ts_framer.h"
 
 #include <atomic>
-#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -18,6 +17,10 @@
 #include <memory>
 #include <thread>
 #include <vector>
+
+namespace px4::userland {
+class TsContinuityChecker;
+}
 
 namespace asicen {
 
@@ -136,11 +139,8 @@ private:
     std::unique_ptr<std::uint8_t[]> queue_;
     std::size_t queue_head_ = 0U;
     std::size_t queue_bytes_ = 0U;
-    struct Continuity {
-        bool seen = false;
-        std::uint8_t counter = 0U;
-    };
-    std::array<Continuity, 8192U> continuity_{};
+    // One stream-owned checker, allocated before capture (about 1.6 MiB).
+    std::unique_ptr<px4::userland::TsContinuityChecker> continuity_;
     px4::userland::TunerStreamCounters counters_{};
     px4::userland::TunerAttachment attachment_{};
     px4::userland::TunerAttachment final_attachment_{};

@@ -881,6 +881,12 @@ endif()
 
 if(ASICEN_BUILD_TESTS)
     enable_testing()
+    # The upstream header-only checker and its unchanged portable regression fixture.
+    add_executable(asicen-ts-continuity-tests ${ASICEN_PX4_ROOT}/tests/ts_continuity_tests.cpp)
+    target_include_directories(asicen-ts-continuity-tests PRIVATE ${ASICEN_PX4_ROOT}/include)
+    asicen_enable_project_warnings(asicen-ts-continuity-tests)
+    add_test(NAME asicen-ts-continuity-tests COMMAND asicen-ts-continuity-tests)
+
     # Preserve the reference's portable helper API and FIFO oracle without
     # including synthetic transports in production builds.
     add_library(asicen_transport_mock STATIC ${ASICEN_PX4_ROOT}/src/mock_transport.cpp)

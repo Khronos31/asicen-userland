@@ -77,7 +77,7 @@ git push origin vX.Y.Z
 
 0.1.0 の `release_tag.yml` は、同じ ASICEN tag commit にあるローカルの `release_reusable.yml` を使用します。PX4 のレビュー済み共通 publisher/verifier とテストを GPL-2.0-only のまま一時的に内包し、取得元・固定 commit・hash・必要な差分を [provenance](release-automation-provenance.md) に記録します。両 job の helper checkout は ASICEN 自身の exact tag SHA に一致させ、別 repository や異なる SHA を拒否します。テストも ASICEN の対象 commit を checkout し、PX4 の外部 checkout・cross-repository reusable workflow・`referenced_workflows` の外部エントリには依存しません。
 
-ASICEN 0.1.0 は PX4 の次回 WinSCard リリースを待ちません。後日、共通自動化を含む PX4 の正式リリースが公開された後、その公式 tag が指す full commit SHA を確認して外部参照へ切り替えます。未リリース commit や浮動 branch/tag は外部依存先にせず、workflow pin と helper checkout の SHA 一致検証を維持します。切替自体はコード変更として新候補・必要な再確認の前に行い、既存候補への文書だけの後続変更に混ぜません。追加の token や Environment 承認は設けません。
+PX4 v0.2.1 の正式 tag commit `dd1c1bea16a5871085d5f2a42c009364c1ec7345` に共通自動化が含まれましたが、その固定版の publisher には compare API path と Actions artifact の Accept header の不具合が残っています。ASICEN 0.1.0 は既存のローカル同梱を維持し、[provenance](release-automation-provenance.md) に明示した 2 点だけを製品側の修正として候補固定前に反映します。未リリース PX4 の外部参照や、一度限りの PX4 リリース復旧処理は追加しません。将来の外部参照への切替では、必要な修正を含む正式リリースの full commit SHA を確認し、workflow と helper を同じ SHA へ揃えます。切替自体はコード変更として新候補・必要な再確認の前に行い、既存候補への文書だけの後続変更に混ぜません。追加の token や Environment 承認は設けません。
 
 共通 workflow は、同じ repository、正確な tag SHA/ref、`build_userland.yml`、`push` に対応した成功 run を確認します。候補/再現性 run についても repository、workflow、SHA、attempt、成功状態と実アーティファクトを照合します。run 未完了・失敗、artifact 期限切れ・欠落、入力不一致は公開を止める理由です。
 

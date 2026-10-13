@@ -41,6 +41,7 @@ enum class MessageType : std::uint16_t {
     CARD_TRANSMIT = 0x0035U,
     BEGIN_TRANSACTION = 0x0036U,
     END_TRANSACTION = 0x0037U,
+    CARD_HANDLE_STATUS = 0x0038U,
     ATTACH_STREAM = 0x0040U,
     TS_DATA = 0x8040U,
     DEVICE_EVENT = 0x80f0U,
@@ -402,8 +403,11 @@ private:
 inline constexpr std::uint32_t kCapabilityEvents = 1U << 0U;
 inline constexpr std::uint32_t kCapabilityCard = 1U << 1U;
 inline constexpr std::uint32_t kCapabilityStreamStats = 1U << 2U;
+// Opt-in strict CARD lifetime and atomic owned CARD_HANDLE_STATUS snapshots.
+inline constexpr std::uint32_t kCapabilityCardGenerationBinding = 1U << 3U;
 inline constexpr std::uint32_t kKnownCapabilities =
-    kCapabilityEvents | kCapabilityCard | kCapabilityStreamStats;
+    kCapabilityEvents | kCapabilityCard | kCapabilityStreamStats |
+    kCapabilityCardGenerationBinding;
 
 enum class ConnectionRole : std::uint8_t {
     control_client,

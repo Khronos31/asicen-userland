@@ -234,6 +234,83 @@ TunerAttachment identity(std::uint64_t attachment_id = 8U)
     return value;
 }
 
+
+std::vector<std::uint8_t> flatten_packets(
+    const std::vector<std::vector<std::uint8_t>>& packets)
+{
+    std::vector<std::uint8_t> bytes;
+    for (const auto& value : packets) {
+        bytes.insert(bytes.end(), value.begin(), value.end());
+    }
+    return bytes;
+}
+
+std::vector<std::uint8_t> adaptation_packet(std::uint8_t cc, bool payload,
+                                            bool discontinuity = false)
+{
+    auto bytes = packet(cc);
+    bytes[3U] = static_cast<std::uint8_t>((payload ? 0x30U : 0x20U) | cc);
+    bytes[4U] = payload ? 1U : 183U;
+    bytes[5U] = discontinuity ? 0x80U : 0U;
+    return bytes;
+}
+
+std::vector<std::uint8_t> pcr_packet(std::uint8_t cc)
+{
+    auto bytes = adaptation_packet(cc, true);
+    bytes[4U] = 13U;
+    bytes[5U] = 0x18U;  // PCR and OPCR; only the PCR timestamp may differ.
+    for (std::size_t index = 6U; index < 18U; ++index) {
+        bytes[index] = 0U;
+    }
+    bytes[10U] = 0x7eU;
+    bytes[16U] = 0x7eU;
+    return bytes;
+}
+
+bool check_quality_stream(const std::vector<std::vector<std::uint8_t>>& packets,
+                          std::uint64_t continuity_errors, std::uint64_t tei_packets,
+                          const char* message)
+{
+    asicen::MockTunerBackend frontend;
+    FakeSource source;
+    source.chunks = packets;
+    const auto expected = flatten_packets(packets);
+    asicen::HardwareStreamService service(
+        frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{expected.size()});
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start continuity regression stream");
+    const auto id = identity(32U);
+    CHECK(service.attach(id), "attach continuity regression stream");
+    CHECK(source.wait_emitted(packets.size()), "all continuity regression packets reach queue");
+    const auto stats = service.stats(id);
+    CHECK(stats && stats.value().continuity_errors == continuity_errors &&
+              stats.value().tei_packets == tei_packets,
+          message);
+    CHECK(stats.value().packets == packets.size() && stats.value().bytes == expected.size() &&
+              stats.value().queue_drops == 0U && stats.value().sync_errors == 0U &&
+              stats.value().usb_errors == 0U && stats.value().empty_intervals == 0U,
+          "continuity observation preserves packet, byte and independent error counters");
+    const auto terminal = service.terminal(id);
+    CHECK(terminal && terminal.value() == TunerStreamTerminal::none,
+          "continuity observation does not change capture termination");
+    std::vector<std::uint8_t> output(expected.size());
+    const auto read = service.read(id, {output.data(), output.size()}, {0U});
+    CHECK(read && read.value().bytes == expected.size() && !read.value().eof &&
+              !read.value().timed_out && output == expected,
+          "all packets, including duplicates and untrusted packets, are delivered byte-exactly");
+    CHECK(service.detach(id), "detach continuity regression stream");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop continuity regression source");
+    const auto final = service.final_snapshot(id);
+    CHECK(final && final.value().counters.continuity_errors == continuity_errors &&
+              final.value().counters.tei_packets == tei_packets &&
+              final.value().counters.packets == packets.size() &&
+              final.value().counters.bytes == expected.size() &&
+              final.value().terminal == static_cast<std::uint8_t>(TunerStreamTerminal::stopped),
+          "final snapshot retains exact continuity, TEI and delivery totals");
+    CHECK(service.release_final(id), "release continuity regression identity");
+    return true;
+}
+
 bool mock_stream_uses_canonical_bounds_and_attachment_identity()
 {
     asicen::MockTunerStream stream;
@@ -388,20 +465,249 @@ bool quality_counters_follow_enqueued_packets()
     const auto id = identity(31U);
     CHECK(service.attach(id), "attach quality observation");
     CHECK(source.wait_emitted(6U), "quality packets reach queue");
+    // Keep this fixture byte-for-byte: TEI CC=2 is untrusted, and current
+    // DI CC=7 explicitly rebases before CC=8. No trusted comparison is a
+    // gap; the separate trusted-gap regression below still requires one CC error.
     const auto stats = service.stats(id);
     CHECK(stats && stats.value().packets == 6U && stats.value().bytes == 1128U &&
-              stats.value().tei_packets == 1U && stats.value().continuity_errors == 1U &&
+              stats.value().tei_packets == 1U && stats.value().continuity_errors == 0U &&
               stats.value().sync_errors == 2U && stats.value().empty_intervals == 3U,
-          "quality counters include unread queue, PID gap, TEI, sync and empty intervals");
+          "quality counters include unread queue, independent TEI, DI, sync and empty intervals");
+    const auto expected = flatten_packets(source.chunks);
+    std::vector<std::uint8_t> output(expected.size());
+    const auto read = service.read(id, {output.data(), output.size()}, {0U});
+    CHECK(read && read.value().bytes == expected.size() && output == expected,
+          "quality observation preserves the entire original fixture byte-for-byte");
     CHECK(service.detach(id), "detach quality observation");
     const auto snapshot = service.final_snapshot(id);
     CHECK(snapshot && snapshot.value().counters.sync_errors == 2U &&
-              snapshot.value().counters.empty_intervals == 3U,
+              snapshot.value().counters.empty_intervals == 3U &&
+              snapshot.value().counters.tei_packets == 1U &&
+              snapshot.value().counters.continuity_errors == 0U,
           "source observations survive final snapshot");
     CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop quality source");
     const auto stopped_snapshot = service.final_snapshot(id);
     CHECK(stopped_snapshot && stopped_snapshot.value().counters.sync_errors == 2U,
           "source observations survive hardware cleanup");
+    return true;
+}
+
+bool continuity_duplicate_pairs_triples_and_conflicts()
+{
+    const auto first = packet(0U);
+    CHECK(check_quality_stream({first, first, packet(1U)}, 0U, 0U,
+                               "one exact duplicate is legal"),
+          "exact duplicate pair");
+    CHECK(check_quality_stream({first, first, first, packet(1U)}, 1U, 0U,
+                               "the third same-CC payload is a continuity error"),
+          "exact duplicate triple");
+    CHECK(check_quality_stream({first, first, first, first, packet(1U)}, 2U, 0U,
+                               "every payload after the duplicate pair remains an error"),
+          "long duplicate run");
+    auto conflict = first;
+    conflict.back() ^= 1U;
+    CHECK(check_quality_stream({first, conflict, conflict, packet(1U)}, 2U, 0U,
+                               "conflicting same-CC payloads never gain a duplicate allowance"),
+          "same-CC payload conflict");
+    auto other_pid = packet(12U);
+    other_pid[2U] = 0x21U;
+    auto null_packet = packet(9U);
+    null_packet[1U] = 0x1fU;
+    null_packet[2U] = 0xffU;
+    CHECK(check_quality_stream({first, other_pid, null_packet, first, packet(1U)}, 0U, 0U,
+                               "trusted other PIDs and null packets preserve per-PID adjacency"),
+          "multiplexed duplicate pair");
+    CHECK(check_quality_stream({packet(15U), packet(0U), packet(0U), packet(1U)}, 0U, 0U,
+                               "counter wrap and its one duplicate are legal"),
+          "wrap duplicate pair");
+    return true;
+}
+
+bool continuity_pcr_duplicate_exception_is_narrow()
+{
+    const auto first = pcr_packet(5U);
+    auto later = first;
+    later[6U] = 0x81U;
+    later[7U] = 0x34U;
+    later[8U] = 0x56U;
+    later[9U] = 0x78U;
+    later[10U] = 0xffU;
+    later[11U] = 43U;  // Valid PCR extension 299.
+    CHECK(check_quality_stream({first, later, packet(6U)}, 0U, 0U,
+                               "a duplicate may change only the valid PCR timestamp"),
+          "PCR timestamp duplicate");
+    CHECK(check_quality_stream({later, first, packet(6U)}, 0U, 0U,
+                               "PCR timestamp ordering is outside this CC-only observation"),
+          "nonmonotonic PCR timestamp duplicate");
+    auto third = later;
+    third[6U] ^= 1U;
+    CHECK(check_quality_stream({first, later, third, packet(6U)}, 1U, 0U,
+                               "PCR timestamp variation does not permit a third duplicate"),
+          "PCR timestamp triple");
+    for (const std::size_t position : {1U, 3U, 4U, 5U, 12U, 16U, 17U, 18U, 80U, 187U}) {
+        auto conflict = later;
+        conflict[position] ^= position == 1U ? 0x40U : position == 3U ? 0x80U : 1U;
+        CHECK(check_quality_stream({first, conflict, packet(6U)}, 1U, 0U,
+                                   "header, OPCR, stuffing and payload changes remain conflicts"),
+              "PCR exception excludes non-PCR bytes");
+    }
+    auto reserved = later;
+    reserved[10U] &= 0xfdU;
+    auto extension = later;
+    extension[11U] = 44U;  // Invalid PCR extension 300.
+    CHECK(check_quality_stream({first, reserved, extension, later, packet(6U)}, 1U, 0U,
+                               "invalid PCR fields break duplicate adjacency without rebasing CC"),
+          "invalid PCR duplicate adjacency");
+    return true;
+}
+
+bool continuity_adaptation_and_discontinuity_rebase()
+{
+    const auto first = packet(0U);
+    const auto adaptation = adaptation_packet(0U, false);
+    CHECK(check_quality_stream({first, adaptation, adaptation, packet(1U)}, 0U, 0U,
+                               "adaptation-only packets retain the counter without consuming it"),
+          "adaptation-only continuity");
+    CHECK(check_quality_stream({first, adaptation_packet(7U, false), packet(8U)}, 1U, 0U,
+                               "an adaptation-only counter jump is a real continuity error"),
+          "adaptation-only jump");
+    CHECK(check_quality_stream({first, adaptation, first, packet(1U)}, 1U, 0U,
+                               "adaptation-only packets interrupt payload duplicate adjacency"),
+          "adaptation-only duplicate boundary");
+    for (const bool payload : {false, true}) {
+        const auto discontinuity = adaptation_packet(7U, payload, true);
+        CHECK(check_quality_stream({first, discontinuity, packet(8U)}, 0U, 0U,
+                                   "valid current DI rebases both adaptation-only and payload CC"),
+              "DI rebases continuity");
+        CHECK(check_quality_stream({first, discontinuity, packet(11U), packet(12U)}, 1U, 0U,
+                                   "DI rebase gives no grace to a later trusted counter gap"),
+              "trusted gap after DI");
+    }
+    auto zero_length = adaptation_packet(7U, true);
+    zero_length[4U] = 0U;
+    zero_length[5U] = 0x80U;  // Payload, not adaptation flags.
+    CHECK(check_quality_stream({first, zero_length, packet(8U)}, 1U, 0U,
+                               "zero-length adaptation cannot treat the first payload byte as DI"),
+          "zero-length adaptation boundary");
+    auto last_payload_byte = adaptation_packet(1U, true);
+    last_payload_byte[4U] = 182U;
+    CHECK(check_quality_stream({first, last_payload_byte, packet(2U)}, 0U, 0U,
+                               "maximum payload adaptation length retains its one payload byte"),
+          "maximum payload adaptation boundary");
+    return true;
+}
+
+bool continuity_tei_and_invalid_packets_preserve_trusted_baselines()
+{
+    const auto first = packet(0U);
+    auto tei = packet(2U);
+    tei[1U] |= 0x80U;
+    CHECK(check_quality_stream({first, tei}, 0U, 1U,
+                               "TEI itself never creates a continuity error"),
+          "TEI-only observation");
+    CHECK(check_quality_stream({first, tei, packet(1U)}, 0U, 1U,
+                               "TEI is counted independently and does not replace trusted CC"),
+          "trusted baseline after TEI");
+    CHECK(check_quality_stream({first, tei, packet(3U), packet(4U)}, 1U, 1U,
+                               "a later trusted gap is counted once across the TEI packet"),
+          "trusted-gap regression");
+    CHECK(check_quality_stream({first, tei, first, packet(1U)}, 1U, 1U,
+                               "same-PID TEI invalidates duplicate adjacency"),
+          "TEI duplicate boundary");
+    auto foreign_tei = tei;
+    foreign_tei[2U] = 0x21U;
+    CHECK(check_quality_stream({first, foreign_tei, first, packet(1U)}, 1U, 1U,
+                               "untrusted TEI PID cannot preserve another PID's duplicate adjacency"),
+          "foreign-PID TEI duplicate boundary");
+    auto null_tei = tei;
+    null_tei[1U] = 0x9fU;
+    null_tei[2U] = 0xffU;
+    CHECK(check_quality_stream({first, null_tei, first, packet(1U)}, 1U, 1U,
+                               "TEI is independently counted even when the untrusted PID is null"),
+          "null-PID TEI duplicate boundary");
+    auto invalid = packet(7U);
+    invalid[3U] = 0x07U;  // Reserved adaptation_field_control.
+    CHECK(check_quality_stream({first, invalid, packet(1U)}, 0U, 0U,
+                               "invalid AFC is not a CC error and cannot replace trusted CC"),
+          "trusted baseline after invalid AFC");
+    CHECK(check_quality_stream({first, invalid, packet(3U), packet(4U)}, 1U, 0U,
+                               "a later trusted gap remains visible after an invalid packet"),
+          "trusted gap after invalid AFC");
+    invalid[2U] = 0x21U;
+    CHECK(check_quality_stream({first, invalid, first, packet(1U)}, 1U, 0U,
+                               "invalid foreign PID breaks duplicate adjacency globally"),
+          "foreign-PID invalid duplicate boundary");
+    auto invalid_sync = packet(7U);
+    invalid_sync[0U] = 0U;
+    CHECK(check_quality_stream({first, invalid_sync, first, packet(1U)}, 1U, 0U,
+                               "invalid sync does not manufacture CC state or preserve adjacency"),
+          "invalid-sync duplicate boundary");
+    for (const std::uint8_t length : {0U, 1U, 182U, 184U, 255U}) {
+        auto bad_length = adaptation_packet(7U, false, true);
+        bad_length[4U] = length;
+        CHECK(check_quality_stream({first, bad_length, packet(1U)}, 0U, 0U,
+                                   "invalid adaptation-only length cannot apply DI or rebase CC"),
+              "invalid adaptation-only length");
+    }
+    for (const std::uint8_t length : {183U, 184U, 255U}) {
+        auto bad_length = adaptation_packet(7U, true, true);
+        bad_length[4U] = length;
+        CHECK(check_quality_stream({first, bad_length, first, packet(1U)}, 1U, 0U,
+                                   "invalid payload adaptation length breaks adjacency despite DI"),
+              "invalid payload adaptation length");
+    }
+    return true;
+}
+
+bool continuity_state_resets_between_capture_epochs()
+{
+    // Prevent accidental embedding of the approximately 1.6 MiB checker on
+    // the caller's stack, including the default Windows stack.
+    static_assert(sizeof(asicen::HardwareStreamService) < 64U * 1024U,
+                  "the continuity checker must be stream-owned heap storage");
+    asicen::MockTunerBackend frontend;
+    FakeSource source;
+    const auto first = packet(0U);
+    auto tei = packet(7U);
+    tei[1U] |= 0x80U;
+    asicen::HardwareStreamService service(
+        frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{4U * 188U});
+    for (unsigned epoch = 0U; epoch < 2U; ++epoch) {
+        source.chunks = epoch == 0U
+            ? std::vector<std::vector<std::uint8_t>>{first, first, first, tei}
+            : std::vector<std::vector<std::uint8_t>>{first, first, packet(1U)};
+        const auto expected = flatten_packets(source.chunks);
+        const auto previous_emitted = source.emitted;  // Previous worker has been joined.
+        const std::uint64_t expected_errors = epoch == 0U ? 1U : 0U;
+        const auto id = identity(40U + epoch);
+        CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start fresh continuity epoch");
+        CHECK(service.attach(id), "attach fresh continuity epoch");
+        CHECK(source.wait_emitted(previous_emitted + source.chunks.size()),
+              "new epoch packets reach queue");
+        const auto stats = service.stats(id);
+        CHECK(stats && stats.value().continuity_errors == expected_errors &&
+                  stats.value().tei_packets == expected_errors &&
+                  stats.value().packets == source.chunks.size() &&
+                  stats.value().bytes == expected.size(),
+              "a new epoch clears trusted CC, consumed duplicate state and all quality counters");
+        CHECK(service.detach(id), "detach continuity epoch");
+        std::vector<std::uint8_t> output(expected.size());
+        const auto read = service.read(id, {output.data(), output.size()}, {0U});
+        CHECK(read && read.value().bytes == expected.size() && output == expected,
+              "every epoch drains byte-exactly after detach");
+        std::array<std::uint8_t, 188U> tail{};
+        const auto eof = service.read(id, {tail.data(), tail.size()}, {0U});
+        CHECK(eof && eof.value().eof && eof.value().terminal == TunerStreamTerminal::stopped,
+              "epoch drain retains the stopped terminal");
+        CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop continuity epoch source");
+        const auto final = service.final_snapshot(id);
+        CHECK(final && final.value().counters.continuity_errors == expected_errors &&
+                  final.value().counters.tei_packets == expected_errors &&
+                  final.value().counters.packets == source.chunks.size() &&
+                  final.value().counters.bytes == expected.size(),
+              "epoch final snapshot cannot inherit an earlier epoch's counters");
+        CHECK(service.release_final(id), "release epoch before starting another stream");
+    }
     return true;
 }
 
@@ -772,6 +1078,13 @@ int main()
         return 1;
     }
     if (!quality_counters_follow_enqueued_packets()) {
+        return 1;
+    }
+    if (!continuity_duplicate_pairs_triples_and_conflicts() ||
+        !continuity_pcr_duplicate_exception_is_narrow() ||
+        !continuity_adaptation_and_discontinuity_rebase() ||
+        !continuity_tei_and_invalid_packets_preserve_trusted_baselines() ||
+        !continuity_state_resets_between_capture_epochs()) {
         return 1;
     }
     if (!start_precedes_attach_and_full_identity_is_required()) {

@@ -1,6 +1,8 @@
 # px4-userland CLI adaptation boundary
 
-Current comparison baseline is PX4
+Current reusable-code comparison baseline is official PX4 v0.2.1
+`dd1c1bea16a5871085d5f2a42c009364c1ec7345`; see the [current reuse record](px4-v0.2.1-reuse.md).
+The earlier Issue #4 comparison used PX4
 `1a1485d0c3e972e0a47be907edb67949564aa9a7` and ASICEN starting point
 `42c92a6b27247498f1c2920fd98bb20a346e59e4`.
 The exhaustive discrepancy record is [Issue #4](https://github.com/Khronos31/asicen-userland/issues/4).

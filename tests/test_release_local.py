@@ -160,10 +160,11 @@ class LocalWorkflowTests(unittest.TestCase):
     def test_upstream_exact_copies_match_documented_frozen_hashes(self):
         provenance = (ROOT / "docs/release-automation-provenance.md").read_text()
         self.assertIn("b4635226082161ce09f811b1571c9dd25f40cf03", provenance)
+        self.assertIn("dd1c1bea16a5871085d5f2a42c009364c1ec7345", provenance)
         exact = re.findall(r"^\| `([^`]+)` \| `[^`]+` \| `([0-9a-f]{64})` \| exact \|$",
                            provenance, re.MULTILINE)
         self.assertEqual({path for path, _ in exact}, {
-            "scripts/release_verify.py", "scripts/release_publish.py",
+            "scripts/release_verify.py",
             "tests/test_release_verify.py", "tests/test_release_integration.py",
             "tests/fixtures/release-upstream/release_tag.yml",
             "tests/fixtures/release-upstream/release_reusable.yml",
@@ -172,6 +173,20 @@ class LocalWorkflowTests(unittest.TestCase):
         for path, expected in exact:
             with self.subTest(path=path):
                 self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), expected)
+
+    def test_real_http_boundary_regressions_also_cover_asicen_profile(self):
+        import test_release_publish as boundary
+        # Exercise the real GitHub URL/request/download implementation with
+        # mocked openers, not the orchestration FakeAPI. No network is used.
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(boundary.HTTPTests)
+        result = unittest.TestResult()
+        with patch.object(boundary, "REPOSITORY", REPOSITORY), \
+                patch.object(boundary, "PREFIX", "/repos/" + REPOSITORY):
+            suite.run(result)
+        self.assertGreater(result.testsRun, 0)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.skipped, [])
 
     def test_pending_record_example_is_not_a_completed_release_record(self):
         import test_release_publish as boundary

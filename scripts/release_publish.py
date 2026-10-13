@@ -121,9 +121,14 @@ class GitHub:
         require(path.startswith(self.prefix + "/") or path == self.prefix,
                 "API path is outside the release repository")
         parsed = urlsplit(path)
+        compare_path = re.fullmatch(
+            re.escape(self.prefix) + r"/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}",
+            parsed.path,
+        )
         require(not parsed.scheme and not parsed.netloc and not parsed.fragment
                 and not any(ord(c) < 32 for c in path)
-                and ".." not in parsed.path and "%" not in parsed.path,
+                and (".." not in parsed.path or compare_path is not None)
+                and "%" not in parsed.path,
                 "unsafe API path")
         return "https://api.github.com" + path
 
@@ -178,10 +183,14 @@ class GitHub:
     def download(self, path, destination):
         url = self.api_url(path)
         authenticated = True
+        actions_artifact = re.fullmatch(
+            re.escape(self.prefix) + r"/actions/artifacts/[1-9][0-9]*/zip", path,
+        ) is not None
         for _ in range(6):
             try:
-                response = self.request("GET", url, authenticated=authenticated,
-                                        accept="application/octet-stream")
+                accept = ("application/vnd.github+json"
+                          if authenticated and actions_artifact else "application/octet-stream")
+                response = self.request("GET", url, authenticated=authenticated, accept=accept)
             except HTTPError as exc:
                 if exc.code in (301, 302, 303, 307, 308):
                     url = safe_download_url(exc.headers.get("Location", ""))

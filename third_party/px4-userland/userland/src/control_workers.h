@@ -55,6 +55,7 @@ enum class ControlWorkerOperation : std::uint8_t {
     tuner_status,
     tuner_shutdown,
     card_status,
+    card_handle_status,
     card_status_combined,
     card_presence,
     card_connect,
@@ -91,6 +92,7 @@ struct ControlWorkerTask final {
     std::uint64_t lease_id = 0U;
     std::uint64_t card_handle = 0U;
     ShareMode share_mode = ShareMode::shared;
+    bool card_generation_bound = false;
     Disposition disposition = Disposition::leave;
     TuneRequestPayload tune{};
     std::array<std::uint8_t, kMaxCardPayload> apdu{};
@@ -131,11 +133,15 @@ struct ControlWorkerCompletion final {
 class ControlWorkerLanes final {
 public:
     static Result<std::unique_ptr<ControlWorkerLanes>> create(
-        CardService& card_service, TunerService& tuner_service) noexcept;
+        CardService& card_service, TunerService& tuner_service,
+        const char* runtime_directory = nullptr) noexcept;
+    // Windows wake sockets use this UTF-8 runtime parent. Only nullptr selects
+    // LOCALAPPDATA (for standalone callers); POSIX wake pipes ignore it.
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
     static Result<std::unique_ptr<ControlWorkerLanes>> create_for_test(
         CardService& card_service, TunerService& tuner_service,
-        const ControlWorkerStartupOptions& options) noexcept;
+        const ControlWorkerStartupOptions& options,
+        const char* runtime_directory = nullptr) noexcept;
     static void set_test_startup_options(
         ControlWorkerStartupOptions* options) noexcept;
 #endif

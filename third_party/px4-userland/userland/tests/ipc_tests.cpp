@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // ASICEN modification, 2026-10-10: profile-specific wire magic and LIST
 // fixtures; every upstream codec assertion is retained in both profiles.
+// ASICEN modification, 2026-10-13: apply that same magic to the new upstream
+// CARD_HANDLE_STATUS request and response golden frames.
 #include "px4/ipc.h"
 
 #include <array>
@@ -152,6 +154,10 @@ bool typed_roundtrip_for(MessageType type, MessageKind kind, ByteView payload)
         return kind == MessageKind::request ? static_cast<bool>(decode_empty_payload(payload)) :
                    TYPED_ROUNDTRIP(CardStatusResponsePayload,
                                    decode_card_status_response_payload);
+    case MessageType::CARD_HANDLE_STATUS:
+        return kind == MessageKind::request ?
+                   TYPED_ROUNDTRIP(CardHandleRequestPayload, decode_card_handle_request_payload) :
+                   TYPED_ROUNDTRIP(CardStatusResponsePayload, decode_card_status_response_payload);
     case MessageType::CARD_CONNECT:
         return kind == MessageKind::request ?
                    TYPED_ROUNDTRIP(CardConnectRequestPayload,
@@ -296,6 +302,14 @@ bool test_golden_frames_all_message_ids()
         PX4_TEST_MAGIC "01 00 00 00 37 00 00 00 44 33 22 11 09 00 00 00 "
         "08 07 06 05 04 03 02 01 01",
         MessageType::END_TRANSACTION, MessageKind::request, id));
+    CHECK(expect_golden(
+        PX4_TEST_MAGIC "01 00 00 00 38 00 00 00 44 33 22 11 08 00 00 00 "
+        "08 07 06 05 04 03 02 01",
+        MessageType::CARD_HANDLE_STATUS, MessageKind::request, id));
+    CHECK(expect_golden(
+        PX4_TEST_MAGIC "01 00 00 00 38 00 01 00 44 33 22 11 0d 00 00 00 "
+        "01 01 01 00 00 00 00 00 00 00 02 3b 00",
+        MessageType::CARD_HANDLE_STATUS, MessageKind::response, id));
     CHECK(expect_golden(
         PX4_TEST_MAGIC "01 00 00 00 40 00 00 00 44 33 22 11 18 00 00 00 "
         "08 07 06 05 04 03 02 01 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f",
@@ -624,7 +638,11 @@ bool test_success_and_error_payloads()
     CHECK(expect_valid_payload(MessageType::END_TRANSACTION, MessageKind::response, ""));
     CHECK(expect_valid_payload(MessageType::ATTACH_STREAM, MessageKind::response, ""));
 
-    constexpr std::array<MessageType, 18U> request_types{
+    CHECK(!expect_valid_payload(MessageType::CARD_HANDLE_STATUS, MessageKind::request, ""));
+    CHECK(!expect_valid_payload(MessageType::CARD_HANDLE_STATUS, MessageKind::request,
+                                "01 00 00 00 00 00 00 00 00"));
+    CHECK(!is_known_message_type(static_cast<MessageType>(0x0039U)));
+    constexpr std::array<MessageType, 19U> request_types{
         MessageType::HELLO,           MessageType::LIST,
         MessageType::STATUS,          MessageType::ACQUIRE,
         MessageType::RELEASE,         MessageType::TUNE,
@@ -633,7 +651,8 @@ bool test_success_and_error_payloads()
         MessageType::CARD_CONNECT,    MessageType::CARD_RECONNECT,
         MessageType::CARD_DISCONNECT, MessageType::CARD_RESET,
         MessageType::CARD_TRANSMIT,   MessageType::BEGIN_TRANSACTION,
-        MessageType::END_TRANSACTION, MessageType::ATTACH_STREAM};
+        MessageType::END_TRANSACTION, MessageType::ATTACH_STREAM,
+        MessageType::CARD_HANDLE_STATUS};
     for (const MessageType type : request_types) {
         CHECK(expect_valid_payload(type, MessageKind::error_response,
                                    "09 00 00 00 05 00 65 72 72 6f 72"));

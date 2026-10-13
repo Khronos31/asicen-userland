@@ -54,7 +54,7 @@ LNB 給電に関する注意点は以下のとおりです。
 
 旧候補の公開 CI では Linux（Ubuntu）ctest が 53/53、macOS arm64 が 51/51 でした。この値は今回の修正後候補の合格件数ではありません。修正後候補は、そのコミットの CI と配布アーカイブの監査結果を確認してください。配布する macOS アーカイブにはピン留めしたローダを同梱します。ビルド・オフライン試験は実機での受信確認とは別です。
 
-Windows 11 x86_64 は PX4 と同じ Phase 1（製品コマンドと CARD_* を含む同一ホスト IPC）の開発・ビルド検証対象です。WinSCard 互換 DLL / Microsoft PC/SC 登録は Phase 2 で、0.1.0 の Windows 配布・正式対応は行いません。Windows を含め、この parity 修正の build/offline 検証と実機認定は分けて記録します。
+Windows 11 x86_64 は Phase 1（製品コマンドと CARD_* を含む同一ホスト IPC）の開発・ビルド検証対象です。WinSCard 互換 DLL / Microsoft PC/SC 登録は Phase 2 で、0.1.0 の Windows 配布・正式対応は行いません。Windows を含め、この parity 修正の build/offline 検証と実機認定は分けて記録します。
 
 ## 必要条件
 

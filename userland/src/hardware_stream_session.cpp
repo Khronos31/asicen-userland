@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/hardware_stream_session.h"
+#include "px4/ts_continuity.h"
 
 #include <algorithm>
 #include <cstring>
@@ -52,6 +53,7 @@ HardwareStreamService::HardwareStreamService(px4::userland::TunerServiceBackend&
                                 ? 0U
                                 : queue_capacity.bytes),
       queue_(new (std::nothrow) std::uint8_t[queue_capacity_bytes_]),
+      continuity_(new (std::nothrow) px4::userland::TsContinuityChecker),
       thread_launcher_(thread_launcher)
 {
 }
@@ -246,7 +248,7 @@ Result<void> HardwareStreamService::start_capture(std::uint8_t receiver, System 
     if (queue_capacity_bytes_ == 0U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
-    if (!queue_) {
+    if (!queue_ || !continuity_) {
         return Result<void>::failure(Error::INTERNAL);
     }
     std::lock_guard<std::mutex> life(lifecycle_mutex_);
@@ -614,7 +616,9 @@ void HardwareStreamService::clear_attempt_locked() noexcept
 {
     queue_head_ = 0U;
     queue_bytes_ = 0U;
-    continuity_ = {};
+    if (continuity_) {
+        continuity_->reset();
+    }
     counters_ = {};
     attachment_ = {};
     final_attachment_ = {};
@@ -653,26 +657,11 @@ void HardwareStreamService::observe_packet_locked(const std::uint8_t* packet) no
     if ((packet[1U] & 0x80U) != 0U) {
         ++counters_.tei_packets;
     }
-    const std::size_t pid = (static_cast<std::size_t>(packet[1U] & 0x1fU) << 8U) | packet[2U];
-    if (pid == 0x1fffU) {
-        return;
-    }
-    const std::uint8_t adaptation = static_cast<std::uint8_t>((packet[3U] >> 4U) & 3U);
-    if (adaptation == 0U || adaptation == 2U) {
-        return;
-    }
-    const std::uint8_t counter = static_cast<std::uint8_t>(packet[3U] & 0x0fU);
-    const bool discontinuity = adaptation == 3U && packet[4U] != 0U &&
-                               static_cast<std::size_t>(packet[4U]) + 5U <= 188U &&
-                               (packet[5U] & 0x80U) != 0U;
-    auto& state = continuity_[pid];
-    if (state.seen && !discontinuity &&
-        counter != static_cast<std::uint8_t>((state.counter + 1U) & 0x0fU)) {
+    if (continuity_->observe(packet, px4::userland::TsContinuityChecker::kPacketSize).kind ==
+        px4::userland::TsContinuityKind::error) {
         ++counters_.continuity_errors;
     }
-    // No IT930x PSB startup-drop heuristic: ASICEN has different silicon.
-    state.seen = true;
-    state.counter = counter;
+    // Observation only: no filtering or IT930x PSB startup-drop heuristic.
 }
 
 }  // namespace asicen

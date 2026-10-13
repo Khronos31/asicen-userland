@@ -2,34 +2,42 @@
 
 ## Source and license
 
-For ASICEN 0.1.0, the reviewed PX4 release automation is temporarily embedded
-as local source. This avoids making ASICEN depend on an unreleased external
-workflow or wait for PX4's next WinSCard release. This import does not change
-the C++ parity baseline or imply hardware acceptance or release authorization.
+For ASICEN 0.1.0, the reviewed PX4 release automation remains embedded as
+product-owned local source. Its unchanged shared baseline is now also present
+in the official PX4 v0.2.1 release. Two bounded HTTP-boundary corrections below
+are maintained locally because that immutable release still contains the
+publisher defects. ASICEN does not fetch or execute unreleased PX4 source.
+This update does not change the C++ parity baseline or imply hardware
+acceptance or release authorization.
 
 - Repository: [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland)
-- Exact reviewed source: [`b4635226082161ce09f811b1571c9dd25f40cf03`](https://github.com/Khronos31/px4-userland/commit/b4635226082161ce09f811b1571c9dd25f40cf03)
+- Original reviewed import: [`b4635226082161ce09f811b1571c9dd25f40cf03`](https://github.com/Khronos31/px4-userland/commit/b4635226082161ce09f811b1571c9dd25f40cf03)
 - Upstream work: [PX4 PR #56](https://github.com/Khronos31/px4-userland/pull/56)
+- Official released baseline: [PX4 v0.2.1](https://github.com/Khronos31/px4-userland/releases/tag/v0.2.1),
+  tag commit [`dd1c1bea16a5871085d5f2a42c009364c1ec7345`](https://github.com/Khronos31/px4-userland/commit/dd1c1bea16a5871085d5f2a42c009364c1ec7345).
+  The baseline files listed below have the same bytes as the original import.
 - License: GPL-2.0-only. Imported files retain their SPDX notices. The exact
   upstream `LICENSE` is preserved in `third_party/release-automation/LICENSE`.
   This license does not apply to the separately identified vendor firmware.
 
-The source commit is provenance for this reviewed local copy, not an approved
-external release dependency. Its origin is recorded without claiming that
-PX4 has already published an official release containing it.
+The original import commit records history. The official tag commit identifies
+the released baseline; neither is an active external workflow dependency.
+Post-release PX4 fixes are cited below as review evidence for explicit local
+changes, never as an external checkout or reusable-workflow pin.
 
 ## Import inventory
 
-Hashes below are SHA-256 of the upstream file bytes at the source commit.
-`exact` entries remain byte-identical. Only the workflow adapter and test
-fixture selection described below differ; no publisher/verifier logic changes.
+Hashes below are SHA-256 of upstream file bytes at the official released
+baseline (also identical at the original import). `exact` entries remain
+byte-identical. The workflow adapter, test fixture selection and the explicitly
+listed local HTTP fixes are the only differences. Verifier logic is unchanged.
 
 | Local path | Upstream path | Upstream SHA-256 | Copy |
 | --- | --- | --- | --- |
 | `scripts/release_verify.py` | `scripts/release_verify.py` | `1c3ebe46b1b7c0d0079c7996a928a7eaefdcec69c01a06e2ff9da143dd34738a` | exact |
-| `scripts/release_publish.py` | `scripts/release_publish.py` | `961321ca9a3d8cf4eb762d94961f5edce708a18fbeb49fb9f4126ee8783ab47a` | exact |
+| `scripts/release_publish.py` | `scripts/release_publish.py` | `961321ca9a3d8cf4eb762d94961f5edce708a18fbeb49fb9f4126ee8783ab47a` | local HTTP fixes |
 | `tests/test_release_verify.py` | `tests/test_release_verify.py` | `1b8e520655b7d8a02390c611c5d739ea0e3088433cba0fe92a1e7f28b7a4941f` | exact |
-| `tests/test_release_publish.py` | `tests/test_release_publish.py` | `c01ba5cf866920a7da4f616dfd0d27e8d311336ff40dfc827d4e9b2ffb0276e6` | fixture paths only |
+| `tests/test_release_publish.py` | `tests/test_release_publish.py` | `c01ba5cf866920a7da4f616dfd0d27e8d311336ff40dfc827d4e9b2ffb0276e6` | fixture paths and HTTP regression additions |
 | `tests/test_release_integration.py` | `tests/test_release_integration.py` | `00beb76e195bed6450f97d15382a2e4aeef8a3f207fadcd0919b48995b9770f4` | exact |
 | `tests/fixtures/release-upstream/release_tag.yml` | `.github/workflows/release_tag.yml` | `55efbf775a55c14604dd344e06f4cfb87d11e43c9aa7880f967bc267d0059f02` | exact |
 | `tests/fixtures/release-upstream/release_reusable.yml` | `.github/workflows/release_reusable.yml` | `9e18a7f8f166ef5dcbac14628eb8996c621930dc792cb83d3abd76b411c68c3b` | exact |
@@ -51,10 +59,12 @@ fixture selection described below differ; no publisher/verifier logic changes.
   Changes to local scripts, tests and workflow/provenance documents trigger it.
 - The imported publisher suite selects frozen PX4 wrapper/reusable workflow
   fixtures only for the upstream workflow/bootstrap tests. All 83 original test
-  cases and assertions remain; its build-workflow assertions still inspect
-  ASICEN's real build workflow. The two other suites are exact copies. New
-  `tests/test_release_local.py` cases inspect and execute the actual ASICEN
-  workflow guards, enforce local SHA binding and reject external fetches.
+  cases and assertions remain, supplemented by four HTTP-boundary regressions;
+  its build-workflow assertions still inspect ASICEN's real build workflow.
+  The two other suites are exact copies. `tests/test_release_local.py` cases
+  inspect and execute the actual ASICEN workflow guards, enforce local SHA
+  binding and reject external fetches. The HTTP suite is also run against the
+  ASICEN product profile with mocked openers and no network.
 - The fixtures are test data, outside `.github/workflows`; they cannot launch
   a workflow or fetch PX4. Their bootstrap network boundary remains mocked.
   The shared tests continue covering both product profiles even though this
@@ -66,13 +76,48 @@ Windows 0.1.0 distribution exclusion, firmware binary/source rules and unresolve
 rights notice, fixed hardware/soak requirements and explicit user decisions are
 preserved. Offline tests do not certify physical hardware or publish a release.
 
+## Bounded local publisher corrections
+
+The released v0.2.1 publisher has two HTTP-boundary defects also present in
+the original ASICEN import. Before freezing a new ASICEN candidate, the local
+`scripts/release_publish.py` receives only these corrections:
+
+1. Allow GitHub's canonical compare path with two lowercase 40-hex commit
+   SHAs separated by `...` under the selected product repository. Continue
+   rejecting traversal, encoded paths, foreign repositories, absolute URLs,
+   fragments and control characters. The general `..` rejection must not
+   reject this exact GitHub compare endpoint.
+2. Use `application/vnd.github+json` on the authenticated, exact
+   `/actions/artifacts/<positive-id>/zip` API request. Use
+   `application/octet-stream` for Release assets and the subsequent signed
+   artifact download. Redirects remain HTTPS/approved-host only, and the token
+   is never forwarded to the signed download host.
+
+Review evidence: [PX4 PR #61](https://github.com/Khronos31/px4-userland/pull/61)
+for the compare-path correction and [PX4 PR #62](https://github.com/Khronos31/px4-userland/pull/62)
+for the Actions media contract. These references document local corrections;
+they are not dependency pins. No recovery-only Publisher options,
+`release_recover.py`, hardcoded PX4 v0.2.1 data, recovery workflow or recovery
+tests are imported.
+
+The regression tests exercise the real `GitHub.api_url`, `request` and
+`download` code through mocked HTTP openers rather than bypassing that boundary
+with `FakeAPI`. They check canonical/hostile compare paths, the Actions
+415/302 media contract, binary Release downloads and token-free redirect
+handling. This is offline boundary coverage, not a claim of live publication
+or physical-hardware validation.
+
 ## Later replacement
 
-After PX4 officially releases the shared automation, verify the official release
-tag and resolve it to its full commit SHA. Replace the temporary embedding with
-that released PX4 workflow/helper reference together, keeping immutable pin
-binding and rerunning both product suites plus the caller's security tests.
-Do not use a floating tag/branch, or another unreleased external commit.
+PX4 v0.2.1 officially contains the shared automation, but its publisher still
+has the two defects above. Keep ASICEN's existing local binding for this
+candidate. An eventual external replacement must use an official release that
+contains the required corrections: verify the tag's full commit SHA, replace
+the workflow and helper reference together, retain immutable pin binding, and
+rerun both product suites plus the caller's security tests. The released
+reusable workflow always checks out its own PX4 SHA; a patched ASICEN helper
+cannot silently override it. Do not use a floating tag/branch or an unreleased
+external commit.
 
 This replacement is a code/workflow change and must happen before freezing a
 new candidate and performing the required validation. Do not slip it into the
