@@ -88,3 +88,31 @@ This record describes fixed-source inspection and the proposed candidate changes
 Before freezing the candidate, execute the exact shared CC fixtures, native stream/counter/epoch tests, reference and ASICEN codec/worker/card suites, and the full platform CI/packaging/relink matrix. Compare all emitted bytes in the native fixtures. Verify the final artifact source SHA and the unchanged firmware/package policy. The Windows build script already stages both underscore and hyphen test names; the native runner selects `*tests.exe`, so the standalone checker target is included without changing release assets.
 
 Required ASICEN hardware/specification checks and user-selected soak/reproducibility decisions still apply. Release-note authoring and tag/publication remain separate later explicit requests; an offline pass cannot grant either.
+
+## ASICEN receive-performance follow-on (2026-10-13)
+
+After the import above, the ASICEN-specific backend selects four 65,536-byte
+bulk-IN transfers instead of four 4,096-byte transfers. The queue depth,
+completion/resubmission order, cancellation/drain contract and four-packet
+sync probe stay fixed. The size has an official high-throughput source basis in
+[linux-abi.md](reverse-engineering/linux-abi.md) and the four pending submissions
+in the [guarded trace](hardware-traces/2026-10-08-guarded-init.usbmon.txt).
+Neither historical source establishes clean reception for the new candidate.
+The lifecycle regression checks the submitted count/size and rejects negative
+or requested-length-plus-one completions without resubmission.
+
+The ASICEN mode-7 implementation additionally prepares DES schedules once per
+decoder and uses portable fused S/P tables. Packet bytes and per-chunk counters
+must match the frozen scalar oracle. The test-only differential/round suites
+cover that equivalence; the optional synthetic benchmark is excluded from the
+default build and is not a timing-based gate. No timing recorder, raw-input
+capture, diagnostic environment variable, workflow adapter or new crypto
+dependency is added to production. Shared PX4 sources and their official
+`dd1c1bea16a5871085d5f2a42c009364c1ec7345` pin remain untouched.
+
+These follow-on changes supersede only the implementation-level transform/size
+description above, not its protocol or support boundaries. They invalidate
+earlier candidate binary qualification. Exact changed-candidate build,
+reproducibility and the existing eight-archive hardware/soak evidence remain
+required by [release-validation.md](release-validation.md) and
+[release-record.md](release-record.md); no hardware pass is claimed here.

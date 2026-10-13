@@ -21,6 +21,25 @@ before the next candidate is frozen. The product VERSION stays 0.1.0; historical
 hardware evidence does not qualify the changed binaries. The embedded release
 automation has its own provenance and remains separate from this C++ pin.
 
+Receive-performance revision (2026-10-13): use four 65,536-byte asynchronous
+bulk-IN transfers in the ASICEN backend. This selects the official
+[high-throughput buffer size](docs/reverse-engineering/linux-abi.md), also
+observed as four pending transfers in the
+[guarded official trace](docs/hardware-traces/2026-10-08-guarded-init.usbmon.txt).
+Those historical submissions do not prove successful reception or qualify a
+new candidate. Preserve transfer ordering, draining, backpressure, the existing
+four-packet sync probe and all model/access-path support boundaries.
+
+The portable mode-7 transform may prepare its two DES schedules once per
+decoder and use fused S/P lookup tables, provided packet bytes, key boundaries,
+seed derivation, XOR order, invalid-input behavior and decoder counters remain
+identical to the original scalar implementation. Keep the scalar oracle and
+synthetic timing tool test-only; timing is not a pass/fail acceptance gate.
+The pinned PX4 packet/card contracts below, CLI, IPC and firmware are unchanged.
+This revision changes candidate binaries and therefore requires a new candidate
+and its existing release-validation gates; it is not a hardware acceptance,
+support expansion, release-note request or tag/publication authorization.
+
 ## Objective
 
 Receive real PX-W3U3 MPEG-TS with a direct libusb userland implementation and

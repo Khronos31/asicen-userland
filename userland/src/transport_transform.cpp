@@ -20,9 +20,6 @@ constexpr std::uint8_t kFinalPermutation[64] = {
     40, 8,  48, 16, 56, 24, 64, 32, 39, 7,  47, 15, 55, 23, 63, 31, 38, 6,  46, 14, 54, 22,
     62, 30, 37, 5,  45, 13, 53, 21, 61, 29, 36, 4,  44, 12, 52, 20, 60, 28, 35, 3,  43, 11,
     51, 19, 59, 27, 34, 2,  42, 10, 50, 18, 58, 26, 33, 1,  41, 9,  49, 17, 57, 25};
-constexpr std::uint8_t kExpansion[48] = {
-    32, 1,  2,  3,  4,  5,  4,  5,  6,  7,  8,  9,  8,  9,  10, 11, 12, 13, 12, 13, 14, 15, 16, 17,
-    16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25, 24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1};
 constexpr std::uint8_t kPermutation[32] = {16, 7, 20, 21, 29, 12, 28, 17, 1,  15, 23,
                                            26, 5, 18, 31, 10, 2,  8,  24, 14, 32, 27,
                                            3,  9, 19, 13, 30, 6,  22, 11, 4,  25};
@@ -61,7 +58,7 @@ constexpr std::uint8_t kSBoxes[8][64] = {
      15, 3, 5,  8, 2, 1,  14, 7,  4,  10, 8, 13, 15, 12, 9,  0,  3,  5,  6,  11}};
 
 template <std::size_t N>
-std::uint64_t permute(std::uint64_t input, const std::uint8_t (&table)[N], unsigned input_bits)
+constexpr std::uint64_t permute(std::uint64_t input, const std::uint8_t (&table)[N], unsigned input_bits)
 {
     std::uint64_t output = 0;
     for (std::size_t i = 0; i < N; ++i) {
@@ -70,11 +67,39 @@ std::uint64_t permute(std::uint64_t input, const std::uint8_t (&table)[N], unsig
     return output;
 }
 
-struct DesDecryptKey {
-    std::array<std::uint64_t, 16> subkeys{};
-};
+using DesDecryptKey = std::array<std::uint64_t, 16>;
 
-DesDecryptKey make_decrypt_key(const std::uint8_t* key)
+// Each six-bit index includes the S-box row/column mapping; each value already
+// occupies its final P-permuted bit positions. These eight contributions are
+// disjoint. Generate from the DES definitions instead of opaque magic tables.
+constexpr std::array<std::array<std::uint32_t, 64>, 8> make_sp_boxes()
+{
+    std::array<std::array<std::uint32_t, 64>, 8> result{};
+    for (unsigned box = 0; box < 8; ++box) {
+        for (unsigned six = 0; six < 64; ++six) {
+            const unsigned row = ((six & 0x20U) >> 4U) | (six & 1U);
+            const unsigned column = (six >> 1U) & 0x0fU;
+            const std::uint32_t substituted =
+                static_cast<std::uint32_t>(kSBoxes[box][row * 16U + column]) << (28U - 4U * box);
+            result[box][six] = static_cast<std::uint32_t>(permute(substituted, kPermutation, 32));
+        }
+    }
+    return result;
+}
+
+constexpr auto kSpBoxes = make_sp_boxes();
+static_assert(sizeof(kSpBoxes) == 2048, "DES S/P tables must remain compact");
+
+template <typename T>
+void wipe(T& value) noexcept
+{
+    volatile std::uint8_t* bytes = reinterpret_cast<volatile std::uint8_t*>(&value);
+    for (std::size_t i = 0; i < sizeof(value); ++i) {
+        bytes[i] = 0U;
+    }
+}
+
+void make_decrypt_key(const std::uint8_t* key, DesDecryptKey& result)
 {
     std::uint64_t key_bits = 0;
     for (std::size_t i = 0; i < 8; ++i) {
@@ -83,28 +108,29 @@ DesDecryptKey make_decrypt_key(const std::uint8_t* key)
     const std::uint64_t selected = permute(key_bits, kPc1, 64);
     std::uint32_t left = static_cast<std::uint32_t>((selected >> 28U) & 0x0fffffffU);
     std::uint32_t right = static_cast<std::uint32_t>(selected & 0x0fffffffU);
-    DesDecryptKey result;
-    for (std::size_t round = 0; round < result.subkeys.size(); ++round) {
+    for (std::size_t round = 0; round < result.size(); ++round) {
         const unsigned shift = kRotations[round];
         left = ((left << shift) | (left >> (28U - shift))) & 0x0fffffffU;
         right = ((right << shift) | (right >> (28U - shift))) & 0x0fffffffU;
-        result.subkeys[round] =
+        result[round] =
             permute((static_cast<std::uint64_t>(left) << 28U) | right, kPc2, 56);
     }
-    return result;
 }
 
 std::uint32_t feistel(std::uint32_t right, std::uint64_t subkey)
 {
-    const std::uint64_t mixed = permute(right, kExpansion, 32) ^ subkey;
-    std::uint32_t substituted = 0;
-    for (unsigned box = 0; box < 8; ++box) {
-        const std::uint8_t six = static_cast<std::uint8_t>((mixed >> (42U - 6U * box)) & 0x3fU);
-        const std::uint8_t row = static_cast<std::uint8_t>(((six & 0x20U) >> 4U) | (six & 1U));
-        const std::uint8_t column = static_cast<std::uint8_t>((six >> 1U) & 0x0fU);
-        substituted = (substituted << 4U) | kSBoxes[box][row * 16U + column];
-    }
-    return static_cast<std::uint32_t>(permute(substituted, kPermutation, 32));
+    // DES E expansion as eight fixed six-bit windows; the first and last wrap
+    // at bit 32. Keep the original 48-bit schedule order and decrypt rounds.
+    const auto first = ((right & 1U) << 5U) | (right >> 27U);
+    const auto last = ((right << 1U) | (right >> 31U)) & 0x3fU;
+    return kSpBoxes[0][(first ^ (subkey >> 42U)) & 0x3fU] ^
+           kSpBoxes[1][((right >> 23U) ^ (subkey >> 36U)) & 0x3fU] ^
+           kSpBoxes[2][((right >> 19U) ^ (subkey >> 30U)) & 0x3fU] ^
+           kSpBoxes[3][((right >> 15U) ^ (subkey >> 24U)) & 0x3fU] ^
+           kSpBoxes[4][((right >> 11U) ^ (subkey >> 18U)) & 0x3fU] ^
+           kSpBoxes[5][((right >> 7U) ^ (subkey >> 12U)) & 0x3fU] ^
+           kSpBoxes[6][((right >> 3U) ^ (subkey >> 6U)) & 0x3fU] ^
+           kSpBoxes[7][(last ^ subkey) & 0x3fU];
 }
 
 void des_decrypt_block(const std::uint8_t* input, const DesDecryptKey& key, std::uint8_t* output)
@@ -119,7 +145,7 @@ void des_decrypt_block(const std::uint8_t* input, const DesDecryptKey& key, std:
     for (int round = 15; round >= 0; --round) {
         const std::uint32_t next_left = right;
         const std::uint32_t next_right =
-            left ^ feistel(right, key.subkeys[static_cast<std::size_t>(round)]);
+            left ^ feistel(right, key[static_cast<std::size_t>(round)]);
         left = next_left;
         right = next_right;
     }
@@ -130,25 +156,20 @@ void des_decrypt_block(const std::uint8_t* input, const DesDecryptKey& key, std:
     }
 }
 
-} // namespace
-
-bool transform_transport_packet_v7(const std::uint8_t* input, std::size_t length,
-                                   const std::uint8_t* first_des_key,
-                                   const std::uint8_t* second_des_key,
-                                   const std::uint8_t* xor_state, std::uint8_t* output)
+void copy_and_xor_packet(const std::uint8_t* input, const std::uint8_t* xor_state,
+                         std::uint8_t* output)
 {
-    if (input == nullptr || first_des_key == nullptr || second_des_key == nullptr ||
-        xor_state == nullptr || output == nullptr || length != 188) {
-        return false;
-    }
     if (input != output) {
-        std::memcpy(output, input, length);
+        std::memcpy(output, input, 188);
     }
-    for (std::size_t offset = 4; offset < length; ++offset) {
+    for (std::size_t offset = 4; offset < 188; ++offset) {
         output[offset] ^= xor_state[kStateOrder[(offset - 4) % 8]];
     }
-    const auto first_key = make_decrypt_key(first_des_key);
-    const auto second_key = make_decrypt_key(second_des_key);
+}
+
+void decrypt_packet(const DesDecryptKey& first_key, const DesDecryptKey& second_key,
+                     std::uint8_t* output)
+{
     for (std::size_t offset = 4; offset < 132; offset += 8) {
         std::array<std::uint8_t, 8> block{};
         std::memcpy(block.data(), output + offset, block.size());
@@ -159,6 +180,88 @@ bool transform_transport_packet_v7(const std::uint8_t* input, std::size_t length
         std::memcpy(block.data(), output + offset, block.size());
         des_decrypt_block(block.data(), second_key, output + offset);
     }
+}
+
+} // namespace
+
+TransportTransformV7::~TransportTransformV7()
+{
+    clear();
+}
+
+TransportTransformV7::TransportTransformV7(TransportTransformV7&& other) noexcept
+    : first_subkeys_(other.first_subkeys_), second_subkeys_(other.second_subkeys_),
+      xor_state_(other.xor_state_), valid_(other.valid_)
+{
+    other.clear();
+}
+
+TransportTransformV7& TransportTransformV7::operator=(TransportTransformV7&& other) noexcept
+{
+    if (this != &other) {
+        clear();
+        first_subkeys_ = other.first_subkeys_;
+        second_subkeys_ = other.second_subkeys_;
+        xor_state_ = other.xor_state_;
+        valid_ = other.valid_;
+        other.clear();
+    }
+    return *this;
+}
+
+bool TransportTransformV7::prepare(const std::uint8_t* first_des_key,
+                                   const std::uint8_t* second_des_key,
+                                   const std::uint8_t* xor_state) noexcept
+{
+    clear();
+    if (first_des_key == nullptr || second_des_key == nullptr || xor_state == nullptr) {
+        return false;
+    }
+    make_decrypt_key(first_des_key, first_subkeys_);
+    make_decrypt_key(second_des_key, second_subkeys_);
+    std::memcpy(xor_state_.data(), xor_state, xor_state_.size());
+    valid_ = true;
+    return true;
+}
+
+void TransportTransformV7::clear() noexcept
+{
+    wipe(first_subkeys_);
+    wipe(second_subkeys_);
+    wipe(xor_state_);
+    valid_ = false;
+}
+
+bool TransportTransformV7::transform_packet(const std::uint8_t* input, std::size_t length,
+                                           std::uint8_t* output) const noexcept
+{
+    if (!valid_ || input == nullptr || output == nullptr || length != 188) {
+        return false;
+    }
+    copy_and_xor_packet(input, xor_state_.data(), output);
+    decrypt_packet(first_subkeys_, second_subkeys_, output);
+    return true;
+}
+
+bool transform_transport_packet_v7(const std::uint8_t* input, std::size_t length,
+                                   const std::uint8_t* first_des_key,
+                                   const std::uint8_t* second_des_key,
+                                   const std::uint8_t* xor_state, std::uint8_t* output)
+{
+    if (input == nullptr || first_des_key == nullptr || second_des_key == nullptr ||
+        xor_state == nullptr || output == nullptr || length != 188) {
+        return false;
+    }
+    // Preserve the existing wrapper's copy/XOR/key-read order as well as its
+    // public interface. Streaming decoders use a prepared context instead.
+    copy_and_xor_packet(input, xor_state, output);
+    DesDecryptKey first_key{};
+    DesDecryptKey second_key{};
+    make_decrypt_key(first_des_key, first_key);
+    make_decrypt_key(second_des_key, second_key);
+    decrypt_packet(first_key, second_key, output);
+    wipe(first_key);
+    wipe(second_key);
     return true;
 }
 
