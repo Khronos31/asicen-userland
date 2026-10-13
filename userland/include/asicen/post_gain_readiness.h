@@ -7,11 +7,13 @@
 
 namespace asicen {
 
-// Temporary, opt-in diagnostic. Not a supported product configuration.
+// ASICEN FC0012 acquisition readiness. The default uses the tested 340 ms
+// post-gain window; tracing and the A/B override remain diagnostic-only.
+inline constexpr unsigned kPostGainStableMs = 340U;
 struct PostGainDiagnosticConfig {
     bool enabled = false;
     bool valid = true;
-    unsigned stable_ms = 0U;
+    unsigned stable_ms = kPostGainStableMs;
 };
 inline PostGainDiagnosticConfig parse_post_gain_diagnostic(const char* value) noexcept
 {

@@ -1,9 +1,12 @@
 # W3U3 terrestrial startup: post-gain readiness A/B diagnostic
 
-This is an opt-in investigation build, not a release candidate or an established
-hardware fix. It is based on `a092650dee1e851150a15259d36377b56d12ff86`; that
-commit only records results after candidate `b64577e94389fe479d573eed57c745e2eb5573ef`.
-The pinned PX4 v0.2.1 source is unchanged.
+The original opt-in investigation build is
+`6dae08a784cf78613b0013ada766c57b30b8c65a`, based on evidence commit
+`a092650dee1e851150a15259d36377b56d12ff86` after candidate
+`b64577e94389fe479d573eed57c745e2eb5573ef`.
+This revision makes the tested B readiness behavior the default in a fix
+candidate. It is not a verified hardware fix or a release authorization.
+The pinned PX4 v0.2.1 source is unchanged. Trace recording remains opt-in.
 
 ## Evidence and hypothesis
 
@@ -27,7 +30,9 @@ the existing settle interval, not a newly established vendor requirement.
 
 Set the environment variable on the **daemon process**, before it starts:
 
-- Unset: original return behavior, no diagnostic event recording.
+- Unset: the same 340-ms readiness behavior as B below, without diagnostic
+  event recording. In the historical `6dae08a` build only, unset selected the
+  original return behavior; do not confuse the two defaults.
 - `ASICEN_DIAGNOSTIC_POST_GAIN_MS=0`: A; original return behavior and hardware
   sequence, with bounded diagnostic recording.
 - `ASICEN_DIAGNOSTIC_POST_GAIN_MS=340`: B; the gain call returns not-ready. A later
@@ -48,9 +53,10 @@ TS discard, CC tolerance, or shared PX4 behavior change is introduced. The
 existing reset/filter and acquisition sequence runs after readiness succeeds.
 An issued reset does not by itself prove every device FIFO is empty.
 
-## Minimal E02 comparison
+## Historical minimal E02 comparison
 
-Use one verified Linux musl x86_64 diagnostic archive for **both** A and B, with
+The original comparison used one Linux musl x86_64 diagnostic archive for
+**both** A and B, with
 the exact same daemon and client hashes. Keep the existing E02 test harness,
 device/port selection, frontend, coax, USB topology, firmware, validator and
 timeouts. Do not silently replace it with an E03-host trial.
@@ -121,7 +127,7 @@ Do not convert delivery timestamps into exact on-air error times.
 - Any B timeout is a failed readiness attempt, not a successful capture or a
   reason to extend the product deadline automatically.
 
-Changes are confined to this diagnostic branch. Do not merge or tag it as a
+Changes are confined to the investigation/fix-candidate branch. Do not merge or tag it as a
 release merely because offline tests or these short trials succeed.
 
 ## Offline verification before publication
@@ -135,7 +141,8 @@ cmake --build build-postgain -j 4
 ctest --test-dir build-postgain --output-on-failure --timeout 180 -j 2
 ```
 
-Result: **75/75 CTest targets passed**. The initial test invocation was stopped
+Historical diagnostic result (`6dae08a`): **75/75 CTest targets passed**.
+The initial test invocation was stopped
 after the new retune fixture used a frozen test clock inside a bounded sleep;
 the fixture was corrected to let time advance during actual retune and the full
 suite was rerun successfully. No device operations were performed for this run.
@@ -147,6 +154,62 @@ the pre-gain sample, gain-once behavior, real backend retune reset, and bounded
 trace saturation/milestone reservation. Existing lifecycle tests also passed.
 The A sequence comparison covers request/value/index for the lock/gain call;
 it is not a byte-for-byte recorded hardware trace of a complete tune/capture.
-An additional B-specific outer-service timeout/cancellation integration test
-has not been added; those shared service paths were not changed and their
-existing tests remain part of the full suite. Hardware outcome is unverified.
+That diagnostic did not add a B-specific outer-service timeout/cancellation
+integration test. The candidate must verify those paths as described below;
+the historical pass is not a test result for the changed candidate.
+
+## Warm E02 evidence and fix-candidate boundary (2026-10-14 JST)
+
+The [initial five pairs](https://github.com/Khronos31/asicen-userland/issues/7#issuecomment-6150816682)
+and [additional ten pairs](https://github.com/Khronos31/asicen-userland/issues/7#issuecomment-6151079359)
+used diagnostic `6dae08a`, identical hashes, warm W3U3, T27 receiver 1,
+fresh daemons and 10-second captures, always A then B. A failed 2/15 times
+(A3: 39 CC events; A9: 48), while B failed 0/15. All 30 runs had zero
+reported TEI, sync, queue and USB errors and daemon exit 0.
+
+A9's final CC event was detected at packet 356, beyond its first 346 emitted
+packets. Detection position does not locate the physical disturbance in time;
+it compares the current packet with the previous packet of the same PID.
+Do not infer that all errors fit into one block or add prefix suppression.
+
+The gain-to-first-worker-delivery interval was 192.6--245.9 ms for A and
+553.2--569.2 ms for B. This supports preparing a conservative readiness
+candidate, not causation, a safe minimum, or a zero failure-rate claim.
+Fixed order, one channel/device and warm-only operation limit the evidence.
+
+The candidate's default now follows B without tracing. Explicit diagnostic
+`0` remains available only for controlled comparisons, and `340` enables the
+same wait plus trace. Validate the normal unset path as well as the traced
+path; old A/B evidence does not certify this rebuilt binary.
+
+Before hardware handoff, verify fresh post-gain samples, observed unlock
+reset, retune/close reset, outer timeout/no-lock handling and interruption
+during readiness with offline tests. Then coordinate short channel/receiver
+regression and a counterbalanced comparison with the owner. These are proposed
+checks, not automatic physical-operation instructions or new soak gates.
+Long soaks remain deferred until the end under the existing user decision.
+
+The separate cold firmware upload IO failure is unresolved. Warm tests do
+not exercise it. LNA initial values, shared PX4 code, transfer/framing behavior
+and firmware loader code are unchanged by this candidate. No release, tag or
+new model/platform hardware acceptance is implied.
+
+## Fix-candidate offline verification
+
+On 2026-10-14 JST, the Latitude executor applied the candidate patch to a clean
+detached `6dae08a` worktree. Release/Ninja configure and all 267 build steps
+passed; CTest passed **75/75**, and `git diff --check` passed. All four changed
+code/test file hashes matched the publication inputs. This is offline evidence,
+not hardware acceptance. The separate cloud C++17 readiness unit check also
+passed with strict warnings, no exceptions and no RTTI.
+
+The lifecycle target now runs the unchanged real PX4 `TunerService` against
+the fake-USB ASICEN backend with its normal default configuration. It covers
+successful readiness (35 outer 10-ms polls), original-budget timeout, never-lock,
+stop requested between readiness polls, same-lease retune failure/recovery and
+release/reacquire. Failed readiness keeps streaming unavailable. Cancellation
+inside an in-flight USB operation is not newly tested here.
+Default-versus-traced-B tests compare lock/gain USB request/value/index sequences
+and verify the normal path records no trace. Existing explicit-A and sampled
+unlock tests remain. Run default-path tests with
+`ASICEN_DIAGNOSTIC_POST_GAIN_MS` unset.

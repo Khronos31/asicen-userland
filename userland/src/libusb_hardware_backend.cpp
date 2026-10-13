@@ -1313,13 +1313,12 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
         gain_applied_ = true;
         post_gain_readiness_.reset();
         record_startup("gain_complete");
-        // A=0 retains the original return and exact I/O sequence. B never
-        // counts the pre-gain B0 observation toward post-gain readiness.
-        if (startup_config_.enabled && startup_config_.stable_ms != 0U)
+        // The normal path and diagnostic B require a fresh post-gain sample.
+        // Diagnostic A=0 alone retains the original immediate return.
+        if (startup_config_.stable_ms != 0U)
             return Result<bool>::success(false);
     }
-    if (w3_terrestrial && gain_applied_ && startup_config_.enabled &&
-        startup_config_.stable_ms != 0U) {
+    if (w3_terrestrial && gain_applied_ && startup_config_.stable_ms != 0U) {
         const bool ready = post_gain_readiness_.observe(
             locked, steady_now(), startup_config_.stable_ms);
         record_startup("readiness", ready, startup_config_.stable_ms);

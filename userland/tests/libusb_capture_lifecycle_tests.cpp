@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/libusb_hardware_backend.h"
+#include "px4/tuner_service.h"
 
 #include <algorithm>
 #include <array>
@@ -188,6 +189,7 @@ struct FakeUsb {
     bool expire_after_power_write = false;
     unsigned fake_elapsed_ms = 0U;
     bool fixed_clock = false;
+    std::chrono::steady_clock::time_point fixed_clock_origin{};
     std::uint8_t terrestrial_b0 = 0U;
     unsigned expire_after_tsid_read_ms = 0U;
     unsigned missing_tsid_reads = 0U;
@@ -259,7 +261,7 @@ struct FakeUsb {
     static std::chrono::steady_clock::time_point now_hook(void* context)
     {
         auto& fake = *static_cast<FakeUsb*>(context);
-        return (fake.fixed_clock ? std::chrono::steady_clock::time_point{} :
+        return (fake.fixed_clock ? fake.fixed_clock_origin :
                                    std::chrono::steady_clock::now()) +
                std::chrono::milliseconds(fake.fake_elapsed_ms);
     }
@@ -735,10 +737,13 @@ bool test_post_gain_diagnostic_a_preserves_io()
         LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
         Hooks hooks{};
         configure(hardware, fake, hooks, 1U);
-        LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, mode);
+        if (mode != nullptr)
+            LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, mode);
         fake.terrestrial_b0 = 0xa9U;
         const auto locked = hardware.is_locked(1U, System::ISDB_T);
-        CHECK(locked.has_value() && locked.value());
+        // Gain USB operations stay identical. Only diagnostic A returns ready
+        // on the pre-gain sample; the normal path requires fresh observations.
+        CHECK(locked.has_value() && locked.value() == (mode != nullptr));
         CHECK(LibusbW3u3HardwareTestPeer::gain_applied(hardware));
         CHECK((LibusbW3u3HardwareTestPeer::startup_events(hardware) != 0U) ==
               (mode != nullptr));
@@ -752,7 +757,8 @@ bool test_post_gain_diagnostic_a_preserves_io()
     return true;
 }
 
-bool test_post_gain_diagnostic_b_requires_new_stable_samples()
+bool check_post_gain_stable_samples(
+    const char* mode, std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>>& controls)
 {
     FakeUsb fake;
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
@@ -762,7 +768,8 @@ bool test_post_gain_diagnostic_b_requires_new_stable_samples()
     fake.fixed_clock = true;
     fake.fake_elapsed_ms = 5000U;
     fake.terrestrial_b0 = 0xa9U;
-    LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, "340");
+    if (mode != nullptr)
+        LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, mode);
     auto locked = hardware.is_locked(1U, System::ISDB_T);
     CHECK(locked.has_value() && !locked.value());
     CHECK(LibusbW3u3HardwareTestPeer::gain_applied(hardware));
@@ -795,12 +802,271 @@ bool test_post_gain_diagnostic_b_requires_new_stable_samples()
     fake.fail_control_once = LIBUSB_ERROR_IO;
     CHECK(hardware.is_locked(1U, System::ISDB_T).error() == Error::USB_IO);
     CHECK(fake.submit_count == 0 && fake.dsc_start_count == 0);
+    CHECK((LibusbW3u3HardwareTestPeer::startup_events(hardware) != 0U) ==
+          (mode != nullptr));
+    CHECK(LibusbW3u3HardwareTestPeer::startup_dropped(hardware) == 0U);
+    for (const auto& event : fake.controls)
+        controls.emplace_back(event.request, event.value, event.index);
     // The real tune plan contains bounded sleeps, so let its clock advance.
     fake.fixed_clock = false;
     CHECK(hardware.tune_terrestrial(1U, 557142U, 1000U).has_value());
     CHECK(!LibusbW3u3HardwareTestPeer::gain_applied(hardware));
     locked = hardware.is_locked(1U, System::ISDB_T);
     CHECK(locked.has_value() && !locked.value());
+    CHECK((LibusbW3u3HardwareTestPeer::startup_events(hardware) != 0U) ==
+          (mode != nullptr));
+    return true;
+}
+
+bool test_post_gain_diagnostic_b_requires_new_stable_samples()
+{
+    std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>> controls;
+    return check_post_gain_stable_samples("340", controls);
+}
+
+bool test_post_gain_default_matches_b_without_trace()
+{
+    std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>> normal;
+    std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>> diagnostic;
+    CHECK(check_post_gain_stable_samples(nullptr, normal));
+    CHECK(check_post_gain_stable_samples("340", diagnostic));
+    CHECK(normal == diagnostic);
+    return true;
+}
+
+class ReadinessNonce final : public px4::userland::TunerNonceSource {
+public:
+    px4::userland::Result<std::array<std::uint8_t, px4::userland::ipc::kNonceLength>>
+    generate() noexcept override
+    {
+        std::array<std::uint8_t, px4::userland::ipc::kNonceLength> nonce{};
+        nonce[0] = next_++;
+        return decltype(generate())::success(nonce);
+    }
+
+private:
+    std::uint8_t next_ = 1U;
+};
+
+// Both the real backend and the unchanged shared service observe this clock.
+// Frontend tune/gain sleeps run on real time. Only the outer readiness polls
+// switch to virtual time, so a frozen clock cannot hang the actual tune plan.
+class ReadinessServiceTime final : public px4::userland::TunerServiceTime {
+public:
+    explicit ReadinessServiceTime(FakeUsb& fake) : fake_(fake) {}
+
+    void begin(std::uint32_t timeout, unsigned remaining, unsigned cancel_after)
+    {
+        fake_.fixed_clock = false;
+        fake_.fake_elapsed_ms = 0U;
+        have_start_ = false;
+        timeout_ms_ = timeout;
+        remaining_after_gain_ = remaining;
+        cancel_after_ = cancel_after;
+        sleeps.clear();
+        leased_during_wait = true;
+        stream_blocked_during_wait = true;
+        cancelled_during_readiness = false;
+        controls_at_cancel = 0U;
+    }
+
+    std::uint64_t monotonic_ms() noexcept override
+    {
+        const auto now = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                FakeUsb::now_hook(&fake_).time_since_epoch()).count());
+        if (!have_start_) {
+            start_ms = now;
+            have_start_ = true;
+        }
+        return now;
+    }
+
+    void sleep_ms(std::uint32_t milliseconds) noexcept override
+    {
+        if (!fake_.fixed_clock) {
+            fake_.fixed_clock_origin = FakeUsb::now_hook(&fake_);
+            fake_.fake_elapsed_ms = 0U;
+            fake_.fixed_clock = true;
+        }
+        if (sleeps.empty() && remaining_after_gain_ != 0U) {
+            // Spend most of the original request budget at the first wait.
+            // There must be no new timeout budget for the readiness window.
+            const auto target = start_ms + timeout_ms_ - remaining_after_gain_;
+            const auto now = monotonic_ms();
+            if (now < target)
+                fake_.fake_elapsed_ms += static_cast<unsigned>(target - now);
+        }
+        fake_.fake_elapsed_ms += milliseconds;
+        sleeps.push_back(milliseconds);
+        const auto status = service->status();
+        leased_during_wait = leased_during_wait && status.has_value() &&
+            status.value().receiver_states[1U] == px4::userland::ipc::ReceiverState::leased;
+        stream_blocked_during_wait = stream_blocked_during_wait &&
+            service->start_stream(1U, lease_id).error() == Error::NOT_READY;
+        if (cancel_after_ != 0U && sleeps.size() == cancel_after_) {
+            cancelled_during_readiness =
+                LibusbW3u3HardwareTestPeer::gain_applied(*fake_.hardware);
+            controls_at_cancel = fake_.controls.size();
+            service->request_stop();
+        }
+    }
+
+    px4::userland::TunerService* service = nullptr;
+    std::uint64_t lease_id = 0U;
+    std::uint64_t start_ms = 0U;
+    std::vector<std::uint32_t> sleeps;
+    bool leased_during_wait = true;
+    bool stream_blocked_during_wait = true;
+    bool cancelled_during_readiness = false;
+    std::size_t controls_at_cancel = 0U;
+
+private:
+    FakeUsb& fake_;
+    bool have_start_ = false;
+    std::uint32_t timeout_ms_ = 0U;
+    unsigned remaining_after_gain_ = 0U;
+    unsigned cancel_after_ = 0U;
+};
+
+struct ReadinessServiceFixture {
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware{nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3)};
+    Hooks hooks{};
+    ReadinessNonce nonce;
+    ReadinessServiceTime time{fake};
+    px4::userland::TunerService service{hardware, nonce, time};
+    std::uint64_t lease_id = 0U;
+
+    ReadinessServiceFixture()
+    {
+        configure(hardware, fake, hooks, 1U);
+        hooks.now = FakeUsb::now_hook;
+        fake.terrestrial_b0 = 0xa9U;
+        time.service = &service;
+        // Use the real constructor's default configuration, not the test peer
+        // diagnostic setter, throughout these outer-service tests.
+    }
+
+    bool acquire()
+    {
+        const auto acquired = service.acquire(1U, 1U);
+        if (!acquired) return false;
+        lease_id = acquired.value().lease_id;
+        time.lease_id = lease_id;
+        return true;
+    }
+
+    px4::userland::Result<px4::userland::ipc::TuneResponsePayload>
+    tune(unsigned remaining_after_gain = 0U, unsigned cancel_after = 0U)
+    {
+        constexpr std::uint32_t timeout_ms = 5000U;
+        time.begin(timeout_ms, remaining_after_gain, cancel_after);
+        return service.tune(1U, {lease_id, System::ISDB_T, 557142U, 0xffffU,
+                                 0xffffU, 6000000U, 0U, timeout_ms});
+    }
+
+    bool state(px4::userland::ipc::ReceiverState expected)
+    {
+        const auto status = service.status();
+        return status.has_value() && status.value().receiver_states[1U] == expected;
+    }
+};
+
+bool test_default_readiness_shared_service_success()
+{
+    ReadinessServiceFixture fixture;
+    CHECK(fixture.acquire());
+    const auto tuned = fixture.tune();
+    CHECK(tuned.has_value() && tuned.value().locked == 1U);
+    // First post-gain sample at 10 ms, then the full 340 ms window. PX4 must
+    // not stack another 340 ms wait on top of the hardware readiness gate.
+    CHECK(fixture.time.sleeps.size() == 35U);
+    CHECK(std::all_of(fixture.time.sleeps.begin(), fixture.time.sleeps.end(),
+                      [](std::uint32_t delay) { return delay == 10U; }));
+    CHECK(fixture.time.leased_during_wait && fixture.time.stream_blocked_during_wait);
+    CHECK(fixture.state(px4::userland::ipc::ReceiverState::tuned));
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(fixture.hardware) == 0U);
+    CHECK(fixture.fake.submit_count == 0 && fixture.fake.dsc_start_count == 0);
+    CHECK(fixture.service.start_stream(1U, fixture.lease_id).has_value());
+    CHECK(fixture.service.release(1U, fixture.lease_id).has_value());
+    CHECK(fixture.state(px4::userland::ipc::ReceiverState::free));
+    return true;
+}
+
+bool test_default_readiness_shared_service_timeout_and_no_lock()
+{
+    for (bool locked : {true, false}) {
+        ReadinessServiceFixture fixture;
+        CHECK(fixture.acquire());
+        fixture.fake.terrestrial_b0 = locked ? 0xa9U : 0xa0U;
+        // Leave only 100 ms of the original service timeout once polling has
+        // started, including the case that gain never becomes applicable.
+        CHECK(fixture.tune(100U).error() == Error::TIMEOUT);
+        CHECK(fixture.time.sleeps.size() == 10U);
+        CHECK(fixture.time.monotonic_ms() - fixture.time.start_ms == 5000U);
+        CHECK(LibusbW3u3HardwareTestPeer::gain_applied(fixture.hardware) == locked);
+        CHECK(fixture.time.leased_during_wait && fixture.time.stream_blocked_during_wait);
+        CHECK(fixture.state(px4::userland::ipc::ReceiverState::leased));
+        CHECK(fixture.service.start_stream(1U, fixture.lease_id).error() == Error::NOT_READY);
+        CHECK(fixture.fake.submit_count == 0 && fixture.fake.dsc_start_count == 0);
+        CHECK(LibusbW3u3HardwareTestPeer::startup_events(fixture.hardware) == 0U);
+        CHECK(fixture.service.release(1U, fixture.lease_id).has_value());
+        CHECK(!LibusbW3u3HardwareTestPeer::gain_applied(fixture.hardware));
+        CHECK(fixture.state(px4::userland::ipc::ReceiverState::free));
+    }
+    return true;
+}
+
+bool test_default_readiness_shared_service_cancel()
+{
+    ReadinessServiceFixture fixture;
+    CHECK(fixture.acquire());
+    // Cancel after fresh post-gain observations, before the stable boundary.
+    // Preserve the backend's existing stopped-control-gate TIMEOUT mapping.
+    CHECK(fixture.tune(0U, 5U).error() == Error::TIMEOUT);
+    CHECK(fixture.time.cancelled_during_readiness);
+    CHECK(fixture.time.sleeps.size() == 5U);
+    CHECK(fixture.time.monotonic_ms() - fixture.time.start_ms < 5000U);
+    CHECK(fixture.time.leased_during_wait && fixture.time.stream_blocked_during_wait);
+    CHECK(fixture.state(px4::userland::ipc::ReceiverState::leased));
+    CHECK(fixture.service.start_stream(1U, fixture.lease_id).error() == Error::NOT_READY);
+    CHECK(fixture.fake.controls.size() == fixture.time.controls_at_cancel);
+    CHECK(fixture.fake.submit_count == 0 && fixture.fake.dsc_start_count == 0);
+    CHECK(fixture.service.release(1U, fixture.lease_id).has_value());
+    CHECK(fixture.state(px4::userland::ipc::ReceiverState::free));
+    CHECK(!LibusbW3u3HardwareTestPeer::gain_applied(fixture.hardware));
+    CHECK(fixture.hardware.is_locked(1U, System::ISDB_T).error() == Error::UNSUPPORTED);
+    return true;
+}
+
+bool test_default_readiness_shared_service_retune_and_release()
+{
+    ReadinessServiceFixture fixture;
+    CHECK(fixture.acquire());
+    CHECK(fixture.tune().has_value());
+    CHECK(fixture.time.sleeps.size() == 35U);
+    // A completed window cannot qualify a later tune with too little budget.
+    CHECK(fixture.tune(100U).error() == Error::TIMEOUT);
+    CHECK(fixture.state(px4::userland::ipc::ReceiverState::leased));
+    CHECK(fixture.service.start_stream(1U, fixture.lease_id).error() == Error::NOT_READY);
+    // A retry on the same lease must run a fresh full window and can recover.
+    CHECK(fixture.tune().has_value());
+    CHECK(fixture.time.sleeps.size() == 35U);
+    const auto old_lease = fixture.lease_id;
+    CHECK(fixture.service.release(1U, old_lease).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::gain_applied(fixture.hardware));
+    CHECK(fixture.hardware.is_locked(1U, System::ISDB_T).error() == Error::UNSUPPORTED);
+    CHECK(fixture.acquire());
+    CHECK(fixture.lease_id != old_lease);
+    CHECK(fixture.service.start_stream(1U, old_lease).error() == Error::NOT_FOUND);
+    CHECK(fixture.service.start_stream(1U, fixture.lease_id).error() == Error::NOT_READY);
+    CHECK(fixture.tune().has_value());
+    CHECK(fixture.time.sleeps.size() == 35U);
+    CHECK(fixture.time.leased_during_wait && fixture.time.stream_blocked_during_wait);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(fixture.hardware) == 0U);
+    CHECK(fixture.fake.submit_count == 0 && fixture.fake.dsc_start_count == 0);
+    CHECK(fixture.service.release(1U, fixture.lease_id).has_value());
     return true;
 }
 
@@ -1837,6 +2103,16 @@ int main()
         {"test_post_gain_diagnostic_a_preserves_io", test_post_gain_diagnostic_a_preserves_io},
         {"test_post_gain_diagnostic_b_requires_new_stable_samples",
          test_post_gain_diagnostic_b_requires_new_stable_samples},
+        {"test_post_gain_default_matches_b_without_trace",
+         test_post_gain_default_matches_b_without_trace},
+        {"test_default_readiness_shared_service_success",
+         test_default_readiness_shared_service_success},
+        {"test_default_readiness_shared_service_timeout_and_no_lock",
+         test_default_readiness_shared_service_timeout_and_no_lock},
+        {"test_default_readiness_shared_service_cancel",
+         test_default_readiness_shared_service_cancel},
+        {"test_default_readiness_shared_service_retune_and_release",
+         test_default_readiness_shared_service_retune_and_release},
         {"test_startup_trace_reserves_capture_milestones",
          test_startup_trace_reserves_capture_milestones},
         {"test_transport_errors_keep_their_public_class",

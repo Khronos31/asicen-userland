@@ -40,6 +40,19 @@ This revision changes candidate binaries and therefore requires a new candidate
 and its existing release-validation gates; it is not a hardware acceptance,
 support expansion, release-note request or tag/publication authorization.
 
+Terrestrial readiness revision (2026-10-14 JST): for the original W3U3/W3U2
+FC0012 path, do not report acquisition readiness from the lock observation
+made before gain adjustment. Require a fresh locked observation after gain,
+then a locked observation at least 340 ms later; an observed unlock resets
+that interval. Preserve the shared outer deadline and cancellation, and reset
+readiness on retune and close. This is a hardware-specific conservative
+candidate, supported by the E02 warm T27 A/B results in Issue #7 (A: 2/15
+failures, B: 0/15), not proof of a vendor-required minimum or universal fix.
+The diagnostic override remains temporary; unset uses this readiness behavior
+without tracing. Do not change LNA values, shared PX4 services, TS bytes or
+validation rules. Existing evidence does not qualify the changed binaries;
+cold firmware-transfer IO remains a separate unresolved issue.
+
 ## Objective
 
 Receive real PX-W3U3 MPEG-TS with a direct libusb userland implementation and

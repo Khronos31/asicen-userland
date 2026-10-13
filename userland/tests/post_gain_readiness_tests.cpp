@@ -11,8 +11,13 @@ int main()
     const auto ms = [](int value) { return PostGainReadiness::Time{} + std::chrono::milliseconds(value); };
     CHECK(!parse_post_gain_diagnostic(nullptr).enabled);
     CHECK(parse_post_gain_diagnostic(nullptr).valid);
+    CHECK(parse_post_gain_diagnostic(nullptr).stable_ms == 340U);
+    CHECK(asicen::PostGainDiagnosticConfig{}.stable_ms == 340U);
     CHECK(parse_post_gain_diagnostic("0").enabled);
+    CHECK(parse_post_gain_diagnostic("0").valid);
     CHECK(parse_post_gain_diagnostic("0").stable_ms == 0U);
+    CHECK(parse_post_gain_diagnostic("340").enabled);
+    CHECK(parse_post_gain_diagnostic("340").valid);
     CHECK(parse_post_gain_diagnostic("340").stable_ms == 340U);
     for (const char* bad : {"", "-1", "1", "340x", " 340", "0340", "999999999999999999"}) {
         CHECK(!parse_post_gain_diagnostic(bad).valid);
@@ -34,6 +39,11 @@ int main()
     CHECK(!gate.observe(true, ms(5000), 340U));
     CHECK(!gate.observe(true, ms(5339), 340U));
     CHECK(gate.observe(true, ms(5340), 340U));
+    // Completed readiness must not survive release or a new tune.
+    gate.reset();
+    CHECK(!gate.observe(true, ms(10000), 340U));
+    CHECK(!gate.observe(true, ms(10339), 340U));
+    CHECK(gate.observe(true, ms(10340), 340U));
     gate.reset();
     CHECK(!gate.observe(true, ms(6000), 340U));
     CHECK(!gate.observe(true, ms(5000), 340U)); // Defensive clock reversal.
