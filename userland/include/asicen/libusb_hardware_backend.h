@@ -14,11 +14,13 @@
 #include "asicen/v2_frontend.h"
 #include "asicen/card_mailbox_hardware.h"
 #include "asicen/card_operation_guard.h"
+#include "asicen/post_gain_readiness.h"
 
 #include <atomic>
 #include <array>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -279,6 +281,23 @@ private:
     bool v2_identity_verified_ = false;
     bool tuned_ = false;
     bool gain_applied_ = false;
+    PostGainDiagnosticConfig startup_config_ =
+        parse_post_gain_diagnostic(std::getenv("ASICEN_DIAGNOSTIC_POST_GAIN_MS"));
+    PostGainReadiness post_gain_readiness_;
+    struct StartupEvent {
+        const char* stage = nullptr;
+        std::chrono::steady_clock::time_point at{};
+        std::int64_t first = 0;
+        std::int64_t second = 0;
+    };
+    std::atomic<bool> startup_trace_active_{false};
+    std::mutex startup_trace_mutex_;
+    std::array<StartupEvent, 256> startup_events_{};
+    std::size_t startup_event_count_ = 0U;
+    std::size_t startup_events_dropped_ = 0U;
+    void record_startup(const char*, std::int64_t = 0, std::int64_t = 0) noexcept;
+    void flush_startup_trace() noexcept;
+    void reset_startup_diagnostic() noexcept;
     bool source_prepared_ = false;
     bool dsc_attempted_ = false;
     bool dsc_stopped_ = true;

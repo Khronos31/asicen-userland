@@ -426,10 +426,15 @@ LibusbW3u3Hardware::~LibusbW3u3Hardware() noexcept
     // bridge is terminal and is never reopened by release().
     stop_lnb_monitor();
     (void)release();
+    flush_startup_trace();
 }
 
 Result<void> LibusbW3u3Hardware::claim()
 {
+    if (!startup_config_.valid) {
+        std::fprintf(stderr, "ASICEN_DIAGNOSTIC_POST_GAIN_MS must be 0 or 340\n");
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
     // Reject unsupported or mismatched families before claims, GPIO reads,
     // revision/controller requests, or any other vendor transfer.
     if (fd_function_mismatch_) {
@@ -1189,6 +1194,10 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
         gain_applied_ = false;
         return Result<void>::success();
     }
+    reset_startup_diagnostic();
+    startup_trace_active_.store(startup_config_.enabled && !uses_legacy_frontend() &&
+                                !uses_v2_frontend());
+    record_startup("tune_begin", frequency_khz, timeout_ms);
     const auto plan = uses_legacy_frontend()
                           ? plan_legacy_terrestrial_tune(legacy_frontend(), frequency_khz, 6U)
                           : plan_terrestrial_tune_full(frequency_khz, 6U);
@@ -1203,6 +1212,8 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
     tuned_system_ = System::ISDB_T;
     tuned_frequency_khz_ = frequency_khz;
     gain_applied_ = false;
+    post_gain_readiness_.reset();
+    record_startup("tune_complete");
     return Result<void>::success();
 }
 
@@ -1230,6 +1241,7 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint
     deadline_ = previous_deadline_active ? std::min(previous_deadline, selection_deadline)
                                          : selection_deadline;
     deadline_active_ = true;
+    reset_startup_diagnostic();
     const SatelliteOperationResult tuned = run_model_satellite_tune(rf_khz);
     deadline_ = previous_deadline;
     deadline_active_ = previous_deadline_active;
@@ -1290,11 +1302,28 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
     lock = report.last_read;
     have = true;
     const bool locked = have && (lock & 0x0fU) == 0x09U;
-    if (locked && !gain_applied_ && !uses_legacy_frontend() && !uses_v2_frontend()) {
+    const bool w3_terrestrial = !uses_legacy_frontend() && !uses_v2_frontend();
+    record_startup(gain_applied_ ? "post_gain_lock" : "pre_gain_lock", lock, locked);
+    if (locked && !gain_applied_ && w3_terrestrial) {
+        record_startup("gain_begin");
         if (!run_plan(plan_fc0012_gain_once(receiver_local(receiver)), 1000U)) {
+            record_startup("gain_error", static_cast<int>(plan_error_));
             return Result<bool>::failure(plan_error_);
         }
         gain_applied_ = true;
+        post_gain_readiness_.reset();
+        record_startup("gain_complete");
+        // A=0 retains the original return and exact I/O sequence. B never
+        // counts the pre-gain B0 observation toward post-gain readiness.
+        if (startup_config_.enabled && startup_config_.stable_ms != 0U)
+            return Result<bool>::success(false);
+    }
+    if (w3_terrestrial && gain_applied_ && startup_config_.enabled &&
+        startup_config_.stable_ms != 0U) {
+        const bool ready = post_gain_readiness_.observe(
+            locked, steady_now(), startup_config_.stable_ms);
+        record_startup("readiness", ready, startup_config_.stable_ms);
+        return Result<bool>::success(ready);
     }
     return Result<bool>::success(locked);
 }
@@ -1387,6 +1416,8 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
     if (source_prepared_ && !cleanup_failed_.load()) {
         return Result<void>::failure(Error::BUSY);
     }
+    flush_startup_trace();
+    post_gain_readiness_.reset();
     // Independent LNB cleanup is still attempted after another cleanup stage
     // quarantines the receiver. Never release its lease with uncertain power.
     const auto off = clear_lnb_power();
@@ -2294,9 +2325,11 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         return fail_prepare(seed.error());
     }
     link_seed_ = seed.value();
+    record_startup("filter_reset_begin");
     if (!run_plan(plan_stream_setup(local, 1U), 5000U)) {
         return fail_prepare(plan_error_);
     }
+    record_startup("filter_reset_complete");
     if (!set_cf_bit(local, 0x03U, true)) {
         return fail_prepare(Error::USB_IO);
     }
@@ -2367,19 +2400,23 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
             return fail_prepare(Error::USB_IO);
         }
     }
+    record_startup("initial_urbs_submitted", kQueueDepth, kChunkSize);
     dsc_attempted_ = true;
     dsc_stopped_ = false;
     if (!dsc_start(local)) {
         return fail_prepare(Error::USB_IO);
     }
+    record_startup("dsc_started");
     output_start_attempted_ = true;
     if (!set_cf_bit(local, 0x08U, true)) {
         return fail_prepare(Error::USB_IO);
     }
+    record_startup("cf40_started");
     link_apply_attempted_ = true;
     if (!apply_link_seed()) {
         return fail_prepare(Error::USB_IO);
     }
+    record_startup("controller_output_enabled");
     decoder_.clear();
     decoder_ = TransportCaptureDecoderV7(link_seed_.data(), link_seed_.size());
     if (!decoder_.valid()) {
@@ -2400,6 +2437,7 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
         return CaptureRunResult::usb_error;
     }
     AsyncState& state = *async_;
+    record_startup("worker_run");
     CaptureRunResult outcome = CaptureRunResult::cancelled;
     while (!cleanup_failed_.load(std::memory_order_acquire) && !cancelled_flag.load() &&
            !stop_requested_.load() && !capture_interrupted_.load()) {
@@ -2438,6 +2476,10 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
             continue;
         }
         AsyncState::Slot& slot = state.slots[index];
+        const bool trace_first = slot.submission_order < 4U;
+        if (trace_first)
+            record_startup("delivery", static_cast<std::int64_t>(slot.submission_order),
+                           slot_actual);
         if (slot_status != LIBUSB_TRANSFER_COMPLETED && slot_status != LIBUSB_TRANSFER_TIMED_OUT) {
             outcome = slot_status == LIBUSB_TRANSFER_NO_DEVICE || disconnected_.load()
                           ? CaptureRunResult::disconnected
@@ -2460,6 +2502,12 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
                 },
                 &sink);
             capture_sync_errors_.fetch_add(decoder_.sync_loss_events() - before);
+            if (trace_first) {
+                const auto framing = decoder_.counters();
+                record_startup("framing_emitted",
+                               static_cast<std::int64_t>(framing.emitted_packets),
+                               static_cast<std::int64_t>(framing.discarded_sync_search_bytes));
+            }
             if (cleanup_failed_.load(std::memory_order_acquire)) {
                 outcome = CaptureRunResult::usb_error;
                 break;
@@ -2585,7 +2633,58 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
     if (result != CaptureRunResult::cancelled) {
         mark_cleanup_failed(Error::USB_IO);
     }
+    record_startup("drain_complete", static_cast<int>(result));
+    flush_startup_trace();
     return result;
+}
+
+
+void LibusbW3u3Hardware::record_startup(const char* stage, std::int64_t first,
+                                        std::int64_t second) noexcept
+{
+    if (!startup_trace_active_.load()) return;
+    std::lock_guard<std::mutex> lock(startup_trace_mutex_);
+    if (!startup_trace_active_.load()) return;
+    // Keep capacity for capture/drain milestones after a long lock poll.
+    const bool repetitive = std::strcmp(stage, "pre_gain_lock") == 0 ||
+                            std::strcmp(stage, "post_gain_lock") == 0 ||
+                            (std::strcmp(stage, "readiness") == 0 && first == 0);
+    if (repetitive && startup_event_count_ >= startup_events_.size() - 64U) {
+        ++startup_events_dropped_;
+        return;
+    }
+    if (startup_event_count_ == startup_events_.size()) {
+        ++startup_events_dropped_;
+        return;
+    }
+    startup_events_[startup_event_count_++] = {stage, steady_now(), first, second};
+}
+
+void LibusbW3u3Hardware::flush_startup_trace() noexcept
+{
+    if (!startup_config_.enabled) return;
+    std::lock_guard<std::mutex> lock(startup_trace_mutex_);
+    startup_trace_active_.store(false);
+    if (startup_event_count_ == 0U) return;
+    const auto origin = startup_events_[0].at;
+    std::fprintf(stderr, "asicen-startup-diagnostic stable_ms=%u events=%zu dropped=%zu\n",
+                 startup_config_.stable_ms, startup_event_count_, startup_events_dropped_);
+    for (std::size_t i = 0; i < startup_event_count_; ++i) {
+        const auto& event = startup_events_[i];
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            event.at - origin).count();
+        std::fprintf(stderr, "asicen-startup-diagnostic us=%lld stage=%s first=%lld second=%lld\n",
+                     static_cast<long long>(us), event.stage,
+                     static_cast<long long>(event.first), static_cast<long long>(event.second));
+    }
+    startup_event_count_ = 0U;
+    startup_events_dropped_ = 0U;
+}
+
+void LibusbW3u3Hardware::reset_startup_diagnostic() noexcept
+{
+    flush_startup_trace();
+    post_gain_readiness_.reset();
 }
 
 void LibusbW3u3Hardware::quarantine_capture() noexcept

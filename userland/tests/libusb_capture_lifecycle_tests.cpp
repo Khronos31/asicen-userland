@@ -61,6 +61,30 @@ struct LibusbW3u3HardwareTestPeer {
         hardware.tuned_ = false;
     }
     static bool gain_applied(const LibusbW3u3Hardware& hardware) { return hardware.gain_applied_; }
+    static void startup_diagnostic(LibusbW3u3Hardware& hardware, const char* mode)
+    {
+        hardware.reset_startup_diagnostic();
+        hardware.startup_config_ = parse_post_gain_diagnostic(mode);
+        hardware.startup_trace_active_.store(hardware.startup_config_.enabled);
+        hardware.gain_applied_ = false;
+    }
+    static std::size_t startup_events(const LibusbW3u3Hardware& hardware)
+    {
+        return hardware.startup_event_count_;
+    }
+    static void startup_event(LibusbW3u3Hardware& hardware, const char* stage,
+                              std::int64_t first = 0)
+    {
+        hardware.record_startup(stage, first);
+    }
+    static std::size_t startup_dropped(const LibusbW3u3Hardware& hardware)
+    {
+        return hardware.startup_events_dropped_;
+    }
+    static const char* startup_stage(const LibusbW3u3Hardware& hardware, std::size_t index)
+    {
+        return hardware.startup_events_[index].stage;
+    }
     static void set_link_seed(LibusbW3u3Hardware& hardware,
                               const std::array<std::uint8_t, 16>& seed)
     {
@@ -163,6 +187,8 @@ struct FakeUsb {
     bool short_control_once = false;
     bool expire_after_power_write = false;
     unsigned fake_elapsed_ms = 0U;
+    bool fixed_clock = false;
+    std::uint8_t terrestrial_b0 = 0U;
     unsigned expire_after_tsid_read_ms = 0U;
     unsigned missing_tsid_reads = 0U;
     int cancel_count = 0;
@@ -232,8 +258,10 @@ struct FakeUsb {
     }
     static std::chrono::steady_clock::time_point now_hook(void* context)
     {
-        return std::chrono::steady_clock::now() +
-               std::chrono::milliseconds(static_cast<FakeUsb*>(context)->fake_elapsed_ms);
+        auto& fake = *static_cast<FakeUsb*>(context);
+        return (fake.fixed_clock ? std::chrono::steady_clock::time_point{} :
+                                   std::chrono::steady_clock::now()) +
+               std::chrono::milliseconds(fake.fake_elapsed_ms);
     }
     static int control_function_hook(void* context, std::uint8_t function,
                                      const ControlTransfer& transfer, unsigned char* response)
@@ -436,6 +464,7 @@ struct FakeUsb {
             for (std::size_t i = 0; i < payload; ++i) {
                 const std::uint8_t reg = static_cast<std::uint8_t>(first + i);
                 response[i + 1U] =
+                    slave == 0x30U && first == 0xb0U ? terrestrial_b0 :
                     slave == 0x4aU ? controller[reg]
                     : slave == 0xa8U && first == 0xb0U
                         ? static_cast<std::uint8_t>(
@@ -694,6 +723,113 @@ bool has_cf_request(const FakeUsb& fake, std::size_t local, Request request)
 
 bool discard_packets(void*, const std::uint8_t*, std::size_t)
 {
+    return true;
+}
+
+
+bool test_post_gain_diagnostic_a_preserves_io()
+{
+    std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>> baseline;
+    for (const char* mode : {static_cast<const char*>(nullptr), "0"}) {
+        FakeUsb fake;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, mode);
+        fake.terrestrial_b0 = 0xa9U;
+        const auto locked = hardware.is_locked(1U, System::ISDB_T);
+        CHECK(locked.has_value() && locked.value());
+        CHECK(LibusbW3u3HardwareTestPeer::gain_applied(hardware));
+        CHECK((LibusbW3u3HardwareTestPeer::startup_events(hardware) != 0U) ==
+              (mode != nullptr));
+        std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>> actual;
+        for (const auto& event : fake.controls)
+            actual.emplace_back(event.request, event.value, event.index);
+        if (mode == nullptr) baseline = actual;
+        else CHECK(actual == baseline);
+        CHECK(fake.submit_count == 0 && fake.dsc_start_count == 0);
+    }
+    return true;
+}
+
+bool test_post_gain_diagnostic_b_requires_new_stable_samples()
+{
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    hooks.now = FakeUsb::now_hook;
+    fake.fixed_clock = true;
+    fake.fake_elapsed_ms = 5000U;
+    fake.terrestrial_b0 = 0xa9U;
+    LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, "340");
+    auto locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && !locked.value());
+    CHECK(LibusbW3u3HardwareTestPeer::gain_applied(hardware));
+    const auto controls_after_gain = fake.controls.size();
+    fake.fake_elapsed_ms = 5100U;
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && !locked.value());
+    CHECK(fake.controls.size() == controls_after_gain + 1U);
+    fake.fake_elapsed_ms = 5439U;
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && !locked.value());
+    fake.fake_elapsed_ms = 5440U;
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && locked.value());
+    CHECK(fake.controls.size() == controls_after_gain + 3U);
+    fake.terrestrial_b0 = 0xa0U;
+    fake.fake_elapsed_ms = 5500U;
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && !locked.value());
+    fake.terrestrial_b0 = 0xa9U;
+    fake.fake_elapsed_ms = 5510U;
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && !locked.value());
+    fake.fake_elapsed_ms = 5849U;
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && !locked.value());
+    fake.fake_elapsed_ms = 5850U;
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && locked.value());
+    fake.fail_control_once = LIBUSB_ERROR_IO;
+    CHECK(hardware.is_locked(1U, System::ISDB_T).error() == Error::USB_IO);
+    CHECK(fake.submit_count == 0 && fake.dsc_start_count == 0);
+    // The real tune plan contains bounded sleeps, so let its clock advance.
+    fake.fixed_clock = false;
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 1000U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::gain_applied(hardware));
+    locked = hardware.is_locked(1U, System::ISDB_T);
+    CHECK(locked.has_value() && !locked.value());
+    return true;
+}
+
+bool test_startup_trace_reserves_capture_milestones()
+{
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, "340");
+    for (unsigned i = 0; i < 300U; ++i)
+        LibusbW3u3HardwareTestPeer::startup_event(hardware, "post_gain_lock", 0xa9);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(hardware) == 192U);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_dropped(hardware) == 108U);
+    LibusbW3u3HardwareTestPeer::startup_event(hardware, "readiness", 0);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(hardware) == 192U);
+    for (const char* stage : {"readiness", "initial_urbs_submitted", "dsc_started",
+                              "delivery", "drain_complete"})
+        LibusbW3u3HardwareTestPeer::startup_event(hardware, stage, 1);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(hardware) == 197U);
+    CHECK(std::strcmp(LibusbW3u3HardwareTestPeer::startup_stage(hardware, 196U),
+                      "drain_complete") == 0);
+    for (unsigned i = 0; i < 100U; ++i)
+        LibusbW3u3HardwareTestPeer::startup_event(hardware, "delivery", 1);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(hardware) == 256U);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_dropped(hardware) == 150U);
+    LibusbW3u3HardwareTestPeer::startup_diagnostic(hardware, "0");
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(hardware) == 0U);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_dropped(hardware) == 0U);
     return true;
 }
 
@@ -1698,6 +1834,11 @@ int main()
          test_short_revision_transfer_is_protocol_error},
         {"test_initialization_deadline_without_usb_error_is_timeout",
          test_initialization_deadline_without_usb_error_is_timeout},
+        {"test_post_gain_diagnostic_a_preserves_io", test_post_gain_diagnostic_a_preserves_io},
+        {"test_post_gain_diagnostic_b_requires_new_stable_samples",
+         test_post_gain_diagnostic_b_requires_new_stable_samples},
+        {"test_startup_trace_reserves_capture_milestones",
+         test_startup_trace_reserves_capture_milestones},
         {"test_transport_errors_keep_their_public_class",
          test_transport_errors_keep_their_public_class},
         {"test_completion_order_and_length_contract", test_completion_order_and_length_contract},

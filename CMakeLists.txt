@@ -837,6 +837,11 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     target_link_libraries(asicen-transport-transform-benchmark PRIVATE asicen_core)
     asicen_enable_project_warnings(asicen-transport-transform-benchmark)
 
+    add_executable(asicen-post-gain-readiness-tests userland/tests/post_gain_readiness_tests.cpp)
+    target_link_libraries(asicen-post-gain-readiness-tests PRIVATE asicen_core)
+    asicen_enable_project_warnings(asicen-post-gain-readiness-tests)
+    add_test(NAME asicen-post-gain-readiness-tests COMMAND asicen-post-gain-readiness-tests)
+
     add_executable(asicen-link-seed-diagnostic-tests userland/tests/link_seed_diagnostic_tests.cpp)
     target_link_libraries(asicen-link-seed-diagnostic-tests PRIVATE asicen_core)
     asicen_enable_project_warnings(asicen-link-seed-diagnostic-tests)
