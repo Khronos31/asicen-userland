@@ -827,6 +827,30 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     asicen_enable_project_warnings(asicen-transport-transform-tests)
     add_test(NAME asicen-transport-transform-tests COMMAND asicen-transport-transform-tests)
 
+    add_executable(asicen-transport-transform-round-tests
+        userland/tests/transport_transform_round_tests.cpp
+        userland/tests/transport_transform_reference.cpp)
+    target_include_directories(asicen-transport-transform-round-tests PRIVATE userland/include)
+    asicen_enable_project_warnings(asicen-transport-transform-round-tests)
+    add_test(NAME asicen-transport-transform-round-tests
+        COMMAND asicen-transport-transform-round-tests)
+
+    add_executable(asicen-transport-transform-differential-tests
+        userland/tests/transport_transform_differential_tests.cpp
+        userland/tests/transport_transform_reference.cpp)
+    target_link_libraries(asicen-transport-transform-differential-tests PRIVATE asicen_core)
+    asicen_enable_project_warnings(asicen-transport-transform-differential-tests)
+    add_test(NAME asicen-transport-transform-differential-tests
+        COMMAND asicen-transport-transform-differential-tests)
+
+    # Synthetic opt-in timing tool, never a hardware test or a timing-based CI
+    # pass/fail gate. The independent scalar oracle is linked only into tests.
+    add_executable(asicen-transport-transform-benchmark EXCLUDE_FROM_ALL
+        userland/tests/transport_transform_benchmark.cpp
+        userland/tests/transport_transform_reference.cpp)
+    target_link_libraries(asicen-transport-transform-benchmark PRIVATE asicen_core)
+    asicen_enable_project_warnings(asicen-transport-transform-benchmark)
+
     add_executable(asicen-link-seed-diagnostic-tests userland/tests/link_seed_diagnostic_tests.cpp)
     target_link_libraries(asicen-link-seed-diagnostic-tests PRIVATE asicen_core)
     asicen_enable_project_warnings(asicen-link-seed-diagnostic-tests)
