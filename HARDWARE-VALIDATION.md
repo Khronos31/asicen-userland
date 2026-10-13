@@ -1104,3 +1104,107 @@ Notes: the first 2-hour attempt streamed to /tmp, which is a tmpfs
 disk instead. This failed tmpfs attempt is recorded as the reason the
 soak output target is a disk path, not a soak failure of the release
 candidate.
+
+## 2026-10-13: official PX4 v0.2.1 pin and replacement 0.1.0 candidate
+
+Recorded by dot. This section records cloud CI and artifact inspection only.
+It is not a hardware result, release-note approval, or tag/publication approval.
+
+[PR #10](https://github.com/Khronos31/asicen-userland/pull/10) was merged into
+`release/0.1.0` after independent source review and successful final-head CI.
+The portable source subset is pinned to official PX4 v0.2.1 commit
+`dd1c1bea16a5871085d5f2a42c009364c1ec7345`. The complete import/adapter scope is
+in [the reuse record](docs/px4-v0.2.1-reuse.md).
+
+### Fixed candidate identity
+
+- Candidate source: `329a925bd524e19e945a9dc2140ef2b28926125c`
+- Source tree: `18d82f51394dc3498414afbc3a628b9d557992bb`
+- Candidate push run: [38338502324](https://github.com/Khronos31/asicen-userland/actions/runs/38338502324), attempt 1
+- Candidate `release-candidate` artifact: [11785698350](https://github.com/Khronos31/asicen-userland/actions/runs/38338502324/artifacts/11785698350)
+- Candidate `release-provenance` artifact: 11786067895
+- Independent workflow-dispatch run: [38338575743](https://github.com/Khronos31/asicen-userland/actions/runs/38338575743), attempt 1
+- Reproduction `release-candidate` artifact: [11786281562](https://github.com/Khronos31/asicen-userland/actions/runs/38338575743/artifacts/11786281562)
+- Reproduction `release-provenance` artifact: 11786556425
+
+Both runs used the same source SHA/tree and `release/0.1.0`, completed all
+20 jobs successfully, and had no pull-request source context. Run/attempt,
+repository, head repository, workflow path and artifact bindings were checked.
+The two candidate ZIPs are 10,489,443 bytes each; their Actions wrapper digests
+are respectively `9ffbe7361213caa8ea63712e64f9ea7803532f2d7bcfa16a832cb714617163df`
+and `0fb34d5a93bbdba642804704866b0fe2ef4693e9cea111966ad585247502bc84`.
+Both downloaded wrappers matched the API digests. Wrapper bytes need not be
+identical: the ten contained release files are compared independently.
+
+### Offline checks and exact artifact reproduction
+
+The frozen `release_verify.py` and `release_publish.py` helpers were used for
+safe flat artifact extraction and checks of bundle inventories, outer and
+inner checksums, source commit/tree, manifests, program modes, static libusb
+identity, pinned firmware bytes/notices and Linux build-provenance bindings.
+No archive executable was run during this inspection. The full release
+verification/publication entry point was not invoked and no completed
+hardware/notes record was fabricated.
+
+All eight binary archives, the source archive and outer `SHA256SUMS` are
+byte-identical across the two independent runs. Every complete file was
+compared without timestamp, UUID, signature or metadata masking.
+
+| File | SHA-256 (both runs) |
+| --- | --- |
+| `asicen-userland-0.1.0-android-aarch64.tar.gz` | `8df6d1a027b13b7670b3fec4df77e65ef80c4a0a4fb154568e46bb7b045feb11` |
+| `asicen-userland-0.1.0-android-armv7a.tar.gz` | `3cf6bd6decf8d95803d8a4130990e5af49417fa3e8c1b08449474a408cf67a39` |
+| `asicen-userland-0.1.0-android-x86_64.tar.gz` | `a507c276983448dedd5267c719fe3fa868313aacab41d095116123af30f5a667` |
+| `asicen-userland-0.1.0-darwin-arm64.tar.gz` | `e079fc9dfc21de4cbc8093ce6d8dd662cf130ae1c2c89c12c706ab74a594bb8d` |
+| `asicen-userland-0.1.0-linux-glibc-aarch64.tar.gz` | `1834904eb0aad0ed758ae5c27975d6ae380e6dfcfe05cfa1de2c04e5ea953c8e` |
+| `asicen-userland-0.1.0-linux-glibc-x86_64.tar.gz` | `7cfeef13319ac3dfaf122c91346ccc7833345fe79e163a60367479063f100225` |
+| `asicen-userland-0.1.0-linux-musl-aarch64.tar.gz` | `2e2c13d497c405e65d7267f1b689a9c95069c6bbed4bd35640a8011225055769` |
+| `asicen-userland-0.1.0-linux-musl-x86_64.tar.gz` | `309ad632def1f43ffd2e35783da7252346901789de401d1755b0685bc15423e9` |
+| `asicen-userland-0.1.0-source.tar.gz` | `442592b5d1807c9296c6352e921924b7ec7b78fb4c87687ba46ea2f04c64730f` |
+| `SHA256SUMS` | `ab0ae630143aaddee823ced03dcca221d28b4451b7013301d8d7cca47d1e83ce` |
+
+Recorded build inputs also match independently of the payload comparison:
+the production Linux Docker digests and package/compiler versions, macOS
+toolchain versions, Android NDK/compiler versions and explicit libusb source
+digest were read from the paired job logs. All 20 paired jobs reported matching
+runner-image versions. Representative effective inputs include:
+
+- Alpine GCC 14.2.0-r6, CMake 3.31.7-r1, binutils 2.44-r3, pcsc-lite 2.3.3-r0.
+- Debian GCC 10.2.1-6, CMake 3.18.4-2+deb11u1, binutils 2.35.2-2, pcsc-lite 1.9.1-1.
+- macOS 14.8.9 / 23J631, Xcode 15.4 / 15F31d, SDK 14.5,
+  Apple Clang 15.0.0 / clang-1500.3.9.4, ld-1053.12, CMake 4.4.3,
+  Ninja 1.13.2, pcsc-lite 2.5.1 and pkgconf 3.0.6.
+- Android NDK r27d, exact packaged `Pkg.Revision = 27.3.13750724` in all
+  three ABI archives of both runs; Clang 18.0.4. Packaged binary-audit metadata,
+  Linux libc archive hashes, target triples and binary/IFD hash bindings also
+  match.
+- libusb 1.0.30 archive SHA-256:
+  `fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf`.
+
+This is evidence for the observed build inputs, not a claim of a complete
+compiler/runtime input SBOM. Windows build and native offline tests passed,
+but no Windows archive is included in this ASICEN 0.1.0 candidate.
+
+### Hardware handoff and unresolved issue
+
+All hardware rows for this replacement candidate remain pending. Prior
+candidate results above keep their original identity and are not transferred
+to these changed binaries. Follow [release-validation.md](docs/release-validation.md)
+for the eight-archive matrix, LNB measurements, short regression, representative
+full-channel checks and six-hour aggregate soak schedule.
+
+The shared CC checker changes observation and counting, not TS output bytes.
+[Issue #7](https://github.com/Khronos31/asicen-userland/issues/7#issuecomment-6108270376)
+remains unresolved: saved old and new CS2 recordings contained actual TEI/CC
+errors, including errors beyond startup. Earlier zero daemon counters and the
+historical wording “all error-free” above must not be used as independent
+proof of error-free TS. The stored recordings and the later offline analysis
+take precedence for that question. [PR #8](https://github.com/Khronos31/asicen-userland/pull/8)
+remains a separate, unmerged diagnostic and is not part of this candidate.
+
+Begin with the representative host's required LNB/short-regression checks and
+offline TS inspection. If CS2 remains unsuitable, record the failure and stop
+short of declaring release acceptance; a code repair requires a replacement
+candidate and the corresponding revalidation. Keep raw TS, card responses,
+seeds and keys local; share counts, command/exit status, tool versions and
+non-sensitive evidence locations. The release-note placeholders remain pending.
