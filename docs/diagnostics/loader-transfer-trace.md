@@ -1,8 +1,10 @@
 # Cold loader transfer trace
 
-This is a diagnostic build based on readiness candidate
+The original diagnostic increment was based on readiness candidate
 `f643e1ea6537f6c944c0bf377095e0da638de695`. It does not fix the cold-loader
-failure or qualify a release. The default post-gain readiness remains 340 ms;
+failure or qualify a release. For the later, narrowly scoped acquisition retry,
+see [sibling-acquisition-retry.md](sibling-acquisition-retry.md).
+The default post-gain readiness remains 340 ms;
 the shared PX4 code, firmware bytes, LNA values and capture behavior are unchanged.
 
 ## Evidence and unresolved alternatives

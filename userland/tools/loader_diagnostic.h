@@ -52,7 +52,7 @@ struct Target {
 
 class Trace final {
 public:
-    static constexpr std::size_t kEventCapacity = 64U;
+    static constexpr std::size_t kEventCapacity = 256U;
 
     explicit Trace(Mode mode, std::FILE* sink = stderr) noexcept
         : enabled_(mode == Mode::Enabled), sink_(sink)

@@ -53,6 +53,19 @@ without tracing. Do not change LNA values, shared PX4 services, TS bytes or
 validation rules. Existing evidence does not qualify the changed binaries;
 cold firmware-transfer IO remains a separate unresolved issue.
 
+Sibling loader acquisition revision (2026-10-14 JST): after a successful
+primary upload and sibling GPIO restore on a dual-function device, treat
+explicit transient sibling open failures as acquisition failures eligible for
+fresh topology resolution within the existing bounded acquisition deadline.
+Preserve permanent-error handling, cancellation, identity checks and warm/single
+device behavior. Do not retry any firmware request, repeat the primary upload
+or GPIO restore, or accept a failed transfer as success. This targets the
+pre-transfer open failure observed in Issue #7 P01; it does not establish the
+cause of the earlier transfer-stage IO error. After offline validation, compare
+the fixed build using C10 and P10. If neither series reproduces the failure,
+record only "修正後の簡易試験では再現せず" and proceed under the user's decision,
+without claiming a statistically established failure rate or guaranteed cure.
+
 ## Objective
 
 Receive real PX-W3U3 MPEG-TS with a direct libusb userland implementation and

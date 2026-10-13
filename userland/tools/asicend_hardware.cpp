@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicend_args.h"
 #include "asicend_identity.h"
+#include "loader_acquisition.h"
 #include "loader_diagnostic.h"
 #include "px4d_signals.h"
 #if defined(_WIN32)
@@ -349,6 +350,7 @@ int load_loader_firmware(libusb_context* context, const Options& options,
     // mirrors the observed bring-up in HARDWARE-VALIDATION.md.
     const bool dual_functions = target_count == 2U &&
         options.file_descriptor_count == 0U;
+    bool sibling_restored = false;
     for (std::size_t i = 0; i < target_count; ++i) {
         asicen::LibusbDevice device;
         loader_diag::Target target{};
@@ -363,46 +365,59 @@ int load_loader_firmware(libusb_context* context, const Options& options,
             if (trace != nullptr) trace->record(loader_diag::Stage::OpenResult,
                 target, opened, loader_diag::Domain::Libusb, opened != 0);
         } else {
-            // After a GPIO sibling restore the loader re-enumerates with a
-            // fresh address; retry resolution so the fresh sibling is used.
+            // GPIO restore can leave the old sibling address visible briefly.
+            // Re-resolve after a transient open failure, within the same budget.
+            // Open retries are restricted to a successful sibling restore;
+            // warm siblings retain their existing resolution-only retries.
+            namespace acquisition = asicen::cli::loader_acquisition;
+            static_assert(acquisition::kOpenIo == LIBUSB_ERROR_IO &&
+                          acquisition::kOpenNoDevice == LIBUSB_ERROR_NO_DEVICE &&
+                          acquisition::kOpenNotFound == LIBUSB_ERROR_NOT_FOUND);
             const bool is_sibling_release = dual_functions && i == 1U;
-            if (trace != nullptr) trace->record(loader_diag::Stage::ResolveBegin, target);
-            const auto resolve_deadline =
-                std::chrono::steady_clock::now() + std::chrono::seconds(10);
-            px4::userland::Result<ResolvedDevice> resolved =
-                px4::userland::Result<ResolvedDevice>::failure(
-                    px4::userland::Error::NOT_FOUND);
-            while (std::chrono::steady_clock::now() < resolve_deadline) {
-                if (px4::userland::px4d::stop_requested()) return diagnostic.finish(3);
-                resolved = resolve_device(context, options.usb_paths[i]);
-                if (resolved) break;
-                if (resolved.error() != px4::userland::Error::NOT_FOUND &&
-                    resolved.error() != px4::userland::Error::NOT_READY) break;
-                if (!is_sibling_release) break;
-                sleep_ms(250U);
-            }
-            if (resolved) {
-                if (trace != nullptr) {
-                    target.location_known = true;
-                    target.bus = resolved.value().location.bus;
-                    target.address = resolved.value().location.address;
-                    target.port_count = static_cast<std::uint8_t>(resolved.value().port_path.size());
-                    std::copy(resolved.value().port_path.begin(), resolved.value().port_path.end(),
-                              target.ports.begin());
-                    trace->record(loader_diag::Stage::ResolveResult, target, 0, loader_diag::Domain::Px4);
-                    trace->record(loader_diag::Stage::OpenBegin, target);
-                }
-                opened = device.open(context, resolved.value().location);
-                open_error = asicen::map_libusb_acquisition_error(opened);
-                if (trace != nullptr) trace->record(loader_diag::Stage::OpenResult,
-                    target, opened, loader_diag::Domain::Libusb, opened != 0);
-            } else {
-                open_error = is_sibling_release &&
-                    std::chrono::steady_clock::now() >= resolve_deadline
-                        ? px4::userland::Error::TIMEOUT : resolved.error();
-                if (trace != nullptr) trace->record(loader_diag::Stage::ResolveResult,
-                    target, static_cast<int>(resolved.error()), loader_diag::Domain::Px4, true);
-            }
+            const auto acquired = acquisition::run(is_sibling_release,
+                [] { return std::chrono::steady_clock::now(); },
+                [] { return px4::userland::px4d::stop_requested(); },
+                [&] {
+                    // Do not attribute a failed fresh resolution to the last address.
+                    target.location_known = false;
+                    target.port_count = 0U;
+                    if (trace != nullptr) trace->record(loader_diag::Stage::ResolveBegin, target);
+                    const auto resolved = resolve_device(context, options.usb_paths[i]);
+                    if (!resolved) {
+                        open_error = resolved.error();
+                        if (trace != nullptr) trace->record(loader_diag::Stage::ResolveResult,
+                            target, static_cast<int>(open_error), loader_diag::Domain::Px4, true);
+                        return acquisition::retryable_resolve_error(open_error)
+                            ? acquisition::Attempt::Retry : acquisition::Attempt::Failed;
+                    }
+                    if (trace != nullptr) {
+                        target.location_known = true;
+                        target.bus = resolved.value().location.bus;
+                        target.address = resolved.value().location.address;
+                        target.port_count = static_cast<std::uint8_t>(resolved.value().port_path.size());
+                        std::copy(resolved.value().port_path.begin(), resolved.value().port_path.end(),
+                                  target.ports.begin());
+                        trace->record(loader_diag::Stage::ResolveResult, target, 0, loader_diag::Domain::Px4);
+                        trace->record(loader_diag::Stage::OpenBegin, target);
+                    }
+                    opened = device.open(context, resolved.value().location);
+                    open_error = asicen::map_libusb_acquisition_error(opened);
+                    if (trace != nullptr) trace->record(loader_diag::Stage::OpenResult,
+                        target, opened, loader_diag::Domain::Libusb, opened != 0);
+                    if (opened == 0) return acquisition::Attempt::Acquired;
+                    // open() closes partial handles itself. NOT_FOUND also covers
+                    // disappearance between enumeration and opening. Do not retry
+                    // ACCESS, BUSY, invalid parameters or other permanent errors.
+                    return sibling_restored && acquisition::retryable_open_error(opened)
+                        ? acquisition::Attempt::Retry : acquisition::Attempt::Failed;
+                },
+                [](std::chrono::steady_clock::duration delay) {
+                    sleep_ms(static_cast<std::uint32_t>(
+                        std::chrono::ceil<std::chrono::milliseconds>(delay).count()));
+                });
+            if (acquired == acquisition::Result::Cancelled) return diagnostic.finish(3);
+            if (acquired == acquisition::Result::TimedOut)
+                open_error = px4::userland::Error::TIMEOUT;
         }
         if (opened != 0) {
             std::fprintf(stderr, "firmware: cannot resolve or open the addressed device: %s\n",
@@ -536,6 +551,7 @@ int load_loader_firmware(libusb_context* context, const Options& options,
             }
             const int restore_rc = restore_sibling_loader(primary_runtime, trace, runtime_target);
             if (restore_rc != 0) return diagnostic.finish(restore_rc);
+            sibling_restored = true;
         }
         // The sibling loader re-enumerates at the second --usb-path topology.
         // Loop again; resolve_device on usb_paths[1] finds the fresh loader.
