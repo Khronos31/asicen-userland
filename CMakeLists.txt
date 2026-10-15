@@ -599,6 +599,36 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         # changing any backend operation's deadline.
         set_tests_properties(asicen-libusb-capture-lifecycle-tests PROPERTIES TIMEOUT 60)
 
+        # The fake USB fixture observes overflow before unblocking its sink using
+        # POSIX stderr capture. The production split pump is platform-neutral.
+        if(UNIX)
+            add_executable(asicen-libusb-split-capture-tests
+                userland/tests/libusb_split_capture_tests.cpp
+                userland/tests/transport_transform_reference.cpp)
+            target_link_libraries(asicen-libusb-split-capture-tests PRIVATE asicen_libusb)
+            asicen_enable_project_warnings(asicen-libusb-split-capture-tests)
+            add_test(NAME asicen-libusb-split-capture-tests
+                COMMAND asicen-libusb-split-capture-tests)
+            set_tests_properties(asicen-libusb-split-capture-tests PROPERTIES TIMEOUT 120)
+        endif()
+
+        # GNU-compatible ELF link wrapping intercepts the event API boundary;
+        # this deterministic test never creates a real USB context.
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            add_executable(asicen-libusb-capture-wait-api-tests
+                userland/tests/libusb_capture_wait_api_tests.cpp)
+            target_link_libraries(asicen-libusb-capture-wait-api-tests PRIVATE asicen_libusb)
+            foreach(api get_device_list try_lock_events unlock_events event_handling_ok
+                    lock_event_waiters unlock_event_waiters event_handler_active wait_for_event
+                    handle_events_locked handle_events_timeout_completed)
+                target_link_options(asicen-libusb-capture-wait-api-tests PRIVATE "-Wl,--wrap=libusb_${api}")
+            endforeach()
+            asicen_enable_project_warnings(asicen-libusb-capture-wait-api-tests)
+            add_test(NAME asicen-libusb-capture-wait-api-tests
+                COMMAND asicen-libusb-capture-wait-api-tests)
+            set_tests_properties(asicen-libusb-capture-wait-api-tests PROPERTIES TIMEOUT 60)
+        endif()
+
         add_executable(asicen-libusb-lnb-lifecycle-tests userland/tests/libusb_lnb_lifecycle_tests.cpp)
         target_link_libraries(asicen-libusb-lnb-lifecycle-tests PRIVATE asicen_libusb)
         asicen_enable_project_warnings(asicen-libusb-lnb-lifecycle-tests)

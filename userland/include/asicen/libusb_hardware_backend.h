@@ -244,6 +244,10 @@ private:
     CaptureRunResult stop_and_drain(bool dsc_was_attempted) noexcept;
     CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept;
     bool handle_events(unsigned timeout_ms) noexcept;
+    bool wait_capture_events(unsigned timeout_ms, const std::atomic<bool>& cancelled) noexcept;
+    struct SplitPump;
+    CaptureRunResult run_split_usb_pump(const std::atomic<bool>& cancelled,
+        bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept;
     bool stop_capture_safely() noexcept override;
     bool restore_gpio_snapshot_safely() noexcept override;
 

@@ -17,6 +17,7 @@
 #include <array>
 #include <cerrno>
 #include <cstdio>
+#include <condition_variable>
 #include <cstring>
 #include <new>
 #if !defined(_WIN32)
@@ -24,6 +25,7 @@
 #include <sys/time.h>
 #endif
 #include <thread>
+
 
 namespace asicen {
 namespace {
@@ -180,6 +182,11 @@ struct LibusbW3u3Hardware::AsyncState {
     std::uint64_t next_delivery_order = 0U;
     bool prepared = false;
     bool drain_failed = false;
+    // Unlike drain_failed, this capture-result latch survives transfer release.
+    // A cancellation/sink stop must not hide a malformed concurrent callback.
+    bool split_completion_failed = false;
+    bool split_draining = false;
+    CaptureRunResult split_callback_result = CaptureRunResult::cancelled;
     bool raw_io_enabled = false;
     std::uint8_t endpoint = 0U;
     std::mutex mutex;
@@ -195,18 +202,204 @@ struct LibusbW3u3Hardware::AsyncState {
             std::lock_guard<std::mutex> lock(state.mutex);
             if (!slot->pending || slot->transfer != transfer) {
                 state.drain_failed = true;
+                state.split_completion_failed = true;
                 return;
             }
             slot->pending = false;
             slot->status = static_cast<int>(transfer->status);
             slot->actual = transfer->actual_length;
             slot->ready = true;
+            // Preserve errors reported before the drain boundary even if a
+            // simultaneous sink rejection/cancel skips the producer scan.
+            if (!state.split_draining && slot->status != LIBUSB_TRANSFER_COMPLETED &&
+                slot->status != LIBUSB_TRANSFER_TIMED_OUT) {
+                if (slot->status == LIBUSB_TRANSFER_NO_DEVICE)
+                    state.split_callback_result = CaptureRunResult::disconnected;
+                else if (state.split_callback_result == CaptureRunResult::cancelled)
+                    state.split_callback_result = CaptureRunResult::usb_error;
+            }
             if (slot->actual < 0 || static_cast<std::size_t>(slot->actual) > slot->buffer.size() ||
                 slot->actual > transfer->length) {
                 state.drain_failed = true;
+                state.split_completion_failed = true;
                 return;
             }
         }
+    }
+};
+
+// One run-owned heap allocation. A reserved or consumer-held block counts
+// against the same bounded ingress limit as a queued block. USB slots are separate.
+struct LibusbW3u3Hardware::SplitPump {
+    static constexpr std::size_t kIngressDepth = 32U;
+    struct Block {
+        std::array<std::uint8_t, kChunkSize> bytes{};
+        std::uint64_t submission = 0;
+        std::size_t size = 0;
+    };
+    LibusbW3u3Hardware& hardware;
+    const std::atomic<bool>& cancelled;
+    bool (*emit)(void*, const std::uint8_t*, std::size_t);
+    void* context;
+    std::array<Block, kIngressDepth> blocks{};
+    std::array<bool, kIngressDepth> used{};
+    std::array<std::size_t, kIngressDepth> fifo{};
+    std::size_t head = 0, count = 0, occupied = 0, high_water = 0;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool closed = false;
+    std::atomic<bool> abort{false}, done{false};
+    NativeThread consumer;
+    CaptureRunResult consumer_result = CaptureRunResult::cancelled;
+    const char* terminal = "cancelled";
+    std::uint64_t copied_chunks = 0, copied_bytes = 0;
+    std::uint64_t decoder_input_chunks = 0, decoder_input_bytes = 0;
+    std::uint64_t discarded_chunks = 0, discarded_bytes = 0;
+    std::uint64_t overflow_submission = 0;
+    unsigned ingress_overflow = 0;
+
+    SplitPump(LibusbW3u3Hardware& owner, const std::atomic<bool>& stop,
+              bool (*sink)(void*, const std::uint8_t*, std::size_t), void* opaque) noexcept
+        : hardware(owner), cancelled(stop), emit(sink), context(opaque) {}
+
+    bool stopping() const noexcept
+    {
+        return abort.load(std::memory_order_acquire) || cancelled.load() ||
+            hardware.stop_requested_.load() || hardware.capture_interrupted_.load() ||
+            hardware.cleanup_failed_.load(std::memory_order_acquire);
+    }
+
+    std::size_t reserve() noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (std::size_t i = 0; i < used.size(); ++i) {
+            if (!used[i]) {
+                used[i] = true;
+                high_water = std::max(high_water, ++occupied);
+                return i;
+            }
+        }
+        return kIngressDepth; // Never wait for consumer capacity.
+    }
+
+    void release(std::size_t index) noexcept
+    {
+        used[index] = false;
+        --occupied;
+    }
+
+    bool publish(std::size_t index) noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++copied_chunks;
+        copied_bytes += blocks[index].size;
+        if (closed || done.load(std::memory_order_acquire) || stopping()) {
+            ++discarded_chunks;
+            discarded_bytes += blocks[index].size;
+            release(index);
+            return false;
+        }
+        fifo[(head + count) % fifo.size()] = index;
+        ++count;
+        changed.notify_one();
+        return true;
+    }
+
+    void close(bool discard) noexcept
+    {
+        if (discard) abort.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            closed = true;
+        }
+        changed.notify_all();
+    }
+
+    static void* entry(void* opaque) noexcept
+    {
+        static_cast<SplitPump*>(opaque)->consume();
+        return nullptr;
+    }
+
+    void consume() noexcept
+    {
+        for (;;) {
+            std::size_t index = kIngressDepth;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                changed.wait_for(lock, std::chrono::milliseconds(100),
+                    [&] { return count != 0 || closed || stopping(); });
+                if (stopping()) break;
+                if (count == 0) {
+                    if (closed) break;
+                    continue;
+                }
+                index = fifo[head];
+                head = (head + 1) % fifo.size();
+                --count;
+            }
+            auto& block = blocks[index];
+            // No queue or state lock is held through decode/emit.
+            const auto before = hardware.decoder_.sync_loss_events();
+            ++decoder_input_chunks;
+            decoder_input_bytes += block.size;
+            const auto delivered = hardware.decoder_.push({block.bytes.data(), block.size},
+                [](void* opaque, px4::userland::ByteView packet) noexcept {
+                    auto& self = *static_cast<SplitPump*>(opaque);
+                    // A stop between packets must not drain a whole queued run.
+                    if (self.stopping()) return Result<void>::failure(Error::SLOW_CONSUMER);
+                    return self.emit(self.context, packet.data, packet.size)
+                        ? Result<void>::success() : Result<void>::failure(Error::SLOW_CONSUMER);
+                }, this);
+            hardware.capture_sync_errors_.fetch_add(hardware.decoder_.sync_loss_events() - before);
+            if (block.submission < kQueueDepth) {
+                const auto framing = hardware.decoder_.counters();
+                hardware.record_startup("framing_emitted",
+                    static_cast<std::int64_t>(framing.emitted_packets),
+                    static_cast<std::int64_t>(framing.discarded_sync_search_bytes));
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                release(index);
+            }
+            if (!delivered || hardware.cleanup_failed_.load(std::memory_order_acquire)) {
+                consumer_result = hardware.cleanup_failed_.load(std::memory_order_acquire) ||
+                    (!delivered && delivered.error() != Error::SLOW_CONSUMER)
+                    ? CaptureRunResult::usb_error : CaptureRunResult::cancelled;
+                break;
+            }
+        }
+        bool wake_producer = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            while (count != 0) {
+                const auto index = fifo[head];
+                head = (head + 1) % fifo.size();
+                --count;
+                ++discarded_chunks;
+                discarded_bytes += blocks[index].size;
+                release(index);
+            }
+            done.store(true, std::memory_order_release);
+            wake_producer = !closed;
+        }
+        // Reuse the existing race-safe event-wait terminal predicate and wake.
+        // This never takes the queue/state/control gate and never resubmits.
+        if (wake_producer) hardware.interrupt();
+    }
+
+    void dump() const noexcept
+    {
+        const bool reconciled = copied_bytes == decoder_input_bytes + discarded_bytes &&
+            copied_chunks == decoder_input_chunks + discarded_chunks && occupied == 0;
+        std::fprintf(stderr, "asicen-split-usb-pump version=1 terminal=%s ingress_overflow=%u overflow_submission=%llu "
+            "pool_blocks=32 block_bytes=65536"
+            " high_water=%zu copied_chunks=%llu copied_bytes=%llu decoder_input_chunks=%llu decoder_input_bytes=%llu discarded_chunks=%llu discarded_bytes=%llu accounting=%s\n",
+            terminal, ingress_overflow, static_cast<unsigned long long>(overflow_submission), high_water,
+            static_cast<unsigned long long>(copied_chunks), static_cast<unsigned long long>(copied_bytes),
+            static_cast<unsigned long long>(decoder_input_chunks), static_cast<unsigned long long>(decoder_input_bytes),
+            static_cast<unsigned long long>(discarded_chunks), static_cast<unsigned long long>(discarded_bytes),
+            reconciled ? "reconciled" : "inconclusive");
     }
 };
 
@@ -1590,6 +1783,7 @@ bool LibusbW3u3Hardware::poll_v2_lnb_feedback_if_due() noexcept
     return check_v2_lnb_feedback().has_value();
 }
 
+
 bool LibusbW3u3Hardware::start_lnb_monitor() noexcept
 {
     std::lock_guard<std::mutex> life(lnb_monitor_mutex_);
@@ -2345,6 +2539,9 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         already_prepared = state.prepared;
         state.next_submission_order = state.next_delivery_order = 0U;
         state.drain_failed = false;
+        state.split_completion_failed = false;
+        state.split_draining = false;
+        state.split_callback_result = CaptureRunResult::cancelled;
         for (auto& slot : state.slots) {
             slot.owner = &state;
             slot.status = LIBUSB_TRANSFER_ERROR;
@@ -2377,7 +2574,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
             return fail_prepare(Error::INTERNAL);
         }
         libusb_fill_bulk_transfer(slot.transfer, primary_.handle(), endpoint, slot.buffer.data(),
-                                  static_cast<int>(slot.buffer.size()), AsyncState::completed,
+                                  static_cast<int>(kChunkSize), AsyncState::completed,
                                   &slot, 0U);
     }
     {
@@ -2428,133 +2625,179 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     return Result<void>::success();
 }
 
-CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag,
-                                         bool (*emit)(void*, const std::uint8_t*, std::size_t),
-                                         void* context) noexcept
+CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
+    const std::atomic<bool>& cancelled_flag,
+    bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
 {
-    if (!source_prepared_ || emit == nullptr) {
-        return CaptureRunResult::usb_error;
-    }
+    if (!source_prepared_ || emit == nullptr) return CaptureRunResult::usb_error;
     AsyncState& state = *async_;
     record_startup("worker_run");
+    std::unique_ptr<SplitPump> pump(new (std::nothrow) SplitPump(*this, cancelled_flag, emit, context));
     CaptureRunResult outcome = CaptureRunResult::cancelled;
-    while (!cleanup_failed_.load(std::memory_order_acquire) && !cancelled_flag.load() &&
-           !stop_requested_.load() && !capture_interrupted_.load()) {
-        bool drain_failed = false;
+    bool discard = false;
+    if (!pump) {
+        std::fprintf(stderr, "asicen-split-usb-pump version=1 terminal=allocation_failed ingress_overflow=0\n");
+        outcome = CaptureRunResult::usb_error;
+    } else if (!pump->stopping() && !pump->consumer.start(SplitPump::entry, pump.get(),
+                   capture_usb_hooks_ ? capture_usb_hooks_->launch_thread : nullptr)) {
+        pump->terminal = "launch_failed";
+        outcome = CaptureRunResult::usb_error;
+    } else while (!pump->stopping() && !pump->done.load(std::memory_order_acquire)) {
         std::size_t index = kQueueDepth;
-        int slot_status = LIBUSB_TRANSFER_ERROR;
-        int slot_actual = 0;
+        int status = LIBUSB_TRANSFER_ERROR;
+        int actual = 0;
+        std::uint64_t submission = 0;
+        bool invalid = false;
         {
             std::lock_guard<std::mutex> lock(state.mutex);
-            drain_failed = state.drain_failed;
-            if (!drain_failed) {
-                for (std::size_t candidate = 0U; candidate < state.slots.size(); ++candidate) {
-                    auto& queued = state.slots[candidate];
-                    if (!queued.ready || queued.submission_order != state.next_delivery_order) {
-                        continue;
-                    }
-                    index = candidate;
-                    ++state.next_delivery_order;
-                    queued.ready = false;
-                    slot_status = queued.status;
-                    slot_actual = queued.actual;
+            invalid = state.drain_failed;
+            for (std::size_t i = 0; !invalid && i < state.slots.size(); ++i) {
+                const auto& slot = state.slots[i];
+                if (slot.ready && slot.submission_order == state.next_delivery_order) {
+                    index = i;
+                    status = slot.status;
+                    actual = slot.actual;
+                    submission = slot.submission_order;
                     break;
                 }
             }
         }
-        if (drain_failed) {
+        if (invalid) {
+            pump->terminal = "invalid_callback_or_length";
             outcome = CaptureRunResult::usb_error;
             break;
         }
         if (index == kQueueDepth) {
-            if (!handle_events(100U)) {
-                outcome = disconnected_.load() ? CaptureRunResult::disconnected
-                                               : CaptureRunResult::usb_error;
+            const bool ok = wait_capture_events(100U, cancelled_flag);
+            if (!ok) {
+                pump->terminal = "event_failure";
+                outcome = disconnected_.load() ? CaptureRunResult::disconnected : CaptureRunResult::usb_error;
                 break;
             }
             continue;
         }
-        AsyncState::Slot& slot = state.slots[index];
-        const bool trace_first = slot.submission_order < 4U;
-        if (trace_first)
-            record_startup("delivery", static_cast<std::int64_t>(slot.submission_order),
-                           slot_actual);
-        if (slot_status != LIBUSB_TRANSFER_COMPLETED && slot_status != LIBUSB_TRANSFER_TIMED_OUT) {
-            outcome = slot_status == LIBUSB_TRANSFER_NO_DEVICE || disconnected_.load()
-                          ? CaptureRunResult::disconnected
-                          : CaptureRunResult::usb_error;
+        auto& slot = state.slots[index];
+        if (status != LIBUSB_TRANSFER_COMPLETED && status != LIBUSB_TRANSFER_TIMED_OUT) {
+            pump->terminal = "transfer_status";
+            outcome = status == LIBUSB_TRANSFER_NO_DEVICE || disconnected_.load()
+                ? CaptureRunResult::disconnected : CaptureRunResult::usb_error;
             break;
         }
-        if (slot_status == LIBUSB_TRANSFER_COMPLETED && slot_actual > 0) {
-            const auto before = decoder_.sync_loss_events();
-            struct Sink {
-                bool (*emit)(void*, const std::uint8_t*, std::size_t);
-                void* context;
-            } sink{emit, context};
-            const auto delivered = decoder_.push(
-                {slot.buffer.data(), static_cast<std::size_t>(slot_actual)},
-                [](void* opaque, px4::userland::ByteView packet) noexcept {
-                    auto& target = *static_cast<Sink*>(opaque);
-                    return target.emit(target.context, packet.data, packet.size)
-                               ? Result<void>::success()
-                               : Result<void>::failure(Error::SLOW_CONSUMER);
-                },
-                &sink);
-            capture_sync_errors_.fetch_add(decoder_.sync_loss_events() - before);
-            if (trace_first) {
-                const auto framing = decoder_.counters();
-                record_startup("framing_emitted",
-                               static_cast<std::int64_t>(framing.emitted_packets),
-                               static_cast<std::int64_t>(framing.discarded_sync_search_bytes));
-            }
-            if (cleanup_failed_.load(std::memory_order_acquire)) {
+        const bool has_bytes = status == LIBUSB_TRANSFER_COMPLETED && actual > 0;
+        std::size_t copy = SplitPump::kIngressDepth;
+        if (has_bytes) {
+            copy = pump->reserve();
+            if (copy == SplitPump::kIngressDepth) {
+                // Latch a transport failure before waking/joining the consumer.
+                // Leave this completion unretired for bounded stop/drain.
+                pump->ingress_overflow = 1;
+                pump->overflow_submission = submission;
+                pump->terminal = "ingress_overflow";
+                std::fprintf(stderr, "asicen-split-usb-pump terminal=ingress_overflow submission=%llu "
+            "pool_blocks=32 block_bytes=65536"
+            "\n",
+                    static_cast<unsigned long long>(submission));
                 outcome = CaptureRunResult::usb_error;
+                discard = true;
                 break;
             }
-            if (!delivered) {
-                outcome = delivered.error() == Error::SLOW_CONSUMER ? CaptureRunResult::cancelled
-                                                                    : CaptureRunResult::usb_error;
-                break;
-            }
-        } else {
-            capture_empty_intervals_.fetch_add(1U);
+            auto& block = pump->blocks[copy];
+            block.submission = submission;
+            block.size = static_cast<std::size_t>(actual);
+            // The sole producer has not resubmitted this completed generation.
+            // Its buffer is therefore owned until copied and explicitly reused.
+            std::memcpy(block.bytes.data(), slot.buffer.data(), block.size);
         }
         {
             std::lock_guard<std::mutex> lock(state.mutex);
-            if (cleanup_failed_.load(std::memory_order_acquire)) {
+            slot.ready = false;
+            ++state.next_delivery_order;
+        }
+        if (submission < kQueueDepth)
+            record_startup("delivery", static_cast<std::int64_t>(submission), actual);
+        if (has_bytes) {
+            if (!pump->publish(copy)) break;
+        } else capture_empty_intervals_.fetch_add(1U);
+
+        // Publication and submission are solely on this original run caller.
+        // No mutex is held across libusb: it can synchronously call completed().
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            if (state.drain_failed) {
+                pump->terminal = "invalid_callback_or_length";
                 outcome = CaptureRunResult::usb_error;
                 break;
             }
+            if (pump->stopping() || pump->done.load(std::memory_order_acquire)) break;
             slot.actual = 0;
-            slot.ready = false;
             slot.pending = true;
             ++slot.generation;
             slot.submission_order = state.next_submission_order++;
         }
         if (submit_transfer(slot.transfer) != 0) {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            slot.pending = false;
-            outcome =
-                disconnected_.load() ? CaptureRunResult::disconnected : CaptureRunResult::usb_error;
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                slot.pending = false;
+            }
+            pump->terminal = "submit_failure";
+            outcome = disconnected_.load() ? CaptureRunResult::disconnected : CaptureRunResult::usb_error;
             break;
         }
     }
-    if (cleanup_failed_.load(std::memory_order_acquire)) {
-        outcome = CaptureRunResult::usb_error;
+    if (pump) {
+        // On transport failure let preceding copied input finish in FIFO order.
+        // External cancellation and sink failure still stop between packets.
+        pump->close(discard || outcome == CaptureRunResult::cancelled);
+        pump->consumer.join(); // No state, queue, service or control lock held.
+        if (outcome == CaptureRunResult::cancelled && pump->consumer_result != CaptureRunResult::cancelled)
+            outcome = pump->consumer_result;
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            if (state.split_completion_failed) {
+                outcome = CaptureRunResult::usb_error;
+                if (!pump->ingress_overflow) pump->terminal = "invalid_callback_or_length";
+            }
+            // These callbacks precede cancel_pending(), so terminal statuses
+            // are real capture failures, not expected drain cancellation.
+            for (const auto& slot : state.slots) {
+                if (!slot.ready || slot.status == LIBUSB_TRANSFER_COMPLETED ||
+                    slot.status == LIBUSB_TRANSFER_TIMED_OUT) continue;
+                if (slot.status == LIBUSB_TRANSFER_NO_DEVICE) outcome = CaptureRunResult::disconnected;
+                else if (outcome == CaptureRunResult::cancelled) outcome = CaptureRunResult::usb_error;
+                if (!pump->ingress_overflow && !state.split_completion_failed)
+                    pump->terminal = "transfer_status";
+            }
+        }
+        pump->dump();
     }
-    const CaptureRunResult cleanup = stop_and_drain(dsc_attempted_);
-    if (cleanup == CaptureRunResult::fatal_drain) {
-        return cleanup;
-    }
+    if (cleanup_failed_.load(std::memory_order_acquire)) outcome = CaptureRunResult::usb_error;
+    // Consumer use has ended before transfer release, decoder clear,
+    // bounded drain or callback-storage quarantine.
+    const auto cleanup = stop_and_drain(dsc_attempted_);
+    if (cleanup == CaptureRunResult::fatal_drain) return cleanup;
     if (cleanup != CaptureRunResult::cancelled) {
         mark_cleanup_failed(Error::USB_IO);
         return cleanup;
     }
-    source_prepared_ = false;
-    if (outcome == CaptureRunResult::usb_error || outcome == CaptureRunResult::disconnected) {
-        return outcome;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        // A callback can arrive during bounded stop/drain as well. Preserve its
+        // invalid-observation result even though release clears drain_failed.
+        if (state.split_completion_failed) outcome = CaptureRunResult::usb_error;
+        if (state.split_callback_result == CaptureRunResult::disconnected)
+            outcome = CaptureRunResult::disconnected;
+        else if (state.split_callback_result == CaptureRunResult::usb_error &&
+                 outcome == CaptureRunResult::cancelled) outcome = CaptureRunResult::usb_error;
     }
-    return CaptureRunResult::cancelled;
+    source_prepared_ = false;
+    return outcome;
+}
+
+CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag,
+                                         bool (*emit)(void*, const std::uint8_t*, std::size_t),
+                                         void* context) noexcept
+{
+    return run_split_usb_pump(cancelled_flag, emit, context);
 }
 
 void LibusbW3u3Hardware::interrupt() noexcept
@@ -2614,6 +2857,10 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
 {
     if (abandoned_) {
         return CaptureRunResult::fatal_drain;
+    }
+    if (async_) {
+        std::lock_guard<std::mutex> lock(async_->mutex);
+        async_->split_draining = true;
     }
     // A card transaction owns the bridge until its bounded operation ends.
     // Hold the same gate across DSC stop, callback drain and restoration so
@@ -2732,6 +2979,71 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(bool dsc_ok,
         mark_cleanup_failed(Error::USB_IO);
     }
     return result;
+}
+
+bool LibusbW3u3Hardware::wait_capture_events(unsigned timeout_ms,
+                                            const std::atomic<bool>& cancelled_flag) noexcept
+{
+    // Preserve existing injected event pumps. Real libusb callbacks may also
+    // run in a synchronous control caller, between run's scan and this wait.
+    if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->pump_events != nullptr)
+        return handle_events(timeout_ms);
+    if (context_ == nullptr || !async_) return false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    const auto should_return = [&]() noexcept {
+        if (cancelled_flag.load() || stop_requested_.load() || capture_interrupted_.load() ||
+            cleanup_failed_.load(std::memory_order_acquire)) return true;
+        std::lock_guard<std::mutex> lock(async_->mutex);
+        if (async_->drain_failed) return true;
+        for (const auto& slot : async_->slots)
+            if (slot.ready && slot.submission_order == async_->next_delivery_order) return true;
+        return false;
+    };
+    const auto remaining = [&]() noexcept {
+        const auto us = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::microseconds>(
+            deadline - std::chrono::steady_clock::now()).count());
+        timeval tv{};
+        tv.tv_sec = static_cast<long>(us / 1000000);
+        tv.tv_usec = static_cast<long>(us % 1000000);
+        return tv;
+    };
+    int rc = 0;
+    for (;;) {
+        if (libusb_try_lock_events(context_) == 0) {
+            // Lock order matches completion: libusb events -> AsyncState.
+            // Never hold AsyncState while acquiring a libusb lock or polling.
+            if (should_return()) {
+                libusb_unlock_events(context_);
+                return true;
+            }
+            if (!libusb_event_handling_ok(context_)) {
+                libusb_unlock_events(context_);
+                if (std::chrono::steady_clock::now() >= deadline) return true;
+                continue;
+            }
+            auto timeout = remaining();
+            rc = libusb_handle_events_locked(context_, &timeout);
+            libusb_unlock_events(context_);
+            break;
+        }
+        libusb_lock_event_waiters(context_);
+        if (should_return()) {
+            libusb_unlock_event_waiters(context_);
+            return true;
+        }
+        if (!libusb_event_handler_active(context_)) {
+            libusb_unlock_event_waiters(context_);
+            if (std::chrono::steady_clock::now() >= deadline) return true;
+            continue;
+        }
+        auto timeout = remaining();
+        rc = libusb_wait_for_event(context_, &timeout);
+        libusb_unlock_event_waiters(context_);
+        // A timeout or spurious/other-submission wake returns to run's scan.
+        break;
+    }
+    if (rc == LIBUSB_ERROR_NO_DEVICE) disconnected_.store(true);
+    return rc >= 0;
 }
 
 bool LibusbW3u3Hardware::handle_events(unsigned timeout_ms) noexcept

@@ -111,6 +111,26 @@ source. recisdb remains an external downstream program.
 
 ## Shared packet and card contracts (2026-10-13)
 
+### Native USB pumping revision 1 (2026-10-15)
+
+The native libusb capture caller pumps events and recycles completed requests
+in submission order independently of one joined decode/emit consumer. Preserve
+four requests of 65536 bytes. A fixed 32-block software FIFO provides 2 MiB of
+payload storage; reserved and consumer-held blocks count toward this limit.
+The producer must not wait for queue capacity. Exhaustion reports an explicit
+USB transport failure and overflow metadata, never a silent successful drop.
+The consumer is joined before decoder clearing, transfer release or device
+teardown. Callback errors preceding drain remain authoritative through cleanup.
+Event waits recheck ready/terminal predicates under libusb event coordination,
+including callbacks dispatched by synchronous controls on the shared context.
+
+The emit callback remains serialized and packet-oriented, but executes on the
+joined consumer rather than the run caller. Public CLI, IPC, source selection,
+firmware, tuning and LNB behavior are unchanged. This shared-backend change adds
+no model-specific identification or frontend behavior. The motivating hardware
+evidence is limited to W3U3; it does not establish other-model/platform reception
+or release qualification. See `docs/usb-pump.md` for lifecycle and test scope.
+
 Use the exact v0.2.1 `TsContinuityChecker` on complete, transformed 188-byte
 packets at the existing HardwareStreamService observation point. Only its
 `error` classification increments continuity-errors. One legal same-PID

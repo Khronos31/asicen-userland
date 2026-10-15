@@ -1,5 +1,16 @@
 # Official PX4 v0.2.1 source reuse for ASICEN 0.1.0
 
+## Native capture scheduling revision, 2026-10-15
+
+The ASICEN libusb backend now separates ordered USB pumping from one joined
+decode/emit consumer with 32 bounded software blocks. USB geometry remains
+four 65536-byte requests. This is an evidence-backed ASICEN transport scheduling
+change; no imported PX4 source, decoder/framer, packet checker, CLI, IPC or
+service observation contract changes. Emit remains serialized, but thread
+affinity changes from the run caller to its joined consumer. Explicit overflow
+and terminal failure reporting are preserved. See [usb-pump.md](usb-pump.md).
+This is not a release or additional-model hardware qualification claim.
+
 ## Fixed inputs and scope
 
 - ASICEN starting commit: `432684cc5c9919e1e3379d7ba64db7d6ebb7795c` on `release/0.1.0`.
