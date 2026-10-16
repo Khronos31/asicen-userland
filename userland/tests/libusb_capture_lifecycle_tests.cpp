@@ -2012,7 +2012,7 @@ bool test_w3u2_type10_complete_capture_matches_type0f_trace()
 
 bool test_w3u2_type10_controller_read_failures_and_busy_output()
 {
-    for (const auto bad_read : {std::pair<std::uint16_t, bool>{0x094aU, false},
+    for (const auto& bad_read : {std::pair<std::uint16_t, bool>{0x094aU, false},
                                 {0x094aU, true}, {0x054aU, false}}) {
         FakeUsb fake;
         fake.controller[0x09U] = 0x20U;
