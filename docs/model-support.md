@@ -2,8 +2,9 @@
 
 Reviewer and integration: **dot (OpenAI)**. Source baseline:
 `2718916cce028055290d5561ffde2df2d0153312` (2026-10-09 JST).
-This work executes only offline tests and static analysis, not hardware or vendor
-binaries. Hardware-unverified means implementation and protocol evidence exist;
+The original model-support work used offline tests and static analysis, not
+hardware or vendor binaries. The bounded 2026-10-16 W3U2 hardware follow-up is
+recorded below. Hardware-unverified means implementation and protocol evidence exist;
 it does not mean a receiver was tested, all silicon revisions work, or every
 physical tuner is currently exposed.
 
@@ -19,14 +20,18 @@ physical tuner is currently exposed.
 
 The W3U3 hardware results in HARDWARE-VALIDATION.md predate these model changes.
 They are not hardware validation of the new branch or of another model. The
-other four products have not been tested here. Four-receiver enclosures still
+S3U, S3U2 and W3U3 V2 have not been tested here. W3U2 received bounded
+primary terrestrial and satellite checks on 2026-10-16; see
+[w3u2-type10-2026-10-16.md](reverse-engineering/w3u2-type10-2026-10-16.md). Four-receiver enclosures still
 reserve the sibling interface, but this backend exposes only the two operational
 primary receivers, using IPC count2/mask01. The catalogue's capacity4 is physical
 metadata, not a promise of four simultaneous captures. Secondary reception and
 multiple simultaneous leases remain outside this implementation.
 
 Runtime support remains conditional on the implemented bridge revision11/52,
-controller address4a/type0f and version7 link path. Other detected revisions or
+controller address4a/type0f and version7 link path. W3U2 additionally accepts
+decoded type0x10 (observed raw0x20), following the original official driver's
+shared type0f/type10 path. Other detected revisions or
 controller types fail before unsupported frontend/link operations. These guards
 are deliberate protocol boundaries, not claims that every unit of each model
 contains that revision. In particular revision16/52 has a separate ASICEN link

@@ -66,6 +66,17 @@ the fixed build using C10 and P10. If neither series reproduces the failure,
 record only "修正後の簡易試験では再現せず" and proceed under the user's decision,
 without claiming a statistically established failure rate or guaranteed cure.
 
+W3U2 controller revision (2026-10-16 JST): accept decoded controller type
+0x10 in addition to 0x0f only for the canonical W3U2 profile, at both powered
+initialization and link-diagnostic guards. The observed controller4a/09 raw0x20
+decodes as (raw & 0x3e) >> 1. The original official Linux object shares the
+relevant version7 initialization, seed, output and cleanup paths for these types.
+Preserve revision, transfer status/length, idle-state, model and firmware checks.
+This does not expand the primary-only two-receiver, single-active-lease scope.
+Bounded startup and 60-second primary T/S tests are recorded in
+[the W3U2 record](docs/reverse-engineering/w3u2-type10-2026-10-16.md);
+they do not qualify other models, platforms or a release.
+
 ## Objective
 
 Receive real PX-W3U3 MPEG-TS with a direct libusb userland implementation and

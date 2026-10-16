@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/libusb_hardware_backend.h"
+#include "asicen/powered_controller_type.h"
 #include "px4/tuner_service.h"
 
 #include <algorithm>
@@ -37,6 +38,14 @@ struct LibusbW3u3HardwareTestPeer {
         (void)hardware.active_receiver_.reserve(receiver);
     }
 
+    static bool snapshot_link_diagnostic(LibusbW3u3Hardware& hardware)
+    {
+        return hardware.snapshot_link_diagnostic();
+    }
+    static const DeviceProfile* profile(const LibusbW3u3Hardware& hardware)
+    {
+        return hardware.profile_;
+    }
     static bool verify_v2_roles(LibusbW3u3Hardware& hardware)
     {
         return hardware.verify_v2_pair_roles();
@@ -186,6 +195,8 @@ struct FakeUsb {
     int fail_submit_error = LIBUSB_ERROR_IO;
     int fail_control_once = 0;
     bool short_control_once = false;
+    std::uint16_t fail_i2c_read_value_once = 0U;
+    std::uint16_t short_i2c_read_value_once = 0U;
     bool expire_after_power_write = false;
     unsigned fake_elapsed_ms = 0U;
     bool fixed_clock = false;
@@ -347,6 +358,14 @@ struct FakeUsb {
 
     int control(const ControlTransfer& transfer, unsigned char* response)
     {
+        if (transfer.request == Request::I2cRead && fail_i2c_read_value_once == transfer.value) {
+            fail_i2c_read_value_once = 0U;
+            return LIBUSB_ERROR_IO;
+        }
+        if (transfer.request == Request::I2cRead && short_i2c_read_value_once == transfer.value) {
+            short_i2c_read_value_once = 0U;
+            return static_cast<int>(transfer.length) - 1;
+        }
         if (short_control_once) {
             short_control_once = false;
             return transfer.length - 1;
@@ -1881,6 +1900,200 @@ bool test_legacy_controller_guard_runs_board_off_sequence()
     return true;
 }
 
+bool test_powered_controller_type_predicate_exhaustive()
+{
+    const auto* all_profiles = profiles();
+    CHECK(all_profiles != nullptr && profile_count() != 0U);
+    for (std::size_t profile_index = 0; profile_index < profile_count(); ++profile_index) {
+        const auto* profile = &all_profiles[profile_index];
+        for (unsigned raw = 0U; raw < 256U; ++raw) {
+            const auto decoded = static_cast<std::uint8_t>((raw & 0x3eU) >> 1U);
+            const bool expected = decoded == 0x0fU ||
+                                  (profile->model_id == ModelId::W3u2 && decoded == 0x10U);
+            CHECK(powered_controller_type_supported(profile, static_cast<std::uint8_t>(raw)) ==
+                      expected);
+        }
+    }
+    for (unsigned raw = 0U; raw < 256U; ++raw) {
+        CHECK(!powered_controller_type_supported(nullptr, static_cast<std::uint8_t>(raw)));
+    }
+    const auto* w3u2 = find_profile(ModelId::W3u2);
+    const auto* w3u3 = find_profile(ModelId::W3u3);
+    CHECK(powered_controller_type_supported(w3u2, 0x20U) &&
+              powered_controller_type_supported(w3u2, 0x21U));
+    CHECK(!powered_controller_type_supported(w3u3, 0x20U) &&
+              !powered_controller_type_supported(w3u3, 0x21U));
+    return true;
+}
+
+bool test_w3u2_type10_passes_both_production_gates()
+{
+    {
+        FakeUsb fake;
+        fake.controller[0x09U] = 0x20U;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        CHECK(LibusbW3u3HardwareTestPeer::snapshot_link_diagnostic(hardware));
+    }
+    {
+        FakeUsb fake;
+        fake.controller[0x09U] = 0x20U;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+        CHECK(hardware.open_receiver(1U).has_value());
+        CHECK(hardware.shutdown().has_value());
+    }
+    {
+        FakeUsb fake;
+        fake.controller[0x09U] = 0x20U;
+        fake.controller[0x05U] = 0x01U;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        CHECK(!LibusbW3u3HardwareTestPeer::snapshot_link_diagnostic(hardware));
+    }
+    return true;
+}
+
+bool test_w3u2_type10_complete_capture_matches_type0f_trace()
+{
+    auto capture_trace = [](std::uint8_t controller_type,
+                            std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>>& trace) {
+        FakeUsb fake;
+        const std::array<std::uint8_t, 16> deterministic_seed{{0, 1, 2, 3, 4, 5, 6, 7,
+                                                               8, 9, 10, 11, 12, 13, 14, 15}};
+        fake.seed_override = &deterministic_seed;
+        fake.controller[0x09U] = controller_type;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 0U);
+        LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+        if (!hardware.open_receiver(0U).has_value() ||
+            !hardware.tune_satellite(0U, 1049480U, 3000U).has_value()) {
+            return false;
+        }
+        std::atomic<bool> cancelled{false};
+        if (!hardware.prepare(0U, System::ISDB_S, cancelled).has_value() ||
+            fake.seed_write_count != 16 || fake.controller[0x05U] != 0xa0U ||
+            !hardware.stop().has_value() || !hardware.close_receiver(0U).has_value() ||
+            !hardware.shutdown().has_value()) {
+            return false;
+        }
+        CHECK(fake.seed_clear_count == 16 && fake.seed_clear_values_zero);
+        CHECK(fake.controller[0x05U] == 0U && fake.cancel_count == 4 && fake.free_count == 4);
+        for (const auto& event : fake.controls) {
+            trace.emplace_back(event.request, event.value, event.index);
+        }
+        return true;
+    };
+    std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>> type0f;
+    std::vector<std::tuple<Request, std::uint16_t, std::uint16_t>> type10;
+    CHECK(capture_trace(0x1eU, type0f));
+    CHECK(capture_trace(0x20U, type10));
+    if (type0f != type10) {
+        const auto mismatch = std::mismatch(type0f.begin(), type0f.end(), type10.begin(), type10.end());
+        std::fprintf(stderr, "trace mismatch index=%zu sizes=%zu/%zu\n",
+                     static_cast<std::size_t>(mismatch.first - type0f.begin()),
+                     type0f.size(), type10.size());
+        if (mismatch.first != type0f.end() && mismatch.second != type10.end()) {
+            std::fprintf(stderr, "type0f=(%u,%04x,%04x) type10=(%u,%04x,%04x)\n",
+                         static_cast<unsigned>(std::get<0>(*mismatch.first)),
+                         std::get<1>(*mismatch.first), std::get<2>(*mismatch.first),
+                         static_cast<unsigned>(std::get<0>(*mismatch.second)),
+                         std::get<1>(*mismatch.second), std::get<2>(*mismatch.second));
+        }
+    }
+    CHECK(type0f == type10);
+    return true;
+}
+
+bool test_w3u2_type10_controller_read_failures_and_busy_output()
+{
+    for (const auto& bad_read : {std::pair<std::uint16_t, bool>{0x094aU, false},
+                                {0x094aU, true}, {0x054aU, false}}) {
+        FakeUsb fake;
+        fake.controller[0x09U] = 0x20U;
+        if (bad_read.second) fake.short_i2c_read_value_once = bad_read.first;
+        else fake.fail_i2c_read_value_once = bad_read.first;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 0U);
+        LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+        CHECK(!hardware.open_receiver(0U).has_value());
+        CHECK(fake.seed_write_count == 0 && fake.submit_count == 0);
+    }
+    {
+        FakeUsb fake;
+        fake.controller[0x09U] = 0x20U;
+        fake.controller[0x05U] = 0x01U;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 0U);
+        LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+        CHECK(hardware.open_receiver(0U).error() == Error::BUSY);
+        CHECK(fake.seed_write_count == 0 && fake.submit_count == 0);
+    }
+    {
+        FakeUsb fake;
+        const std::array<std::uint8_t, 16> deterministic_seed{{0, 1, 2, 3, 4, 5, 6, 7,
+                                                               8, 9, 10, 11, 12, 13, 14, 15}};
+        fake.seed_override = &deterministic_seed;
+        fake.controller[0x09U] = 0x20U;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 0U);
+        LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+        CHECK(hardware.open_receiver(0U).has_value());
+        CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+        fake.fail_seed_write_number = 2;
+        std::atomic<bool> cancelled{false};
+        CHECK(!hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+        CHECK(fake.seed_write_count == 2 && fake.seed_clear_count == 16);
+        CHECK(fake.seed_clear_values_zero && fake.controller[0x05U] == 0U);
+        CHECK(fake.cancel_count == 4 && fake.free_count == 4);
+        CHECK(saw_dsc(fake, Request::DscStop, 0U));
+    }
+    return true;
+}
+
+bool test_type10_helper_rejects_copied_profile_and_constructor_canonicalizes()
+{
+    const auto* canonical = find_profile(ModelId::W3u2);
+    CHECK(canonical != nullptr);
+    DeviceProfile copied = *canonical;
+    CHECK(!powered_controller_type_supported(&copied, 0x20U));
+    CHECK(powered_controller_type_supported(canonical, 0x20U));
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, &copied);
+    CHECK(LibusbW3u3HardwareTestPeer::profile(hardware) == canonical);
+    return true;
+}
+
+bool test_w3u3_type10_fails_both_production_gates()
+{
+    {
+        FakeUsb fake;
+        fake.controller[0x09U] = 0x20U;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        CHECK(!LibusbW3u3HardwareTestPeer::snapshot_link_diagnostic(hardware));
+    }
+    {
+        FakeUsb fake;
+        fake.controller[0x09U] = 0x20U;
+        LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3));
+        Hooks hooks{};
+        configure(hardware, fake, hooks, 1U);
+        LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+        CHECK(hardware.open_receiver(1U).error() == Error::UNSUPPORTED);
+        CHECK(!saw_demod_write(fake, 0x0fU, 0x34U));
+    }
+    return true;
+}
+
 bool test_legacy_gpioex_off_failure_is_visible_and_quarantines()
 {
     FakeUsb fake;
@@ -2130,6 +2343,18 @@ int main()
          test_s3u2_powers_off_gpioex_and_retains_single_capture_lease},
         {"test_legacy_controller_guard_runs_board_off_sequence",
          test_legacy_controller_guard_runs_board_off_sequence},
+        {"test_powered_controller_type_predicate_exhaustive",
+         test_powered_controller_type_predicate_exhaustive},
+        {"test_w3u2_type10_passes_both_production_gates",
+         test_w3u2_type10_passes_both_production_gates},
+        {"test_w3u3_type10_fails_both_production_gates",
+         test_w3u3_type10_fails_both_production_gates},
+        {"test_w3u2_type10_complete_capture_matches_type0f_trace",
+         test_w3u2_type10_complete_capture_matches_type0f_trace},
+        {"test_w3u2_type10_controller_read_failures_and_busy_output",
+         test_w3u2_type10_controller_read_failures_and_busy_output},
+        {"test_type10_helper_rejects_copied_profile_and_constructor_canonicalizes",
+         test_type10_helper_rejects_copied_profile_and_constructor_canonicalizes},
         {"test_legacy_gpioex_off_failure_is_visible_and_quarantines",
          test_legacy_gpioex_off_failure_is_visible_and_quarantines},
         {"test_legacy_revision_guard_precedes_any_board_write",

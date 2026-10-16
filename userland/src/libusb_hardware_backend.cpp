@@ -4,6 +4,7 @@
 #include "asicen/device_profile.h"
 #include "asicen/enclosure.h"
 #include "asicen/hardware_gpio_guard.h"
+#include "asicen/powered_controller_type.h"
 #include "asicen/transport_transform.h"
 #include "asicen/write_protocol.h"
 #if defined(_WIN32)
@@ -3215,7 +3216,8 @@ bool LibusbW3u3Hardware::snapshot_link_diagnostic()
 {
     std::uint8_t type_reg = 0;
     return verify_device_revision() && read_i2c(0x4aU, 0x09U, 1U, &type_reg) &&
-           ((type_reg & 0x3eU) >> 1U) == 0x0fU && link_diagnostic_.snapshot_idle(this);
+           powered_controller_type_supported(profile_, type_reg) &&
+           link_diagnostic_.snapshot_idle(this);
 }
 bool LibusbW3u3Hardware::verify_device_revision() noexcept
 {
@@ -3231,7 +3233,15 @@ LibusbW3u3Hardware::PoweredControllerCheck LibusbW3u3Hardware::verify_powered_co
     if (!read_i2c(0x4aU, 0x09U, 1U, &type)) {
         return PoweredControllerCheck::type_read_failed;
     }
-    if (((type & 0x3eU) >> 1U) != 0x0fU) {
+    const char* expected = powered_controller_type_supported(profile_, 0x20U)
+                               ? "0x0f or 0x10 (PX-W3U2)"
+                               : "0x0f";
+    std::fprintf(stderr,
+                 "asicend: powered-controller model=%s i2c=4a reg=09 raw=0x%02x decoded=0x%02x expected=%s\n",
+                 profile_ != nullptr ? profile_->model : "unknown",
+                 static_cast<unsigned>(type),
+                 static_cast<unsigned>((type & 0x3eU) >> 1U), expected);
+    if (!powered_controller_type_supported(profile_, type)) {
         return PoweredControllerCheck::unsupported_type;
     }
     if (!read_controller05(&state)) {
