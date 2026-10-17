@@ -17,8 +17,8 @@
 //   out/linux64/ReleaseToCustomer_64bit_130109_2/libPlexLib_W3U3.a
 // member TunerControl.o. No vendor object code, crypto material or large vendor
 // table is copied. The demodulator/FC0012 slave model and every request
-// encoding used here are documented in docs/reverse-engineering/linux-abi.md
-// and were re-derived from the vendor disassembly.
+// encoding used here were re-derived from the vendor disassembly. Record:
+// https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/linux-abi.md
 
 #include <array>
 #include <cstddef>

@@ -714,7 +714,7 @@ before running this operation. bBCardInit performs decoder-chip I2C and GPIO
 operations, not a B-CAS APDU read; Linux random-key wrappers are no-op stubs.
 
 The sanitized guest trace, with firmware payload bytes omitted, is in
-docs/hardware-traces/2026-10-08-official-loader-probe.usbmon.txt.
+[the archived trace](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/hardware-traces/2026-10-08-official-loader-probe.usbmon.txt).
 Raw guest text and both pcaps are preserved locally under
 /config/.tools/asicen-work/official-trace-20261008/ and on the SSH machines.
 Capture processes were stopped after this bounded recording. Both official
@@ -759,7 +759,7 @@ and bit1 high, without proving the output latch or electrical function.
 No GPIOEx write was inferred from this observation.
 
 The 194-event trace is preserved in
-docs/hardware-traces/2026-10-08-readonly-diagnostics.usbmon.txt; its raw copy
+[the archived trace](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/hardware-traces/2026-10-08-readonly-diagnostics.usbmon.txt); its raw copy
 is in the local official-trace-20261008 directory. Both receiver functions
 are now runtime 0b06:0005 and the official runtime module is loaded again.
 The bounded usbmon reader was stopped. No reception was attempted here.
@@ -767,7 +767,7 @@ The bounded usbmon reader was stopped. No reception was attempted here.
 ### LNB-excluded official-library startup trial
 
 On 2026-10-08 around 22:22 JST, parent ran the standalone guarded harness
-preserved in docs/hardware-traces/official-trace-harness.cpp. This is a
+preserved in [the archived harness](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/hardware-traces/official-trace-harness.cpp). This is a
 modified-library comparison, not an unmodified official reception reference.
 Linker wrapping removes bit20 from both GPIO value and mask and skips
 GPIOEx writes. Host compilation and linking passed; disassembly of the
@@ -834,7 +834,7 @@ the non-LNB startup sequence is included; final guest runtime devices were
 primary address4 and secondary address8.
 
 The sanitized trace is
-docs/hardware-traces/2026-10-08-guarded-init.usbmon.txt; firmware and device
+[the archived trace](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/hardware-traces/2026-10-08-guarded-init.usbmon.txt); firmware and device
 identity payloads were omitted. Raw guest text, host pcap and stderr remain
 under /config/.tools/asicen-work/official-trace-20261008/ and on the SSH
 machines. Capture readers were stopped. GPIO was restored; frontend/CF
@@ -894,14 +894,16 @@ were primary address4 and secondary address10.
 The host pcap contains1430 events, with zero dropped packets. Captures were
 started before DevCreate and stopped after restoration; no capture reader
 or harness process remains. The sanitized combined trace is
-docs/hardware-traces/2026-10-08-customer-info-init.usbmon.txt; EEPROM identity
+[the archived trace](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/hardware-traces/2026-10-08-customer-info-init.usbmon.txt); EEPROM identity
 and Customer_Info payloads are omitted. The 20 firmware-loader submissions
 retain usbmon's truncated payload snippets. Full raw text,
 pcap and stderr remain under
 /config/.tools/asicen-work/official-trace-20261008/ and on the SSH machines.
 
-Build the updated harness object on the modern host, using the extracted
-SDK header directory, then link that object on the isolated CentOS guest:
+The following is the historical build command at
+[snapshot 02282ef](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/hardware-traces/official-trace-harness.cpp),
+using the extracted SDK headers on the modern host and linking on the isolated
+CentOS guest. Its recorded source path is not part of the current tree:
 
 ```sh
 g++ -std=c++11 -Wall -Wextra -Wpedantic -Werror -fno-stack-protector \
@@ -938,7 +940,7 @@ were not established. All eight guest bulk completions had cancellation
 status-2 and length0. Init/UnInit/DevClose succeeded, and non-LNB GPIO
 restoration read backFF/GPIOEx02. No LNB mask or GPIOEx write was sent.
 
-See [the analysis and bounded trial](docs/reverse-engineering/official-tune-readiness-gate-2026-10-08.md)
+See [the analysis and bounded trial](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/official-tune-readiness-gate-2026-10-08.md)
 for API addresses, the lower-level call's side effects and limitations,
 trace counts, preservation locations and the still-unresolved supported
 public receive-chain preparation. This trial does not reproduce the full
@@ -966,7 +968,7 @@ validation, other sections are truncated, and20 CC jumps remain. Do not
 interpret zero sync/TEI errors as zero loss or claim the initial128packet
 exclusion repairs the entire recording.
 
-See [the first-TS report](docs/reverse-engineering/official-first-ts-2026-10-08.md)
+See [the first-TS report](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/official-first-ts-2026-10-08.md)
 for the public API sequence, transform distinction, validation, invocation,
 trace limitations and retained artifacts. Full seed traces and TS remain
 local; only code and non-key diagnostics are committed.

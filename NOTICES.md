@@ -132,7 +132,7 @@ The repository's recpt1 `COPYING` is not a license for them. Linux's
 [module-license rules](https://docs.kernel.org/process/license-rules.html#module-license)
 say `MODULE_LICENSE` is not a substitute for the source license. Attribution
 and the source checksums are kept in the local files and in
-[the V2 source facts](docs/reverse-engineering/v2-nmi-families.md). The local adaptation is
+[the V2 source facts](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/v2-nmi-families.md). The local adaptation is
 distributed as GPL-2.0-only, which is this product's license and the stricter
 reading of an unspecified GPL version. That is not a finding that upstream
 named GPL-2.0-only. Asking upstream remains open. Model-specific differences

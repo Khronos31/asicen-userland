@@ -13,7 +13,7 @@ Goal: turn the current enumeration/protocol skeleton into a direct libusb bring-
 ## Safe first implementation targets
 
 1. Open/claim runtime interface(s).
-2. Implement generic vendor control helper from `docs/reverse-engineering/linux-abi.md`.
+2. Implement generic vendor control helper from [the historical ABI notes](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/linux-abi.md).
 3. Start with read-only requests whose semantics are known:
    - device high-speed query (`bRequest 0x0a`)
    - customer info (`0x0c`)

@@ -14,7 +14,7 @@
 | PX-W3U3 | `0b06:0005` | 同上 | 同上 |
 | PX-W3U3 V2 | `0b06:0006` | 条件付きの primary（[仕様上の制限](SPEC.md#010-source-supported-model-boundary)） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
 
-候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
+候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
 
 4 チューナー機（PX-W3U2、PX-W3U3、PX-W3U3 V2）は sibling 側の USB 機能も認識して確保しますが、現行のバックエンドが公開している受信部は primary 側の 2 つ（0: 衛星、1: 地デジ）のみです。同時受信可能なストリームは 1 本であり、製品カタログ上の 4 系統同時受信には対応していません。
 

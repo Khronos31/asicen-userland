@@ -23,9 +23,9 @@ automation has its own provenance and remains separate from this C++ pin.
 
 Receive-performance revision (2026-10-13): use four 65,536-byte asynchronous
 bulk-IN transfers in the ASICEN backend. This selects the official
-[high-throughput buffer size](docs/reverse-engineering/linux-abi.md), also
+[high-throughput buffer size](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/linux-abi.md), also
 observed as four pending transfers in the
-[guarded official trace](docs/hardware-traces/2026-10-08-guarded-init.usbmon.txt).
+[guarded official trace](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/hardware-traces/2026-10-08-guarded-init.usbmon.txt).
 Those historical submissions do not prove successful reception or qualify a
 new candidate. Preserve transfer ordering, draining, backpressure, the existing
 four-packet sync probe and all model/access-path support boundaries.
@@ -74,7 +74,7 @@ relevant version7 initialization, seed, output and cleanup paths for these types
 Preserve revision, transfer status/length, idle-state, model and firmware checks.
 This does not expand the primary-only two-receiver, single-active-lease scope.
 Bounded startup and 60-second primary T/S tests are recorded in
-[the W3U2 record](docs/reverse-engineering/w3u2-type10-2026-10-16.md);
+[the W3U2 record](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md);
 they do not qualify other models, platforms or a release.
 
 ## Objective
@@ -381,13 +381,13 @@ physical power support is established, but their recovered setters are no-ops:
 `15` must return UNSUPPORTED and `0` must not claim measured power OFF.
 The current user interface and shutdown behavior are in
 [README LNB control](README.md#lnb-電源制御); source evidence is in
-[the static LNB facts](docs/reverse-engineering/lnb-control-facts.md).
+[the static LNB facts](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/lnb-control-facts.md).
 
 Runtime support is limited to bridge revision 11/52, controller address 4a,
 type 0f and the version 7 link; W3U2 also accepts decoded type 10. Revision
 16/52 is unsupported. V2 uses its customer-information roles and RF-owner
 mapping rather than USB enumeration order; see the existing
-[V2 hardware facts](docs/reverse-engineering/v2-frontend-facts-2026-10-09.md).
+[V2 hardware facts](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/v2-frontend-facts-2026-10-09.md).
 The V2 loader is a separate 16384-byte image (SHA-256
 `5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`,
 start/index `55d6`), not the bundled Linux image (start/index `5399`).

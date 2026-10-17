@@ -3,7 +3,7 @@
 // Copyright (C) Budi Rachmanto, AreMa Inc. <info@are.ma>.
 // nm131.c declares MODULE_LICENSE("GPL") and does not state a GPL version.
 // Per-family ISDB-T differences independently transcribed from documented
-// register operations in the official V2 driver. See v2-nmi-families.md.
+// register operations in the official V2 driver. Record: https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/v2-nmi-families.md
 #include "asicen/v2_nmi.h"
 #include <algorithm>
 #include <array>

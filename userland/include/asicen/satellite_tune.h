@@ -6,8 +6,8 @@
 // Bounded, transport-independent W3U3 satellite tune/lock/TSID operations.
 // Scalar tuner facts were transcribed from Sat_freq_mapping_list in the
 // saved PLEX W3U3 TunerControl.o (.data+0, 24 records, stride 12). Call order
-// and register protocol are documented in
-// docs/reverse-engineering/satellite-tune-facts-2026-10-09.md.
+// and register protocol are documented in the historical source record:
+// https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/satellite-tune-facts-2026-10-09.md
 
 #include <array>
 #include <cstddef>
