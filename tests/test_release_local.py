@@ -153,12 +153,12 @@ class LocalWorkflowTests(unittest.TestCase):
     def test_offline_suite_runs_local_tests_and_tracks_test_changes(self):
         self.assertEqual(self.tests.count("      - tests/**"), 2)
         self.assertEqual(self.tests.count("      - third_party/release-automation/**"), 2)
-        self.assertEqual(self.tests.count("      - docs/release-automation-provenance.md"), 2)
+        self.assertEqual(self.tests.count("      - THIRD_PARTY_NOTICES.md"), 2)
         self.assertIn("python3 -m unittest discover -s tests -p 'test_release_*.py' -v", self.tests)
         self.assertNotIn("contents: write", self.tests)
 
     def test_upstream_exact_copies_match_documented_frozen_hashes(self):
-        provenance = (ROOT / "docs/release-automation-provenance.md").read_text()
+        provenance = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
         self.assertIn("b4635226082161ce09f811b1571c9dd25f40cf03", provenance)
         self.assertIn("dd1c1bea16a5871085d5f2a42c009364c1ec7345", provenance)
         exact = re.findall(r"^\| `([^`]+)` \| `[^`]+` \| `([0-9a-f]{64})` \| exact \|$",

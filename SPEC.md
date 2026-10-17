@@ -140,7 +140,8 @@ joined consumer rather than the run caller. Public CLI, IPC, source selection,
 firmware, tuning and LNB behavior are unchanged. This shared-backend change adds
 no model-specific identification or frontend behavior. The motivating hardware
 evidence is limited to W3U3; it does not establish other-model/platform reception
-or release qualification. See `docs/usb-pump.md` for lifecycle and test scope.
+or release qualification. Offline coverage is in the queued-capture and
+libusb-capture lifecycle tests; it is not hardware qualification.
 
 Use the exact v0.2.1 `TsContinuityChecker` on complete, transformed 188-byte
 packets at the existing HardwareStreamService observation point. Only its
@@ -228,9 +229,8 @@ tags or GitHub Releases. The separate `release_tag.yml` calls the locally
 embedded `release_reusable.yml` from the same ASICEN tag commit. Both helper
 checkouts are bound to that exact full commit SHA; an unrelated repository or
 mismatched SHA is rejected. No PX4 checkout or cross-repository workflow call
-is needed for 0.1.0. The source, license, local adaptations and later migration
-to a released PX4 tag's full commit SHA are recorded in
-`docs/release-automation-provenance.md`.
+is needed for 0.1.0. Source, license and local adaptations are recorded in
+`THIRD_PARTY_NOTICES.md`; the publication procedure is `docs/releasing.md`.
 It is triggered only by a version tag push after the user's explicit
 "tag + release" request. No extra GitHub Environment approval is added.
 
@@ -263,9 +263,8 @@ verify again. Stop on missing evidence, incomplete runs or conflicts; never
 replace an existing tag or conflicting published asset. Full procedures and
 record fields are in `docs/releasing.md` and `docs/release-record.md`.
 
-See [the compatibility audit](docs/compatibility-audit-2026-10-09.md) for the
-observed gaps and executable checks. The following reception increments
-remain useful development milestones, not a replacement for this contract.
+The following reception increments are historical development milestones,
+not a replacement for this contract.
 
 1. Enclosure bring-up: observe two runtime `0b06:0005` functions on the original
    sibling port paths, each with endpoints `81`/`82` and successful read-only
@@ -366,9 +365,9 @@ The 2026-10-08 independent critic returned REVISE. Before integrating hardware:
 
 ## 0.1.0 source-supported model boundary
 
-Use [docs/model-support.md](docs/model-support.md) as the current implementation
-and evidence matrix for the five USB products. Model recognition, source-backed
-runtime support and physical validation are separate states. Unsupported
+The [README model table](README.md#対応機種) defines the five USB profiles.
+Model recognition, source-backed runtime support and physical validation are
+separate states. Unsupported
 silicon/controller revisions fail closed; they must not inherit W3U3 writes
 merely because the USB vendor is ASICEN. S3U's combined receiver remains one
 exclusive resource across terrestrial and satellite tuning. Four-receiver
@@ -380,4 +379,18 @@ LNB requests follow px4-userland's `--lnb-voltage 0|15` ISDB-S interface.
 Current software switching is source-backed for W3U2/W3U3/V2 only. S3U/S3U2
 physical power support is established, but their recovered setters are no-ops:
 `15` must return UNSUPPORTED and `0` must not claim measured power OFF.
-See [the LNB contract](docs/lnb-control.md) and its static evidence.
+The current user interface and shutdown behavior are in
+[README LNB control](README.md#lnb-電源制御); source evidence is in
+[the static LNB facts](docs/reverse-engineering/lnb-control-facts.md).
+
+Runtime support is limited to bridge revision 11/52, controller address 4a,
+type 0f and the version 7 link; W3U2 also accepts decoded type 10. Revision
+16/52 is unsupported. V2 uses its customer-information roles and RF-owner
+mapping rather than USB enumeration order; see the existing
+[V2 hardware facts](docs/reverse-engineering/v2-frontend-facts-2026-10-09.md).
+The V2 loader is a separate 16384-byte image (SHA-256
+`5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`,
+start/index `55d6`), not the bundled Linux image (start/index `5399`).
+Require explicit model selection and whole-image verification before USB access;
+loader VID:PID alone does not identify the runtime model. V2 accepts loader
+`1738:5211` and its external image is not redistributed.

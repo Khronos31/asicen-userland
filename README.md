@@ -12,49 +12,47 @@
 | PX-S3U2 | `0b06:0003` | 0: 衛星、1: 地デジ（同時は 1 系統のみ） | 同上 |
 | PX-W3U2 | `0b06:0004` | 物理仕様は地デジ 2 + 衛星 2。バックエンドは primary の 2 系統（0: 衛星、1: 地デジ）のみ公開 | GPIO20 active-low。`--lnb-voltage 15` を受理 |
 | PX-W3U3 | `0b06:0005` | 同上 | 同上 |
-| PX-W3U3 V2 | `0b06:0006` | 条件付きの primary。詳細は [docs/model-support.md](docs/model-support.md) を参照 | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
+| PX-W3U3 V2 | `0b06:0006` | 条件付きの primary（[仕様上の制限](SPEC.md#010-source-supported-model-boundary)） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
 
-本リポジトリの 0.1.0 配布候補において、これらの機種に対する実機動作確認はまだ行われていません（実機未確認です）。
+候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
 
 4 チューナー機（PX-W3U2、PX-W3U3、PX-W3U3 V2）は sibling 側の USB 機能も認識して確保しますが、現行のバックエンドが公開している受信部は primary 側の 2 つ（0: 衛星、1: 地デジ）のみです。同時受信可能なストリームは 1 本であり、製品カタログ上の 4 系統同時受信には対応していません。
 
-実行時に対応している内部経路はブリッジ revision 11 / ASIC type 0f / version 7 のみです。revision 16 は未実装のため、デーモン起動前に失敗します（すべての個体が該当の revision であるとは限りません）。
+実行時の内部経路はブリッジ revision 11/52・controller type 0f・version 7 に限定し、W3U2 は type 10 も受理します。未実装の revision 16/52 等は起動時に拒否します。機種名だけで全個体の対応を保証しません。
 
-`asicend --models` は USB デバイスにアクセスせず、ソースコード上の定義プロファイル一覧を表示します。表示される `lnb_validation=pending` は、アンテナ端子の電圧が未測定であることを示しています。詳細は [docs/model-support.md](docs/model-support.md) を参照してください。
+`asicend --models` は USB にアクセスせず定義プロファイルを表示します。`lnb_validation=pending` はモデル全体の認定状態であり、個別の電圧実測は[検証記録](docs/release-validation.md#現在の候補と検証状況)で区別します。
 
 ## LNB 電源制御
 
 衛星放送（ISDB-S）の受信時に、`asicen-ts` の `--lnb-voltage 0|15` オプションで LNB 電源の要求を指定します（既定値は `0`）。px4-userland と同じく、15V を要求する場合はデーモン起動時に `--allow-lnb-power` を指定します。許可フラグがない場合の 15V 要求は拒否します。
 
-地デジ（ISDB-T）では `--lnb-voltage` を付けません（地デジに対して `--lnb-voltage 15` を指定すると拒否されます）。
+地デジ（ISDB-T）では `--lnb-voltage` を付けません（`0` を含め、明示すると拒否されます）。
 
 LNB 給電に関する注意点は以下のとおりです。
 
 - **AC アダプタの要件**: PX-W3U2、PX-W3U3、PX-W3U3 V2 の公式仕様では、LNB 給電時に AC アダプタの接続が必要です。
-- **端子電圧の未測定**: USB 転送の成功や GPIO の読み戻しは、アンテナ端子の電圧ではありません。この配布候補では、テスターによる測定はまだです。
+- **端子電圧**: USB 転送や GPIO の読み戻しは電圧の実測ではありません。今回測定した W3U3 の結果を、他機種・未試験環境へ広げません。
 - **PX-S3U / PX-S3U2 の制限**: 機器の物理仕様としては LNB 給電能力を持っていますが、回収された公式ソフトウェアの解析において給電の切り替え処理が存在しないため、本バックエンドでは `--lnb-voltage 15` を非対応として拒否します。PX-W3U3 の GPIO 制御を S3U 系に適用することはありません。
 - **安全制御**: デーモン起動時は安全のため先に給電オフを書き込みます。デバイスのクローズ時およびデーモン終了時は、以前給電していた GPIO の状態に戻さず確実にオフにします。選局に失敗した場合は選局前の設定へ戻します。また、PX-W3U3 V2 では保護条件（GPIO20 が立ち、GPIO80 が落ちる状態）を検出すると給電を遮断し、自動でオンへ戻すことはしません。
 
-詳細は [docs/lnb-control.md](docs/lnb-control.md) を参照してください。
-
 ## 動作環境
 
-バージョン 0.1.0 のバイナリ配布は Linux・macOS・Android の 8 種類です。Windows のコードとビルド検証は含みますが、Windows バイナリは配布しません。Windows の正式対応は WinSCard 対応を揃えた 0.2.x で予定しています。以下の旧候補の記録は、この parity 修正後のバイナリの検証結果ではありません。アーカイブ名は `asicen-userland-0.1.0-` で始まります。
+バージョン 0.1.0 のバイナリ配布は Linux・macOS・Android の 8 種類です。Windows のコードとビルド検証は含みますが、Windows バイナリは配布しません。Windows の正式対応は WinSCard 対応を揃えた 0.2.x で予定しています。候補ごとの結果は[検証状況](docs/release-validation.md#現在の候補と検証状況)に記録します。アーカイブ名は `asicen-userland-0.1.0-` で始まります。
 
-| 対象 OS / 環境 | 配布アーカイブ名 | ビルド方針 | 修正後候補の実機確認 | 構成と備考 |
+| 対象 OS / 環境 | 配布アーカイブ名 | ビルド方針 | 候補 6dbdba2 の実機確認 | 構成と備考 |
 |---|---|:---:|:---:|---|
-| Linux x86_64 (glibc) | `asicen-userland-0.1.0-linux-glibc-x86_64` | CI の対象 | 未確認 | コマンド 3 本は musl 完全静的リンク。PC/SC IFD は glibc 2.31 向け共有オブジェクト |
-| Linux x86_64 (musl) | `asicen-userland-0.1.0-linux-musl-x86_64` | CI の対象 | 未確認 | コマンド 3 本は musl 完全静的リンク。PC/SC IFD は musl 向け共有オブジェクト |
+| Linux x86_64 (glibc) | `asicen-userland-0.1.0-linux-glibc-x86_64` | CI の対象 | E03 短時間確認・未認定 | コマンド 3 本は musl 完全静的リンク。PC/SC IFD は glibc 2.31 向け共有オブジェクト |
+| Linux x86_64 (musl) | `asicen-userland-0.1.0-linux-musl-x86_64` | CI の対象 | SCS 補足のみ・E02 未認定 | コマンド 3 本は musl 完全静的リンク。PC/SC IFD は musl 向け共有オブジェクト |
 | Linux aarch64 (glibc) | `asicen-userland-0.1.0-linux-glibc-aarch64` | CI の対象 | 未確認 | コマンド 3 本は musl 完全静的リンク。PC/SC IFD は glibc 2.31 向け共有オブジェクト |
 | Linux aarch64 (musl) | `asicen-userland-0.1.0-linux-musl-aarch64` | CI の対象 | 未確認 | コマンド 3 本は musl 完全静的リンク。PC/SC IFD は musl 向け共有オブジェクト |
-| macOS arm64 | `asicen-userland-0.1.0-darwin-arm64` | CI の対象 | 未確認 | libusb 静的リンク。実行時に読み込むのはシステムライブラリのみ。IFD は `asicen-userland-ifd.bundle`。ローダを同梱 |
+| macOS arm64 | `asicen-userland-0.1.0-darwin-arm64` | CI の対象 | E04 短時間確認・未認定 | libusb 静的リンク。実行時に読み込むのはシステムライブラリのみ。IFD は `asicen-userland-ifd.bundle`。ローダを同梱 |
 | Android aarch64 | `asicen-userland-0.1.0-android-aarch64` | CI の対象 | 未確認 | Termux 用。API 24、libc++ 静的リンク、16KiB ページ。IFD・APK なし |
 | Android armv7a | `asicen-userland-0.1.0-android-armv7a` | CI の対象 | 未確認 | Termux 用。API 24、libc++ 静的リンク、16KiB ページ。IFD・APK なし |
 | Android x86_64 | `asicen-userland-0.1.0-android-x86_64` | CI の対象 | 未確認 | Termux 用。API 24、libc++ 静的リンク、16KiB ページ。IFD・APK なし |
 
-旧候補の公開 CI では Linux（Ubuntu）ctest が 53/53、macOS arm64 が 51/51 でした。この値は今回の修正後候補の合格件数ではありません。修正後候補は、そのコミットの CI と配布アーカイブの監査結果を確認してください。配布する macOS アーカイブにはピン留めしたローダを同梱します。ビルド・オフライン試験は実機での受信確認とは別です。
+候補の CI は[run 38942153016](https://github.com/Khronos31/asicen-userland/actions/runs/38942153016)で 20 jobs 成功しました。ビルド・オフライン試験は実機認定とは別です。
 
-Windows 11 x86_64 は Phase 1（製品コマンドと CARD_* を含む同一ホスト IPC）の開発・ビルド検証対象です。WinSCard 互換 DLL / Microsoft PC/SC 登録は Phase 2 で、0.1.0 の Windows 配布・正式対応は行いません。Windows を含め、この parity 修正の build/offline 検証と実機認定は分けて記録します。
+Windows 11 x86_64 は Phase 1（製品コマンドと CARD_* を含む同一ホスト IPC）の開発・ビルド検証対象です。WinSCard 互換 DLL / Microsoft PC/SC 登録は Phase 2 で、0.1.0 の Windows 配布・正式対応は行いません。
 
 ## 必要条件
 
@@ -62,7 +60,7 @@ Windows 11 x86_64 は Phase 1（製品コマンドと CARD_* を含む同一ホ�
 
 S3U / S3U2 / W3U2 / W3U3 用の Linux ローダは `firmware/asicen-loader.bin`（16,384 バイト、SHA-256 `b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`）としてリポジトリにあります。再配布権は未解決のままです。GitHub Actions のランナーは、このチェックアウトされたファイルを 8 つのバイナリ配布アーカイブへ同梱します。対応ソースのアーカイブには入れません。
 
-PX-W3U3 V2 用の別イメージ（詳細は [docs/model-support.md](docs/model-support.md)）は、このファイルとは別物で、リポジトリには入っていません。
+PX-W3U3 V2 用の別イメージは同梱しません。互換性と取得後の照合条件は [SPEC.md](SPEC.md#010-source-supported-model-boundary) を参照してください。
 
 ファームウェアの転送は `asicend --usb-path ... --instance TOKEN --model MODEL --firmware PATH` で行います（ローダ状態のデバイスへ転送し、runtime の再列挙を待ってから起動します。既に runtime の場合は転送をスキップします）。`--fd` で与える Termux では再列挙に追随できないため、転送と起動を分けて行います（転送後に runtime の fd を再取得して `--firmware` なしで起動）。`--usb-path` には PX4 と同じく明示の `--instance` が必要です。`--fd` で省略した場合は、serial の代わりに観測した USB topology から instance を決めます。開発用の `asicen-probe load-firmware` も引き続き利用できます。
 
@@ -213,8 +211,6 @@ px4-userland のチャンネル表記を踏襲しています。
 - `9`: カード
 - `10`: ファームウェア
 - `70`: 内部エラー
-
-コマンド体系と適合性の詳細は [docs/cli-adaptation.md](docs/cli-adaptation.md) を参照してください。
 
 ## PC/SC と内蔵カードリーダー
 

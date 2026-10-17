@@ -130,4 +130,4 @@ fresh Release lifecycle/session/IPC tests passed3/3. The previously observed
 card-only timing flake remains documented despite the final full-suite pass.
 
 The experiment plan and unresolved test limitation are recorded in
-[the acceptance plan](../live-card-stream-plan-2026-10-09.md).
+[the historical acceptance plan](https://github.com/Khronos31/asicen-userland/blob/6dbdba248a4d9dc5d3f0ef9c887c6e150cb2e9cd/docs/live-card-stream-plan-2026-10-09.md).

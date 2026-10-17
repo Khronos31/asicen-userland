@@ -1114,7 +1114,7 @@ It is not a hardware result, release-note approval, or tag/publication approval.
 `release/0.1.0` after independent source review and successful final-head CI.
 The portable source subset is pinned to official PX4 v0.2.1 commit
 `dd1c1bea16a5871085d5f2a42c009364c1ec7345`. The complete import/adapter scope is
-in [the reuse record](docs/px4-v0.2.1-reuse.md).
+in [the source manifest](third_party/px4-userland/UPSTREAM.md).
 
 ### Fixed candidate identity
 

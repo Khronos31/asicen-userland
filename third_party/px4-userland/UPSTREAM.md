@@ -114,8 +114,8 @@ existing ASICEN delta. The two new CARD_HANDLE_STATUS golden frames select
 the existing product-magic macro just like all other frames. The shared
 checker, its complete standalone fixtures and the shared card-client contract
 fixtures are added exactly, giving 87 imported files (70 exact and 17 with the
-local deltas below). File-level mapping and scope are recorded in
-`../../docs/px4-v0.2.1-reuse.md`.
+local deltas below). The imported-file list and necessary local deltas in this
+manifest are the current source-reuse record.
 
 The refresh includes opt-in generation-bound card handles, owned handle-status
 snapshots, full capability-mask validation and the Windows worker's explicit

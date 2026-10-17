@@ -20,7 +20,7 @@ jobs:
       contents: write
       actions: read
     # Temporary local embedding for 0.1.0; provenance and replacement policy:
-    # docs/release-automation-provenance.md.
+    # THIRD_PARTY_NOTICES.md#embedded-release-automation.
     uses: ./.github/workflows/release_reusable.yml
     with:
       product: asicen-userland

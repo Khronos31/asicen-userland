@@ -12,8 +12,8 @@ specific:
 - The embedded release publisher/verifier, tests and adapted workflows are
   GPL-2.0-only from px4-userland `b4635226082161ce09f811b1571c9dd25f40cf03`.
   Their SPDX notices remain intact. The exact upstream license is preserved in
-  `third_party/release-automation/LICENSE`; the file inventory, origin hashes
-  and local adaptations are in [release automation provenance](docs/release-automation-provenance.md).
+  `third_party/release-automation/LICENSE`; the retained origin and local
+  adaptations are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md#embedded-release-automation).
 - The FC0012 tuner implementation is GPL-2.0-or-later.
 - `userland/src/v2_frontend.cpp` and `userland/src/v2_nmi.cpp` are the
   GPL-2.0-only adaptation described below. Upstream did not state a version.
@@ -43,7 +43,7 @@ px4-userland are incorporated from official release v0.2.1,
 revision `dd1c1bea16a5871085d5f2a42c009364c1ec7345` under GPL-2.0-only.
 Imported files retain their SPDX notices; its license is reproduced in
 `third_party/px4-userland/LICENSE`. The file inventory and local changes are
-recorded in [docs/cli-adaptation.md](docs/cli-adaptation.md). The adapted CLI
+recorded in [the source manifest](third_party/px4-userland/UPSTREAM.md). The adapted CLI
 entry points `userland/tools/asicenctl.cpp`, `userland/tools/asicen_ts.cpp`,
 and `userland/tools/asicen_ts_windows.cpp` retain that GPL-2.0-only license.
 The combined CLI executables therefore use GPL version2; existing
@@ -132,7 +132,7 @@ The repository's recpt1 `COPYING` is not a license for them. Linux's
 [module-license rules](https://docs.kernel.org/process/license-rules.html#module-license)
 say `MODULE_LICENSE` is not a substitute for the source license. Attribution
 and the source checksums are kept in the local files and in
-[the model support record](docs/model-support.md). The local adaptation is
+[the V2 source facts](docs/reverse-engineering/v2-nmi-families.md). The local adaptation is
 distributed as GPL-2.0-only, which is this product's license and the stricter
 reading of an unspecified GPL version. That is not a finding that upstream
 named GPL-2.0-only. Asking upstream remains open. Model-specific differences

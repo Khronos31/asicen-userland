@@ -1,14 +1,54 @@
 # 0.1.0 の実機検証手順
 
-現在の固定候補は `b64577e94389fe479d573eed57c745e2eb5573ef`。候補 run `38408329934` と独立再現 run `38408518367` はそれぞれ 20/20 jobs 成功し、配布する 9 アーカイブと `SHA256SUMS` の全 bytes が一致した。代表機 E03 の 33 チャンネル回帰、カード抜き差し、USB 切断後の新デーモンによる復帰を確認した。LNB は 0 V / 15 V を実測し、停止後の緩やかな低下を確認したが、最後は利用者が短絡で 0 V にしたため、自然に 0 V まで戻る観測は未完了。詳細は [固定候補と代表機の記録](../HARDWARE-VALIDATION.md#2026-10-14-jst-fixed-candidate-b64577e-and-representative-short-regression) を参照。
+## 現在の候補と検証状況
 
-代表機の 2 時間ソークは未実施。2026-10-14 JST の利用者の再確認に従い、30 分以上のソークは短時間試験の後、最後にまとめて行う。今回このセッションが担当するのは代表機 E03 だけであり、他環境の合格を代行しない。残る実機条件を終えるまではリリース受入完了とはしない。
+実機試験対象は `6dbdba248a4d9dc5d3f0ef9c887c6e150cb2e9cd`
+（`candidate/0.1.0-20261017`）。[run 38942153016](https://github.com/Khronos31/asicen-userland/actions/runs/38942153016)、attempt 1 は 20 jobs 成功。
+release-candidate artifact は `12063394756`、provenance は `12064755490`。
+9 アーカイブの checksum と source/run/ref を照合したが、同一 source の独立した第2 run との byte 比較は未実施である。
 
-以下は旧候補の履歴です。PR #11 取り込み後の候補は `f7352f4dcc71b364638279b774da3727fdec2ff7`。候補 run `38358322625` と独立再現 run `38358427484` はそれぞれ 20/20 jobs 成功し、配布する 9 アーカイブと `SHA256SUMS` は全 bytes が一致した。固定 identity・hash・build input・診断比較・実機確認の範囲は [2026-10-13 の新候補記録](../HARDWARE-VALIDATION.md#2026-10-13-receive-throughput-fix-and-candidate-f7352f4) に残す。旧候補の結果は履歴として保持し、新候補の実機合格へ一括で引き継がない。
+2026-10-17 JST 時点の PX-W3U3 の結果は以下のとおり。各結果はこの候補と実施した経路に限り、別アーカイブ・別機種の合格へ広げない。
+
+| 環境 / アーカイブ | 今回確認した短時間項目 | 未完了・注意 |
+|---|---|---|
+| E03 AnduinOS x86_64 / linux-glibc-x86_64 | T27・BS01 各60秒、同一daemonのカード抜き挿し、USB切断と新daemonでの復帰、LNB 0/15 Vと短絡なしの自然な0 Vへの低下 | 47対象の10秒回帰は45 clean / BS09の2 TSでCC異常。2時間ソーク未実施。全件合格・リリース認定ではない |
+| HAOS上のDebian 13 / glibc 2.41 SCS / linux-musl-x86_64 | T27・BS01各60秒、LNB実測、同一daemonでのカード不在とATR復帰、USB切断と新daemonでの60秒復帰 | 静的muslコマンドの補足試験。Alpine/musl native E02・musl IFDの代用ではない。再挿入presence値は抽出失敗で欠落。30分ソーク未実施 |
+| E04 macOS 26.6.2 native arm64 / darwin-arm64 | T27・BS01各60秒、LNB実測、同一daemonのカード抜き挿し、USB切断と新daemonでの60秒復帰 | 2時間ソーク、FD/RSS経時傾向、今回のPC/SC経路は未検証。TSDuckのNo BAT / No TDT報告は保持 |
+
+受信は primary RX1 地上波 / RX0 衛星、同時1本、壁給電設備では LNB 0 V。
+LNB測定時だけ衛星同軸を分離した。物理操作や報告時刻から検出遅延・電圧減衰時間・部品健全性を推測しない。
+USB切断ではclient/daemonともexit 7、復帰は旧daemonの自動回復ではなく新daemonによる。
+カード結果はnative CARD_*経路で、生ATR/APDU/識別値を記録へ転載しない。
+
+| 使用アーカイブ（asicen-userland-0.1.0-） | SHA-256 |
+|---|---|
+| linux-glibc-x86_64.tar.gz | `5feddfa8e05cb2920017eef483cccb3c54e96f0a22dc1a4582adf1e31c12ffdf` |
+| linux-musl-x86_64.tar.gz | `371f869b974e78f4431b790a7f417f6a1b0d108579b26e43a7931eb83ad18418` |
+| darwin-arm64.tar.gz | `3eab8f8b22bfb112656b7fdc5f870b51ffbd7ffe2ca31bd7e3702e6a70dc1d39` |
+
+E03のBS09失敗はTSID16528がnative CC 77（独立checker discontinuity76＋duplicate conflict1）、TSID16530が35（同35）。いずれもclient/checker/daemon exit 8/8/0、TSID・byte/packet一致、TEI/sync/USB/queue異常0。失敗を再取得で消さず、原因は未確定とする。
+
+試験手順の失敗も保持する。E03の準備前client起動・誤ったruntime・中断した300秒試行は品質観測から除外し、60秒復帰の終了値欠落を直接CLI追試と区別した。SCSの初回daemon終了値と再挿入presence欠落は推定で埋めない。Macの長いruntimeによる起動失敗、抽出エラー、Python 3.9.6の別プロセス間monotonic差による無効な3.853958 ms計測は製品の即時TIMEOUTとは扱わない。`/usr/bin/time -p` の再計測は約30秒であった。
+
+commands・終了値・TS・validator・保存場所を含む当時の詳細は、コミットに固定した
+[E03記録](https://github.com/Khronos31/asicen-userland/blob/9d31cf551e96e6f9a2dd0e5d729940f03009c4c8/docs/validation/rc-6dbdba2-e03-2026-10-17.md)、
+[HAOS/SCS記録](https://github.com/Khronos31/asicen-userland/blob/9d31cf551e96e6f9a2dd0e5d729940f03009c4c8/docs/validation/rc-6dbdba2-haos-scs-2026-10-17.md)、
+[E04記録](https://github.com/Khronos31/asicen-userland/blob/9d31cf551e96e6f9a2dd0e5d729940f03009c4c8/docs/validation/rc-6dbdba2-e04-2026-10-17.md)を参照する。
+本要約は保存済み報告の照合であり、raw logの再取得・再解析ではない。
+
+その他のLinux/Android行、各所定ソーク、候補全体の再現性・公開前照合は未完了。
+30分以上のソークを短時間項目の後、最後にまとめる既存の順序を維持する。
+リリース受入・ノート確定・タグ・正式公開は完了していない。
+
+## 過去の候補
+
+2026-10-14 JST の旧固定候補は `b64577e94389fe479d573eed57c745e2eb5573ef`。候補 run `38408329934` と独立再現 run `38408518367` はそれぞれ 20/20 jobs 成功し、配布する 9 アーカイブと `SHA256SUMS` の全 bytes が一致した。代表機 E03 の 33 チャンネル回帰、カード抜き差し、USB 切断後の新デーモンによる復帰を確認した。LNB は 0 V / 15 V を実測し、停止後の緩やかな低下を確認したが、最後は利用者が短絡で 0 V にしたため、自然に 0 V まで戻る観測は未完了。詳細は [固定候補と代表機の記録](../HARDWARE-VALIDATION.md#2026-10-14-jst-fixed-candidate-b64577e-and-representative-short-regression) を参照。
+
+当時、代表機の 2 時間ソークは未実施だった。2026-10-14 JST の利用者の再確認に従い、30 分以上のソークは短時間試験の後、最後にまとめて行う。当時の担当範囲は代表機 E03 のみで、他環境の合格を代行していない。残る実機条件を終えるまではリリース受入完了とはしない。
+
+さらに前の候補の履歴です。PR #11 取り込み後の候補は `f7352f4dcc71b364638279b774da3727fdec2ff7`。候補 run `38358322625` と独立再現 run `38358427484` はそれぞれ 20/20 jobs 成功し、配布する 9 アーカイブと `SHA256SUMS` は全 bytes が一致した。固定 identity・hash・build input・診断比較・実機確認の範囲は [2026-10-13 の新候補記録](../HARDWARE-VALIDATION.md#2026-10-13-receive-throughput-fix-and-candidate-f7352f4) に残す。旧候補の結果は履歴として保持し、新候補の実機合格へ一括で引き継がない。
 
 旧候補 f7352f4 の代表機 33 チャンネル回帰は 32 PASS / 1 FAIL（T27 の CC 不連続 1 件）。同じ候補の有限長 T26 → T27 → T27 追試は 3 回とも PASS だったが、初回の失敗や原因未確定を取り消さず、全チャンネル合格・リリース受入完了とはしない。
-
-今回の E03 の衛星受信は既存の壁給電設備のまま `--lnb-voltage 0` を維持する。地上波のコマンドには衛星専用の `--lnb-voltage` 引数を付けない。下記の一般的な 15 V の記述を、この接続で給電を開始する許可として読まない。この扱いは今回の受信だけに適用し、8 アーカイブの別途の LNB 実測、カード・USB の物理項目、所定のソークを省略しない。
 
 現在の再利用コードの比較基準は正式公開済み px4-userland v0.2.1 `dd1c1bea16a5871085d5f2a42c009364c1ec7345`。利用者の 2026-10-11 JST の決定により、0.1.0 の配布対象は Linux・macOS・Android の 8 種類とする。Windows のコードとビルド検証は残すがバイナリ配布には含めず、WinSCard 対応を揃えた 0.2.x で正式対応する予定。ASICEN のバイナリアーカイブには Linux ローダを同梱し、対応ソースのアーカイブには入れない。
 

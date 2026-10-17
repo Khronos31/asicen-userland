@@ -12,8 +12,8 @@ specific:
 - The embedded release publisher/verifier, tests and adapted workflows are
   GPL-2.0-only from px4-userland `b4635226082161ce09f811b1571c9dd25f40cf03`.
   Their SPDX notices remain intact. The exact upstream license is preserved in
-  `third_party/release-automation/LICENSE`; the file inventory, origin hashes
-  and local adaptations are in [release automation provenance](docs/release-automation-provenance.md).
+  `third_party/release-automation/LICENSE`; the retained origin and local
+  adaptations are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md#embedded-release-automation).
 - The FC0012 tuner implementation is GPL-2.0-or-later.
 - `userland/src/v2_frontend.cpp` and `userland/src/v2_nmi.cpp` are the
   GPL-2.0-only adaptation described below. Upstream did not state a version.
@@ -43,7 +43,7 @@ px4-userland are incorporated from official release v0.2.1,
 revision `dd1c1bea16a5871085d5f2a42c009364c1ec7345` under GPL-2.0-only.
 Imported files retain their SPDX notices; its license is reproduced in
 `third_party/px4-userland/LICENSE`. The file inventory and local changes are
-recorded in [docs/cli-adaptation.md](docs/cli-adaptation.md). The adapted CLI
+recorded in [the source manifest](third_party/px4-userland/UPSTREAM.md). The adapted CLI
 entry points `userland/tools/asicenctl.cpp`, `userland/tools/asicen_ts.cpp`,
 and `userland/tools/asicen_ts_windows.cpp` retain that GPL-2.0-only license.
 The combined CLI executables therefore use GPL version2; existing
@@ -132,7 +132,7 @@ The repository's recpt1 `COPYING` is not a license for them. Linux's
 [module-license rules](https://docs.kernel.org/process/license-rules.html#module-license)
 say `MODULE_LICENSE` is not a substitute for the source license. Attribution
 and the source checksums are kept in the local files and in
-[the model support record](docs/model-support.md). The local adaptation is
+[the V2 source facts](docs/reverse-engineering/v2-nmi-families.md). The local adaptation is
 distributed as GPL-2.0-only, which is this product's license and the stricter
 reading of an unspecified GPL version. That is not a finding that upstream
 named GPL-2.0-only. Asking upstream remains open. Model-specific differences
@@ -144,3 +144,32 @@ licenses. The extraction script reads its decoding key from the user's verified
 vendor file; it embeds neither the key nor firmware. Its separate fingerprint
 and load address do not grant redistribution rights or make it interchangeable
 with the Linux firmware image.
+
+## Embedded release automation
+
+The GPL-2.0-only release scripts, tests and workflow fixtures originate from
+PX4 `b4635226082161ce09f811b1571c9dd25f40cf03`; the same baseline is in
+[v0.2.1](https://github.com/Khronos31/px4-userland/tree/dd1c1bea16a5871085d5f2a42c009364c1ec7345),
+`dd1c1bea16a5871085d5f2a42c009364c1ec7345`. SPDX notices and the full license
+are retained. These are local sources, not a build-time network dependency.
+
+| Local path | Upstream path | Upstream SHA-256 | Copy |
+| --- | --- | --- | --- |
+| `scripts/release_verify.py` | `scripts/release_verify.py` | `1c3ebe46b1b7c0d0079c7996a928a7eaefdcec69c01a06e2ff9da143dd34738a` | exact |
+| `scripts/release_publish.py` | `scripts/release_publish.py` | `961321ca9a3d8cf4eb762d94961f5edce708a18fbeb49fb9f4126ee8783ab47a` | local HTTP fixes |
+| `tests/test_release_verify.py` | `tests/test_release_verify.py` | `1b8e520655b7d8a02390c611c5d739ea0e3088433cba0fe92a1e7f28b7a4941f` | exact |
+| `tests/test_release_publish.py` | `tests/test_release_publish.py` | `c01ba5cf866920a7da4f616dfd0d27e8d311336ff40dfc827d4e9b2ffb0276e6` | fixture paths and HTTP regression additions |
+| `tests/test_release_integration.py` | `tests/test_release_integration.py` | `00beb76e195bed6450f97d15382a2e4aeef8a3f207fadcd0919b48995b9770f4` | exact |
+| `tests/fixtures/release-upstream/release_tag.yml` | `.github/workflows/release_tag.yml` | `55efbf775a55c14604dd344e06f4cfb87d11e43c9aa7880f967bc267d0059f02` | exact |
+| `tests/fixtures/release-upstream/release_reusable.yml` | `.github/workflows/release_reusable.yml` | `9e18a7f8f166ef5dcbac14628eb8996c621930dc792cb83d3abd76b411c68c3b` | exact |
+| `.github/workflows/release_reusable.yml` | `.github/workflows/release_reusable.yml` | `9e18a7f8f166ef5dcbac14628eb8996c621930dc792cb83d3abd76b411c68c3b` | local adapter |
+| `third_party/release-automation/LICENSE` | `LICENSE` | `8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643` | exact |
+
+
+The local workflows bind both helper checkouts to the exact ASICEN tag SHA.
+The publisher retains two HTTP-boundary fixes: canonical same-repository
+40-hex-SHA compare paths, and GitHub's JSON Accept header for Actions artifact
+ZIP requests. Upstream workflow fixtures are inert test data; local bootstrap
+and both product profiles are checked offline. No PX4 recovery-only publishing
+code is imported. Publication and support requirements remain in
+[docs/releasing.md](docs/releasing.md).

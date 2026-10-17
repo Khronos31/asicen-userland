@@ -9,7 +9,7 @@ on:
       - tests/**
       - third_party/release-automation/**
       - docs/releasing.md
-      - docs/release-automation-provenance.md
+      - THIRD_PARTY_NOTICES.md
   push:
     paths:
       - .github/workflows/**
@@ -17,7 +17,7 @@ on:
       - tests/**
       - third_party/release-automation/**
       - docs/releasing.md
-      - docs/release-automation-provenance.md
+      - THIRD_PARTY_NOTICES.md
   workflow_dispatch:
 
 permissions:
