@@ -111,6 +111,8 @@ public:
     // A successful read always returns at least one byte. EOF and reset are
     // reported as DISCONNECTED; no native errno escapes this boundary.
     Result<std::size_t> read_some(MutableByteView output, Timeout timeout) noexcept;
+    // Writes arbitrary protocol bytes within one monotonic absolute deadline.
+    Result<void> write_all(ByteView bytes, Timeout timeout) noexcept;
 
     // Reads one transport chunk into caller-owned storage and passes it to the
     // allocation-free StreamFramer. The returned count is the number of frames

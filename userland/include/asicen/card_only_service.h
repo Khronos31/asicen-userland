@@ -5,13 +5,17 @@
 #include "asicen/card_mailbox_hardware.h"
 #include "asicen/card_operation_guard.h"
 #include "px4/card_service.h"
+#include "px4/enclosure_context.h"
 #include "px4/tuner_service.h"
 
+#include <chrono>
 #include <csignal>
+#include <memory>
 
 namespace asicen {
 
 class LibusbW3u3Hardware;
+class LibusbContext;
 
 class W3u3CardServiceBackend final : public px4::userland::CardServiceBackend {
 public:
@@ -84,6 +88,25 @@ int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtim
                                 const char* instance, bool group,
                                 const volatile std::sig_atomic_t* stop_requested,
                                 bool (*stop_callback)() noexcept = nullptr) noexcept;
+
+px4::userland::Result<std::unique_ptr<px4::userland::ipc::posix::EnclosureContext>>
+create_live_card_stream_context(
+    std::unique_ptr<LibusbContext> context_owner,
+    std::unique_ptr<LibusbW3u3Hardware> hardware,
+    px4::userland::ipc::posix::SerialEndpointLease lease,
+    const px4::userland::ipc::posix::EnclosurePublication& publication,
+    const volatile std::sig_atomic_t* stop_requested) noexcept;
+
+struct OwnedLiveCardStreamResult final {
+    int exit_status = 70;
+    bool close_deadline_expired = false;
+};
+
+OwnedLiveCardStreamResult run_live_card_stream_server(
+    px4::userland::ipc::posix::EnclosureContext& context,
+    const volatile std::sig_atomic_t* stop_requested,
+    bool (*stop_callback)() noexcept,
+    std::chrono::milliseconds close_budget = std::chrono::milliseconds{15000}) noexcept;
 
 }  // namespace asicen
 

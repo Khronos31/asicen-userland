@@ -112,8 +112,8 @@ int main(int argc, char** argv)
     PosixSignal signal;
     Px4TsFailureKind failure_kind = Px4TsFailureKind::ipc;
     Px4TsRunDiagnostics diagnostics;
-    const auto result = Px4TsRunner::run(arguments, output, clock, signal,
-                                         &failure_kind, &diagnostics);
+    const auto result = Px4TsRunner::run_wire(arguments, output, clock, signal,
+                                              &failure_kind, &diagnostics);
     if (!result) {
         std::fprintf(stderr, "asicen-ts: %s\n", error_string(result.error()));
         std::fprintf(stderr, "written packets=%llu bytes=%llu\n",

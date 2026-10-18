@@ -65,23 +65,31 @@ V2SourceRoute v2_source_route(const std::uint8_t* data, std::size_t size, std::u
 }
 std::uint32_t v2_tune_frequency_hz(V2FrontendTarget t, std::uint32_t f)
 {
+    return v2_tune_center_hz(t, static_cast<std::uint64_t>(f) * 1000U);
+}
+std::uint32_t v2_terrestrial_center_hz(std::uint64_t f)
+{
+    if (f < 90000000U || f > 770000000U)
+        return 0;
+    if (f >= 165000000U && f <= 167143000U)
+        f = 167143000U;
+    else if (f >= 195143000U && f <= 197143000U)
+        f = 195143000U;
+    else if (f >= 471143000U && f <= 473143000U)
+        f = 473143000U;
+    return static_cast<std::uint32_t>((f / 1000000U) * 1000000U + 143000U);
+}
+std::uint32_t v2_tune_center_hz(V2FrontendTarget t, std::uint64_t f)
+{
     if (!v2_target_valid(t))
         return 0;
     if (v2_target_is_satellite(t)) {
-        // Bound the Japanese RF band before subtracting LO or multiplying.
-        if (f < 11628000U || f > 12828000U)
+        // Bound the Japanese RF band before subtracting LO.
+        if (f < 11628000000ULL || f > 12828000000ULL)
             return 0;
-        return (f - 10678000U) * 1000U;
+        return static_cast<std::uint32_t>(f - 10678000000ULL);
     }
-    if (f < 90000U || f > 770000U)
-        return 0;
-    if (f >= 165000U && f <= 167143U)
-        f = 167143U;
-    else if (f >= 195143U && f <= 197143U)
-        f = 195143U;
-    else if (f >= 471143U && f <= 473143U)
-        f = 473143U;
-    return (f / 1000U) * 1000000U + 143000U;
+    return v2_terrestrial_center_hz(f);
 }
 V2Pll compute_v2_satellite_pll(std::uint32_t f, bool bit6, bool bit0)
 {
@@ -747,9 +755,17 @@ V2FrontendResult tune_v2_frontend(FrontendTransport* transport, V2FrontendTarget
                                   std::uint32_t rf_khz, V2FrontendReport* report,
                                   unsigned budget_ms)
 {
+    return tune_v2_frontend_hz(transport, target, static_cast<std::uint64_t>(rf_khz) * 1000U,
+                               report, budget_ms);
+}
+V2FrontendResult tune_v2_frontend_hz(FrontendTransport* transport, V2FrontendTarget target,
+                                     std::uint64_t rf_hz, V2FrontendReport* report,
+                                     unsigned budget_ms)
+{
     if (report)
         *report = {};
-    const auto hz = v2_tune_frequency_hz(target, rf_khz);
+    const bool satellite_off_khz = v2_target_is_satellite(target) && rf_hz % 1000U != 0U;
+    const auto hz = satellite_off_khz ? 0U : v2_tune_center_hz(target, rf_hz);
     if (!transport || !hz || !budget_ms)
         return V2FrontendResult::InvalidArgument;
     Engine e(transport, target, report, budget_ms);

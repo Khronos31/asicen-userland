@@ -644,23 +644,29 @@ Fc0012Pll compute_fc0012_pll(std::uint32_t freq_khz)
 
 std::uint32_t terrestrial_tune_center_khz(std::uint32_t freq_khz)
 {
-    if (freq_khz == 0) {
+    return static_cast<std::uint32_t>(
+        terrestrial_tune_center_hz(static_cast<std::uint64_t>(freq_khz) * 1000U) / 1000U);
+}
+
+std::uint64_t terrestrial_tune_center_hz(std::uint64_t frequency_hz)
+{
+    if (frequency_hz == 0) {
         return 0;
     }
     // TunerControl.o .text 0x23bc-0x23f5: rdx = (freq>>3)/125*1000, i.e.
-    // floor(freq/1000)*1000, then vendor-specific special ranges and a +143 kHz
-    // offset before Adpater_SetFreqISDBT(rdx + 0x8f).
-    const std::uint64_t truncated = static_cast<std::uint64_t>(freq_khz / 1000U) * 1000U;
-    if (truncated >= 165000U && truncated <= 167000U) {
-        return 0x28ce7U; // 167143
+    // floor(freq/1000)*1000 kHz = floor-MHz, then vendor-specific special
+    // ranges and a +143 kHz offset before Adpater_SetFreqISDBT(rdx + 0x8f).
+    const std::uint64_t truncated = (frequency_hz / 1000000U) * 1000000U;
+    if (truncated >= 165000000U && truncated <= 167000000U) {
+        return 167143000U;
     }
-    if (truncated >= 195000U && truncated <= 197000U) {
-        return 0x2fa47U; // 195143
+    if (truncated >= 195000000U && truncated <= 197000000U) {
+        return 195143000U;
     }
-    if (truncated >= 471000U && truncated <= 473000U) {
-        return 0x73837U; // 473143
+    if (truncated >= 471000000U && truncated <= 473000000U) {
+        return 473143000U;
     }
-    return static_cast<std::uint32_t>(truncated + 0x8fU);
+    return truncated + 143000U;
 }
 
 FrontendPlan plan_startup_subset()

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-10: cancellation notifications for the native
-// tuner/stream adapters before the reference worker drain and cleanup sequence.
 #ifndef PX4_USERLAND_TUNER_SERVICE_H
 #define PX4_USERLAND_TUNER_SERVICE_H
 
+#include "dtv/userland/detail/receiver_engine.h"
 #include "px4/error.h"
 #include "px4/ipc.h"
 
@@ -12,6 +11,61 @@
 #include <mutex>
 
 namespace px4::userland {
+
+// R3 strict frequency facts, data only.  A backend reports them per receiver
+// and system; TunerService copies them once before workers start and the pure
+// strict preparation evaluates only this owned copy (no backend call).
+struct TunerFrequencyRows final {
+    std::uint64_t first_hz = 0U;
+    std::uint64_t step_hz = 0U;
+    std::uint8_t count = 0U;
+};
+
+struct TunerStrictProfile final {
+    // The backend implements the strict Hz programming entrance for this
+    // receiver/system.  Without it the receiver keeps the R2 kHz entrance.
+    bool native_hz = false;
+    // Inclusive admitted requested-Hz domain (satellite: IF).
+    std::uint64_t min_hz = 0U;
+    std::uint64_t max_hz = 0U;
+    // When row_sets is nonzero the request must equal one row exactly.
+    std::array<TunerFrequencyRows, 2U> rows{};
+    std::uint8_t row_sets = 0U;
+    // Explicit satellite LNB controls the profile supports: bit 0 = 0 V,
+    // bit 1 = 15 V. Absence remains distinct from an explicit 0 V request.
+    std::uint8_t lnb_voltage_mask = 0U;
+    // Satellite slot indexes 0..slot_count-1 are supported (TSID 1..65534).
+    std::uint8_t slot_count = 0U;
+};
+
+// Small stack-local strict programming result (optional command Hz and
+// typed evidence); the shared engine type.
+using TunerHzProgramming = dtv::userland::detail::TuneProgramming;
+
+// Internal strict Hz tune request (not a wire record).  frequency_hz is the
+// exact canonical request in the system's public domain (satellite: IF).
+struct TunerHzTuneRequest final {
+    std::uint64_t lease_id = 0U;
+    ipc::System system = ipc::System::ISDB_T;
+    std::uint64_t frequency_hz = 0U;
+    dtv::userland::wire::Selection selection = dtv::userland::wire::Selection::automatic;
+    std::uint16_t selection_value = 0U;
+    dtv::userland::wire::Optional<std::uint8_t> lnb_voltage{};
+    dtv::userland::wire::Optional<bool> lna{};
+    bool pid_subset = false;
+    std::uint32_t timeout_ms = 0U;
+};
+
+// Owned bounded outcome of the pure strict preparation.  It is produced after
+// the acceptance clock sample and before any lane lock, copied into the task,
+// and consumed at the engine's validation position.  hz_entrance selects the
+// engine request; it is set from the receiver's immutable profile, never from
+// a numeric value.
+struct TunerPreparedTune final {
+    bool hz_entrance = false;
+    dtv::userland::detail::TuneRequest legacy{};
+    dtv::userland::detail::HzTuneRequest hz{};
+};
 
 // Portable seam for the physical receiver implementation.  It deliberately
 // contains no transport, operating-system, or frontend implementation types.
@@ -47,6 +101,37 @@ public:
     virtual Result<void> tune_satellite(std::uint8_t receiver,
                                         std::uint32_t frequency_khz,
                                         std::uint32_t timeout_ms) noexcept = 0;
+    // R3 strict Hz programming entrances.  frequency_hz is the exact request
+    // (satellite: IF).  The defaults are UNSUPPORTED: there is no shared kHz
+    // fallback.  Production backends override them with native programming.
+    virtual Result<TunerHzProgramming> tune_terrestrial_hz(std::uint8_t receiver,
+                                                           std::uint64_t frequency_hz,
+                                                           std::uint32_t timeout_ms) noexcept
+    {
+        (void)receiver;
+        (void)frequency_hz;
+        (void)timeout_ms;
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    }
+    virtual Result<TunerHzProgramming> tune_satellite_hz(std::uint8_t receiver,
+                                                         std::uint64_t frequency_hz,
+                                                         std::uint32_t timeout_ms) noexcept
+    {
+        (void)receiver;
+        (void)frequency_hz;
+        (void)timeout_ms;
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    }
+    // Immutable strict profile facts for one receiver/system, queried once by
+    // configure_strict_capabilities() before workers start.  The default has
+    // no native Hz entrance.
+    virtual TunerStrictProfile strict_profile(std::uint8_t receiver,
+                                              ipc::System system) const noexcept
+    {
+        (void)receiver;
+        (void)system;
+        return TunerStrictProfile{};
+    }
     virtual Result<bool> is_locked(std::uint8_t receiver,
                                    ipc::System system) noexcept = 0;
     // The post-lock settle is a px4_drv device policy, not a generic
@@ -94,8 +179,7 @@ public:
     {
         (void)receiver;
     }
-    // Called by the daemon before draining workers. Backends should interrupt
-    // cancellable waits and reject queued work; it performs no service cleanup.
+    // Called before daemon workers are drained; backends interrupt cancellable waits.
     virtual void request_stop() noexcept {}
     // Called after all logical leases have been released. Production uses it
     // to retry any ambiguous zero-reference LNB shutdown before transports
@@ -160,6 +244,9 @@ struct TunerAttachment final {
     std::uint8_t receiver = 0U;
     ipc::System system = ipc::System::ISDB_T;
     std::array<std::uint8_t, ipc::kNonceLength> nonce{};
+    // v1 attachment selects the evict-oldest data-queue policy.  It is not
+    // part of the attachment identity.
+    bool evict_oldest = false;
 };
 
 // Transport-independent final stream accounting.  A stream implementation
@@ -214,8 +301,6 @@ struct TunerStatus final {
 class TunerStreamControl {
 public:
     virtual ~TunerStreamControl() noexcept = default;
-    // Interrupt any cancellable read so server shutdown can drain stream
-    // workers before destroying the stream backend.
     virtual void request_stop() noexcept {}
     virtual Result<void> attach(const TunerAttachment& attachment) noexcept = 0;
     virtual Result<void> detach(const TunerAttachment& attachment) noexcept = 0;
@@ -300,75 +385,233 @@ public:
     Result<TunerStatus> status() const noexcept;
     Result<void> disconnect_client(std::uint64_t client_id) noexcept;
     Result<void> shutdown() noexcept;
-    void request_stop() noexcept { backend_.request_stop(); }
+    void request_stop() noexcept { backend_.legacy().request_stop(); }
+
+    // R2 strict admission.  The real daemon enables the immutable capability
+    // table once before its workers start, built from the audited backend
+    // model/count metadata.  Tests that do not opt in keep the legacy direct
+    // tune entrance.
+    using TunerAdmittedTune = dtv::userland::detail::AdmittedTune;
+    Result<void> configure_strict_capabilities() noexcept;
+    bool strict_admission_enabled() const noexcept;
+    // Same monotonic domain as the engine clock, sampled at request acceptance
+    // before queue submission.
+    std::uint64_t monotonic_ms() const noexcept;
+    // R2 compatibility admission of an unprepared old-wire request: the
+    // legacy kHz entrance with the old validation decision.
+    Result<TunerAdmittedTune> try_admit_tune(
+        std::uint64_t client_id, const ipc::TuneRequestPayload& request,
+        std::uint64_t accepted_at_ms) noexcept;
+    // R3 pure strict preparation.  It reads only the owned profile copy and
+    // performs no backend, clock, engine or lock operation, so callers run it
+    // after the acceptance sample and before any lane lock.  The old-wire
+    // form keeps the old validation decision, converts the u64 kHz scalar to
+    // Hz with a checked multiplication, and selects the strict Hz entrance
+    // only for a receiver whose profile is native.
+    TunerPreparedTune prepare_tune(std::uint8_t receiver,
+                                   const ipc::TuneRequestPayload& request) const noexcept;
+    TunerPreparedTune prepare_tune_hz(std::uint8_t receiver,
+                                      const TunerHzTuneRequest& request) const noexcept;
+    // Callback-free admission of a prepared request (same engine body).
+    Result<TunerAdmittedTune> try_admit_prepared_tune(
+        std::uint64_t client_id, const TunerPreparedTune& prepared,
+        std::uint64_t accepted_at_ms) noexcept;
+    Result<void> execute_admitted_tune(const TunerAdmittedTune& ticket) noexcept;
+    Result<void> abort_unstarted_tune(const TunerAdmittedTune& ticket,
+                                      Error error) noexcept;
+    // Synchronous logical-teardown invalidation of an admitted ticket.
+    Result<void> revoke_tune_ticket(std::uint64_t client_id,
+                                    std::uint64_t lease_id) noexcept;
+    // Internal diagnostic/test view of the R2 tune metadata for one legacy
+    // receiver.  It carries only permitted tune fields (no lease/client/token)
+    // and is not part of the wire contract.
+    Result<dtv::userland::detail::TuneMetadata> tune_metadata(
+        std::uint8_t receiver) const noexcept;
+
+    // Token-free engine snapshot (states, operations, tune metadata and lease
+    // presence) taken under the engine registry lock.  It performs no backend
+    // I/O.  Slot order is the legacy receiver order 0..receiver_count()-1.
+    Result<dtv::userland::detail::ReceiverEngineStatus> engine_status() const noexcept;
+    // Fixed enclosure shape.  receiver_supports() is the backend's pure
+    // metadata predicate (no I/O) for receivers below receiver_count().
+    std::uint8_t receiver_count() const noexcept { return receiver_count_; }
+    bool receiver_supports(std::uint8_t receiver, ipc::System system) const noexcept;
+    // Owned strict profile copied by configure_strict_capabilities(); an empty
+    // profile when the receiver/system has none.  No backend call.
+    TunerStrictProfile strict_profile(std::uint8_t receiver,
+                                      ipc::System system) const noexcept;
+
+    // --- v1 stream authority facade (the same common engine) ---
+    // The daemon selects the immutable contract once before its workers start;
+    // the legacy stream entrances then return UNSUPPORTED on that engine.  These
+    // forwarders add no second lease/stream authority.
+    using TunerStreamContract = dtv::userland::detail::StreamContract;
+    using TunerStreamStart = dtv::userland::detail::StreamStartResult;
+    using TunerStreamTicket = dtv::userland::detail::StreamAttachTicket;
+    using TunerStreamStop = dtv::userland::detail::StreamStopResult;
+    Result<void> configure_stream_contract(TunerStreamContract contract,
+                                           std::uint64_t context_epoch) noexcept;
+    Result<TunerStreamStart> start_stream_v1(std::uint64_t client_id,
+                                             std::uint64_t lease_id,
+                                             std::uint64_t revision,
+                                             std::uint64_t now_ms,
+                                             std::uint64_t arm_budget_ms) noexcept;
+    Result<TunerStreamTicket> reserve_attach_v1(
+        std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t epoch,
+        std::uint64_t stream_id,
+        const dtv::userland::detail::ReceiverToken& token,
+        std::uint64_t now_ms) noexcept;
+    Result<void> prepare_attach_v1(const TunerStreamTicket& ticket) noexcept;
+    Result<void> commit_attach_v1(const TunerStreamTicket& ticket) noexcept;
+    Result<void> abort_attach_v1(const TunerStreamTicket& ticket, Error cause) noexcept;
+    Result<TunerStreamStop> stop_stream_v1(std::uint64_t client_id,
+                                           std::uint64_t lease_id,
+                                           std::uint64_t stream_id) noexcept;
+    Result<TunerStreamStop> expire_armed_v1(std::uint64_t client_id,
+                                            std::uint64_t lease_id,
+                                            std::uint64_t stream_id,
+                                            std::uint64_t now_ms) noexcept;
+    Result<void> run_stream_cleanup_v1(const TunerStreamTicket& ticket) noexcept;
+    Result<void> complete_stream_cleanup_v1(const TunerStreamTicket& ticket,
+                                            Error result, bool quiesced) noexcept;
+    Result<TunerStreamStop> stream_last_terminal_v1(std::uint64_t client_id,
+                                                    std::uint64_t lease_id) const noexcept;
 
 private:
-    enum class StreamState : std::uint8_t {
-        none,
-        armed,
-        attaching,
-        active,
-        revoked,
-        consumed,
+    // The lease, tune, and stream lifecycle runs in the common receiver
+    // engine.  These adapters only translate the PX4 seams and types; the
+    // PX-Q3U4 receiver defaults, the settle policy, and request validation
+    // stay in this product.
+    class BackendAdapter final : public dtv::userland::detail::ReceiverBackend {
+    public:
+        explicit BackendAdapter(TunerServiceBackend& backend) noexcept
+            : backend_(backend)
+        {
+        }
+        TunerServiceBackend& legacy() const noexcept { return backend_; }
+        bool supports(dtv::userland::detail::ReceiverId receiver,
+                      dtv::userland::detail::ReceiverSystem system) const noexcept override;
+        bool selects_satellite_stream_before_tune() const noexcept override;
+        std::uint32_t lock_settle_ms(
+            dtv::userland::detail::ReceiverId receiver,
+            dtv::userland::detail::ReceiverSystem system) const noexcept override;
+        Result<void> open(dtv::userland::detail::ReceiverId receiver) noexcept override;
+        Result<void> tune(dtv::userland::detail::ReceiverId receiver,
+                          dtv::userland::detail::ReceiverSystem system,
+                          std::uint32_t frequency_khz,
+                          std::uint32_t timeout_ms) noexcept override;
+        Result<dtv::userland::detail::TuneProgramming> program_hz(
+            dtv::userland::detail::ReceiverId receiver,
+            dtv::userland::detail::ReceiverSystem system, std::uint64_t requested_hz,
+            std::uint32_t timeout_ms) noexcept override;
+        Result<bool> is_locked(dtv::userland::detail::ReceiverId receiver,
+                               dtv::userland::detail::ReceiverSystem system) noexcept override;
+        Result<void> select_satellite_slot(dtv::userland::detail::ReceiverId receiver,
+                                           std::uint8_t slot,
+                                           std::uint32_t timeout_ms) noexcept override;
+        Result<void> select_satellite_tsid(dtv::userland::detail::ReceiverId receiver,
+                                           std::uint16_t tsid,
+                                           std::uint32_t timeout_ms) noexcept override;
+        Result<void> close(dtv::userland::detail::ReceiverId receiver) noexcept override;
+        Result<void> begin_tune_power(dtv::userland::detail::ReceiverId receiver,
+                                      dtv::userland::detail::ReceiverSystem system,
+                                      std::uint8_t lnb_voltage) noexcept override;
+        Result<void> commit_tune_power(
+            dtv::userland::detail::ReceiverId receiver) noexcept override;
+        Result<void> rollback_tune_power(
+            dtv::userland::detail::ReceiverId receiver) noexcept override;
+        void mark_disconnected(dtv::userland::detail::ReceiverId receiver) noexcept override;
+        Result<void> shutdown() noexcept override;
+        Result<void> start_capture(dtv::userland::detail::ReceiverId receiver,
+                                   dtv::userland::detail::ReceiverSystem system) noexcept override;
+        Result<void> stop_capture(dtv::userland::detail::ReceiverId receiver,
+                                  dtv::userland::detail::ReceiverSystem system) noexcept override;
+
+    private:
+        TunerServiceBackend& backend_;
     };
 
-    struct Lease final {
-        bool active = false;
-        std::uint64_t client_id = 0U;
-        std::uint64_t lease_id = 0U;
-        std::uint8_t receiver = 0U;
-        ipc::System system = ipc::System::ISDB_T;
-        std::array<std::uint8_t, ipc::kNonceLength> nonce{};
-        std::uint64_t attachment_id = 0U;
-        StreamState stream_state = StreamState::none;
-        std::uint64_t attach_started_ms = 0U;
-        // A failed or revoked start may have partially enabled the pin.  Keep
-        // this flag until physical cleanup has been attempted.
-        bool capture_maybe_active = false;
-        bool stream_maybe_attached = false;
-        bool backend_disconnected = false;
+    class NonceAdapter final : public dtv::userland::detail::ReceiverTokenSource {
+    public:
+        explicit NonceAdapter(TunerNonceSource& source) noexcept : source_(source) {}
+        Result<dtv::userland::detail::ReceiverToken> generate() noexcept override;
+
+    private:
+        TunerNonceSource& source_;
     };
 
-    static bool valid_client(std::uint64_t client_id) noexcept;
-    bool valid_receiver(std::uint8_t receiver) const noexcept;
-    ipc::System initial_system(std::uint8_t receiver) const noexcept;
+    class LeaseIdAdapter final : public dtv::userland::detail::ReceiverIdSource {
+    public:
+        explicit LeaseIdAdapter(TunerLeaseIdSource* source) noexcept : source_(source) {}
+        Result<std::uint64_t> next() noexcept override;
+
+    private:
+        TunerLeaseIdSource* source_;
+    };
+
+    class AttachmentIdAdapter final : public dtv::userland::detail::ReceiverIdSource {
+    public:
+        explicit AttachmentIdAdapter(TunerAttachmentIdSource* source) noexcept
+            : source_(source)
+        {
+        }
+        Result<std::uint64_t> next() noexcept override;
+
+    private:
+        TunerAttachmentIdSource* source_;
+    };
+
+    class TimeAdapter final : public dtv::userland::detail::ReceiverClock {
+    public:
+        explicit TimeAdapter(TunerServiceTime& time) noexcept : time_(time) {}
+        std::uint64_t monotonic_ms() noexcept override;
+        void sleep_ms(std::uint32_t milliseconds) noexcept override;
+
+    private:
+        TunerServiceTime& time_;
+    };
+
+    class StreamAdapter final : public dtv::userland::detail::ReceiverStreamControl {
+    public:
+        explicit StreamAdapter(TunerStreamControl* stream) noexcept : stream_(stream) {}
+        Result<void> attach(
+            const dtv::userland::detail::Attachment& attachment) noexcept override;
+        Result<void> detach(
+            const dtv::userland::detail::Attachment& attachment) noexcept override;
+        Result<dtv::userland::detail::StreamCounters> stats(
+            const dtv::userland::detail::Attachment& attachment) const noexcept override;
+        Result<dtv::userland::detail::StreamFinalSnapshot> final_snapshot(
+            const dtv::userland::detail::Attachment& attachment) const noexcept override;
+
+    private:
+        TunerStreamControl* stream_;
+    };
+
     static bool valid_tune(const ipc::TuneRequestPayload& request) noexcept;
-    int find_lease_locked(std::uint64_t client_id,
-                          std::uint64_t lease_id) const noexcept;
-    bool lease_id_in_use_locked(std::uint64_t lease_id) const noexcept;
-    bool attachment_id_in_use_locked(std::uint64_t attachment_id) const noexcept;
-    Result<std::uint64_t> allocate_lease_id_locked(std::uint8_t receiver) noexcept;
-    Result<std::uint64_t> allocate_attachment_id_locked(
-        std::uint8_t receiver) noexcept;
-    void set_state_locked(std::uint8_t receiver, ipc::ReceiverState state) noexcept;
-    Result<void> close_lease(const Lease& lease) noexcept;
-    Result<void> stop_capture_if_needed(const Lease& lease) noexcept;
-    Result<void> detach_data_plane_if_needed(const Lease& lease) noexcept;
-    Result<void> release_lease(std::uint64_t client_id,
-                               std::uint64_t lease_id) noexcept;
-    Result<void> cleanup_client(std::uint64_t client_id) noexcept;
-    Result<void> cleanup_all() noexcept;
-    void observe_disconnect(std::uint8_t receiver, Error error) noexcept;
-    Result<bool> poll_lock(std::uint8_t receiver, ipc::System system,
-                           std::uint64_t start_ms,
-                           std::uint32_t timeout_ms) noexcept;
+    static std::uint8_t legacy_receiver_count(
+        const TunerServiceBackend& backend) noexcept;
+    const TunerStrictProfile* strict_profile_for(std::uint8_t receiver,
+                                                 ipc::System system) const noexcept;
 
-    TunerServiceBackend& backend_;
-    TunerNonceSource& nonce_source_;
-    TunerServiceTime& time_;
-    TunerLeaseIdSource* lease_id_source_;
-    TunerAttachmentIdSource* attachment_id_source_;
-    TunerStreamControl* stream_control_;
-    std::uint64_t next_lease_id_ = 1U;
-    std::uint64_t next_attachment_id_ = 1U;
-    std::uint64_t last_attachment_id_ = 0U;
-    std::uint64_t generation_ = 1U;
-    std::array<Lease, ipc::kReceiverCount> leases_{};
-    std::array<std::uint64_t, ipc::kReceiverCount> reserved_lease_ids_{};
-    std::array<std::uint64_t, ipc::kReceiverCount> reserved_attachment_ids_{};
-    std::array<ipc::ReceiverState, ipc::kReceiverCount> states_{};
-    mutable std::mutex mutex_;
-    mutable std::array<std::mutex, ipc::kReceiverCount> receiver_mutexes_{};
+    BackendAdapter backend_;
+    NonceAdapter nonce_source_;
+    TimeAdapter time_;
+    LeaseIdAdapter lease_id_source_;
+    AttachmentIdAdapter attachment_id_source_;
+    StreamAdapter stream_control_;
+    // Legacy contiguous receiver IDs 0..receiver_count_-1 in engine slot order,
+    // taken from the backend once at construction.  Supported backends (Q3U4,
+    // W3U4, MLT, single receiver, and ASICEN after profile selection) keep a
+    // fixed count for the service's lifetime; a backend whose count grows
+    // later is not supported, and its added receivers are not acquirable.
+    std::uint8_t receiver_count_;
+    std::array<dtv::userland::detail::ReceiverId, ipc::kReceiverCount> receiver_ids_;
+    // Owned immutable strict profiles [receiver][0: ISDB-T, 1: ISDB-S],
+    // written once by configure_strict_capabilities() before workers start.
+    std::array<std::array<TunerStrictProfile, 2U>, ipc::kReceiverCount> strict_profiles_{};
+    // Declared last: destroyed first, while the adapters are still alive.  Its
+    // destructor performs the shutdown that ~TunerService() used to call.
+    dtv::userland::detail::ReceiverEngine engine_;
 };
 
 }  // namespace px4::userland

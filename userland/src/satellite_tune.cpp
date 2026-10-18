@@ -201,6 +201,19 @@ bool w3u3_satellite_if_to_rf_khz(std::uint32_t if_khz, std::uint32_t* rf_khz) no
     return true;
 }
 
+bool w3u3_satellite_if_hz_to_rf_hz(std::uint64_t if_hz, std::uint64_t* rf_hz) noexcept
+{
+    // Every row is an integral kHz, so exact Hz membership is an integral
+    // kHz IF that passes the kHz row gate.
+    if (rf_hz == nullptr || if_hz % 1000U != 0U || if_hz / 1000U > UINT32_MAX)
+        return false;
+    std::uint32_t rf_khz = 0U;
+    if (!w3u3_satellite_if_to_rf_khz(static_cast<std::uint32_t>(if_hz / 1000U), &rf_khz))
+        return false;
+    *rf_hz = static_cast<std::uint64_t>(rf_khz) * 1000U;
+    return true;
+}
+
 namespace {
 
 FrontendPlan plan_satellite_tune(std::uint32_t rf_khz, std::uint16_t initial_tsid,

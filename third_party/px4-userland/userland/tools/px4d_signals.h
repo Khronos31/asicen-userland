@@ -24,6 +24,9 @@ void notify_cleanup_complete() noexcept;
 // True once notify_cleanup_complete() has been observed.
 bool cleanup_complete() noexcept;
 
+// Standalone policy for a whole-context cleanup that missed its finite budget.
+[[noreturn]] void exit_after_close_deadline(int status) noexcept;
+
 }  // namespace px4::userland::px4d
 
 #endif

@@ -113,6 +113,15 @@ struct Px4TsRunDiagnostics final {
 // socket or output stream from a signal handler.
 class Px4TsRunner final {
 public:
+    // Normal UDTV path: HELLO/LIST/STATUS/ACQUIRE/TUNE/START, typed ATTACH,
+    // typed TS_DATA/STREAM_END, then STOP and RELEASE.  -t/--time starts when
+    // the AttachResponse is accepted.
+    static Result<Px4TsRunResult> run_wire(
+        const Px4TsArguments& arguments, Px4TsOutput& output,
+        Px4TsClock& clock, const Px4TsSignal& signal,
+        Px4TsFailureKind* failure_kind = nullptr,
+        Px4TsRunDiagnostics* diagnostics = nullptr) noexcept;
+    // Previous internal-IPC runner, retained for its existing unit fixtures.
     static Result<Px4TsRunResult> run(
         const Px4TsArguments& arguments, Px4TsOutput& output,
         Px4TsClock& clock, const Px4TsSignal& signal,

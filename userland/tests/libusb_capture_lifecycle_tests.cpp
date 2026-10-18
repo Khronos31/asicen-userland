@@ -109,6 +109,10 @@ struct LibusbW3u3HardwareTestPeer {
         hardware.capture_usb_hooks_ = hooks;
         hardware.claimed_ = true;
     }
+    static void hooks_only(LibusbW3u3Hardware& hardware, const Hooks* hooks)
+    {
+        hardware.capture_usb_hooks_ = hooks;
+    }
     static void mark_tuned(LibusbW3u3Hardware& hardware, std::uint8_t receiver)
     {
         hardware.tuned_ = true;
@@ -202,6 +206,7 @@ struct FakeUsb {
     bool fixed_clock = false;
     std::chrono::steady_clock::time_point fixed_clock_origin{};
     std::uint8_t terrestrial_b0 = 0U;
+    bool satellite_tsid_ready = false;
     unsigned expire_after_tsid_read_ms = 0U;
     unsigned missing_tsid_reads = 0U;
     int cancel_count = 0;
@@ -486,6 +491,10 @@ struct FakeUsb {
                 const std::uint8_t reg = static_cast<std::uint8_t>(first + i);
                 response[i + 1U] =
                     slave == 0x30U && first == 0xb0U ? terrestrial_b0 :
+                    satellite_tsid_ready && first == 0xceU && i < 2U
+                        ? static_cast<std::uint8_t>(i == 0U ? 0x12U : 0x34U) :
+                    satellite_tsid_ready && first == 0x8fU && i < 2U
+                        ? static_cast<std::uint8_t>(i == 0U ? 0x12U : 0x34U) :
                     slave == 0x4aU ? controller[reg]
                     : slave == 0xa8U && first == 0xb0U
                         ? static_cast<std::uint8_t>(

@@ -50,6 +50,8 @@ public:
     int port_result = 2;
     int port_result_call = 1;
     int retained_fd = -1;
+    std::vector<int> wrapped_fds;
+    bool verify_wrapped_fds_closed = false;
     bool empty_context = false;
     bool empty_handle = false;
     bool handle_on_failure = false;
@@ -86,6 +88,13 @@ public:
     void exit(libusb_context* context) noexcept override
     {
         verify(context == context_, "context identity retained until exit");
+#if defined(__linux__) || defined(__ANDROID__)
+        if (verify_wrapped_fds_closed) {
+            for (const int fd : wrapped_fds)
+                verify(::fcntl(fd, F_GETFD) < 0,
+                       "all wrapped duplicate FDs closed before context exit");
+        }
+#endif
         events.emplace_back("exit");
     }
     ssize_t get_device_list(libusb_context* context, libusb_device*** list) noexcept override
@@ -121,6 +130,7 @@ public:
     {
         verify(context == context_, "wrap uses initialized context");
         retained_fd = static_cast<int>(fd);
+        wrapped_fds.push_back(retained_fd);
         events.emplace_back("wrap");
         ++wrap_calls;
         *handle = (wrap_error == 0 || handle_on_failure) && !empty_handle
@@ -679,6 +689,25 @@ bool quarantine_retains_context_and_handle()
     return true;
 }
 
+bool device_location_uses_injected_api()
+{
+    FakeApi api;
+    {
+        asicen::LibusbContext context(api);
+        CHECK(context.initialize() == 0, "initialize location context");
+        asicen::LibusbDevice device(api);
+        CHECK(device.open(context.get(), asicen::UsbLocation{1U, 2U}) == 0,
+              "open injected location device");
+        const int bus_calls = api.bus_calls;
+        const int address_calls = api.address_calls;
+        CHECK(device.bus_number() == 1U && device.device_address() == 2U,
+              "location getters use injected acquisition API");
+        CHECK(api.bus_calls == bus_calls + 1 && api.address_calls == address_calls + 1,
+              "location getters do not bypass injected API");
+    }
+    return true;
+}
+
 } // namespace
 
 int main()
@@ -690,7 +719,7 @@ int main()
         !unattempted_claim_is_not_reported_as_success() ||
         !alternate_failure_releases_once() || !granted_fd_failures_and_success() ||
         !port_accessor_preserves_errors_and_bounds() || !granted_fd_topology_failures() ||
-        !quarantine_retains_context_and_handle()) {
+        !quarantine_retains_context_and_handle() || !device_location_uses_injected_api()) {
         return 1;
     }
     std::puts("libusb acquisition/lifetime tests passed (all USB calls injected)");

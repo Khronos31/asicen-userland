@@ -57,6 +57,10 @@ bool is_w3u3_satellite_rf_khz(std::uint32_t rf_khz);
 // PX4 satellite channel plans expose IF; the W3U3 tuner table contains RF.
 // Only the 24 exact source rows are accepted.
 bool w3u3_satellite_if_to_rf_khz(std::uint32_t if_khz, std::uint32_t* rf_khz) noexcept;
+// R3 exact-Hz form of the same 24-row gate: the public IF must equal a row
+// exactly (no tolerance or rounding; row +/-1 Hz is rejected).  The checked
+// IF->RF offset 10678000000 Hz stays backend-local.
+bool w3u3_satellite_if_hz_to_rf_hz(std::uint64_t if_hz, std::uint64_t* rf_hz) noexcept;
 
 // Pure source-derived plan. An empty plan means the RF/TSID combination is not
 // source-valid. BS rows accept the previously selected TSID; CS rows require

@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-10: ASICEN receiver lanes, absent USB serial and native
-// cancellation before draining workers; the reference shutdown order is retained.
-// The original license notice is unchanged.
 #include "px4/control_server.h"
+
+#include "control_workers.h"
+#include "dtv/userland/control_connection.h"
+#include "dtv/userland/wire.h"
 #if defined(ASICEN_PROFILE_ASICEN)
 #include "asicen/product_profile.h"
 #endif
-
-#include "control_workers.h"
 #if defined(PX4_CONTROL_SERVER_TEST_ACCESS)
 #include "control_server_test_access.h"
 #endif
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -71,13 +71,19 @@ inline ssize_t socket_send(std::uintptr_t handle, const void* buffer,
 namespace px4::userland::ipc::posix {
 namespace {
 
-constexpr std::uint32_t kServerCapabilities =
-    kCapabilityEvents | kCapabilityCard | kCapabilityStreamStats |
-    kCapabilityCardGenerationBinding;
+namespace wire = dtv::userland::wire;
+
+// Bound for completing one control response once its first byte is queued.
 constexpr std::uint32_t kClientWriteTimeoutMs = 250U;
 constexpr std::uint32_t kPresencePollIntervalMs = 250U;
 constexpr std::size_t kMaxControlConnections = 32U;
 constexpr std::size_t kRetiredClientCapacity = 64U;
+// Caller-supplied finite armed budget for v1 START.  It is a bounded policy
+// value, not a machine-calibrated constant.
+constexpr std::uint64_t kStreamArmBudgetMs = 5000U;
+// Engine-local epoch tag passed to configure_stream_contract.  The 16-byte
+// wire epoch remains the authority checked by the control/data connection.
+constexpr std::uint64_t kEngineStreamEpoch = 1U;
 constexpr std::size_t kMaxStreamConnections = 32U;
 constexpr std::size_t kStreamReadBytes = (65536U / 188U) * 188U;
 constexpr std::size_t kStreamWriteBudget = 65536U;
@@ -108,30 +114,113 @@ void report_stream_write_blocked(std::uint64_t connection_id) noexcept
     if (test_hooks != nullptr && test_hooks->stream_write_blocked != nullptr)
         test_hooks->stream_write_blocked(test_hooks->context, connection_id);
 }
+
+std::size_t control_write_limit() noexcept
+{
+    return test_hooks != nullptr ? test_hooks->control_write_limit : 0U;
+}
+
+void report_control_write_partial(std::uint64_t connection_id) noexcept
+{
+    if (test_hooks != nullptr && test_hooks->control_write_partial != nullptr)
+        test_hooks->control_write_partial(test_hooks->context, connection_id);
+}
 #endif
 
-ErrorCode ipc_error(Error error) noexcept
+std::uint32_t wire_code(Error error) noexcept
 {
-    switch (error) {
-    case Error::OK: return ErrorCode::OK;
-    case Error::INVALID_ARGUMENT: return ErrorCode::INVALID_ARGUMENT;
-    case Error::VERSION_MISMATCH: return ErrorCode::VERSION_MISMATCH;
-    case Error::NOT_FOUND: return ErrorCode::NOT_FOUND;
-    case Error::BUSY: return ErrorCode::BUSY;
-    case Error::NOT_READY: return ErrorCode::NOT_READY;
-    case Error::TIMEOUT: return ErrorCode::TIMEOUT;
-    case Error::USB_IO: return ErrorCode::USB_IO;
-    case Error::DISCONNECTED: return ErrorCode::DISCONNECTED;
-    case Error::PROTOCOL_ERROR: return ErrorCode::PROTOCOL_ERROR;
-    case Error::FIRMWARE_REJECTED: return ErrorCode::FIRMWARE_REJECTED;
-    case Error::UNSUPPORTED: return ErrorCode::UNSUPPORTED;
-    case Error::NO_CARD: return ErrorCode::NO_CARD;
-    case Error::CARD_REMOVED: return ErrorCode::CARD_REMOVED;
-    case Error::BUFFER_TOO_SMALL: return ErrorCode::BUFFER_TOO_SMALL;
-    case Error::SLOW_CONSUMER: return ErrorCode::SLOW_CONSUMER;
-    case Error::INTERNAL: return ErrorCode::INTERNAL;
+    return static_cast<std::uint32_t>(error);
+}
+
+wire::Scope enclosure_scope() noexcept
+{
+    return wire::Scope{wire::ScopeKind::enclosure, 0U};
+}
+
+wire::Scope receiver_scope(std::uint16_t id) noexcept
+{
+    return wire::Scope{wire::ScopeKind::receiver, id};
+}
+
+wire::System wire_system(dtv::userland::detail::ReceiverSystem system) noexcept
+{
+    return system == dtv::userland::detail::ReceiverSystem::satellite ? wire::System::isdb_s
+                                                                       : wire::System::isdb_t;
+}
+
+ipc::System ipc_system(wire::System system) noexcept
+{
+    return system == wire::System::isdb_s ? ipc::System::ISDB_S : ipc::System::ISDB_T;
+}
+
+ipc::System ipc_system(dtv::userland::detail::ReceiverSystem system) noexcept
+{
+    return system == dtv::userland::detail::ReceiverSystem::satellite
+               ? ipc::System::ISDB_S : ipc::System::ISDB_T;
+}
+
+// Engine samples are monotonic milliseconds times 10^6 in the engine clock;
+// the wire carries nanoseconds from the context start in the same clock.  A
+// sample that cannot be placed on that axis becomes unknown, never valid at 0.
+wire::Measurement<bool> context_measurement(const wire::Measurement<bool>& sample,
+                                            std::uint64_t start_ms,
+                                            std::uint64_t observed_ns) noexcept
+{
+    if (sample.state != wire::MeasureState::valid) return sample;
+    const std::uint64_t start_ns = start_ms * 1000000U;
+    wire::Measurement<bool> result = sample;
+    if (start_ms > std::numeric_limits<std::uint64_t>::max() / 1000000U ||
+        sample.sampled_at_ns < start_ns || sample.sampled_at_ns - start_ns > observed_ns) {
+        result.state = wire::MeasureState::unknown;
+        result.reason = wire::UnknownReason::not_sampled;
+        result.value = false;
+        result.sampled_at_ns = 0U;
+        return result;
     }
-    return ErrorCode::INTERNAL;
+    result.sampled_at_ns = sample.sampled_at_ns - start_ns;
+    return result;
+}
+
+wire::Tune wire_tune(std::uint64_t revision,
+                     const dtv::userland::detail::TuneRecord& record) noexcept
+{
+    wire::Tune tune;
+    tune.revision = revision;
+    tune.system = wire_system(record.system);
+    tune.frequency_hz = record.requested_hz;
+    tune.programmed_hz = record.programmed_hz;
+    tune.verification = record.verification;
+    if (record.stream_id != 0xffffU) {
+        tune.selection = wire::Selection::tsid;
+        tune.selection_value = record.stream_id;
+    } else if (record.slot != 0xffffU) {
+        tune.selection = wire::Selection::slot;
+        tune.selection_value = record.slot;
+    }
+    return tune;
+}
+
+wire::ReceiverState wire_state(dtv::userland::detail::ReceiverState state) noexcept
+{
+    switch (state) {
+    case dtv::userland::detail::ReceiverState::free: return wire::ReceiverState::free;
+    case dtv::userland::detail::ReceiverState::leased: return wire::ReceiverState::leased;
+    case dtv::userland::detail::ReceiverState::tuned: return wire::ReceiverState::tuned;
+    case dtv::userland::detail::ReceiverState::streaming: return wire::ReceiverState::streaming;
+    case dtv::userland::detail::ReceiverState::error: return wire::ReceiverState::error;
+    }
+    return wire::ReceiverState::error;
+}
+
+wire::Operation wire_operation(dtv::userland::detail::ReceiverTuneOperation operation) noexcept
+{
+    switch (operation) {
+    case dtv::userland::detail::ReceiverTuneOperation::idle: return wire::Operation::idle;
+    case dtv::userland::detail::ReceiverTuneOperation::tuning: return wire::Operation::tuning;
+    case dtv::userland::detail::ReceiverTuneOperation::cleanup:
+        return wire::Operation::releasing;
+    }
+    return wire::Operation::releasing;
 }
 
 int timeout_to_poll(Timeout timeout) noexcept
@@ -140,12 +229,39 @@ int timeout_to_poll(Timeout timeout) noexcept
                INT_MAX : static_cast<int>(timeout.milliseconds);
 }
 
-CountersPayload counters_payload(const TunerStreamCounters& counters) noexcept
+// The adopted STREAM_END statistics carry exactly the transmitted-packet and
+// queue-dropped counter IDs.
+wire::StreamCounters wire_stream_counters(const TunerStreamCounters& counters,
+                                          std::uint64_t observed_ns) noexcept
 {
-    return CountersPayload{counters.packets, counters.bytes, counters.sync_errors,
-                           counters.tei_packets, counters.continuity_errors,
-                           counters.queue_drops, counters.usb_errors,
-                           counters.empty_intervals};
+    wire::StreamCounters result{};
+    result.entries.count = 2U;
+    result.entries.items[0].id = wire::kCounterIdTransmittedPackets;
+    result.entries.items[0].counter.measurement.state = wire::MeasureState::valid;
+    result.entries.items[0].counter.measurement.value = counters.packets;
+    result.entries.items[0].counter.measurement.sampled_at_ns = observed_ns;
+    result.entries.items[1].id = wire::kCounterIdQueueDroppedPackets;
+    result.entries.items[1].counter.measurement.state = wire::MeasureState::valid;
+    result.entries.items[1].counter.measurement.value = counters.queue_drops;
+    result.entries.items[1].counter.measurement.sampled_at_ns = observed_ns;
+    return result;
+}
+
+wire::StreamEndReason wire_end_reason(TunerStreamTerminal terminal) noexcept
+{
+    switch (terminal) {
+    case TunerStreamTerminal::stopped: return wire::StreamEndReason::stopped;
+    case TunerStreamTerminal::slow_consumer:
+        return wire::StreamEndReason::slow_consumer;
+    case TunerStreamTerminal::disconnected:
+    case TunerStreamTerminal::usb_error:
+        return wire::StreamEndReason::device_lost;
+    case TunerStreamTerminal::sync_error:
+    case TunerStreamTerminal::bridge_fatal:
+        return wire::StreamEndReason::backend_error;
+    case TunerStreamTerminal::none: break;
+    }
+    return wire::StreamEndReason::stopped;
 }
 
 ErrorCode stream_end_error(TunerStreamTerminal terminal) noexcept
@@ -168,109 +284,151 @@ struct PosixControlServer::Impl final {
     struct LeaseRecord final {
         bool active = false;
         std::uint64_t lease_id = 0U;
+        // TunerService receiver and the public u16 ID it was acquired as.
         std::uint8_t receiver = 0U;
+        std::uint16_t public_id = 0U;
     };
 
     struct Outstanding final {
         bool active = false;
-        MessageType type = MessageType::STATUS;
+        std::uint16_t opcode = 0U;
         ControlWorkerOperation operation = ControlWorkerOperation::tuner_status;
         std::uint32_t request_id = 0U;
         std::uint8_t receiver = 0U;
+        std::uint16_t public_id = 0U;
         std::uint64_t lease_id = 0U;
     };
 
-    class Client final : public FrameConsumer {
+    // One UDTV control connection.  The poll thread owns it; worker tasks
+    // never hold a pointer to it or a view into its frame storage.  A request
+    // stays outstanding until its whole response frame has been written, so
+    // a partial response write blocks the next request like a pending one.
+    class Client final : public wire::FrameHandler {
     public:
         Client(Impl& owner, CardClientId id, SocketStream stream) noexcept
             : owner_(owner), id_(id), stream_(std::move(stream)),
-              framer_(MutableByteView{framing_storage_.data(), framing_storage_.size()}),
-              state_(ConnectionRole::control_server, kServerCapabilities)
+              receiver_(MutableByteView{payload_storage_.data(), payload_storage_.size()}),
+              connection_(owner.hello)
         {
         }
 
-        Result<void> on_frame(const FrameView& frame) noexcept override
+        Result<void> on_frame(const wire::Frame& frame) noexcept override
         {
             return owner_.on_frame(*this, frame);
         }
 
-        template <typename Payload>
-        Result<void> send_payload(MessageType type, MessageKind kind,
-                                  std::uint32_t request_id,
-                                  const Payload& payload) noexcept
-        {
-            const auto payload_size = encode_payload(
-                payload, MutableByteView{payload_buffer_.data(), payload_buffer_.size()});
-            if (!payload_size) {
-                return Result<void>::failure(payload_size.error());
-            }
-            return send_encoded(type, kind, request_id, payload_size.value());
-        }
-
-        Result<void> send_empty(MessageType type, std::uint32_t request_id) noexcept
-        {
-            return send_encoded(type, MessageKind::response, request_id, 0U);
-        }
-
-        Result<void> send_error(MessageType type, std::uint32_t request_id,
-                                Error error) noexcept
-        {
-            const char* detail = error_string(error);
-            return send_payload(
-                type, MessageKind::error_response, request_id,
-                ErrorResponsePayload{
-                    ipc_error(error),
-                    ByteView{reinterpret_cast<const std::uint8_t*>(detail),
-                             std::strlen(detail)}});
-        }
-
-        Result<void> send_event(const DeviceEventPayload& event) noexcept
-        {
-            return send_payload(MessageType::DEVICE_EVENT, MessageKind::event, 0U, event);
-        }
-
-        bool events_enabled() const noexcept
-        {
-            return state_.phase() == ConnectionPhase::active &&
-                   (state_.negotiated_capabilities() & kCapabilityEvents) != 0U;
-        }
-
-        bool card_generation_bound() const noexcept
-        {
-            return (state_.negotiated_capabilities() & kCapabilityCardGenerationBinding) != 0U;
-        }
-
         Result<std::size_t> read_ready() noexcept
         {
-            return stream_.read_frames(
-                MutableByteView{read_buffer_.data(), read_buffer_.size()},
-                framer_, *this, Timeout{0U});
+            const auto received = stream_.read_some(
+                MutableByteView{read_buffer_.data(), read_buffer_.size()}, Timeout{0U});
+            if (!received) {
+                // EOF on a frame boundary is a clean close; inside a frame it
+                // is a truncated request that is never dispatched.  Both end
+                // the connection.
+                if (received.error() == Error::DISCONNECTED) (void)receiver_.finish();
+                return Result<std::size_t>::failure(received.error());
+            }
+            return receiver_.feed(ByteView{read_buffer_.data(), received.value()}, *this);
+        }
+
+        // Queues one complete response frame already written to tx_view().
+        void queue_response(std::size_t size, bool close_after) noexcept
+        {
+            tx_size_ = size;
+            tx_offset_ = 0U;
+            tx_deadline_ = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(kClientWriteTimeoutMs);
+            if (close_after) close_after_flush_ = true;
+        }
+
+        MutableByteView tx_view() noexcept
+        {
+            return MutableByteView{tx_buffer_.data(), tx_buffer_.size()};
+        }
+
+        bool tx_pending() const noexcept { return tx_offset_ < tx_size_; }
+        bool tx_expired(std::chrono::steady_clock::time_point now) const noexcept
+        {
+            return tx_pending() && now >= tx_deadline_;
+        }
+        std::chrono::steady_clock::time_point tx_deadline() const noexcept
+        {
+            return tx_deadline_;
+        }
+
+        // Nonblocking write of the queued response.  When the last byte is
+        // written the request is completed and the next one may be accepted.
+        Result<void> flush() noexcept
+        {
+            std::size_t budget = tx_size_ - tx_offset_;
+#if defined(PX4_CONTROL_SERVER_TEST_ACCESS)
+            const std::size_t limit = control_write_limit();
+            if (limit != 0U && limit < budget) budget = limit;
+#endif
+            while (tx_offset_ < tx_size_ && budget != 0U) {
+#if defined(MSG_NOSIGNAL)
+                constexpr int flags = MSG_NOSIGNAL;
+#else
+                constexpr int flags = 0;
+#endif
+                const ssize_t written = ::send(
+                    stream_.native_handle(), tx_buffer_.data() + tx_offset_, budget, flags);
+                if (written > 0) {
+                    tx_offset_ += static_cast<std::size_t>(written);
+                    budget -= static_cast<std::size_t>(written);
+                    continue;
+                }
+                if (written == 0) return Result<void>::failure(Error::DISCONNECTED);
+#if defined(_WIN32)
+                const int socket_error = ::WSAGetLastError();
+                if (socket_error == WSAEINTR) continue;
+                if (socket_error == WSAEWOULDBLOCK) break;
+                return Result<void>::failure(
+                    socket_error == WSAECONNRESET || socket_error == WSAENOTCONN ||
+                            socket_error == WSAESHUTDOWN ?
+                        Error::DISCONNECTED : Error::INTERNAL);
+#else
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                return Result<void>::failure(
+                    errno == EPIPE || errno == ECONNRESET ? Error::DISCONNECTED
+                                                          : Error::INTERNAL);
+#endif
+            }
+            if (tx_offset_ < tx_size_) {
+#if defined(PX4_CONTROL_SERVER_TEST_ACCESS)
+                report_control_write_partial(id_);
+#endif
+                return Result<void>::success();
+            }
+            tx_offset_ = 0U;
+            tx_size_ = 0U;
+            connection_.complete();
+            if (close_after_flush_) return Result<void>::failure(Error::DISCONNECTED);
+            return Result<void>::success();
         }
 
         CardClientId id() const noexcept { return id_; }
         NativeHandle fd() const noexcept { return stream_.native_handle(); }
-        bool closed() const noexcept
-        {
-            return state_.closed() || state_.poisoned() || !stream_.valid();
-        }
+        bool closed() const noexcept { return receiver_.failed() || !stream_.valid(); }
         void close() noexcept { stream_.close(); }
 
-        ConnectionStateMachine& state() noexcept { return state_; }
-        const ConnectionStateMachine& state() const noexcept { return state_; }
+        wire::ControlConnection& connection() noexcept { return connection_; }
 
-        bool find_lease(std::uint64_t lease_id, std::uint8_t& receiver) const noexcept
+        bool find_lease(std::uint64_t lease_id, LeaseRecord& found) const noexcept
         {
             if (lease_id == 0U) return false;
             for (const LeaseRecord& lease : leases_) {
                 if (lease.active && lease.lease_id == lease_id) {
-                    receiver = lease.receiver;
+                    found = lease;
                     return true;
                 }
             }
             return false;
         }
 
-        bool add_lease(std::uint8_t receiver, std::uint64_t lease_id) noexcept
+        bool add_lease(std::uint8_t receiver, std::uint16_t public_id,
+                       std::uint64_t lease_id) noexcept
         {
             if (lease_id == 0U || receiver >= kReceiverCount) return false;
             for (const LeaseRecord& lease : leases_) {
@@ -278,7 +436,7 @@ struct PosixControlServer::Impl final {
             }
             for (LeaseRecord& lease : leases_) {
                 if (!lease.active) {
-                    lease = LeaseRecord{true, lease_id, receiver};
+                    lease = LeaseRecord{true, lease_id, receiver, public_id};
                     return true;
                 }
             }
@@ -302,18 +460,19 @@ struct PosixControlServer::Impl final {
             return card_handles_;
         }
 
-        void set_outstanding(MessageType type, ControlWorkerOperation operation,
+        void set_outstanding(std::uint16_t opcode, ControlWorkerOperation operation,
                              std::uint32_t request_id, std::uint8_t receiver,
-                             std::uint64_t lease_id) noexcept
+                             std::uint16_t public_id, std::uint64_t lease_id) noexcept
         {
-            outstanding_ = Outstanding{true, type, operation, request_id, receiver, lease_id};
+            outstanding_ = Outstanding{true, opcode, operation, request_id, receiver,
+                                       public_id, lease_id};
         }
 
         bool matches(const ControlWorkerCompletion& completion) const noexcept
         {
             return outstanding_.active &&
                    outstanding_.request_id == completion.request_id &&
-                   outstanding_.type == completion.type &&
+                   outstanding_.opcode == completion.opcode &&
                    outstanding_.operation == completion.operation;
         }
 
@@ -321,53 +480,44 @@ struct PosixControlServer::Impl final {
         void clear_outstanding() noexcept { outstanding_ = Outstanding{}; }
 
     private:
-        Result<void> send_encoded(MessageType type, MessageKind kind,
-                                  std::uint32_t request_id,
-                                  std::size_t payload_size) noexcept
-        {
-            const FrameHeader header{
-                kProtocolMajor, kProtocolMinor, type, kind, request_id,
-                static_cast<std::uint32_t>(payload_size)};
-            const auto frame_size = encode_frame(
-                header, ByteView{payload_buffer_.data(), payload_size},
-                MutableByteView{frame_buffer_.data(), frame_buffer_.size()});
-            if (!frame_size) return Result<void>::failure(frame_size.error());
-            const auto decoded = decode_frame(
-                ByteView{frame_buffer_.data(), frame_size.value()});
-            if (!decoded) return Result<void>::failure(decoded.error());
-            const auto accepted = state_.process_outbound(decoded.value());
-            if (!accepted) return Result<void>::failure(accepted.error());
-            return stream_.write_frame(
-                ByteView{frame_buffer_.data(), frame_size.value()},
-                Timeout{kClientWriteTimeoutMs});
-        }
-
         Impl& owner_;
         CardClientId id_;
         SocketStream stream_;
-        std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> framing_storage_{};
+        std::array<std::uint8_t, wire::kMaxControlPayload> payload_storage_{};
         std::array<std::uint8_t, 8192U> read_buffer_{};
-        std::array<std::uint8_t, kMaxControlPayload> payload_buffer_{};
-        std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> frame_buffer_{};
-        StreamFramer framer_;
-        ConnectionStateMachine state_;
+        std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxControlPayload> tx_buffer_{};
+        wire::FrameReceiver receiver_;
+        wire::ControlConnection connection_;
+        std::size_t tx_size_ = 0U;
+        std::size_t tx_offset_ = 0U;
+        std::chrono::steady_clock::time_point tx_deadline_{};
+        bool close_after_flush_ = false;
         std::array<LeaseRecord, kReceiverCount> leases_{};
         std::vector<std::uint64_t> card_handles_;
         Outstanding outstanding_{};
     };
 
-    class StreamClient final : public FrameConsumer {
+    // Data connection.  Its first frame is the typed UDTV ATTACH; the engine
+    // reserves the armed stream, the existing receiver lane prepares it, and
+    // only the poll-side writer commits after the whole AttachResponse was
+    // sent.
+    class StreamClient;
+
+    // Called by the stream writer after the AttachResponse ws fully sent.
+    void on_attach_ack_sent(StreamClient& client) noexcept;
+
+    class StreamClient final : public wire::FrameHandler {
     public:
         enum class Phase : std::uint8_t { attaching, active, ending };
 
         StreamClient(Impl& owner, std::uint64_t id, SocketStream stream) noexcept
             : owner_(owner), id_(id), stream_(std::move(stream)),
-              framer_(MutableByteView{framing_storage_.data(), framing_storage_.size()}),
-              state_(ConnectionRole::stream_server), phase_(Phase::attaching)
+              receiver_(MutableByteView{framing_storage_.data(), framing_storage_.size()}),
+              phase_(Phase::attaching)
         {
         }
 
-        Result<void> on_frame(const FrameView& frame) noexcept override;
+        Result<void> on_frame(const wire::Frame& frame) noexcept override;
 
         std::uint64_t id() const noexcept { return id_; }
         NativeHandle fd() const noexcept { return stream_.native_handle(); }
@@ -394,9 +544,10 @@ struct PosixControlServer::Impl final {
 
         Result<std::size_t> read_ready() noexcept
         {
-            return stream_.read_frames(
-                MutableByteView{read_buffer_.data(), read_buffer_.size()},
-                framer_, *this, Timeout{0U});
+            const auto received = stream_.read_some(
+                MutableByteView{read_buffer_.data(), read_buffer_.size()}, Timeout{0U});
+            if (!received) return Result<std::size_t>::failure(received.error());
+            return receiver_.feed(ByteView{read_buffer_.data(), received.value()}, *this);
         }
 
         Result<bool> flush(std::size_t budget) noexcept
@@ -446,108 +597,121 @@ struct PosixControlServer::Impl final {
             if (tx_offset_ == tx_size_) {
                 tx_offset_ = 0U;
                 tx_size_ = 0U;
-                if (ack_pending_) ack_pending_ = false;
+                const bool attach_ack_sent = ack_pending_ && attach_ack_;
+                ack_pending_ = false;
+                attach_ack_ = false;
                 if (close_after_flush_) remove_requested_ = true;
+                // COMMIT is the poll-side publication point and happens only
+                // after the whole AttachResponse has been written.
+                if (attach_ack_sent) owner_.on_attach_ack_sent(*this);
                 return Result<bool>::success(true);
             }
             return Result<bool>::success(false);
         }
 
-        Result<void> queue_empty_response(std::uint32_t request_id) noexcept
+        // UDTV typed error reply to the ATTACH request, then close after it is
+        // sent.
+        Result<void> queue_error(std::uint32_t error_request_id,
+                                 std::uint32_t code) noexcept
         {
-            return queue_encoded(MessageType::ATTACH_STREAM, MessageKind::response,
-                                 request_id, EmptyPayload{});
-        }
-
-        Result<void> queue_error(std::uint32_t request_id, Error error) noexcept
-        {
-            const char* detail = error_string(error);
-            const auto result = queue_encoded(
-                MessageType::ATTACH_STREAM, MessageKind::error_response, request_id,
-                ErrorResponsePayload{
-                    ipc_error(error),
-                    ByteView{reinterpret_cast<const std::uint8_t*>(detail),
-                             std::strlen(detail)}});
+            if (tx_pending()) return Result<void>::failure(Error::BUSY);
+            const auto written = wire::encode_error_frame(
+                wire::kOpcodeAttachStream, error_request_id, owner_.hello.epoch, code,
+                "attach", enclosure_scope(),
+                MutableByteView{tx_buffer_.data(), tx_buffer_.size()});
             close_after_flush_ = true;
-            return result;
+            if (!written) return Result<void>::failure(written.error());
+            tx_size_ = written.value();
+            tx_offset_ = 0U;
+            ack_pending_ = false;
+            attach_ack_ = false;
+            return Result<void>::success();
         }
 
-        Result<void> queue_data(std::uint64_t sequence, std::uint64_t drop_count,
+        Result<void> queue_attach_response() noexcept
+        {
+            if (tx_pending() || !ticket_valid)
+                return Result<void>::failure(Error::BUSY);
+            wire::AttachResponse value;
+            value.epoch = owner_.hello.epoch;
+            value.stream_id = stream_id;
+            const auto written = wire::encode_record_frame(
+                wire::Kind::response, wire::kOpcodeAttachStream, request_id, value,
+                &wire::encode_attach_response,
+                MutableByteView{tx_buffer_.data(), tx_buffer_.size()});
+            if (!written) return Result<void>::failure(written.error());
+            tx_size_ = written.value();
+            tx_offset_ = 0U;
+            ack_pending_ = true;
+            attach_ack_ = true;
+            return Result<void>::success();
+        }
+
+        Result<void> queue_data(std::uint64_t data_sequence, std::uint64_t drop_count,
                                 ByteView bytes) noexcept
         {
-            return queue_encoded(
-                MessageType::TS_DATA, MessageKind::event, 0U,
-                TsDataEventPayload{sequence, drop_count, bytes});
+            wire::TsData value;
+            value.stream_id = stream_id;
+            value.sequence = data_sequence;
+            value.cumulative_queue_dropped_packets = drop_count;
+            value.packets = bytes;
+            return queue_event(wire::kOpcodeTsDataEvent, value, &wire::encode_ts_data);
         }
 
-        Result<void> queue_end(const StreamEndEventPayload& payload) noexcept
+        Result<void> queue_end(const wire::StreamFinal& final) noexcept
         {
-            const auto result = queue_encoded(
-                MessageType::STREAM_END, MessageKind::event, 0U, payload);
-            close_after_flush_ = true;
+            wire::StreamEndEvent value;
+            value.final = final;
+            const auto result =
+                queue_event(wire::kOpcodeStreamEndEvent, value,
+                            &wire::encode_stream_end_event);
+            if (result) close_after_flush_ = true;
             return result;
         }
 
-        Result<void> queue_encoded(MessageType type, MessageKind kind,
-                                   std::uint32_t request_id,
-                                   const EmptyPayload&) noexcept
+        template <typename Record>
+        Result<void> queue_event(std::uint16_t opcode, const Record& value,
+                                 Result<std::size_t> (*encode)(const Record&,
+                                                               MutableByteView) noexcept) noexcept
         {
             if (tx_pending()) return Result<void>::failure(Error::BUSY);
-            const FrameHeader header{kProtocolMajor, kProtocolMinor, type, kind,
-                                     request_id, 0U};
-            const auto frame_size = encode_frame(
-                header, ByteView{nullptr, 0U},
+            const auto written = wire::encode_record_frame(
+                wire::Kind::event, opcode, 0U, value, encode,
                 MutableByteView{tx_buffer_.data(), tx_buffer_.size()});
-            if (!frame_size) return Result<void>::failure(frame_size.error());
-            const auto decoded = decode_frame(
-                ByteView{tx_buffer_.data(), frame_size.value()});
-            if (!decoded) return Result<void>::failure(decoded.error());
-            const auto accepted = state_.process_outbound(decoded.value());
-            if (!accepted) return Result<void>::failure(accepted.error());
-            tx_size_ = frame_size.value();
+            if (!written) return Result<void>::failure(written.error());
+            tx_size_ = written.value();
             tx_offset_ = 0U;
-            ack_pending_ = type == MessageType::ATTACH_STREAM &&
-                           kind == MessageKind::response;
+            ack_pending_ = false;
+            attach_ack_ = false;
             return Result<void>::success();
         }
 
-        template <typename Payload>
-        Result<void> queue_encoded(MessageType type, MessageKind kind,
-                                   std::uint32_t request_id,
-                                   const Payload& payload) noexcept
+        void begin_attach(const dtv::userland::detail::StreamAttachTicket& value,
+                          const TunerAttachment& identity) noexcept
         {
-            if (tx_pending()) return Result<void>::failure(Error::BUSY);
-            const auto payload_size = encode_payload(
-                payload, MutableByteView{tx_buffer_.data() + kFrameHeaderSize,
-                                         tx_buffer_.size() - kFrameHeaderSize});
-            if (!payload_size) return Result<void>::failure(payload_size.error());
-            const FrameHeader header{kProtocolMajor, kProtocolMinor, type, kind,
-                                     request_id,
-                                     static_cast<std::uint32_t>(payload_size.value())};
-            const auto frame_size = encode_frame(
-                header,
-                ByteView{tx_buffer_.data() + kFrameHeaderSize, payload_size.value()},
-                MutableByteView{tx_buffer_.data(), tx_buffer_.size()});
-            if (!frame_size) return Result<void>::failure(frame_size.error());
-            const auto decoded = decode_frame(
-                ByteView{tx_buffer_.data(), frame_size.value()});
-            if (!decoded) return Result<void>::failure(decoded.error());
-            const auto accepted = state_.process_outbound(decoded.value());
-            if (!accepted) return Result<void>::failure(accepted.error());
-            tx_size_ = frame_size.value();
-            tx_offset_ = 0U;
-            ack_pending_ = type == MessageType::ATTACH_STREAM &&
-                           kind == MessageKind::response;
-            return Result<void>::success();
+            ticket = value;
+            ticket_valid = true;
+            stream_id = value.stream_id;
+            owner_client_id = value.client_id;
+            lease_id = identity.lease_id;
+            receiver = identity.receiver;
+            attachment = identity;
+            attachment_valid = true;
+            prepared = false;
+            committed = false;
+            attach_completion_seen = true;
         }
 
         Impl& owner() noexcept { return owner_; }
-        ConnectionStateMachine& state() noexcept { return state_; }
         std::uint32_t request_id = 0U;
         std::uint64_t owner_client_id = 0U;
         std::uint64_t lease_id = 0U;
         std::uint8_t receiver = 0U;
-        std::array<std::uint8_t, kNonceLength> nonce{};
+        dtv::userland::detail::StreamAttachTicket ticket{};
+        bool ticket_valid = false;
+        bool prepared = false;
+        bool committed = false;
+        std::uint64_t stream_id = 0U;
         TunerAttachment attachment{};
         bool attachment_valid = false;
         bool cleanup_pending = false;
@@ -556,6 +720,7 @@ struct PosixControlServer::Impl final {
         bool final_snapshot_valid = false;
         TunerStreamFinalSnapshot final_snapshot{};
         std::uint64_t sequence = 0U;
+        std::uint64_t last_queue_drops = 0U;
         bool end_queued = false;
         bool data_eof = false;
         bool attach_completion_seen = false;
@@ -568,15 +733,16 @@ struct PosixControlServer::Impl final {
         Impl& owner_;
         std::uint64_t id_;
         SocketStream stream_;
-        std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> framing_storage_{};
+        std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxTsDataPayload>
+            framing_storage_{};
         std::array<std::uint8_t, kStreamReadBytes> read_buffer_{};
-        std::array<std::uint8_t, kMaxFrameSize> tx_buffer_{};
-        StreamFramer framer_;
-        ConnectionStateMachine state_;
+        std::array<std::uint8_t, wire::kMaxFrameSize> tx_buffer_{};
+        wire::FrameReceiver receiver_;
         Phase phase_;
         std::size_t tx_size_ = 0U;
         std::size_t tx_offset_ = 0U;
         bool ack_pending_ = false;
+        bool attach_ack_ = false;
         bool attach_submitted_ = false;
         bool close_after_flush_ = false;
         bool remove_requested_ = false;
@@ -591,6 +757,8 @@ struct PosixControlServer::Impl final {
         std::uint64_t owner_client_id = 0U;
         std::uint64_t lease_id = 0U;
         std::uint8_t receiver = 0U;
+        dtv::userland::detail::StreamAttachTicket ticket{};
+        bool ticket_valid = false;
         TunerAttachment attachment{};
         bool attachment_valid = false;
     };
@@ -616,56 +784,13 @@ struct PosixControlServer::Impl final {
     Impl(SocketListener listener_value, SocketListener stream_listener_value,
          CardService& service,
          TunerService& tuner, std::unique_ptr<ControlWorkerLanes> workers_value,
-         TunerStreamControl* stream_control_value, std::string_view serial,
-         bool ready_value, std::uint8_t usb_mask,
-         const std::array<ReceiverRecord, kReceiverCount>& records,
-         std::uint8_t receiver_count_value) noexcept
+         TunerStreamControl* stream_control_value) noexcept
         : listener(std::move(listener_value)), stream_listener(std::move(stream_listener_value)),
           card_service(service),
           tuner_service(tuner), workers(std::move(workers_value)),
-          stream_control(stream_control_value), base_serial(serial),
-          ready(ready_value), usb_present_mask(usb_mask),
-          receiver_records(records), receiver_count(receiver_count_value),
+          stream_control(stream_control_value),
           next_presence_poll(std::chrono::steady_clock::now())
     {
-        known_receiver_states.fill(ReceiverState::free);
-        // TunerService reports receivers beyond the enclosure as absent from
-        // construction; seeding them avoids a spurious state_changed event.
-        for (std::size_t index = receiver_count; index < kReceiverCount; ++index)
-            known_receiver_states[index] = ReceiverState::absent;
-    }
-
-    void observe_tuner(const TunerStatus& status) noexcept
-    {
-        for (std::size_t index = 0U; index < kReceiverCount; ++index) {
-            if (known_receiver_states[index] == status.receiver_states[index]) continue;
-            ++generation;
-            known_receiver_states[index] = status.receiver_states[index];
-            pending_events.push_back(DeviceEventPayload{
-                generation, DeviceEventKind::state_changed, EventTargetType::receiver,
-                static_cast<std::uint8_t>(index)});
-        }
-    }
-
-    void observe_card_presence(bool present) noexcept
-    {
-        if (!card_presence_known) {
-            card_presence_known = true;
-            known_card_present = present;
-            return;
-        }
-        if (known_card_present == present) return;
-        known_card_present = present;
-        ++generation;
-        pending_events.push_back(DeviceEventPayload{
-            generation,
-            present ? DeviceEventKind::card_inserted : DeviceEventKind::card_removed,
-            EventTargetType::card, 0U});
-    }
-
-    void observe_card_change(const CardPresenceChange& change) noexcept
-    {
-        if (change.changed) observe_card_presence(change.present);
     }
 
     void record_error(Error error) noexcept
@@ -681,29 +806,8 @@ struct PosixControlServer::Impl final {
         }
     }
 
-    Result<void> flush_events() noexcept
-    {
-        for (const DeviceEventPayload& event : pending_events) {
-            for (const auto& client : clients) {
-                if (client->events_enabled() && !client->send_event(event)) {
-                    schedule_remove(client->id());
-                }
-            }
-        }
-        pending_events.clear();
-        return Result<void>::success();
-    }
-
-    Result<void> send_error(Client& client, MessageType type,
-                            std::uint32_t request_id, Error error) noexcept
-    {
-        const auto sent = client.send_error(type, request_id, error);
-        if (!sent) schedule_remove(client.id());
-        return sent;
-    }
-
     Result<void> on_stream_frame(StreamClient& client,
-                                 const FrameView& frame) noexcept;
+                                 const wire::Frame& frame) noexcept;
     Result<void> accept_stream_ready() noexcept;
     void process_stream_clients(const std::vector<pollfd>& descriptors,
                                 std::size_t descriptor_base,
@@ -734,51 +838,98 @@ struct PosixControlServer::Impl final {
     bool all_retired_stream_cleanup_done() const noexcept;
     void reap_retired_streams() noexcept;
     void queue_live_stream_cleanup(StreamClient& client) noexcept;
+    void queue_v1_stream_cleanup(StreamClient& client) noexcept;
+    StreamClient* find_live_stream(std::uint64_t connection_id) noexcept;
+    bool find_owner_lease(std::uint64_t lease_id, CardClientId& owner,
+                          std::uint8_t& receiver) const noexcept;
 
-    Result<void> send_empty(Client& client, const FrameView& request) noexcept
+    // Queues an error reply for the current request.  A reply that cannot be
+    // encoded ends the connection instead of leaving the request unanswered.
+    void reply_error(Client& client, std::uint16_t opcode, std::uint32_t request_id,
+                     std::uint32_t code, const char* operation,
+                     const wire::Scope& target) noexcept
     {
-        const auto sent = client.send_empty(request.header.type, request.header.request_id);
-        if (!sent) schedule_remove(client.id());
-        return sent;
-    }
-
-    template <typename Payload>
-    Result<void> send_success(Client& client, const FrameView& request,
-                              const Payload& payload) noexcept
-    {
-        const auto sent = client.send_payload(request.header.type, MessageKind::response,
-                                               request.header.request_id, payload);
-        if (!sent) schedule_remove(client.id());
-        return sent;
-    }
-
-    Result<void> submit(Client& client, const FrameView& request,
-                        ControlWorkerTask task) noexcept
-    {
-        if ((task.operation == ControlWorkerOperation::tuner_acquire ||
-             task.operation == ControlWorkerOperation::tuner_release ||
-             task.operation == ControlWorkerOperation::tuner_tune ||
-             task.operation == ControlWorkerOperation::tuner_start_stream ||
-             task.operation == ControlWorkerOperation::tuner_stop_stream ||
-             task.operation == ControlWorkerOperation::tuner_stats) &&
-            task.receiver >= kReceiverCount) {
-            return send_error(client, request.header.type, request.header.request_id,
-                              Error::INVALID_ARGUMENT);
+        const auto written = wire::encode_error_frame(opcode, request_id, hello.epoch, code,
+                                                      operation, target, client.tx_view());
+        if (!written) {
+            client.close();
+            schedule_remove(client.id());
+            return;
         }
+        client.queue_response(written.value(), false);
+    }
+
+    template <typename Record>
+    void reply_record(Client& client, std::uint16_t opcode, std::uint32_t request_id,
+                      const Record& value,
+                      Result<std::size_t> (*encode)(const Record&, MutableByteView) noexcept,
+                      const char* operation, const wire::Scope& target) noexcept
+    {
+        const auto written = wire::encode_record_frame(wire::Kind::response, opcode,
+                                                       request_id, value, encode,
+                                                       client.tx_view());
+        if (!written) {
+            // Never publish a partial or unvalidated record.
+            reply_error(client, opcode, request_id,
+                        wire_code(written.error() == Error::RESOURCE_LIMIT
+                                      ? Error::RESOURCE_LIMIT : Error::INTERNAL),
+                        operation, target);
+            return;
+        }
+        client.queue_response(written.value(), false);
+    }
+
+    // Context-relative clock: nanoseconds since create() in the engine clock.
+    std::uint64_t context_now_ns() const noexcept
+    {
+        const std::uint64_t now_ms = tuner_service.monotonic_ms();
+        const std::uint64_t elapsed = now_ms >= context_start_ms ? now_ms - context_start_ms
+                                                                 : 0U;
+        constexpr std::uint64_t limit = std::numeric_limits<std::uint64_t>::max() / 1000000U;
+        return elapsed > limit ? std::numeric_limits<std::uint64_t>::max()
+                               : elapsed * 1000000U;
+    }
+
+    wire::Snapshot next_snapshot() noexcept
+    {
+        return wire::Snapshot{++snapshot_sequence, context_now_ns()};
+    }
+
+    // Public ID -> list position, or -1.  IDs may be sparse and include 0.
+    int find_public_receiver(std::uint16_t id) const noexcept
+    {
+        const auto& receivers = context->list.receivers;
+        if (!receivers.present) return -1;
+        for (std::size_t index = 0U; index < receivers.value.count; ++index) {
+            if (receivers.value.items[index].id == id) return static_cast<int>(index);
+        }
+        return -1;
+    }
+
+    Result<void> submit(Client& client, std::uint16_t opcode, std::uint32_t request_id,
+                        std::uint16_t public_id, ControlWorkerTask task) noexcept
+    {
         task.client_id = client.id();
-        task.request_id = request.header.request_id;
-        task.type = request.header.type;
+        task.request_id = request_id;
+        task.opcode = opcode;
         task.kind = ControlWorkerTaskKind::client_request;
-        client.set_outstanding(request.header.type, task.operation, task.request_id,
-                               task.receiver, task.lease_id);
+        client.set_outstanding(opcode, task.operation, request_id, task.receiver, public_id,
+                               task.lease_id);
         const ControlWorkerLane lane = lane_for(task);
         const auto submitted = workers->submit(lane, task);
         if (submitted) return Result<void>::success();
         client.clear_outstanding();
-        return send_error(client, request.header.type, request.header.request_id,
-                          submitted.error());
+        reply_error(client, opcode, request_id, wire_code(submitted.error()),
+                    opcode == wire::kOpcodeTune ? "tune"
+                    : opcode == wire::kOpcodeRelease ? "release"
+                    : opcode == wire::kOpcodeStartStream ? "start_stream"
+                    : opcode == wire::kOpcodeStopStream ? "stop_stream" : "acquire",
+                    receiver_scope(public_id));
+        return Result<void>::success();
     }
 
+    // Product lane routing: the P bridge of the TunerService receiver.  It
+    // is not derived from the public receiver ID.
     static ControlWorkerLane lane_for(const ControlWorkerTask& task) noexcept
     {
         if (task.operation == ControlWorkerOperation::card_status ||
@@ -800,216 +951,321 @@ struct PosixControlServer::Impl final {
                        task.operation == ControlWorkerOperation::tuner_shutdown ||
 #if defined(ASICEN_PROFILE_ASICEN)
                        task.receiver < asicen::profile::kReceiversPerUsbFunction ?
-                           ControlWorkerLane::tuner_dev1 : ControlWorkerLane::tuner_dev2;
 #else
-                       task.receiver < 4U ? ControlWorkerLane::tuner_dev1 :
-                                            ControlWorkerLane::tuner_dev2;
+                       task.receiver < 4U ?
 #endif
+                           ControlWorkerLane::tuner_dev1 : ControlWorkerLane::tuner_dev2;
     }
 
-    Result<void> dispatch(Client& client, const FrameView& request) noexcept
+    void serve_list(Client& client, const wire::ControlRequest& request) noexcept
     {
-        switch (request.header.type) {
-        case MessageType::LIST: {
-            if (!decode_empty_payload(request.payload))
-                return Result<void>::failure(Error::PROTOCOL_ERROR);
-            return send_success(
-                client, request,
-                ListResponsePayload{
-                    generation,
-                    ByteView{reinterpret_cast<const std::uint8_t*>(base_serial.data()),
-                             base_serial.size()},
-                    static_cast<std::uint8_t>(ready ? 1U : 0U), usb_present_mask,
-                    receiver_records, receiver_count});
+        wire::ListResponse& response = *list_scratch;
+        response = context->list;
+        response.epoch = hello.epoch;
+        response.snapshot = next_snapshot();
+        if (wire::validate_list_response(response) != Error::OK) {
+            reply_error(client, request.opcode, request.request_id, wire_code(Error::INTERNAL),
+                        "list", enclosure_scope());
+            return;
         }
-        case MessageType::STATUS: {
-            if (!decode_empty_payload(request.payload))
-                return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_status_combined;
-            return submit(client, request, task);
+        reply_record(client, request.opcode, request.request_id, response,
+                     &wire::encode_list_response, "list", enclosure_scope());
+    }
+
+    // STATUS is served on the poll thread from cached state only: one engine
+    // registry snapshot (no backend call) and the immutable descriptors.  It
+    // never reaches CardService, power, UART or a worker lane.
+    void serve_status(Client& client, const wire::ControlRequest& request) noexcept
+    {
+        const wire::Scope scope = request.status.scope;
+        const Error membership = wire::check_status_scope(context->list, scope);
+        if (membership != Error::OK) {
+            reply_error(client, request.opcode, request.request_id, wire_code(membership),
+                        "status",
+                        membership == Error::INVALID_ARGUMENT ? enclosure_scope() : scope);
+            return;
         }
-        case MessageType::CARD_STATUS: {
-            if (!decode_empty_payload(request.payload))
-                return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_status;
-            return submit(client, request, task);
+        const auto engine = tuner_service.engine_status();
+        if (!engine) {
+            reply_error(client, request.opcode, request.request_id,
+                        wire_code(engine.error()), "status", scope);
+            return;
         }
-        case MessageType::CARD_CONNECT: {
-            const auto decoded = decode_card_connect_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_connect;
-            task.share_mode = decoded.value().share_mode;
-            task.card_generation_bound = client.card_generation_bound();
-            return submit(client, request, task);
+        wire::Context status_context;
+        status_context.epoch = hello.epoch;
+        status_context.instance = context->instance;
+        status_context.state = wire::ContextState::ready;
+        const wire::Snapshot snapshot = next_snapshot();
+        wire::StatusResponse& response = *status_scratch;
+        const Error shell = wire::build_status_shell(context->list, status_context, snapshot,
+                                                     scope, response);
+        if (shell != Error::OK) {
+            reply_error(client, request.opcode, request.request_id, wire_code(shell), "status",
+                        scope);
+            return;
         }
-        case MessageType::CARD_HANDLE_STATUS: {
-            const auto decoded = decode_card_handle_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_handle_status;
-            task.card_handle = decoded.value().card_handle;
-            return submit(client, request, task);
+        if (response.receivers.present) {
+            for (std::size_t index = 0U; index < response.receivers.value.count; ++index) {
+                project_receiver(engine.value(), snapshot,
+                                 response.receivers.value.items[index]);
+            }
         }
-        case MessageType::CARD_RECONNECT: {
-            const auto decoded = decode_card_reconnect_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_reconnect;
-            task.card_handle = decoded.value().card_handle;
-            task.share_mode = decoded.value().share_mode;
-            task.disposition = decoded.value().disposition;
-            return submit(client, request, task);
+        if (response.readers.present) {
+            for (std::size_t index = 0U; index < response.readers.value.count; ++index) {
+                wire::ReaderStatus& reader = response.readers.value.items[index];
+                // The card is observed only by explicit card operations, which
+                // this endpoint does not serve yet: there is no cached sample.
+                reader.present = true;
+                reader.card.state = wire::CardState::unknown;
+                reader.card.sampled_at_ns.present = false;
+                reader.card.reason = static_cast<std::uint8_t>(wire::UnknownReason::not_sampled);
+                reader.operation = wire::CardOperation::idle;
+                reader.handles_open = 0U;
+                reader.transaction_active = false;
+            }
         }
-        case MessageType::CARD_DISCONNECT: {
-            const auto decoded = decode_card_disposition_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_disconnect;
-            task.card_handle = decoded.value().card_handle;
-            task.disposition = decoded.value().disposition;
-            return submit(client, request, task);
+        const auto written = wire::encode_status_frame(request.request_id, response,
+                                                       context->list, client.tx_view());
+        if (!written) {
+            reply_error(client, request.opcode, request.request_id,
+                        wire_code(written.error() == Error::RESOURCE_LIMIT
+                                      ? Error::RESOURCE_LIMIT : Error::INTERNAL),
+                        "status", scope);
+            return;
         }
-        case MessageType::CARD_RESET: {
-            const auto decoded = decode_card_handle_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_reset;
-            task.card_handle = decoded.value().card_handle;
-            return submit(client, request, task);
+        client.queue_response(written.value(), false);
+    }
+
+    void project_receiver(const dtv::userland::detail::ReceiverEngineStatus& engine,
+                          const wire::Snapshot& snapshot,
+                          wire::ReceiverStatus& status) const noexcept
+    {
+        const int position = find_public_receiver(status.descriptor.id);
+        const std::uint8_t receiver =
+            position >= 0 ? context->receiver_index[static_cast<std::size_t>(position)] : 0U;
+        std::size_t slot = engine.receiver_count;
+        for (std::size_t index = 0U; index < engine.receiver_count; ++index) {
+            if (engine.receivers[index] == receiver) {
+                slot = index;
+                break;
+            }
         }
-        case MessageType::CARD_TRANSMIT: {
-            const auto decoded = decode_card_transmit_request_payload(request.payload);
-            if (!decoded || decoded.value().apdu.size > task_apdu_capacity())
-                return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_transmit;
-            task.card_handle = decoded.value().card_handle;
-            task.apdu_size = decoded.value().apdu.size;
-            std::memcpy(task.apdu.data(), decoded.value().apdu.data, task.apdu_size);
-            return submit(client, request, task);
+        if (slot == engine.receiver_count) {
+            // Validated at create(); a missing slot would be an internal fault.
+            status.present = false;
+            status.state = wire::ReceiverState::absent;
+            return;
         }
-        case MessageType::BEGIN_TRANSACTION: {
-            const auto decoded = decode_card_handle_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_begin_transaction;
-            task.card_handle = decoded.value().card_handle;
-            return submit(client, request, task);
-        }
-        case MessageType::END_TRANSACTION: {
-            const auto decoded = decode_card_disposition_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            ControlWorkerTask task{};
-            task.operation = ControlWorkerOperation::card_end_transaction;
-            task.card_handle = decoded.value().card_handle;
-            task.disposition = decoded.value().disposition;
-            return submit(client, request, task);
-        }
-        case MessageType::ACQUIRE: {
-            const auto decoded = decode_acquire_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
+        const auto& metadata = engine.tune_metadata[slot];
+        status.present = true;
+        status.state = wire_state(engine.states[slot]);
+        status.operation = wire_operation(engine.operations[slot]);
+        // A receiver under cleanup still holds its resources: leased stays
+        // true until the release finished.
+        status.leased = engine.leased[slot] ||
+                        engine.operations[slot] ==
+                            dtv::userland::detail::ReceiverTuneOperation::cleanup;
+        status.tune_revision = metadata.revision;
+        status.current_tune.present = metadata.current_valid;
+        if (metadata.current_valid)
+            status.current_tune.value = wire_tune(metadata.current_revision, metadata.current);
+        status.last_successful_tune.present = metadata.last_successful_valid;
+        if (metadata.last_successful_valid)
+            status.last_successful_tune.value =
+                wire_tune(metadata.last_successful_revision, metadata.last_successful);
+        // No stream is issued through this endpoint yet, and no measurement or
+        // counter producer is declared in the descriptors.
+        status.stream.present = false;
+        status.last_stream.present = false;
+        status.measurements.entries.count = 0U;
+        status.receiver_statistics.entries.count = 0U;
+        status.stream_statistics.present = false;
+        status.last_error.present = false;
+        (void)snapshot;
+    }
+
+    void dispatch(Client& client, const wire::ControlRequest& request) noexcept
+    {
+        switch (request.kind) {
+        case wire::ControlRequestKind::list:
+            serve_list(client, request);
+            return;
+        case wire::ControlRequestKind::status:
+            serve_status(client, request);
+            return;
+        case wire::ControlRequestKind::acquire: {
+            const std::uint16_t public_id = request.acquire.receiver_id;
+            const int position = find_public_receiver(public_id);
+            if (position < 0) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "acquire", receiver_scope(public_id));
+                return;
+            }
+            const auto engine = tuner_service.engine_status();
+            if (!engine) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(engine.error()), "acquire", receiver_scope(public_id));
+                return;
+            }
+            const std::uint8_t receiver =
+                context->receiver_index[static_cast<std::size_t>(position)];
+            bool found = false;
+            bool busy = false;
+            for (std::size_t index = 0U; index < engine.value().receiver_count; ++index) {
+                if (engine.value().receivers[index] != receiver) continue;
+                found = true;
+                busy = engine.value().leased[index] ||
+                       engine.value().operations[index] !=
+                           dtv::userland::detail::ReceiverTuneOperation::idle;
+                break;
+            }
+            if (!found) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::INTERNAL), "acquire", receiver_scope(public_id));
+                return;
+            }
+            if (busy) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::BUSY), "acquire", receiver_scope(public_id));
+                return;
+            }
             ControlWorkerTask task{};
             task.operation = ControlWorkerOperation::tuner_acquire;
-            task.receiver = decoded.value().receiver_id;
-            return submit(client, request, task);
+            task.receiver = receiver;
+            (void)submit(client, request.opcode, request.request_id, public_id, task);
+            return;
         }
-        case MessageType::RELEASE: {
-            const auto decoded = decode_lease_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            std::uint8_t receiver = 0U;
-            if (!client.find_lease(decoded.value().lease_id, receiver)) {
-                return send_error(client, request.header.type, request.header.request_id,
-                                  Error::NOT_FOUND);
+        case wire::ControlRequestKind::release: {
+            LeaseRecord lease{};
+            if (!client.find_lease(request.release.lease_id, lease)) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "release", enclosure_scope());
+                return;
             }
             ControlWorkerTask task{};
             task.operation = ControlWorkerOperation::tuner_release;
-            task.receiver = receiver;
-            task.lease_id = decoded.value().lease_id;
-            return submit(client, request, task);
+            task.receiver = lease.receiver;
+            task.lease_id = lease.lease_id;
+            (void)submit(client, request.opcode, request.request_id, lease.public_id, task);
+            return;
         }
-        case MessageType::TUNE: {
-            const auto decoded = decode_tune_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            std::uint8_t receiver = 0U;
-            if (!client.find_lease(decoded.value().lease_id, receiver)) {
-                return send_error(client, request.header.type, request.header.request_id,
-                                  Error::NOT_FOUND);
+        case wire::ControlRequestKind::tune: {
+            // Another owner's lease is unknown here and never reaches hardware.
+            LeaseRecord lease{};
+            if (!client.find_lease(request.tune.lease_id, lease)) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "tune", enclosure_scope());
+                return;
+            }
+            if (!tuner_service.strict_admission_enabled()) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::UNSUPPORTED), "tune",
+                            receiver_scope(lease.public_id));
+                return;
             }
             ControlWorkerTask task{};
             task.operation = ControlWorkerOperation::tuner_tune;
-            task.receiver = receiver;
-            task.lease_id = decoded.value().lease_id;
-            task.tune = decoded.value();
-            return submit(client, request, task);
+            task.receiver = lease.receiver;
+            task.lease_id = lease.lease_id;
+            // Accepted time in the engine clock domain before the pure
+            // preparation and before queue publication, so the admitted
+            // deadline covers queue wait.  It is not resampled later.
+            task.accepted_at_ms = tuner_service.monotonic_ms();
+            TunerHzTuneRequest hz{};
+            hz.lease_id = request.tune.lease_id;
+            hz.system = ipc_system(request.tune.system);
+            hz.frequency_hz = request.tune.frequency_hz;
+            hz.selection = request.tune.selection;
+            hz.selection_value = request.tune.selection_value;
+            hz.lnb_voltage = request.tune.lnb_voltage;
+            hz.lna = request.tune.lna;
+            hz.pid_subset = request.tune.pids.present;
+            hz.timeout_ms = request.tune.timeout_ms;
+            task.prepared_tune = tuner_service.prepare_tune_hz(lease.receiver, hz);
+            task.tune_prepared = true;
+            (void)submit(client, request.opcode, request.request_id, lease.public_id, task);
+            return;
         }
-        case MessageType::START_STREAM:
-        case MessageType::STOP_STREAM:
-        case MessageType::STATS: {
-            const auto decoded = decode_lease_request_payload(request.payload);
-            if (!decoded) return Result<void>::failure(Error::PROTOCOL_ERROR);
-            std::uint8_t receiver = 0U;
-            if (!client.find_lease(decoded.value().lease_id, receiver)) {
-                return send_error(client, request.header.type, request.header.request_id,
-                                  Error::NOT_FOUND);
+        case wire::ControlRequestKind::start_stream: {
+            LeaseRecord lease{};
+            if (!client.find_lease(request.start_stream.lease_id, lease)) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "start_stream", enclosure_scope());
+                return;
+            }
+            // START binds to the receiver's successful current tune revision.
+            const auto metadata = tuner_service.tune_metadata(lease.receiver);
+            if (!metadata || !metadata.value().current_valid) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_READY), "start_stream",
+                            receiver_scope(lease.public_id));
+                return;
+            }
+            if (request.start_stream.tune_revision !=
+                metadata.value().current_revision) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::INVALID_ARGUMENT), "start_stream",
+                            receiver_scope(lease.public_id));
+                return;
             }
             ControlWorkerTask task{};
-            task.receiver = receiver;
-            task.lease_id = decoded.value().lease_id;
-            task.operation = request.header.type == MessageType::START_STREAM
-                ? ControlWorkerOperation::tuner_start_stream
-                : request.header.type == MessageType::STOP_STREAM
-                    ? ControlWorkerOperation::tuner_stop_stream
-                    : ControlWorkerOperation::tuner_stats;
-            return submit(client, request, task);
+            task.operation = ControlWorkerOperation::tuner_start_stream_v1;
+            task.receiver = lease.receiver;
+            task.lease_id = lease.lease_id;
+            task.tune_revision = metadata.value().current_revision;
+            task.now_ms = tuner_service.monotonic_ms();
+            task.arm_budget_ms = kStreamArmBudgetMs;
+            (void)submit(client, request.opcode, request.request_id, lease.public_id, task);
+            return;
         }
-        case MessageType::HELLO:
-        case MessageType::ATTACH_STREAM:
-        case MessageType::TS_DATA:
-        case MessageType::DEVICE_EVENT:
-        case MessageType::STREAM_END:
-            return Result<void>::failure(Error::PROTOCOL_ERROR);
+        case wire::ControlRequestKind::stop_stream: {
+            LeaseRecord lease{};
+            if (!client.find_lease(request.stop_stream.lease_id, lease)) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "stop_stream", enclosure_scope());
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::tuner_stop_stream_v1;
+            task.receiver = lease.receiver;
+            task.lease_id = lease.lease_id;
+            task.stream_id = request.stop_stream.stream_id;
+            // A live data connection owns the exact ticket.  Run STOP and the
+            // physical cleanup on the same receiver lane so the typed response
+            // carries the settled final and STREAM_END follows it.
+            for (std::size_t index = 0U; index < stream_client_count; ++index) {
+                const StreamClient& stream = *stream_clients[index];
+                if (!stream.ticket_valid || stream.lease_id != lease.lease_id ||
+                    stream.stream_id != request.stop_stream.stream_id)
+                    continue;
+                task.operation =
+                    ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1;
+                task.stream_ticket = stream.ticket;
+                break;
+            }
+            (void)submit(client, request.opcode, request.request_id, lease.public_id, task);
+            return;
         }
-        return Result<void>::failure(Error::PROTOCOL_ERROR);
+        }
+        reply_error(client, request.opcode, request.request_id, wire_code(Error::INTERNAL),
+                    "request", enclosure_scope());
     }
 
-    static constexpr std::size_t task_apdu_capacity() noexcept
+    Result<void> on_frame(Client& client, const wire::Frame& frame) noexcept
     {
-        return kMaxCardPayload;
-    }
-
-    Result<void> on_frame(Client& client, const FrameView& frame) noexcept
-    {
-        const auto accepted = client.state().process_inbound(frame);
-        if (!accepted) return Result<void>::failure(accepted.error());
-        switch (accepted.value().event) {
-        case ConnectionEvent::hello_response_required: {
-            const auto hello = client.state().pending_hello_response();
-            if (!hello) return Result<void>::failure(hello.error());
-            return client.send_payload(MessageType::HELLO, MessageKind::response,
-                                       frame.header.request_id, hello.value());
-        }
-        case ConnectionEvent::version_mismatch_response_required:
-            return client.send_error(MessageType::HELLO, frame.header.request_id,
-                                     Error::VERSION_MISMATCH);
-        case ConnectionEvent::request_accepted: {
-            const auto dispatched = dispatch(client, frame);
-            if (!dispatched) return dispatched;
-            // Async completions send their response first and flush related
-            // events only after that write. Removal is deferred until this
-            // callback has unwound, so Client is never invalidated here.
-            return flush_events();
-        }
-        case ConnectionEvent::response_accepted:
-        case ConnectionEvent::event_accepted:
-        case ConnectionEvent::attach_response_required:
-        case ConnectionEvent::ts_data_accepted:
-        case ConnectionEvent::stream_end_accepted:
+        const wire::Inbound inbound =
+            client.connection().accept(frame, *request_scratch, client.tx_view());
+        switch (inbound.action) {
+        case wire::InboundAction::close:
             return Result<void>::failure(Error::PROTOCOL_ERROR);
+        case wire::InboundAction::respond:
+            client.queue_response(inbound.reply_size, inbound.close_after_reply);
+            return Result<void>::success();
+        case wire::InboundAction::dispatch:
+            dispatch(client, *request_scratch);
+            return Result<void>::success();
         }
-        return Result<void>::failure(Error::PROTOCOL_ERROR);
+        return Result<void>::failure(Error::INTERNAL);
     }
 
     RetiredClient* find_retired(CardClientId id) noexcept
@@ -1113,6 +1369,9 @@ struct PosixControlServer::Impl final {
             retired->waiting_request = client.outstanding().active;
             for (const LeaseRecord& lease : client.leases()) {
                 if (lease.active) {
+                    // Synchronously revoke any admitted TUNE ticket at the
+                    // logical-teardown point, before the queued release runs.
+                    (void)tuner_service.revoke_tune_ticket(id, lease.lease_id);
                     for (RetiredLease& target : retired->leases) {
                         if (!target.active) {
                             target = RetiredLease{true, false, lease.lease_id,
@@ -1127,6 +1386,7 @@ struct PosixControlServer::Impl final {
             retired->card_pending = true;
         }
         clients.erase(clients.begin() + static_cast<std::ptrdiff_t>(index));
+        client_count.store(clients.size(), std::memory_order_release);
         retry_retired_cleanup();
     }
 
@@ -1171,6 +1431,7 @@ struct PosixControlServer::Impl final {
                 continue;
             }
             clients.push_back(std::move(client));
+            client_count.store(clients.size(), std::memory_order_release);
         }
     }
 
@@ -1234,150 +1495,194 @@ struct PosixControlServer::Impl final {
         handle_cleanup_completion(completion);
     }
 
-    Result<void> send_completion(Client& client,
-                                 const ControlWorkerCompletion& completion) noexcept
+    void send_completion(Client& client,
+                         const ControlWorkerCompletion& completion) noexcept
     {
         const Outstanding outstanding = client.outstanding();
-        Result<void> sent = Result<void>::failure(Error::INTERNAL);
-        if (completion.error != Error::OK) {
-            // TunerService removes a valid release logically before reporting
-            // a backend close error. CardService has the same consume-on-error
-            // rule except for an unknown handle; keep the poll-thread registry
-            // aligned with those ownership contracts.
-            if (completion.operation == ControlWorkerOperation::tuner_release) {
-                client.remove_lease(outstanding.lease_id);
-            } else if (completion.operation == ControlWorkerOperation::card_disconnect &&
-                       completion.error != Error::NOT_FOUND &&
-                       completion.error != Error::BUSY &&
-                       completion.error != Error::INVALID_ARGUMENT) {
-                const auto it = std::find(client.card_handles().begin(),
-                                          client.card_handles().end(),
-                                          completion.card_handle);
-                if (it != client.card_handles().end()) client.card_handles().erase(it);
-            }
-            sent = send_error(client, outstanding.type, completion.request_id,
-                              completion.error);
-        } else {
-            switch (completion.operation) {
-            case ControlWorkerOperation::tuner_acquire:
-                if (!client.add_lease(completion.receiver,
-                                      completion.tuner_acquire.lease_id)) {
-                    sent = send_error(client, outstanding.type, completion.request_id,
-                                      Error::INTERNAL);
-                    ControlWorkerTask cleanup{};
-                    cleanup.operation = ControlWorkerOperation::tuner_release;
-                    cleanup.client_id = client.id();
-                    cleanup.receiver = completion.receiver;
-                    cleanup.lease_id = completion.tuner_acquire.lease_id;
-                    auto retired = allocate_retired(client.id());
-                    if (retired != nullptr) add_orphan_lease(*retired, cleanup.receiver,
-                                                             cleanup.lease_id);
-                    retry_retired_cleanup();
-                } else {
-                    sent = client.send_payload(
-                        outstanding.type, MessageKind::response, completion.request_id,
-                        AcquireResponsePayload{completion.tuner_acquire.lease_id,
-                                               completion.tuner_acquire.nonce});
-                }
-                break;
-            case ControlWorkerOperation::tuner_release:
-                client.remove_lease(outstanding.lease_id);
-                sent = client.send_empty(outstanding.type, completion.request_id);
-                break;
-            case ControlWorkerOperation::tuner_tune:
-                sent = client.send_payload(outstanding.type, MessageKind::response,
-                                           completion.request_id,
-                                           completion.tune_response);
-                break;
-            case ControlWorkerOperation::tuner_start_stream:
-                sent = client.send_empty(outstanding.type, completion.request_id);
-                break;
-            case ControlWorkerOperation::tuner_stop_stream:
-                if (!completion.stream_snapshot_valid) {
-                    sent = send_error(client, outstanding.type, completion.request_id,
-                                      Error::INTERNAL);
-                } else {
-                    sent = client.send_payload(
-                        outstanding.type, MessageKind::response, completion.request_id,
-                        counters_payload(completion.stream_final_snapshot.counters));
-                }
-                break;
-            case ControlWorkerOperation::tuner_stats:
-                sent = client.send_payload(
-                    outstanding.type, MessageKind::response, completion.request_id,
-                    counters_payload(completion.stream_counters));
-                break;
-            case ControlWorkerOperation::card_status:
-            case ControlWorkerOperation::card_handle_status: {
-                observe_card_presence(completion.card_status.present);
-                sent = client.send_payload(
-                    outstanding.type, MessageKind::response, completion.request_id,
-                    CardStatusResponsePayload{
-                        static_cast<std::uint8_t>(completion.card_status.present ? 1U : 0U),
-                        static_cast<std::uint8_t>(completion.card_status.initialized ? 1U : 0U),
-                        completion.card_status.reader_generation,
-                        completion.card_status.atr.view()});
-                break;
-            }
-            case ControlWorkerOperation::card_status_combined:
-                observe_card_presence(completion.card_status.present);
-                if (completion.tuner_status_valid) observe_tuner(completion.tuner_status);
-                sent = client.send_payload(
-                    outstanding.type, MessageKind::response, completion.request_id,
-                    StatusResponsePayload{
-                        generation, static_cast<std::uint8_t>(ready ? 1U : 0U),
-                        usb_present_mask,
-                        static_cast<std::uint8_t>(completion.card_status.present ? 1U : 0U),
-                        static_cast<std::uint8_t>(completion.card_status.initialized ? 1U : 0U),
-                        completion.tuner_status.receiver_states, 0U, 0U});
-                break;
-            case ControlWorkerOperation::card_connect:
-                client.card_handles().push_back(completion.card_connect.handle);
-                sent = client.send_payload(
-                    outstanding.type, MessageKind::response, completion.request_id,
-                    CardConnectResponsePayload{completion.card_connect.handle,
-                                               completion.card_connect.atr.view()});
-                break;
-            case ControlWorkerOperation::card_reconnect:
-                sent = client.send_payload(outstanding.type, MessageKind::response,
-                                           completion.request_id,
-                                           AtrPayload{completion.atr.view()});
-                break;
-            case ControlWorkerOperation::card_disconnect: {
-                const auto it = std::find(client.card_handles().begin(),
-                                          client.card_handles().end(),
-                                          completion.card_handle);
-                if (it != client.card_handles().end()) client.card_handles().erase(it);
-                sent = client.send_empty(outstanding.type, completion.request_id);
-                break;
-            }
-            case ControlWorkerOperation::card_reset:
-                sent = client.send_payload(outstanding.type, MessageKind::response,
-                                           completion.request_id,
-                                           AtrPayload{completion.atr.view()});
-                break;
-            case ControlWorkerOperation::card_transmit:
-                sent = client.send_payload(
-                    outstanding.type, MessageKind::response, completion.request_id,
-                    CardTransmitResponsePayload{
-                        ByteView{completion.card_response.data(),
-                                 completion.card_response_size}});
-                break;
-            case ControlWorkerOperation::card_begin_transaction:
-            case ControlWorkerOperation::card_end_transaction:
-                sent = client.send_empty(outstanding.type, completion.request_id);
-                break;
-            default:
-                sent = Result<void>::failure(Error::INTERNAL);
-                break;
-            }
-        }
+        const wire::Scope target = receiver_scope(outstanding.public_id);
         client.clear_outstanding();
-        if (!sent) schedule_remove(client.id());
-        // This is deliberately after the response write: related receiver or
-        // card transitions must never precede their command response.
-        (void)flush_events();
-        return Result<void>::success();
+        switch (completion.operation) {
+        case ControlWorkerOperation::tuner_acquire: {
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "acquire", target);
+                return;
+            }
+            if (!client.add_lease(completion.receiver, outstanding.public_id,
+                                  completion.tuner_acquire.lease_id)) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::INTERNAL), "acquire", target);
+                auto retired = allocate_retired(client.id());
+                if (retired != nullptr)
+                    add_orphan_lease(*retired, completion.receiver,
+                                     completion.tuner_acquire.lease_id);
+                retry_retired_cleanup();
+                return;
+            }
+            wire::AcquireResponse response;
+            response.epoch = hello.epoch;
+            response.lease_id = completion.tuner_acquire.lease_id;
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_acquire_response, "acquire", target);
+            return;
+        }
+        case ControlWorkerOperation::tuner_release: {
+            // TunerService removes a found lease logically before its hardware
+            // cleanup, even when that cleanup fails, so the poll-thread
+            // registry follows it on every outcome.
+            client.remove_lease(outstanding.lease_id);
+            if (completion.error == Error::NOT_FOUND) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "release", target);
+                return;
+            }
+            wire::ReleaseResponse response;
+            response.epoch = hello.epoch;
+            response.lease_id = outstanding.lease_id;
+            // A cleanup failure leaves the receiver excluded: neither released
+            // nor known to be quiesced, with the primary error.
+            response.released = completion.error == Error::OK;
+            response.quiesced = completion.error == Error::OK;
+            response.error.present = completion.error != Error::OK;
+            if (response.error.present)
+                response.error.value =
+                    wire::make_error_record(wire_code(completion.error), "release");
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_release_response, "release", target);
+            return;
+        }
+        case ControlWorkerOperation::tuner_tune: {
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "tune", target);
+                return;
+            }
+            if (!completion.tune_record_valid) {
+                // The engine committed, but no committed record of this exact
+                // ticket is observable: never report a reconstructed result.
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::INTERNAL), "tune", target);
+                return;
+            }
+            const auto& record = completion.tune_metadata.current;
+            wire::TuneResult result;
+            result.epoch = hello.epoch;
+            result.tune_revision = completion.tune_metadata.current_revision;
+            result.requested_hz = record.requested_hz;
+            result.programmed_hz = record.programmed_hz;
+            result.verification = record.verification;
+            result.lock = context_measurement(record.lock, context_start_ms, context_now_ns());
+            if (record.stream_id != 0xffffU) {
+                result.selected_tsid.present = true;
+                result.selected_tsid.value = record.stream_id;
+            } else if (record.slot != 0xffffU) {
+                result.selected_slot.present = true;
+                result.selected_slot.value = record.slot;
+            }
+            reply_record(client, outstanding.opcode, completion.request_id, result,
+                         &wire::encode_tune_result, "tune", target);
+            return;
+        }
+        case ControlWorkerOperation::tuner_start_stream_v1: {
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "start_stream", target);
+                return;
+            }
+            if (!completion.v1_start_valid) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::INTERNAL), "start_stream", target);
+                return;
+            }
+            wire::StartResponse response;
+            response.epoch = hello.epoch;
+            response.stream_id = completion.v1_start.stream_id;
+            response.attach_token = completion.v1_start.token;
+            response.expires_after_ms = completion.v1_expires_after_ms;
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_start_response, "start_stream", target);
+            return;
+        }
+        case ControlWorkerOperation::tuner_stop_stream_v1:
+        case ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1: {
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "stop_stream", target);
+                return;
+            }
+            if (!completion.v1_stop_valid) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::INTERNAL), "stop_stream", target);
+                return;
+            }
+            wire::StopResponse response;
+            response.epoch = hello.epoch;
+            response.final.id = completion.v1_stop.stream_id;
+            response.final.tune_revision = completion.v1_stop.revision;
+            response.final.reason = wire::StreamEndReason::stopped;
+            if (completion.v1_stop.cleanup_error != Error::OK) {
+                response.final.error.present = true;
+                response.final.error.value = wire::make_error_record(
+                    wire_code(completion.v1_stop.cleanup_error), "stop_stream");
+            }
+            response.quiesced = completion.v1_stop.quiesced;
+            // The wire StreamFinal requires the two adopted stream counters.
+            // Report the live data-plane observation when this STOP has a
+            // data connection; an armed STOP has no physical stream and uses
+            // the zero-valued observation.
+            TunerStreamCounters stop_counters{};
+            for (std::size_t index = 0U; index < stream_client_count; ++index) {
+                const StreamClient& stream = *stream_clients[index];
+                if (!stream.ticket_valid || stream.lease_id != outstanding.lease_id ||
+                    stream.stream_id != completion.v1_stop.stream_id ||
+                    !stream.attachment_valid || stream_control == nullptr)
+                    continue;
+                const auto stats = stream_control->stats(stream.attachment);
+                if (stats) {
+                    stop_counters = stats.value();
+                } else {
+                    const auto snapshot =
+                        stream_control->final_snapshot(stream.attachment);
+                    if (snapshot) stop_counters = snapshot.value().counters;
+                }
+                break;
+            }
+            response.final.statistics =
+                wire_stream_counters(stop_counters, context_now_ns());
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_stop_response, "stop_stream", target);
+            if (completion.operation ==
+                ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1) {
+                // The same lane already ran the physical cleanup.  Stop the
+                // writer and publish STREAM_END from the retained final.
+                for (std::size_t index = 0U; index < stream_client_count; ++index) {
+                    StreamClient& stream = *stream_clients[index];
+                    if (!stream.ticket_valid ||
+                        stream.lease_id != outstanding.lease_id ||
+                        stream.stream_id != completion.v1_stop.stream_id)
+                        continue;
+                    stream.cleanup_pending = false;
+                    stream.cleanup_queued = false;
+                    stream.cleanup_complete = true;
+                    stream.set_phase(StreamClient::Phase::ending);
+                    if (stream_control == nullptr || !stream.attachment_valid) {
+                        stream.request_remove();
+                        break;
+                    }
+                    const auto snapshot =
+                        stream_control->final_snapshot(stream.attachment);
+                    if (snapshot) begin_stream_end(stream, snapshot.value());
+                    else stream.request_remove();
+                    break;
+                }
+            }
+            return;
+        }
+        default:
+            break;
+        }
+        reply_error(client, outstanding.opcode, completion.request_id,
+                    wire_code(Error::INTERNAL), "request", target);
     }
 
     void handle_completion(const ControlWorkerCompletion& completion) noexcept
@@ -1385,11 +1690,7 @@ struct PosixControlServer::Impl final {
         if (completion.kind == ControlWorkerTaskKind::background &&
             completion.operation == ControlWorkerOperation::card_presence) {
             presence_poll_pending = false;
-            if (completion.error == Error::OK) {
-                observe_card_change(completion.card_presence);
-            } else {
-                record_error(completion.error);
-            }
+            if (completion.error != Error::OK) record_error(completion.error);
             next_presence_poll = std::chrono::steady_clock::now() +
                                  std::chrono::milliseconds(kPresencePollIntervalMs);
             return;
@@ -1408,17 +1709,18 @@ struct PosixControlServer::Impl final {
             if (completion.error != Error::OK) record_error(completion.error);
             return;
         }
-        if (completion.operation == ControlWorkerOperation::tuner_attach_stream) {
+        if (completion.operation == ControlWorkerOperation::tuner_attach_stream ||
+            completion.operation == ControlWorkerOperation::tuner_prepare_attach_v1) {
             handle_stream_completion(completion);
             return;
         }
         if (completion.kind == ControlWorkerTaskKind::cleanup) {
-            if (completion.operation == ControlWorkerOperation::tuner_detach_stream) {
+            if (completion.operation == ControlWorkerOperation::tuner_detach_stream ||
+                completion.operation == ControlWorkerOperation::tuner_run_stream_cleanup_v1) {
                 handle_stream_cleanup_completion(completion);
             } else if (completion.operation == ControlWorkerOperation::tuner_release ||
                 completion.operation == ControlWorkerOperation::card_release_connection) {
                 handle_cleanup_completion(completion);
-                if (completion.tuner_status_valid) observe_tuner(completion.tuner_status);
             }
             return;
         }
@@ -1427,25 +1729,16 @@ struct PosixControlServer::Impl final {
         if (retired != nullptr) {
             handle_orphan_completion(completion, *retired);
             retry_retired_cleanup();
-            if (completion.tuner_status_valid) observe_tuner(completion.tuner_status);
             return;
         }
 
         for (const auto& client : clients) {
             if (client->id() != completion.client_id) continue;
             if (!client->matches(completion)) return;
-            if (completion.tuner_status_valid) observe_tuner(completion.tuner_status);
-            (void)send_completion(*client, completion);
+            send_completion(*client, completion);
             if (completion.operation == ControlWorkerOperation::tuner_release) {
                 notify_stream_detached_by_identity(completion.client_id,
                                                    completion.lease_id);
-            } else if (completion.operation == ControlWorkerOperation::tuner_stop_stream) {
-                if (completion.stream_snapshot_valid)
-                    notify_stream_detached(completion.client_id, completion.lease_id,
-                                           completion.stream_final_snapshot);
-                else
-                    notify_stream_detached_by_identity(completion.client_id,
-                                                       completion.lease_id);
             }
             return;
         }
@@ -1495,6 +1788,26 @@ struct PosixControlServer::Impl final {
         return false;
     }
 
+    // One nonblocking write attempt per pending response; a response that
+    // is not complete within its deadline ends the connection.
+    void flush_clients() noexcept
+    {
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& client : clients) {
+            if (!client->tx_pending() || client->closed()) continue;
+            if (client->tx_expired(now)) {
+                client->close();
+                schedule_remove(client->id());
+                continue;
+            }
+            const auto flushed = client->flush();
+            if (!flushed) {
+                client->close();
+                schedule_remove(client->id());
+            }
+        }
+    }
+
     Result<void> poll_once(Timeout timeout) noexcept
     {
         if (shutdown_complete) return Result<void>::failure(Error::NOT_READY);
@@ -1515,7 +1828,9 @@ struct PosixControlServer::Impl final {
         descriptors.push_back(pollfd{workers->wake_fd(), POLLIN, 0});
         for (std::size_t index = 0U; index < control_count; ++index) {
             const auto& client = clients[index];
-            descriptors.push_back(pollfd{client->fd(), POLLIN, 0});
+            short events = POLLIN;
+            if (client->tx_pending()) events = static_cast<short>(events | POLLOUT);
+            descriptors.push_back(pollfd{client->fd(), events, 0});
         }
         for (std::size_t index = 0U; index < stream_count; ++index) {
             const auto& client = stream_clients[index];
@@ -1534,6 +1849,17 @@ struct PosixControlServer::Impl final {
                     next_presence_poll - now).count();
                 wait_ms = std::min<std::uint32_t>(
                     wait_ms, static_cast<std::uint32_t>(std::max<std::int64_t>(0, until_poll)));
+            }
+        }
+        {
+            // Wake for the earliest partial-response deadline.
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto& client : clients) {
+                if (!client->tx_pending()) continue;
+                const auto until = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    client->tx_deadline() - now).count();
+                wait_ms = std::min<std::uint32_t>(
+                    wait_ms, static_cast<std::uint32_t>(std::max<std::int64_t>(0, until)));
             }
         }
         const int result = ::poll(descriptors.data(), descriptors.size(),
@@ -1575,12 +1901,16 @@ struct PosixControlServer::Impl final {
                 schedule_remove(clients[client_index]->id());
             }
         }
+        // Responses are written only after every frame of this cycle has been
+        // read, so a request pipelined behind an unanswered one is refused.
+        flush_clients();
         process_stream_clients(descriptors, 3U + control_count, stream_count);
         remove_pending_clients();
         remove_stream_clients();
         process_completions();
         schedule_presence_if_due(std::chrono::steady_clock::now());
-        (void)flush_events();
+        flush_clients();
+        remove_pending_clients();
         if (cleanup_error != Error::OK) {
             const Error error = cleanup_error;
             cleanup_error = Error::OK;
@@ -1593,11 +1923,9 @@ struct PosixControlServer::Impl final {
     {
         if (shutdown_complete) return Result<void>::success();
         shutting_down = true;
-#if defined(ASICEN_PROFILE_ASICEN)
         tuner_service.request_stop();
         card_service.request_stop();
         if (stream_control != nullptr) stream_control->request_stop();
-#endif
         stream_listener.close();
         // The control listener is the first listener to create the shared
         // product/instance directories.  Close the stream endpoint first so
@@ -1674,27 +2002,29 @@ struct PosixControlServer::Impl final {
     TunerService& tuner_service;
     std::unique_ptr<ControlWorkerLanes> workers;
     TunerStreamControl* stream_control;
-    std::string base_serial;
+    // Immutable context: the epoch and producer offered by HELLO, and the
+    // canonical descriptors with their receiver mapping.  The scratch records
+    // are poll-thread working storage for one request at a time.
+    wire::ServerHello hello{};
+    std::unique_ptr<ControlContext> context;
+    std::unique_ptr<wire::ControlRequest> request_scratch;
+    std::unique_ptr<wire::ListResponse> list_scratch;
+    std::unique_ptr<wire::StatusResponse> status_scratch;
+    std::uint64_t context_start_ms = 0U;
+    std::uint64_t snapshot_sequence = 0U;
     std::vector<std::unique_ptr<Client>> clients;
+    std::atomic<std::size_t> client_count{0U};
     // Data clients are fixed-capacity so an accepted socket never depends on
     // an exception-throwing vector growth while the daemon runs.
     std::array<std::unique_ptr<StreamClient>, kMaxStreamConnections> stream_clients{};
     std::size_t stream_client_count = 0U;
-    std::vector<DeviceEventPayload> pending_events;
     std::vector<CardClientId> pending_removals;
     std::array<std::uint64_t, kMaxStreamConnections> pending_stream_removals{};
     std::size_t pending_stream_removal_count = 0U;
     std::array<RetiredClient, kRetiredClientCapacity> retired_clients{};
     std::array<RetiredStream, kRetiredClientCapacity> retired_streams{};
-    std::array<ReceiverState, kReceiverCount> known_receiver_states{};
     CardClientId next_client_id = 1U;
     bool client_ids_exhausted = false;
-    bool ready;
-    std::uint8_t usb_present_mask;
-    std::array<ReceiverRecord, kReceiverCount> receiver_records;
-    std::uint8_t receiver_count;
-    bool card_presence_known = false;
-    bool known_card_present = false;
     bool presence_poll_pending = false;
     bool shutting_down = false;
     bool shutdown_complete = false;
@@ -1704,18 +2034,11 @@ struct PosixControlServer::Impl final {
     bool card_shutdown_complete = false;
     Error cleanup_error = Error::OK;
     std::chrono::steady_clock::time_point next_presence_poll;
-    std::uint64_t generation = 1U;
 };
 
 Result<void> PosixControlServer::Impl::StreamClient::on_frame(
-    const FrameView& frame) noexcept
+    const wire::Frame& frame) noexcept
 {
-    const auto accepted = state_.process_inbound(frame);
-    if (!accepted) return Result<void>::failure(accepted.error());
-    if (accepted.value().event != ConnectionEvent::attach_response_required)
-        return Result<void>::failure(Error::PROTOCOL_ERROR);
-    const auto request = decode_attach_stream_request_payload(frame.payload);
-    if (!request) return Result<void>::failure(Error::PROTOCOL_ERROR);
     return owner_.on_stream_frame(*this, frame);
 }
 
@@ -1787,61 +2110,120 @@ void PosixControlServer::Impl::reap_retired_streams() noexcept
 #endif
 }
 
+// The first and only accepted data-connection frame is the typed UDTV
+// ATTACH_STREAM request.  It reserves the exact armed stream in the same
+// engine, hands the physical prepare to the existing receiver lane, and queues
+// the typed response only after that prepare completes.  No old-wire attach is
+// accepted or reinterpreted.
 Result<void> PosixControlServer::Impl::on_stream_frame(
-    StreamClient& client, const FrameView& frame) noexcept
+    StreamClient& client, const wire::Frame& frame) noexcept
 {
-    const auto request = decode_attach_stream_request_payload(frame.payload);
-    if (!request) return Result<void>::failure(Error::PROTOCOL_ERROR);
+    if (frame.header.kind != wire::Kind::request ||
+        frame.header.opcode != wire::kOpcodeAttachStream ||
+        client.attach_completion_seen) {
+        return Result<void>::failure(Error::PROTOCOL_ERROR);
+    }
+    const auto request = wire::decode_attach_request(frame.payload);
+    if (!request && request.error() == Error::PROTOCOL_ERROR)
+        return Result<void>::failure(Error::PROTOCOL_ERROR);
     client.request_id = frame.header.request_id;
-    client.lease_id = request.value().lease_id;
-    client.nonce = request.value().nonce;
-    if (stream_control == nullptr) {
-        client.mark_attach_completion_seen();
-        const auto queued = client.queue_error(client.request_id, Error::UNSUPPORTED);
+    client.mark_attach_completion_seen();
+    if (!request) {
+        const auto queued = client.queue_error(client.request_id,
+                                               wire_code(request.error()));
         if (!queued) client.request_remove();
         return Result<void>::success();
     }
-
+    if (request.value().epoch != hello.epoch) {
+        const auto queued =
+            client.queue_error(client.request_id, wire::kWireErrorStaleHandle);
+        if (!queued) client.request_remove();
+        return Result<void>::success();
+    }
+    CardClientId owner = 0U;
     std::uint8_t receiver = 0U;
-    std::uint64_t owner_client_id = 0U;
-    bool found = false;
-    for (const auto& control : clients) {
-        if (control->find_lease(client.lease_id, receiver)) {
-            owner_client_id = control->id();
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        client.mark_attach_completion_seen();
-        const auto queued = client.queue_error(client.request_id, Error::NOT_FOUND);
+    if (!find_owner_lease(request.value().lease_id, owner, receiver)) {
+        const auto queued = client.queue_error(client.request_id,
+                                               wire_code(Error::NOT_FOUND));
         if (!queued) client.request_remove();
         return Result<void>::success();
     }
-    client.owner_client_id = owner_client_id;
-    client.receiver = receiver;
+    const auto metadata = tuner_service.tune_metadata(receiver);
+    if (!metadata || !metadata.value().current_valid) {
+        const auto queued = client.queue_error(client.request_id,
+                                               wire_code(Error::NOT_READY));
+        if (!queued) client.request_remove();
+        return Result<void>::success();
+    }
+    const auto reserved = tuner_service.reserve_attach_v1(
+        owner, request.value().lease_id, kEngineStreamEpoch,
+        request.value().stream_id, request.value().attach_token,
+        tuner_service.monotonic_ms());
+    if (!reserved) {
+        const auto queued = client.queue_error(client.request_id,
+                                               wire_code(reserved.error()));
+        if (!queued) client.request_remove();
+        return Result<void>::success();
+    }
+    // The data plane identity is the exact ticket: owner, lease, reservation,
+    // receiver, tune system and the consumed START token.
+    TunerAttachment identity{};
+    identity.owner_client_id = owner;
+    identity.lease_id = request.value().lease_id;
+    identity.attachment_id = reserved.value().reservation;
+    identity.receiver = receiver;
+    identity.system = ipc_system(metadata.value().current.system);
+    identity.nonce = reserved.value().token;
+    identity.evict_oldest = true;
+    client.begin_attach(reserved.value(), identity);
+    client.mark_attach_submitted();
+
     ControlWorkerTask task{};
-    task.type = MessageType::ATTACH_STREAM;
     task.kind = ControlWorkerTaskKind::client_request;
-    task.operation = ControlWorkerOperation::tuner_attach_stream;
-    task.client_id = client.id();
+    task.operation = ControlWorkerOperation::tuner_prepare_attach_v1;
+    task.client_id = owner;
     task.connection_id = client.id();
     task.request_id = client.request_id;
     task.receiver = receiver;
-    task.lease_id = client.lease_id;
-    task.nonce = client.nonce;
+    task.lease_id = request.value().lease_id;
+    task.stream_id = reserved.value().stream_id;
+    task.stream_ticket = reserved.value();
     const auto submitted = workers->submit(lane_for(task), task);
-    if (submitted) {
-        // A failed submission has no completion to classify.  Marking the
-        // request submitted before this point would leave a retired stream
-        // waiting forever for an impossible completion.
-        client.mark_attach_submitted();
-    } else {
-        client.mark_attach_completion_seen();
-        const auto queued = client.queue_error(client.request_id, submitted.error());
+    if (!submitted) {
+        // The reservation belongs to this data connection.  Revoke its
+        // metadata now; the normal removal path runs the exact-ticket cleanup.
+        (void)tuner_service.abort_attach_v1(reserved.value(), submitted.error());
+        const auto queued = client.queue_error(client.request_id,
+                                               wire_code(submitted.error()));
         if (!queued) client.request_remove();
     }
     return Result<void>::success();
+}
+
+PosixControlServer::Impl::StreamClient*
+PosixControlServer::Impl::find_live_stream(std::uint64_t connection_id) noexcept
+{
+    for (std::size_t index = 0U; index < stream_client_count; ++index) {
+        if (stream_clients[index]->id() == connection_id)
+            return stream_clients[index].get();
+    }
+    return nullptr;
+}
+
+bool PosixControlServer::Impl::find_owner_lease(std::uint64_t lease_id,
+                                                CardClientId& owner,
+                                                std::uint8_t& receiver) const noexcept
+{
+    if (lease_id == 0U) return false;
+    for (const auto& client : clients) {
+        for (const LeaseRecord& lease : client->leases()) {
+            if (!lease.active || lease.lease_id != lease_id) continue;
+            owner = client->id();
+            receiver = lease.receiver;
+            return true;
+        }
+    }
+    return false;
 }
 
 void PosixControlServer::Impl::begin_stream_end(
@@ -1852,6 +2234,23 @@ void PosixControlServer::Impl::begin_stream_end(
     client.final_snapshot_valid = true;
     client.data_eof = false;
     client.set_phase(StreamClient::Phase::ending);
+}
+
+void PosixControlServer::Impl::on_attach_ack_sent(StreamClient& client) noexcept
+{
+    if (!client.ticket_valid || !client.prepared) {
+        client.request_remove();
+        return;
+    }
+    const auto committed = tuner_service.commit_attach_v1(client.ticket);
+    if (committed) {
+        client.committed = true;
+        client.set_phase(StreamClient::Phase::active);
+        return;
+    }
+    // STOP/owner teardown linearized before the publication point: never
+    // publish active; finish through the same exact-ticket cleanup.
+    queue_live_stream_cleanup(client);
 }
 
 void PosixControlServer::Impl::notify_stream_detached(
@@ -1895,65 +2294,32 @@ void PosixControlServer::Impl::notify_stream_detached_by_identity(
 void PosixControlServer::Impl::handle_stream_completion(
     const ControlWorkerCompletion& completion) noexcept
 {
-    if (completion.tuner_status_valid) observe_tuner(completion.tuner_status);
-    StreamClient* live = nullptr;
-    for (std::size_t index = 0U; index < stream_client_count; ++index) {
-        if (stream_clients[index]->id() == completion.connection_id) {
-            live = stream_clients[index].get();
-            break;
-        }
-    }
-    if (completion.operation != ControlWorkerOperation::tuner_attach_stream)
+    if (completion.operation != ControlWorkerOperation::tuner_prepare_attach_v1)
         return;
-    if (live != nullptr && live->is_attaching() &&
+    StreamClient* live = find_live_stream(completion.connection_id);
+    if (live != nullptr && live->ticket_valid &&
         live->request_id == completion.request_id) {
         live->mark_attach_completion_seen();
-        if (completion.error == Error::OK && completion.tuner_attachment_valid) {
-            live->attachment = completion.tuner_attachment;
-            live->attachment_valid = true;
-            live->owner_client_id = live->attachment.owner_client_id;
-            live->receiver = live->attachment.receiver;
-            const auto queued = live->queue_empty_response(live->request_id);
-            if (!queued) {
-                live->request_remove();
-                (void)tuner_service.revoke_stream(live->owner_client_id,
-                                                   live->attachment.lease_id);
-            } else {
-                live->set_phase(StreamClient::Phase::active);
-            }
+        if (completion.error == Error::OK) {
+            live->prepared = true;
+            const auto queued = live->queue_attach_response();
+            if (!queued) live->request_remove();
         } else {
-            const auto queued = live->queue_error(
-                live->request_id,
-                completion.error == Error::OK ? Error::INTERNAL : completion.error);
+            const auto queued =
+                live->queue_error(live->request_id, wire_code(completion.error));
             if (!queued) live->request_remove();
         }
         return;
     }
-
     RetiredStream* retired = find_retired_stream(completion.connection_id);
     if (retired == nullptr) {
-        if (completion.error == Error::OK && completion.tuner_attachment_valid)
-            record_error(Error::INTERNAL);
+        if (completion.error == Error::OK) record_error(Error::INTERNAL);
         return;
     }
     retired->waiting_attach = false;
-    if (completion.error == Error::OK && completion.tuner_attachment_valid) {
-        retired->attachment = completion.tuner_attachment;
-        retired->attachment_valid = true;
-        ControlWorkerTask task{};
-        task.kind = ControlWorkerTaskKind::cleanup;
-        task.operation = ControlWorkerOperation::tuner_detach_stream;
-        task.client_id = retired->attachment.owner_client_id;
-        task.connection_id = retired->connection_id;
-        task.receiver = retired->attachment.receiver;
-        task.attachment = retired->attachment;
-        queue_cleanup_task(task, retired->cleanup_queued);
-    } else {
-        retired->active = false;
-#if defined(PX4_CONTROL_SERVER_TEST_ACCESS)
-        report_stream_capacity();
-#endif
-    }
+    // The data connection closed while the physical prepare was in flight.
+    // The exact ticket cleanup is still this server's responsibility.
+    retry_stream_cleanup();
 }
 
 void PosixControlServer::Impl::handle_stream_cleanup_completion(
@@ -2004,29 +2370,33 @@ void PosixControlServer::Impl::retry_stream_cleanup() noexcept
 {
     for (RetiredStream& retired : retired_streams) {
         if (!retired.active || retired.waiting_attach ||
-            retired.cleanup_queued || !retired.attachment_valid)
+            retired.cleanup_queued || !retired.ticket_valid)
             continue;
         ControlWorkerTask task{};
         task.kind = ControlWorkerTaskKind::cleanup;
-        task.operation = ControlWorkerOperation::tuner_detach_stream;
-        task.client_id = retired.attachment.owner_client_id;
+        task.operation = ControlWorkerOperation::tuner_run_stream_cleanup_v1;
+        task.client_id = retired.ticket.client_id;
         task.connection_id = retired.connection_id;
-        task.receiver = retired.attachment.receiver;
-        task.attachment = retired.attachment;
+        task.receiver = retired.receiver;
+        task.lease_id = retired.lease_id;
+        task.stream_id = retired.ticket.stream_id;
+        task.stream_ticket = retired.ticket;
         queue_cleanup_task(task, retired.cleanup_queued);
     }
     for (std::size_t index = 0U; index < stream_client_count; ++index) {
         StreamClient& stream = *stream_clients[index];
         if (!stream.cleanup_pending || stream.cleanup_queued ||
-            !stream.attachment_valid)
+            !stream.ticket_valid)
             continue;
         ControlWorkerTask task{};
         task.kind = ControlWorkerTaskKind::cleanup;
-        task.operation = ControlWorkerOperation::tuner_detach_stream;
-        task.client_id = stream.attachment.owner_client_id;
+        task.operation = ControlWorkerOperation::tuner_run_stream_cleanup_v1;
+        task.client_id = stream.ticket.client_id;
         task.connection_id = stream.id();
-        task.receiver = stream.attachment.receiver;
-        task.attachment = stream.attachment;
+        task.receiver = stream.receiver;
+        task.lease_id = stream.lease_id;
+        task.stream_id = stream.stream_id;
+        task.stream_ticket = stream.ticket;
         queue_cleanup_task(task, stream.cleanup_queued);
     }
 }
@@ -2034,35 +2404,60 @@ void PosixControlServer::Impl::retry_stream_cleanup() noexcept
 void PosixControlServer::Impl::queue_live_stream_cleanup(StreamClient& client) noexcept
 {
     if (client.cleanup_complete || client.cleanup_pending) return;
-    if (client.owner_client_id != 0U && client.lease_id != 0U) {
-        const auto revoked = tuner_service.revoke_stream(
-            client.owner_client_id, client.lease_id, client.nonce);
-        if (!revoked && revoked.error() != Error::NOT_FOUND)
-            record_error(revoked.error());
+    if (client.ticket_valid) {
+        // A metadata entrance issues the single exact-ticket cleanup; the
+        // worker below performs the physical stop/detach.
+        if (!client.committed) {
+            const auto aborted =
+                tuner_service.abort_attach_v1(client.ticket, Error::DISCONNECTED);
+            if (!aborted && aborted.error() != Error::NOT_FOUND)
+                record_error(aborted.error());
+        } else {
+            const auto stopped = tuner_service.stop_stream_v1(
+                client.ticket.client_id, client.lease_id, client.stream_id);
+            if (!stopped && stopped.error() != Error::NOT_FOUND)
+                record_error(stopped.error());
+        }
     }
     client.cleanup_pending = true;
-    if (!client.attachment_valid) {
+    if (!client.ticket_valid) {
         client.cleanup_complete = true;
         return;
     }
     ControlWorkerTask task{};
     task.kind = ControlWorkerTaskKind::cleanup;
-    task.operation = ControlWorkerOperation::tuner_detach_stream;
-    task.client_id = client.attachment.owner_client_id;
+    task.operation = ControlWorkerOperation::tuner_run_stream_cleanup_v1;
+    task.client_id = client.ticket.client_id;
     task.connection_id = client.id();
-    task.receiver = client.attachment.receiver;
-    task.attachment = client.attachment;
+    task.receiver = client.receiver;
+    task.lease_id = client.lease_id;
+    task.stream_id = client.stream_id;
+    task.stream_ticket = client.ticket;
     queue_cleanup_task(task, client.cleanup_queued);
 }
 
 void PosixControlServer::Impl::begin_stream_cleanup(StreamClient& client) noexcept
 {
-    if (client.cleanup_complete || client.cleanup_pending) return;
-    if (client.owner_client_id != 0U && client.lease_id != 0U) {
-        const auto revoked = tuner_service.revoke_stream(
-            client.owner_client_id, client.lease_id, client.nonce);
-        if (!revoked && revoked.error() != Error::NOT_FOUND)
-            record_error(revoked.error());
+    if (client.cleanup_complete) return;
+    if (!client.cleanup_pending && client.ticket_valid) {
+        // A data disconnect is the owner teardown for this exact stream: issue
+        // the one metadata cleanup before the retired record is published.
+        if (!client.committed) {
+            const auto aborted =
+                tuner_service.abort_attach_v1(client.ticket, Error::DISCONNECTED);
+            if (!aborted && aborted.error() != Error::NOT_FOUND)
+                record_error(aborted.error());
+        } else {
+            const auto stopped = tuner_service.stop_stream_v1(
+                client.ticket.client_id, client.lease_id, client.stream_id);
+            if (!stopped && stopped.error() != Error::NOT_FOUND)
+                record_error(stopped.error());
+        }
+    }
+    client.cleanup_pending = true;
+    if (!client.ticket_valid) {
+        client.cleanup_complete = true;
+        return;
     }
     // An attached or in-flight client must not be removed until its retired
     // cleanup record has been reserved.  Admission maintains this invariant;
@@ -2080,19 +2475,21 @@ void PosixControlServer::Impl::begin_stream_cleanup(StreamClient& client) noexce
     retired->owner_client_id = client.owner_client_id;
     retired->lease_id = client.lease_id;
     retired->receiver = client.receiver;
-    retired->waiting_attach = client.attach_was_submitted() &&
-                              !client.attach_completion_seen;
+    retired->ticket = client.ticket;
+    retired->ticket_valid = true;
     retired->attachment_valid = client.attachment_valid;
     retired->attachment = client.attachment;
-    retired->cleanup_complete = !retired->attachment_valid;
-    if (retired->attachment_valid) {
+    retired->cleanup_queued = client.cleanup_queued;
+    if (!retired->cleanup_queued) {
         ControlWorkerTask task{};
         task.kind = ControlWorkerTaskKind::cleanup;
-        task.operation = ControlWorkerOperation::tuner_detach_stream;
-        task.client_id = client.attachment.owner_client_id;
+        task.operation = ControlWorkerOperation::tuner_run_stream_cleanup_v1;
+        task.client_id = client.ticket.client_id;
         task.connection_id = client.id();
-        task.receiver = client.attachment.receiver;
-        task.attachment = client.attachment;
+        task.receiver = client.receiver;
+        task.lease_id = client.lease_id;
+        task.stream_id = client.stream_id;
+        task.stream_ticket = client.ticket;
         queue_cleanup_task(task, retired->cleanup_queued);
     }
 }
@@ -2142,7 +2539,7 @@ void PosixControlServer::Impl::remove_stream_client(std::size_t index) noexcept
             record_error(released.error());
     }
     if (!client.cleanup_complete &&
-        (client.attachment_valid || client.is_attaching()))
+        (client.attachment_valid || client.is_attaching() || client.ticket_valid))
         begin_stream_cleanup(client);
     for (std::size_t current = index; current + 1U < stream_client_count; ++current)
         stream_clients[current] = std::move(stream_clients[current + 1U]);
@@ -2216,7 +2613,9 @@ void PosixControlServer::Impl::process_stream_clients(
             // bounded flush on the following cycle.
             if (client.tx_pending()) {
                 const auto flushed = client.flush(kStreamWriteBudget);
-                if (!flushed) client.request_remove();
+                if (!flushed) {
+                    client.request_remove();
+                }
             }
             if (!client.remove_requested() && client.can_read() &&
                 (events & POLLIN) != 0) {
@@ -2240,8 +2639,10 @@ void PosixControlServer::Impl::process_stream_clients(
                         client.attachment, client.read_buffer(), Timeout{0U});
                     if (read) {
                         if (read.value().bytes != 0U) {
+                            const auto stats = stream_control->stats(client.attachment);
+                            if (stats) client.last_queue_drops = stats.value().queue_drops;
                             const auto queued = client.queue_data(
-                                client.sequence, 0U,
+                                client.sequence, client.last_queue_drops,
                                 ByteView{client.read_buffer().data,
                                          read.value().bytes});
                             if (!queued) {
@@ -2274,10 +2675,22 @@ void PosixControlServer::Impl::process_stream_clients(
             if (!client.remove_requested() && client.phase() == StreamClient::Phase::ending &&
                 client.final_snapshot_valid && client.data_eof && !client.end_queued &&
                 !client.tx_pending()) {
-                const StreamEndEventPayload end{
-                    counters_payload(client.final_snapshot.counters),
-                    stream_end_error(static_cast<TunerStreamTerminal>(
-                        client.final_snapshot.terminal))};
+                wire::StreamFinal end{};
+                end.id = client.stream_id;
+                end.tune_revision =
+                    client.ticket_valid ? client.ticket.revision : 0U;
+                const auto terminal = static_cast<TunerStreamTerminal>(
+                    client.final_snapshot.terminal);
+                end.reason = wire_end_reason(terminal);
+                if (end.reason != wire::StreamEndReason::stopped &&
+                    end.reason != wire::StreamEndReason::shutdown) {
+                    end.error.present = true;
+                    end.error.value = wire::make_error_record(
+                        static_cast<std::uint32_t>(stream_end_error(terminal)), "stream");
+                }
+                end.statistics =
+                    wire_stream_counters(client.final_snapshot.counters,
+                                         context_now_ns());
                 const auto queued = client.queue_end(end);
                 if (!queued) client.request_remove();
                 else client.end_queued = true;
@@ -2287,22 +2700,52 @@ void PosixControlServer::Impl::process_stream_clients(
     }
 }
 
+namespace {
+
+// The context must be a valid canonical LIST whose receivers each map to a
+// distinct receiver of the tuner service; nothing is padded or guessed.
+bool valid_context(const ControlContext& context, const TunerService& tuner_service) noexcept
+{
+    namespace wire = dtv::userland::wire;
+    if (wire::validate_list_response(context.list) != Error::OK) return false;
+    if (context.instance.present &&
+        (context.instance.value.length == 0U ||
+         context.instance.value.length > context.instance.value.bytes.size()))
+        return false;
+    if (!context.list.receivers.present) return true;
+    std::array<bool, kReceiverCount> used{};
+    for (std::size_t index = 0U; index < context.list.receivers.value.count; ++index) {
+        const std::uint8_t receiver = context.receiver_index[index];
+        if (receiver >= tuner_service.receiver_count() || receiver >= used.size() ||
+            used[receiver])
+            return false;
+        used[receiver] = true;
+    }
+    return true;
+}
+
+}  // namespace
+
 Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
     const EndpointConfig& endpoint, CardService& card_service,
-    TunerService& tuner_service, std::string_view base_serial, bool ready,
-    std::uint8_t usb_present_mask, TunerStreamControl* stream_control,
-    std::uint8_t receiver_count, bool dual_system) noexcept
+    TunerService& tuner_service, const ControlContext& context,
+    TunerStreamControl* stream_control) noexcept
 {
-    const auto records = receiver_records(receiver_count, dual_system);
-#if defined(ASICEN_PROFILE_ASICEN)
-    if (base_serial.size() > 0xffffU ||
-#else
-    if (base_serial.empty() || base_serial.size() > 0xffffU ||
-#endif
-        (usb_present_mask & 0xfcU) != 0U || !records) {
+    if (!valid_context(context, tuner_service)) {
         return Result<std::unique_ptr<PosixControlServer>>::failure(
             Error::INVALID_ARGUMENT);
     }
+    std::unique_ptr<ControlContext> owned(new (std::nothrow) ControlContext(context));
+    std::unique_ptr<dtv::userland::wire::ControlRequest> request(
+        new (std::nothrow) dtv::userland::wire::ControlRequest());
+    std::unique_ptr<dtv::userland::wire::ListResponse> list(
+        new (std::nothrow) dtv::userland::wire::ListResponse());
+    std::unique_ptr<dtv::userland::wire::StatusResponse> status(
+        new (std::nothrow) dtv::userland::wire::StatusResponse());
+    if (!owned || !request || !list || !status) {
+        return Result<std::unique_ptr<PosixControlServer>>::failure(Error::INTERNAL);
+    }
+    owned->list.epoch = context.epoch;
     auto listener = SocketListener::listen(endpoint);
     if (!listener) {
         return Result<std::unique_ptr<PosixControlServer>>::failure(listener.error());
@@ -2315,6 +2758,15 @@ Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
         return Result<std::unique_ptr<PosixControlServer>>::failure(
             stream_listener.error());
     }
+    // The v1 stream contract is selected once before any ACQUIRE and before the
+    // worker lanes start.  The engine-local u64 epoch is an internal ticket
+    // tag; the 16-byte wire epoch remains the authority validated by the
+    // control connection, not this value.
+    const auto contract = tuner_service.configure_stream_contract(
+        TunerService::TunerStreamContract::v1, kEngineStreamEpoch);
+    if (!contract) {
+        return Result<std::unique_ptr<PosixControlServer>>::failure(contract.error());
+    }
     auto workers = ControlWorkerLanes::create(card_service, tuner_service,
                                              endpoint.runtime_directory);
     if (!workers) {
@@ -2324,9 +2776,19 @@ Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
     }
     std::unique_ptr<Impl> impl(new (std::nothrow) Impl(
         std::move(listener.value()), std::move(stream_listener.value()), card_service,
-        tuner_service, std::move(workers.value()), stream_control, base_serial, ready,
-        usb_present_mask, records.value(), receiver_count));
+        tuner_service, std::move(workers.value()), stream_control));
     if (!impl) return Result<std::unique_ptr<PosixControlServer>>::failure(Error::INTERNAL);
+    impl->hello.epoch = context.epoch;
+    impl->hello.producer = context.list.producer;
+    // No optional feature is connected in this increment: no STATE_EVENT,
+    // CARD_SERVICE or PID_FILTER is offered.
+    impl->hello.features = 0U;
+    impl->context = std::move(owned);
+    impl->request_scratch = std::move(request);
+    impl->list_scratch = std::move(list);
+    impl->status_scratch = std::move(status);
+    // Origin of the context-relative clock, in the engine clock domain.
+    impl->context_start_ms = tuner_service.monotonic_ms();
     std::unique_ptr<PosixControlServer> server(
         new (std::nothrow) PosixControlServer(std::move(impl)));
     if (!server) return Result<std::unique_ptr<PosixControlServer>>::failure(Error::INTERNAL);
@@ -2367,7 +2829,7 @@ const PathChar* PosixControlServer::stream_endpoint_path() const noexcept
 
 std::size_t PosixControlServer::connection_count() const noexcept
 {
-    return impl_ ? impl_->clients.size() : 0U;
+    return impl_ ? impl_->client_count.load(std::memory_order_acquire) : 0U;
 }
 
 #if defined(PX4_CONTROL_SERVER_TEST_ACCESS)

@@ -32,6 +32,10 @@ struct ControlWorkerStartupOptions final {
     bool fail_wake_pipe = false;
     int fail_lane = -1;
     bool fail_tuner_attach_submit = false;
+    // Deterministic injection of the strict TUNE publication signal failure so
+    // the post-admission abort path is exercised without relying on a real
+    // pthread error.
+    bool fail_tune_signal = false;
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
 };
@@ -49,6 +53,11 @@ enum class ControlWorkerOperation : std::uint8_t {
     tuner_tune,
     tuner_start_stream,
     tuner_stop_stream,
+    tuner_start_stream_v1,
+    tuner_stop_stream_v1,
+    tuner_stop_stream_and_cleanup_v1,
+    tuner_prepare_attach_v1,
+    tuner_run_stream_cleanup_v1,
     tuner_stats,
     tuner_attach_stream,
     tuner_detach_stream,
@@ -78,9 +87,11 @@ enum class ControlWorkerTaskKind : std::uint8_t {
 };
 
 // All task fields own their data. In particular, no task contains a Client,
-// socket, or view into a StreamFramer buffer.
+// socket, or view into a frame receiver buffer.
 struct ControlWorkerTask final {
-    MessageType type = MessageType::STATUS;
+    // Wire opcode of the request this task answers, carried back unchanged in
+    // the completion; the lanes never interpret it.
+    std::uint16_t opcode = 0U;
     ControlWorkerTaskKind kind = ControlWorkerTaskKind::client_request;
     ControlWorkerOperation operation = ControlWorkerOperation::tuner_status;
     std::uint64_t client_id = 0U;
@@ -95,15 +106,35 @@ struct ControlWorkerTask final {
     bool card_generation_bound = false;
     Disposition disposition = Disposition::leave;
     TuneRequestPayload tune{};
+    // R2 strict dispatch.  accepted_at_ms is sampled at request acceptance in
+    // the engine clock domain; admitted_tune is the callback-free admission
+    // result published with the task.
+    std::uint64_t accepted_at_ms = 0U;
+    // v1 START/STOP dispatch values.  now_ms/arm_budget_ms are supplied by the
+    // caller as a finite clock and budget; they are not machine-calibrated
+    // constants.
+    std::uint64_t tune_revision = 0U;
+    std::uint64_t stream_id = 0U;
+    std::uint64_t now_ms = 0U;
+    std::uint64_t arm_budget_ms = 0U;
+    bool tune_admitted = false;
+    dtv::userland::detail::AdmittedTune admitted_tune{};
+    // R3: owned outcome of the pure strict preparation, made after the
+    // acceptance sample and before the lane lock (old-wire or internal Hz
+    // ingress).  An unprepared task uses the R2 kHz admission.
+    bool tune_prepared = false;
+    TunerPreparedTune prepared_tune{};
     std::array<std::uint8_t, kMaxCardPayload> apdu{};
     std::size_t apdu_size = 0U;
     std::array<std::uint8_t, kNonceLength> nonce{};
     TunerAttachment attachment{};
     bool attachment_valid = false;
+    // Exact v1 attachment ticket for prepare and the physical cleanup.
+    dtv::userland::detail::StreamAttachTicket stream_ticket{};
 };
 
 struct ControlWorkerCompletion final {
-    MessageType type = MessageType::STATUS;
+    std::uint16_t opcode = 0U;
     ControlWorkerTaskKind kind = ControlWorkerTaskKind::client_request;
     ControlWorkerOperation operation = ControlWorkerOperation::tuner_status;
     std::uint64_t client_id = 0U;
@@ -117,11 +148,23 @@ struct ControlWorkerCompletion final {
     TunerStatus tuner_status{};
     bool tuner_status_valid = false;
     TuneResponsePayload tune_response{};
+    // Admitted TUNE only: the committed tune metadata of task.receiver, read on
+    // the worker after execution.  tune_record_valid is set only when its
+    // current entry is this ticket's revision.
+    std::uint64_t tune_revision = 0U;
+    dtv::userland::detail::TuneMetadata tune_metadata{};
+    bool tune_record_valid = false;
     TunerStreamCounters stream_counters{};
     TunerStreamFinalSnapshot stream_final_snapshot{};
     bool stream_snapshot_valid = false;
     TunerAttachment tuner_attachment{};
     bool tuner_attachment_valid = false;
+    // v1 typed outcomes for START and armed STOP.
+    dtv::userland::detail::StreamStartResult v1_start{};
+    bool v1_start_valid = false;
+    std::uint32_t v1_expires_after_ms = 0U;
+    dtv::userland::detail::StreamStopResult v1_stop{};
+    bool v1_stop_valid = false;
     CardServiceStatus card_status{};
     CardPresenceChange card_presence{};
     CardServiceConnectResult card_connect{};

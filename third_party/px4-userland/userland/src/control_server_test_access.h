@@ -14,6 +14,18 @@ struct ControlServerTestHooks final {
     void (*stream_count_changed)(void*, std::size_t, std::size_t) noexcept = nullptr;
     void (*stream_partial_frame)(void*, std::uint64_t) noexcept = nullptr;
     void (*stream_write_blocked)(void*, std::uint64_t) noexcept = nullptr;
+    // Control responses: nonzero caps the bytes one flush may send, so a
+    // response stays partially written across poll cycles; the callback
+    // reports each flush that leaves bytes pending.
+    std::size_t control_write_limit = 0U;
+    void (*control_write_partial)(void*, std::uint64_t) noexcept = nullptr;
+    void (*worker_task_submitted)(void*, std::uint8_t, std::uint8_t,
+                                  std::uint64_t, std::uint32_t,
+                                  std::uint8_t) noexcept = nullptr;
+    void (*worker_task_completed)(void*, std::uint8_t, std::uint64_t,
+                                  std::uint32_t, std::uint8_t,
+                                  std::uint32_t) noexcept = nullptr;
+    void (*workers_joined)(void*, std::size_t) noexcept = nullptr;
     void* context = nullptr;
 };
 

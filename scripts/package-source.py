@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
 import tarfile
@@ -105,6 +106,79 @@ def add_git_snapshot(root: Path, ref: str, stage: Path) -> tuple[str, str]:
     return commit, tree
 
 
+def extract_tar(archive: bytes, destination_root: Path) -> None:
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
+        extracted: dict[str, tuple[tarfile.TarInfo, bytes]] = {}
+        for member in stream.getmembers():
+            safe_name(member.name)
+            if member.isdir():
+                continue
+            if member.issym() or member.islnk():
+                fail(f"git archive contains a symlink or hardlink: {member.name}")
+            if not member.isfile():
+                fail(f"unsupported git archive member: {member.name}")
+            handle = stream.extractfile(member)
+            if handle is None:
+                fail(f"cannot read git archive member: {member.name}")
+            extracted[member.name] = (member, handle.read())
+        for name in sorted(extracted):
+            member, data = extracted[name]
+            write_file(destination_root / name, data, member.mode & 0o7777)
+
+
+def read_common_core_revision(product_snapshot: Path) -> str | None:
+    lock_path = product_snapshot / "cmake" / "dtv-userland-core.revision"
+    if not lock_path.is_file():
+        return None
+    revision = lock_path.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision) or revision == "0" * 40:
+        fail("cmake/dtv-userland-core.revision must contain a pinned full 40-hex commit")
+    return revision
+
+
+def resolve_common_core(repository: str, revision: str, explicit_root: Path | None,
+                        work_dir: Path) -> Path:
+    if explicit_root is not None:
+        return explicit_root
+    target = work_dir / "dtv-userland-core"
+    try:
+        subprocess.run(
+            ["git", "clone", "--quiet", "--no-checkout", repository, str(target)],
+            check=True, stderr=subprocess.STDOUT)
+        subprocess.run(
+            ["git", "-C", str(target), "checkout", "--quiet", revision],
+            check=True, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"cannot resolve pinned common core source at {revision}: {error}")
+    return target
+
+
+def add_common_core(product_snapshot: Path, stage: Path, explicit_root: Path | None,
+                    repository: str, work_dir: Path) -> str | None:
+    revision = read_common_core_revision(product_snapshot)
+    if revision is None:
+        return None
+    common_root = resolve_common_core(repository, revision, explicit_root, work_dir)
+    if not (common_root / ".git").exists():
+        fail(f"common core source root is not a git checkout: {common_root}")
+    commit = git_output(common_root, "rev-parse", f"{revision}^{{commit}}")
+    if commit != revision:
+        fail(f"common core revision mismatch: lock {revision} resolved to {commit}")
+    try:
+        archive = subprocess.check_output(
+            ["git", "-C", str(common_root), "archive", "--format=tar", revision]
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"common core git archive failed: {error}")
+    destination = stage / "repository" / "third_party" / "dtv-userland-core"
+    extract_tar(archive, destination)
+    if not (destination / "LICENSE").is_file():
+        fail("common core source archive has no LICENSE")
+    if not (destination / "PROVENANCE.json").is_file():
+        fail("common core source archive has no PROVENANCE.json")
+    return commit
+
+
 def add_libusb(archive: Path, stage: Path) -> None:
     if archive.name != "libusb-1.0.30.tar.bz2" or sha256(archive) != LIBUSB_SHA256:
         fail("source archive requires the exact verified libusb 1.0.30 archive")
@@ -160,6 +234,11 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source-ref", required=True)
     parser.add_argument("--libusb-source-archive", type=Path, required=True)
+    parser.add_argument("--common-core-source-root", type=Path, default=None,
+                        help="Git checkout used to export the pinned dtv-userland-core dependency")
+    parser.add_argument("--common-core-repository",
+                        default="git@github.com:Khronos31/dtv-userland-core.git",
+                        help="repository used to resolve the pinned dtv-userland-core commit")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if not VERSION_RE.fullmatch(args.version):
@@ -177,6 +256,10 @@ def main() -> int:
         stage = Path(temporary) / "stage"
         stage.mkdir()
         commit, tree = add_git_snapshot(root, source_ref, stage)
+        common_commit = add_common_core(
+            stage / "repository", stage,
+            args.common_core_source_root.resolve() if args.common_core_source_root else None,
+            args.common_core_repository, Path(temporary) / "common-src")
         add_libusb(args.libusb_source_archive.resolve(), stage)
         template = stage / "repository" / "packaging" / "REBUILD.md.in"
         if not template.is_file():
@@ -191,19 +274,31 @@ def main() -> int:
             fail(f"missing dependency notice template: {notice_template}")
         notice = notice_template.read_text(encoding="utf-8")
         notice = notice.replace("@VERSION@", args.version).replace("@PLATFORM@", "corresponding-source")
-        notice = notice.replace(
-            "@DEPENDENCY_TEXT@",
+        dependency_text = (
             "dependency.libusb.version=1.0.30\n"
             "dependency.libusb.license=LGPL-2.1-or-later\n"
             "dependency.libusb.linkage=static\n"
+        )
+        if common_commit is not None:
+            dependency_text += (
+                "dependency.dtv-userland-core.license=MIT\n"
+                f"dependency.dtv-userland-core.commit={common_commit}\n"
+            )
+        dependency_text += (
             "corresponding-source-archive=present\n\n"
             "This archive contains the exact repository source snapshot and verified libusb 1.0.30 source "
             "needed to rebuild or relink the Linux, macOS, Android, and Windows Phase 1 binaries. "
             "On each of those targets, asicend statically links libusb 1.0.30. asicen-ts, asicenctl, and the "
             "Linux and macOS PC/SC IFD adapters do not link libusb. The Windows rebuild uses "
             "scripts/build-windows.sh; pass a modified copy with --libusb-source-dir. "
-            "See BUILD-RELINK.md, THIRD_PARTY_NOTICES.md, and third_party/libusb-1.0.30/COPYING.\n",
+            "See BUILD-RELINK.md, THIRD_PARTY_NOTICES.md, and third_party/libusb-1.0.30/COPYING.\n"
         )
+        if common_commit is not None:
+            dependency_text += (
+                "This archive also contains the pinned MIT dtv-userland-core foundation source under "
+                "repository/third_party/dtv-userland-core, including LICENSE and PROVENANCE.json.\n"
+            )
+        notice = notice.replace("@DEPENDENCY_TEXT@", dependency_text)
         write_file(stage / "DEPENDENCY-NOTICE.txt", notice.encode())
         manifest = {
             "schema": 1,
@@ -216,6 +311,9 @@ def main() -> int:
             "forbidden_materials_excluded": [".git", "build outputs", "firmware", "APK/add-on", "vendor drivers"],
             "files": {},
         }
+        if common_commit is not None:
+            manifest["dtv_userland_core_commit"] = common_commit
+            manifest["dtv_userland_core_license"] = "MIT"
         for path in sorted(stage.rglob("*")):
             if path.is_file():
                 manifest["files"][path.relative_to(stage).as_posix()] = {"size": path.stat().st_size, "sha256": sha256(path)}

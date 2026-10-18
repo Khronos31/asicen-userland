@@ -15,6 +15,7 @@
 #include "asicen/card_mailbox_hardware.h"
 #include "asicen/card_operation_guard.h"
 #include "asicen/post_gain_readiness.h"
+#include "asicen/usb_function_observation.h"
 
 #include <atomic>
 #include <array>
@@ -26,6 +27,8 @@
 #include <thread>
 
 namespace asicen {
+
+class AsicenEnclosureFamily;
 
 struct SatelliteProbeSummary {
     SatelliteOperationResult result = SatelliteOperationResult::InvalidArgument;
@@ -90,6 +93,9 @@ public:
     // With no expected profile, resolve it from the primary USB descriptor.
     // An expected profile is still checked against that descriptor on claim.
     const DeviceProfile* device_profile() const noexcept { return profile_; }
+    px4::userland::Result<void> claimed_function_observations(
+        std::array<ClaimedUsbFunctionObservation, 2U>& observations,
+        std::uint8_t& count) const noexcept;
     px4::userland::Result<void> claim();
     px4::userland::Result<void> release() noexcept;
     SatelliteProbeSummary probe_satellite(std::uint32_t rf_khz, bool select_slot, std::size_t slot,
@@ -110,6 +116,16 @@ public:
                                                  std::uint32_t) noexcept override;
     px4::userland::Result<void> tune_satellite(std::uint8_t, std::uint32_t,
                                                std::uint32_t) noexcept override;
+    // R3 native-Hz entrances to the same tune sequences.  W3/legacy report
+    // the selected floor-MHz+143 kHz command center; V2 terrestrial leaves
+    // programmed_hz absent (its NMI may retry +1000 Hz unreported); satellite
+    // reports the exact row IF that was commanded.
+    px4::userland::Result<px4::userland::TunerHzProgramming>
+    tune_terrestrial_hz(std::uint8_t, std::uint64_t, std::uint32_t) noexcept override;
+    px4::userland::Result<px4::userland::TunerHzProgramming>
+    tune_satellite_hz(std::uint8_t, std::uint64_t, std::uint32_t) noexcept override;
+    px4::userland::TunerStrictProfile
+    strict_profile(std::uint8_t, px4::userland::ipc::System) const noexcept override;
     px4::userland::Result<bool> is_locked(std::uint8_t,
                                           px4::userland::ipc::System) noexcept override;
     px4::userland::Result<void> select_satellite_slot(std::uint8_t, std::uint8_t,
@@ -144,6 +160,7 @@ public:
     px4::userland::Result<void> stop() noexcept override;
 
 private:
+    friend class AsicenEnclosureFamily;
     friend struct LibusbW3u3HardwareTestPeer;
 
     friend int run_card_only_server(LibusbW3u3Hardware&, const char*, const char*, bool,
@@ -235,6 +252,11 @@ private:
     bool write_controller05(std::uint8_t) override;
     bool write_link_seed_byte(std::uint8_t, std::uint8_t) override;
 
+    // One terrestrial and one satellite sequence shared by both entrances.
+    px4::userland::Result<void> terrestrial_tune(std::uint8_t, std::uint64_t frequency_hz,
+                                                 std::uint32_t) noexcept;
+    px4::userland::Result<void> satellite_tune(std::uint8_t, bool row_matched,
+                                               std::uint32_t rf_khz, std::uint32_t) noexcept;
     bool run_plan(const FrontendPlan&, unsigned timeout_ms = 3000U,
                   FrontendRunReport* report = nullptr) noexcept;
     bool read_i2c(std::uint8_t slave, std::uint8_t reg, std::uint16_t length,

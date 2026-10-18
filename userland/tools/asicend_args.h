@@ -66,6 +66,7 @@ inline int exit_status(px4::userland::Error error) noexcept
     case Error::CARD_REMOVED:
     case Error::BUFFER_TOO_SMALL: return 9;
     case Error::FIRMWARE_REJECTED: return 10;
+    case Error::RESOURCE_LIMIT: return 4;
     case Error::INTERNAL: return 70;
     }
     return 70;

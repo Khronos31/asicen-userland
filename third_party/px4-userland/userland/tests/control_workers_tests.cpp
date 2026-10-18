@@ -266,7 +266,17 @@ bool test_lane_routing(Fixture& fixture)
     CHECK(!invalid_255 && invalid_255.error() == Error::INVALID_ARGUMENT);
 
 #if defined(ASICEN_PROFILE_ASICEN)
+    receiver.receiver = 4U;
+    const auto invalid_four = workers->submit(ControlWorkerLane::tuner_dev2, receiver);
+    CHECK(!invalid_four && invalid_four.error() == Error::INVALID_ARGUMENT);
+    receiver.receiver = 0U;
+    CHECK(!workers->submit(ControlWorkerLane::tuner_dev2, receiver));
+    receiver.receiver = 1U;
+    CHECK(!workers->submit(ControlWorkerLane::tuner_dev2, receiver));
     receiver.receiver = 2U;
+    CHECK(!workers->submit(ControlWorkerLane::tuner_dev1, receiver));
+    receiver.receiver = 3U;
+    CHECK(!workers->submit(ControlWorkerLane::tuner_dev1, receiver));
 #else
     receiver.receiver = 4U;
 #endif

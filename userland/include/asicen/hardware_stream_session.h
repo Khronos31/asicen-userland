@@ -65,7 +65,9 @@ public:
     // Narrow offline fault-injection seam; product callers use packet counts.
     HardwareStreamService(px4::userland::TunerServiceBackend& frontend, StreamCaptureSource& source,
                           TestQueueCapacityBytes queue_capacity,
-                          NativeThread::Start thread_launcher = nullptr);
+                          NativeThread::Start thread_launcher = nullptr,
+                          void (*read_wait_observer)(void*) noexcept = nullptr,
+                          void* read_wait_observer_context = nullptr);
     ~HardwareStreamService() noexcept override;
     HardwareStreamService(const HardwareStreamService&) = delete;
     HardwareStreamService& operator=(const HardwareStreamService&) = delete;
@@ -80,6 +82,14 @@ public:
                                                  std::uint32_t timeout_ms) noexcept override;
     px4::userland::Result<void> tune_satellite(std::uint8_t receiver, std::uint32_t frequency_khz,
                                                std::uint32_t timeout_ms) noexcept override;
+    px4::userland::Result<px4::userland::TunerHzProgramming>
+    tune_terrestrial_hz(std::uint8_t receiver, std::uint64_t frequency_hz,
+                        std::uint32_t timeout_ms) noexcept override;
+    px4::userland::Result<px4::userland::TunerHzProgramming>
+    tune_satellite_hz(std::uint8_t receiver, std::uint64_t frequency_hz,
+                      std::uint32_t timeout_ms) noexcept override;
+    px4::userland::TunerStrictProfile strict_profile(
+        std::uint8_t receiver, px4::userland::ipc::System system) const noexcept override;
     px4::userland::Result<bool> is_locked(std::uint8_t receiver,
                                           px4::userland::ipc::System system) noexcept override;
     px4::userland::Result<void> select_satellite_slot(std::uint8_t receiver, std::uint8_t slot,
@@ -158,6 +168,8 @@ private:
     px4::userland::TunerStreamTerminal terminal_ = px4::userland::TunerStreamTerminal::none;
     NativeThread worker_;
     NativeThread::Start thread_launcher_;
+    void (*read_wait_observer_)(void*) noexcept = nullptr;
+    void* read_wait_observer_context_ = nullptr;
 };
 
 }  // namespace asicen

@@ -864,6 +864,51 @@ Result<void> SocketStream::write_frame(ByteView frame, Timeout timeout) noexcept
     return Result<void>::success();
 }
 
+Result<void> SocketStream::write_all(ByteView bytes, Timeout timeout) noexcept
+{
+    if (!valid() || (bytes.size != 0U && bytes.data == nullptr)) {
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
+    const Deadline deadline = deadline_after(timeout);
+    std::size_t offset = 0U;
+    const std::size_t maximum = static_cast<std::size_t>(
+        std::numeric_limits<ssize_t>::max());
+    while (offset < bytes.size) {
+        const std::size_t amount = std::min(bytes.size - offset, maximum);
+#if defined(MSG_NOSIGNAL)
+        constexpr int send_flags = MSG_NOSIGNAL;
+#else
+        constexpr int send_flags = 0;
+#endif
+        const ssize_t sent = ::send(fd_, bytes.data + offset, amount, send_flags);
+        if (sent > 0) {
+            offset += static_cast<std::size_t>(sent);
+            if (offset < bytes.size && deadline_expired(deadline)) {
+                return Result<void>::failure(Error::TIMEOUT);
+            }
+            continue;
+        }
+        if (sent == 0) {
+            return Result<void>::failure(Error::DISCONNECTED);
+        }
+        const int error = errno;
+        if (error == EINTR) {
+            if (deadline_expired(deadline)) {
+                return Result<void>::failure(Error::TIMEOUT);
+            }
+            continue;
+        }
+        if (error != EAGAIN && error != EWOULDBLOCK) {
+            return Result<void>::failure(map_errno(error));
+        }
+        const auto ready = wait_fd(fd_, POLLOUT, deadline);
+        if (!ready) {
+            return ready;
+        }
+    }
+    return Result<void>::success();
+}
+
 SocketListener::~SocketListener() noexcept
 {
     close();

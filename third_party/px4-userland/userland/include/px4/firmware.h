@@ -42,7 +42,7 @@ private:
     friend class FirmwareProvider;
     friend class FirmwareTestAccess;
     template <typename T>
-    friend class Result;
+    friend class dtv::userland::Result;
 
     std::vector<std::uint8_t> data_;
 };

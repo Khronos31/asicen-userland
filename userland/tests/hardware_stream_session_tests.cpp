@@ -492,6 +492,39 @@ bool quality_counters_follow_enqueued_packets()
     return true;
 }
 
+bool v1_stream_attachment_evicts_oldest_packet_at_queue_capacity()
+{
+    asicen::MockTunerBackend frontend;
+    FakeSource source;
+    auto first = packet(0U);
+    auto second = packet(1U);
+    auto third = packet(2U);
+    first[20U] = 0xa0U;
+    second[20U] = 0xb1U;
+    third[20U] = 0xc2U;
+    source.chunks = {first, second, third};
+    asicen::HardwareStreamService service(
+        frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{2U * 188U});
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start bounded v1 stream");
+    auto attached = identity(33U);
+    attached.evict_oldest = true;
+    CHECK(service.attach(attached), "attach v1 bounded stream");
+    CHECK(source.wait_emitted(3U), "producer reaches bounded queue capacity");
+    const auto stats = service.stats(attached);
+    CHECK(stats && stats.value().packets == 3U && stats.value().bytes == 3U * 188U &&
+              stats.value().queue_drops == 1U,
+          "bounded v1 queue records the evicted packet while capture continues");
+    const auto expected = flatten_packets({second, third});
+    std::vector<std::uint8_t> output(expected.size());
+    const auto read = service.read(attached, {output.data(), output.size()}, {0U});
+    CHECK(read && read.value().bytes == expected.size() && output == expected,
+          "bounded v1 queue retains the newest packets byte-for-byte");
+    CHECK(service.detach(attached), "detach bounded v1 stream");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop bounded v1 source");
+    CHECK(service.release_final(attached), "release bounded v1 final snapshot");
+    return true;
+}
+
 bool continuity_duplicate_pairs_triples_and_conflicts()
 {
     const auto first = packet(0U);
@@ -1078,6 +1111,9 @@ int main()
         return 1;
     }
     if (!quality_counters_follow_enqueued_packets()) {
+        return 1;
+    }
+    if (!v1_stream_attachment_evicts_oldest_packet_at_queue_capacity()) {
         return 1;
     }
     if (!continuity_duplicate_pairs_triples_and_conflicts() ||

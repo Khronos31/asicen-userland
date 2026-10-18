@@ -65,6 +65,15 @@ V2SourceRoute v2_source_route(const std::uint8_t* customer_info, std::size_t len
 // Official V2 RF-kHz wrapper, including its terrestrial 143 kHz offset.
 // Satellite input remains RF kHz (not IF), as with the original W3U3 API.
 std::uint32_t v2_tune_frequency_hz(V2FrontendTarget target, std::uint32_t rf_khz);
+// R3 continuous-Hz forms; the kHz wrapper above is v2_tune_center_hz at
+// rf_khz * 1000.  Terrestrial uses the accepted literal inclusive Hz windows
+// [165000000, 167143000] -> 167143000, [195143000, 197143000] -> 195143000 and
+// [471143000, 473143000] -> 473143000 on the pre-transform request
+// [90000000, 770000000]; otherwise floor-MHz + 143000 Hz.  The center may
+// exceed 770 MHz (770143000 for 770000000); no post-transform check applies.
+// Satellite input is RF Hz [11628000000, 12828000000]; output is IF Hz.
+std::uint32_t v2_terrestrial_center_hz(std::uint64_t rf_hz);
+std::uint32_t v2_tune_center_hz(V2FrontendTarget target, std::uint64_t rf_hz);
 V2Pll compute_v2_satellite_pll(std::uint32_t intermediate_khz, bool reg21_bit6 = true,
                                bool reg1b_bit0 = false);
 
@@ -97,6 +106,13 @@ V2FrontendResult initialize_v2_frontend(FrontendTransport* transport, V2Frontend
 V2FrontendResult tune_v2_frontend(FrontendTransport* transport, V2FrontendTarget target,
                                   std::uint32_t rf_khz, V2FrontendReport* report = nullptr,
                                   unsigned budget_ms = 3000);
+// R3 Hz entrance sharing the same tune sequence; tune_v2_frontend is this at
+// rf_khz * 1000.  The NMI keeps its own internal quotient and optional retry.
+// The satellite TDA planner is kHz-based, so a satellite RF that is not an
+// integral kHz is rejected rather than rounded.
+V2FrontendResult tune_v2_frontend_hz(FrontendTransport* transport, V2FrontendTarget target,
+                                     std::uint64_t rf_hz, V2FrontendReport* report = nullptr,
+                                     unsigned budget_ms = 3000);
 V2FrontendResult read_v2_frontend_lock(FrontendTransport* transport, V2FrontendTarget target,
                                        bool* locked, V2FrontendReport* report = nullptr,
                                        unsigned budget_ms = 1000);

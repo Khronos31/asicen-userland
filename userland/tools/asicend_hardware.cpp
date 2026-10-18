@@ -610,13 +610,15 @@ int run_asicend_hardware(int argc, char** argv) {
         return 70;
     }
 #endif
-    asicen::LibusbContext owned_context;
-    const int initialized = owned_context.initialize(options.file_descriptor_count != 0U);
+    std::unique_ptr<asicen::LibusbContext> owned_context(new (std::nothrow)
+        asicen::LibusbContext());
+    if (!owned_context) return 70;
+    const int initialized = owned_context->initialize(options.file_descriptor_count != 0U);
     if (initialized != 0) {
         std::fprintf(stderr, "libusb_init: %s\n", libusb_error_name(initialized));
         return exit_status(asicen::map_libusb_error(initialized));
     }
-    libusb_context* context = owned_context.get();
+    libusb_context* context = owned_context->get();
     const auto identity = observed_identity(context, options);
     if (!identity) {
         std::fprintf(stderr, "enclosure identity: %s\n", px4::userland::error_string(identity.error()));
@@ -805,13 +807,30 @@ int run_asicend_hardware(int argc, char** argv) {
                 options.instance.c_str(),
                 options.group, nullptr, &px4::userland::px4d::stop_requested);
         } else {
-            result = asicen::run_live_card_stream_server(
-                *hardware,
-                options.runtime_directory.empty() ? nullptr : options.runtime_directory.c_str(),
-                options.instance.c_str(), options.group, nullptr,
-                &px4::userland::px4d::stop_requested);
+            px4::userland::ipc::posix::EnclosurePublication publication;
+            publication.runtime_directory = options.runtime_directory;
+            publication.instance = options.instance;
+            publication.lease_identity = identity.value();
+            publication.access = options.group
+                ? px4::userland::ipc::posix::EndpointAccess::shared_group
+                : px4::userland::ipc::posix::EndpointAccess::private_user;
+            auto owned_server = asicen::create_live_card_stream_context(
+                std::move(owned_context), std::move(hardware),
+                std::move(enclosure_lease.value()), publication, nullptr);
+            if (!owned_server) {
+                result = exit_status(owned_server.error());
+            } else {
+                auto owner = std::move(owned_server.value());
+                const auto served = asicen::run_live_card_stream_server(
+                    *owner, nullptr, &px4::userland::px4d::stop_requested,
+                    std::chrono::milliseconds{15000});
+                if (served.close_deadline_expired)
+                    px4::userland::px4d::exit_after_close_deadline(70);
+                result = served.exit_status;
+                owner.reset();
+            }
         }
-        if (claimed) {
+        if (claimed && hardware) {
             const auto cleanup = hardware->shutdown();
             if (!cleanup) {
                 std::fprintf(stderr, "shutdown cleanup: %s\n",

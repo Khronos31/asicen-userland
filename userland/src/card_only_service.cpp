@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/card_only_service.h"
+#include "asicen/control_context_builder.h"
 
 #include "asicen/libusb_hardware_backend.h"
 #include "asicen/hardware_stream_session.h"
@@ -12,8 +13,12 @@
 #endif
 
 #include <chrono>
+#include <array>
 #include <cstdio>
+#include <cstring>
+#include <new>
 #include <thread>
+#include <utility>
 
 namespace asicen {
 namespace {
@@ -50,6 +55,8 @@ int exit_status(Error error) noexcept
         return 9;
     case Error::FIRMWARE_REJECTED:
         return 10;
+    case Error::RESOURCE_LIMIT:
+        return 70;
     case Error::INTERNAL:
         return 70;
     }
@@ -60,6 +67,23 @@ using PlatformTunerNonceSource = px4::userland::ipc::windows::WindowsTunerNonceS
 #else
 using PlatformTunerNonceSource = px4::userland::ipc::posix::PosixTunerNonceSource;
 #endif
+
+namespace wire = dtv::userland::wire;
+
+bool build_context_from_claims(const LibusbW3u3Hardware& hardware,
+                               const px4::userland::TunerService& tuner,
+                               const char* instance, const wire::Epoch& epoch,
+                               px4::userland::ipc::posix::ControlContext& out,
+                               bool tuner_enabled = true) noexcept
+{
+    const auto* profile = hardware.device_profile();
+    std::array<ClaimedUsbFunctionObservation, 2U> observations{};
+    std::uint8_t count = 0U;
+    if (profile == nullptr || !hardware.claimed_function_observations(observations, count))
+        return false;
+    return build_asicen_control_context(*profile, observations.data(), count,
+        hardware.receiver_count(), tuner, instance, epoch, out, tuner_enabled);
+}
 
 class CardOnlyTime final : public px4::userland::TunerServiceTime {
 public:
@@ -97,6 +121,11 @@ public:
     {
         return hardware_.requires_terrestrial_lock_settle();
     }
+    px4::userland::TunerStrictProfile strict_profile(
+        std::uint8_t receiver, px4::userland::ipc::System system) const noexcept override
+    {
+        return hardware_.strict_profile(receiver, system);
+    }
     Result<void> open_receiver(std::uint8_t receiver) noexcept override
     {
         return hardware_.open_receiver(receiver);
@@ -110,6 +139,18 @@ public:
                                 std::uint32_t timeout) noexcept override
     {
         return hardware_.tune_satellite(receiver, frequency, timeout);
+    }
+    Result<px4::userland::TunerHzProgramming> tune_terrestrial_hz(
+        std::uint8_t receiver, std::uint64_t frequency,
+        std::uint32_t timeout) noexcept override
+    {
+        return hardware_.tune_terrestrial_hz(receiver, frequency, timeout);
+    }
+    Result<px4::userland::TunerHzProgramming> tune_satellite_hz(
+        std::uint8_t receiver, std::uint64_t frequency,
+        std::uint32_t timeout) noexcept override
+    {
+        return hardware_.tune_satellite_hz(receiver, frequency, timeout);
     }
     Result<bool> is_locked(std::uint8_t receiver,
                            px4::userland::ipc::System system) noexcept override
@@ -155,6 +196,69 @@ private:
 };
 
 }  // namespace
+
+class AsicenEnclosureFamily final : public px4::userland::ipc::posix::EnclosureFamily {
+public:
+    AsicenEnclosureFamily(std::unique_ptr<LibusbContext> context_owner,
+                          std::unique_ptr<LibusbW3u3Hardware> hardware,
+                          const volatile std::sig_atomic_t* stop_requested) noexcept
+        : context_owner_(std::move(context_owner)), hardware_(std::move(hardware)),
+          mailbox_(static_cast<FrontendTransport&>(*hardware_),
+                   hardware_->device_profile()->model_id),
+          card_backend_(mailbox_, *hardware_, stop_requested),
+          raw_session_(mailbox_, mailbox_),
+          card_protocol_(raw_session_, *hardware_, stop_requested),
+          frontend_(*hardware_), stream_(frontend_, *hardware_)
+    {
+    }
+
+    ~AsicenEnclosureFamily() noexcept override { (void)shutdown(); }
+
+    px4::userland::Result<void> prepare_initial_receiver(
+        const volatile std::sig_atomic_t* stop_requested) noexcept
+    {
+        const auto* profile = hardware_->device_profile();
+        const std::uint8_t receiver = profile->combined_isdb_ts ? 0U : 1U;
+        hardware_->diagnostic_stop_flag_ = stop_requested;
+        const auto opened = hardware_->open_receiver(receiver);
+        hardware_->diagnostic_stop_flag_ = nullptr;
+        if (!opened) return opened;
+        return hardware_->close_receiver(receiver);
+    }
+
+    px4::userland::Result<void> shutdown() noexcept override
+    {
+        if (shutdown_attempted_) return shutdown_result_;
+        shutdown_attempted_ = true;
+        shutdown_result_ = hardware_->shutdown();
+        const auto released = hardware_->release();
+        if (shutdown_result_ && !released) shutdown_result_ = released;
+        return shutdown_result_;
+    }
+
+    LibusbW3u3Hardware& hardware() noexcept { return *hardware_; }
+    px4::userland::TunerServiceBackend& tuner_backend() noexcept override { return stream_; }
+    px4::userland::CardServiceBackend& card_backend() noexcept override { return card_backend_; }
+    px4::userland::CardProtocolSession& card_protocol() noexcept override
+    {
+        return card_protocol_;
+    }
+    px4::userland::TunerServiceTime& time() noexcept override { return time_; }
+    px4::userland::TunerStreamControl* stream_control() noexcept override { return &stream_; }
+
+private:
+    std::unique_ptr<LibusbContext> context_owner_;
+    std::unique_ptr<LibusbW3u3Hardware> hardware_;
+    W3u3CardMailboxHardware mailbox_;
+    W3u3CardServiceBackend card_backend_;
+    px4::userland::CardSession raw_session_;
+    W3u3CardProtocolSession card_protocol_;
+    DeferredHardwareShutdown frontend_;
+    HardwareStreamService stream_;
+    CardOnlyTime time_;
+    bool shutdown_attempted_ = false;
+    px4::userland::Result<void> shutdown_result_ = px4::userland::Result<void>::success();
+};
 
 Result<void> W3u3CardServiceBackend::set_power(bool on) noexcept
 {
@@ -319,9 +423,20 @@ int run_card_only_server(LibusbW3u3Hardware& hardware, const char* runtime_direc
         instance, px4::userland::ipc::posix::kControlEndpointName,
         group ? px4::userland::ipc::posix::EndpointAccess::shared_group
               : px4::userland::ipc::posix::EndpointAccess::private_user};
+    const auto epoch = nonce.generate();
+    if (!epoch) {
+        (void)card.shutdown();
+        return exit_status(epoch.error());
+    }
+    px4::userland::ipc::posix::ControlContext context;
+    if (!build_context_from_claims(hardware, tuner,
+                                      endpoint.instance != nullptr ? endpoint.instance : "",
+                                      epoch.value(), context, false)) {
+        (void)card.shutdown();
+        return 3;
+    }
     auto created = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
-        nullptr, hardware.receiver_count(), device_profile->combined_isdb_ts);
+        endpoint, card, tuner, context);
     if (!created) {
         (void)card.shutdown();
         return exit_status(created.error());
@@ -393,14 +508,37 @@ int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtim
     PlatformTunerNonceSource nonce;
     CardOnlyTime time;
     px4::userland::TunerService tuner(stream, nonce, time, nullptr, nullptr, &stream);
+    // The real receiver daemon opts into R2 strict admission once, before its
+    // workers start, from the audited profile/model capability metadata.
+    const auto strict_capabilities = tuner.configure_strict_capabilities();
+    if (!strict_capabilities) {
+        std::fprintf(stderr, "strict capabilities: %s\n",
+                     px4::userland::error_string(strict_capabilities.error()));
+        (void)card.shutdown();
+        (void)stream.shutdown();
+        return exit_status(strict_capabilities.error());
+    }
     const px4::userland::ipc::posix::EndpointConfig endpoint{
         runtime_directory != nullptr && runtime_directory[0] != '\0' ? runtime_directory : nullptr,
         instance, px4::userland::ipc::posix::kControlEndpointName,
         group ? px4::userland::ipc::posix::EndpointAccess::shared_group
               : px4::userland::ipc::posix::EndpointAccess::private_user};
+    const auto epoch = nonce.generate();
+    if (!epoch) {
+        (void)card.shutdown();
+        (void)stream.shutdown();
+        return exit_status(epoch.error());
+    }
+    px4::userland::ipc::posix::ControlContext context;
+    if (!build_context_from_claims(hardware, tuner,
+                                      endpoint.instance != nullptr ? endpoint.instance : "",
+                                      epoch.value(), context)) {
+        (void)card.shutdown();
+        (void)stream.shutdown();
+        return 3;
+    }
     auto created = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
-        &stream, hardware.receiver_count(), device_profile->combined_isdb_ts);
+        endpoint, card, tuner, context, &stream);
     if (!created) {
         (void)card.shutdown();
         (void)stream.shutdown();
@@ -439,6 +577,99 @@ int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtim
         loop_error = card_stopped.error();
     }
     return exit_status(loop_error);
+}
+
+Result<std::unique_ptr<px4::userland::ipc::posix::EnclosureContext>>
+create_live_card_stream_context(
+    std::unique_ptr<LibusbContext> context_owner,
+    std::unique_ptr<LibusbW3u3Hardware> hardware,
+    px4::userland::ipc::posix::SerialEndpointLease lease,
+    const px4::userland::ipc::posix::EnclosurePublication& publication,
+    const volatile std::sig_atomic_t* stop_requested) noexcept
+{
+    using Owner = px4::userland::ipc::posix::EnclosureContext;
+    using Family = px4::userland::ipc::posix::EnclosureFamily;
+    if (!hardware)
+        return Result<std::unique_ptr<Owner>>::failure(Error::INVALID_ARGUMENT);
+    if (!context_owner || !lease.valid() || hardware->device_profile() == nullptr) {
+        (void)hardware->shutdown();
+        (void)hardware->release();
+        return Result<std::unique_ptr<Owner>>::failure(Error::INVALID_ARGUMENT);
+    }
+
+    const auto* device_profile = hardware->device_profile();
+    if (!profile_runtime_supported(*device_profile)) {
+        (void)hardware->shutdown();
+        (void)hardware->release();
+        return Result<std::unique_ptr<Owner>>::failure(Error::UNSUPPORTED);
+    }
+    std::unique_ptr<AsicenEnclosureFamily> asicen_family(new (std::nothrow)
+        AsicenEnclosureFamily(std::move(context_owner), std::move(hardware), stop_requested));
+    if (!asicen_family) {
+        if (hardware) {
+            (void)hardware->shutdown();
+            (void)hardware->release();
+        }
+        return Result<std::unique_ptr<Owner>>::failure(Error::INTERNAL);
+    }
+    AsicenEnclosureFamily* family_view = asicen_family.get();
+    const auto prepared = family_view->prepare_initial_receiver(stop_requested);
+    if (!prepared) return Result<std::unique_ptr<Owner>>::failure(prepared.error());
+
+    std::unique_ptr<Family> family(std::move(asicen_family));
+    std::unique_ptr<PlatformTunerNonceSource> nonce(new (std::nothrow)
+        PlatformTunerNonceSource());
+    if (!nonce) return Result<std::unique_ptr<Owner>>::failure(Error::INTERNAL);
+    const auto epoch = nonce->generate();
+    if (!epoch) return Result<std::unique_ptr<Owner>>::failure(epoch.error());
+
+    auto assembled = Owner::assemble(std::move(family), std::move(nonce));
+    if (!assembled) return Result<std::unique_ptr<Owner>>::failure(assembled.error());
+    std::unique_ptr<Owner> owner = std::move(assembled.value());
+    const auto adopted = owner->adopt_namespace(publication, std::move(lease));
+    if (!adopted) return Result<std::unique_ptr<Owner>>::failure(adopted.error());
+
+    px4::userland::ipc::posix::ControlContext control_context;
+    if (!build_context_from_claims(
+            family_view->hardware(), owner->tuner_service(),
+            publication.instance.c_str(), epoch.value(), control_context)) {
+        return Result<std::unique_ptr<Owner>>::failure(Error::INTERNAL);
+    }
+    const auto published = owner->publish(control_context);
+    if (!published) return Result<std::unique_ptr<Owner>>::failure(published.error());
+    std::fprintf(stderr,
+                 "asicend ready backend=asicen-libusb-live-card-stream model=%s "
+#if defined(_WIN32)
+                 "receivers=%u endpoint=%ls\n",
+#else
+                 "receivers=%u endpoint=%s\n",
+#endif
+                 device_profile->model_key,
+                 static_cast<unsigned>(family_view->hardware().receiver_count()),
+                 owner->endpoint_path());
+    return Result<std::unique_ptr<Owner>>::success(std::move(owner));
+}
+
+OwnedLiveCardStreamResult run_live_card_stream_server(
+    px4::userland::ipc::posix::EnclosureContext& context,
+    const volatile std::sig_atomic_t* stop_requested,
+    bool (*stop_callback)() noexcept,
+    std::chrono::milliseconds close_budget) noexcept
+{
+    Error loop_error = Error::OK;
+    while ((stop_requested == nullptr || *stop_requested == 0) &&
+           (stop_callback == nullptr || !stop_callback())) {
+        const auto polled = context.poll_once(px4::userland::Timeout{100U});
+        if (!polled) {
+            std::fprintf(stderr, "asicend poll: %s\n", px4::userland::error_string(polled.error()));
+            loop_error = polled.error();
+            break;
+        }
+    }
+    const auto closed = context.close(close_budget);
+    if (!closed.quiesced) return OwnedLiveCardStreamResult{70, closed.deadline_expired};
+    if (loop_error == Error::OK && closed.error != Error::OK) loop_error = closed.error;
+    return OwnedLiveCardStreamResult{exit_status(loop_error), false};
 }
 
 }  // namespace asicen

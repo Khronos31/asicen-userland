@@ -8,12 +8,323 @@
 namespace px4::userland {
 namespace {
 
+namespace engine = dtv::userland::detail;
+
 // px4_drv/driver/ptx_chrdev.c:356-359, enabled by
 // px4_drv/driver/px4_device.c:1258 (PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T).
 // The terrestrial lock path settles for 340 ms from check_lock start.
 constexpr std::uint32_t kWaitAfterLockTcTMs = 340U;
 
+static_assert(ipc::kNonceLength == engine::kReceiverTokenLength,
+              "the attach nonce is carried as the engine token");
+static_assert(ipc::kReceiverCount <= engine::kReceiverEngineCapacity,
+              "every legacy receiver needs an engine slot");
+
+// ISDB_T and ISDB_S map to the engine systems.  Any other value (the
+// capability-only ISDB_T_OR_S or an unknown wire value) keeps its number, so
+// backend queries and identity comparisons see exactly the legacy input; the
+// engine rejects it through request validation before acting on it.
+engine::ReceiverSystem to_engine(ipc::System system) noexcept
+{
+    switch (system) {
+    case ipc::System::ISDB_T:
+        return engine::ReceiverSystem::terrestrial;
+    case ipc::System::ISDB_S:
+        return engine::ReceiverSystem::satellite;
+    default:
+        return static_cast<engine::ReceiverSystem>(static_cast<std::uint8_t>(system));
+    }
+}
+
+ipc::System to_legacy(engine::ReceiverSystem system) noexcept
+{
+    switch (system) {
+    case engine::ReceiverSystem::terrestrial:
+        return ipc::System::ISDB_T;
+    case engine::ReceiverSystem::satellite:
+        return ipc::System::ISDB_S;
+    default:
+        return static_cast<ipc::System>(static_cast<std::uint8_t>(system));
+    }
+}
+
+ipc::ReceiverState to_legacy(engine::ReceiverState state) noexcept
+{
+    switch (state) {
+    case engine::ReceiverState::free:
+        return ipc::ReceiverState::free;
+    case engine::ReceiverState::leased:
+        return ipc::ReceiverState::leased;
+    case engine::ReceiverState::tuned:
+        return ipc::ReceiverState::tuned;
+    case engine::ReceiverState::streaming:
+        return ipc::ReceiverState::streaming;
+    case engine::ReceiverState::error:
+        break;
+    }
+    return ipc::ReceiverState::error;
+}
+
+// Legacy receiver numbers are the engine IDs 0..7, so the narrowing is exact.
+std::uint8_t to_legacy(engine::ReceiverId receiver) noexcept
+{
+    return static_cast<std::uint8_t>(receiver);
+}
+
+TunerAttachment to_legacy(const engine::Attachment& attachment) noexcept
+{
+    return TunerAttachment{attachment.owner_client_id, attachment.lease_id,
+                           attachment.attachment_id, to_legacy(attachment.receiver),
+                           to_legacy(attachment.system), attachment.token,
+                           attachment.evict_oldest};
+}
+
+engine::Attachment to_engine(const TunerAttachment& attachment) noexcept
+{
+    return engine::Attachment{attachment.owner_client_id, attachment.lease_id,
+                              attachment.attachment_id, attachment.receiver,
+                              to_engine(attachment.system), attachment.nonce,
+                              attachment.evict_oldest};
+}
+
+TunerStreamCounters to_legacy(const engine::StreamCounters& counters) noexcept
+{
+    return TunerStreamCounters{counters.packets, counters.bytes, counters.sync_errors,
+                               counters.tei_packets, counters.continuity_errors,
+                               counters.queue_drops, counters.usb_errors,
+                               counters.empty_intervals};
+}
+
+engine::StreamCounters to_engine(const TunerStreamCounters& counters) noexcept
+{
+    return engine::StreamCounters{counters.packets, counters.bytes, counters.sync_errors,
+                                  counters.tei_packets, counters.continuity_errors,
+                                  counters.queue_drops, counters.usb_errors,
+                                  counters.empty_intervals};
+}
+
+std::array<engine::ReceiverId, ipc::kReceiverCount> legacy_receiver_ids() noexcept
+{
+    std::array<engine::ReceiverId, ipc::kReceiverCount> receivers{};
+    for (std::size_t receiver = 0U; receiver < receivers.size(); ++receiver)
+        receivers[receiver] = static_cast<engine::ReceiverId>(receiver);
+    return receivers;
+}
+
+// A native profile must describe a nonempty bounded domain and well-formed
+// rows; anything else is a configuration error, not a support claim.
+bool valid_strict_profile(const TunerStrictProfile& profile) noexcept
+{
+    if (!profile.native_hz) return true;
+    if (profile.min_hz == 0U || profile.min_hz > profile.max_hz ||
+        profile.max_hz > engine::kMaxRequestedHz || profile.row_sets > profile.rows.size() ||
+        (profile.lnb_voltage_mask & static_cast<std::uint8_t>(~0x03U)) != 0U)
+        return false;
+    for (std::size_t index = 0U; index < profile.row_sets; ++index) {
+        const TunerFrequencyRows& rows = profile.rows[index];
+        if (rows.count == 0U || (rows.count > 1U && rows.step_hz == 0U)) return false;
+    }
+    return true;
+}
+
+// Exact frequency membership in the owned profile facts: inclusive range,
+// then exact row membership when rows are declared (no tolerance/rounding).
+bool profile_admits_frequency(const TunerStrictProfile& profile, std::uint64_t hz) noexcept
+{
+    if (hz < profile.min_hz || hz > profile.max_hz) return false;
+    if (profile.row_sets == 0U) return true;
+    for (std::size_t index = 0U; index < profile.row_sets; ++index) {
+        const TunerFrequencyRows& rows = profile.rows[index];
+        if (hz < rows.first_hz) continue;
+        const std::uint64_t delta = hz - rows.first_hz;
+        if (rows.step_hz == 0U) {
+            if (delta == 0U) return true;
+            continue;
+        }
+        if (delta % rows.step_hz == 0U && delta / rows.step_hz < rows.count) return true;
+    }
+    return false;
+}
+
+// Satellite selection limits of the profile: slot 0..slot_count-1 or TSID
+// 1..65534 (0xffff marks the unused field).
+bool profile_admits_selection(const TunerStrictProfile& profile, std::uint16_t stream_id,
+                              std::uint16_t slot) noexcept
+{
+    if (slot != 0xffffU) return slot < profile.slot_count;
+    return stream_id != 0U && stream_id != 0xffffU;
+}
+
 }  // namespace
+
+bool TunerService::BackendAdapter::supports(engine::ReceiverId receiver,
+                                            engine::ReceiverSystem system) const noexcept
+{
+    return backend_.receiver_supports(to_legacy(receiver), to_legacy(system));
+}
+
+bool TunerService::BackendAdapter::selects_satellite_stream_before_tune() const noexcept
+{
+    return backend_.selects_satellite_stream_before_tune();
+}
+
+std::uint32_t TunerService::BackendAdapter::lock_settle_ms(
+    engine::ReceiverId receiver, engine::ReceiverSystem system) const noexcept
+{
+    (void)receiver;
+    // The post-lock settle is a px4_drv device policy for the terrestrial
+    // path only; backends opt in explicitly.
+    return system == engine::ReceiverSystem::terrestrial &&
+                   backend_.requires_terrestrial_lock_settle()
+        ? kWaitAfterLockTcTMs
+        : 0U;
+}
+
+Result<void> TunerService::BackendAdapter::open(engine::ReceiverId receiver) noexcept
+{
+    return backend_.open_receiver(to_legacy(receiver));
+}
+
+Result<void> TunerService::BackendAdapter::tune(engine::ReceiverId receiver,
+                                                engine::ReceiverSystem system,
+                                                std::uint32_t frequency_khz,
+                                                std::uint32_t timeout_ms) noexcept
+{
+    return system == engine::ReceiverSystem::terrestrial
+        ? backend_.tune_terrestrial(to_legacy(receiver), frequency_khz, timeout_ms)
+        : backend_.tune_satellite(to_legacy(receiver), frequency_khz, timeout_ms);
+}
+
+Result<engine::TuneProgramming> TunerService::BackendAdapter::program_hz(
+    engine::ReceiverId receiver, engine::ReceiverSystem system, std::uint64_t requested_hz,
+    std::uint32_t timeout_ms) noexcept
+{
+    // Exact Hz forwarding; no unit conversion happens in this adapter.
+    return system == engine::ReceiverSystem::terrestrial
+        ? backend_.tune_terrestrial_hz(to_legacy(receiver), requested_hz, timeout_ms)
+        : backend_.tune_satellite_hz(to_legacy(receiver), requested_hz, timeout_ms);
+}
+
+Result<bool> TunerService::BackendAdapter::is_locked(
+    engine::ReceiverId receiver, engine::ReceiverSystem system) noexcept
+{
+    return backend_.is_locked(to_legacy(receiver), to_legacy(system));
+}
+
+Result<void> TunerService::BackendAdapter::select_satellite_slot(
+    engine::ReceiverId receiver, std::uint8_t slot, std::uint32_t timeout_ms) noexcept
+{
+    return backend_.select_satellite_slot(to_legacy(receiver), slot, timeout_ms);
+}
+
+Result<void> TunerService::BackendAdapter::select_satellite_tsid(
+    engine::ReceiverId receiver, std::uint16_t tsid, std::uint32_t timeout_ms) noexcept
+{
+    return backend_.select_satellite_tsid(to_legacy(receiver), tsid, timeout_ms);
+}
+
+Result<void> TunerService::BackendAdapter::close(engine::ReceiverId receiver) noexcept
+{
+    return backend_.close_receiver(to_legacy(receiver));
+}
+
+Result<void> TunerService::BackendAdapter::begin_tune_power(
+    engine::ReceiverId receiver, engine::ReceiverSystem system,
+    std::uint8_t lnb_voltage) noexcept
+{
+    return backend_.begin_tune_power(to_legacy(receiver), to_legacy(system), lnb_voltage);
+}
+
+Result<void> TunerService::BackendAdapter::commit_tune_power(
+    engine::ReceiverId receiver) noexcept
+{
+    return backend_.commit_tune_power(to_legacy(receiver));
+}
+
+Result<void> TunerService::BackendAdapter::rollback_tune_power(
+    engine::ReceiverId receiver) noexcept
+{
+    return backend_.rollback_tune_power(to_legacy(receiver));
+}
+
+void TunerService::BackendAdapter::mark_disconnected(engine::ReceiverId receiver) noexcept
+{
+    backend_.mark_receiver_disconnected(to_legacy(receiver));
+}
+
+Result<void> TunerService::BackendAdapter::shutdown() noexcept
+{
+    return backend_.shutdown();
+}
+
+Result<void> TunerService::BackendAdapter::start_capture(
+    engine::ReceiverId receiver, engine::ReceiverSystem system) noexcept
+{
+    return backend_.start_capture(to_legacy(receiver), to_legacy(system));
+}
+
+Result<void> TunerService::BackendAdapter::stop_capture(
+    engine::ReceiverId receiver, engine::ReceiverSystem system) noexcept
+{
+    return backend_.stop_capture(to_legacy(receiver), to_legacy(system));
+}
+
+Result<engine::ReceiverToken> TunerService::NonceAdapter::generate() noexcept
+{
+    const auto nonce = source_.generate();
+    if (!nonce) return Result<engine::ReceiverToken>::failure(nonce.error());
+    return Result<engine::ReceiverToken>::success(nonce.value());
+}
+
+Result<std::uint64_t> TunerService::LeaseIdAdapter::next() noexcept
+{
+    return source_->next();
+}
+
+Result<std::uint64_t> TunerService::AttachmentIdAdapter::next() noexcept
+{
+    return source_->next();
+}
+
+std::uint64_t TunerService::TimeAdapter::monotonic_ms() noexcept
+{
+    return time_.monotonic_ms();
+}
+
+void TunerService::TimeAdapter::sleep_ms(std::uint32_t milliseconds) noexcept
+{
+    time_.sleep_ms(milliseconds);
+}
+
+Result<void> TunerService::StreamAdapter::attach(
+    const engine::Attachment& attachment) noexcept
+{
+    return stream_->attach(to_legacy(attachment));
+}
+
+Result<void> TunerService::StreamAdapter::detach(
+    const engine::Attachment& attachment) noexcept
+{
+    return stream_->detach(to_legacy(attachment));
+}
+
+Result<engine::StreamCounters> TunerService::StreamAdapter::stats(
+    const engine::Attachment& attachment) const noexcept
+{
+    const auto counters = stream_->stats(to_legacy(attachment));
+    if (!counters) return Result<engine::StreamCounters>::failure(counters.error());
+    return Result<engine::StreamCounters>::success(to_engine(counters.value()));
+}
+
+Result<engine::StreamFinalSnapshot> TunerService::StreamAdapter::final_snapshot(
+    const engine::Attachment& attachment) const noexcept
+{
+    const auto snapshot = stream_->final_snapshot(to_legacy(attachment));
+    if (!snapshot)
+        return Result<engine::StreamFinalSnapshot>::failure(snapshot.error());
+    return Result<engine::StreamFinalSnapshot>::success(engine::StreamFinalSnapshot{
+        to_engine(snapshot.value().counters), snapshot.value().terminal});
+}
 
 TunerService::TunerService(TunerServiceBackend& backend,
                            TunerNonceSource& nonce_source,
@@ -22,38 +333,27 @@ TunerService::TunerService(TunerServiceBackend& backend,
                            TunerAttachmentIdSource* attachment_id_source,
                            TunerStreamControl* stream_control) noexcept
     : backend_(backend), nonce_source_(nonce_source), time_(time),
-      lease_id_source_(lease_id_source),
-      attachment_id_source_(attachment_id_source), stream_control_(stream_control)
+      lease_id_source_(lease_id_source), attachment_id_source_(attachment_id_source),
+      stream_control_(stream_control), receiver_count_(legacy_receiver_count(backend)),
+      receiver_ids_(legacy_receiver_ids()),
+      engine_(backend_, receiver_ids_.data(), receiver_count_, nonce_source_, time_,
+              lease_id_source != nullptr ? &lease_id_source_ : nullptr,
+              attachment_id_source != nullptr ? &attachment_id_source_ : nullptr,
+              stream_control != nullptr ? &stream_control_ : nullptr)
 {
-    states_.fill(ipc::ReceiverState::free);
-    for (std::size_t receiver = backend_.receiver_count(); receiver < states_.size();
-         ++receiver)
-        states_[receiver] = ipc::ReceiverState::absent;
 }
 
 TunerService::~TunerService() noexcept
 {
-    (void)shutdown();
+    // engine_ is destroyed first and shuts the receivers down exactly once.
 }
 
-bool TunerService::valid_client(std::uint64_t client_id) noexcept
+std::uint8_t TunerService::legacy_receiver_count(
+    const TunerServiceBackend& backend) noexcept
 {
-    return client_id != 0U;
-}
-
-bool TunerService::valid_receiver(std::uint8_t receiver) const noexcept
-{
-    return receiver < ipc::kReceiverCount && receiver < backend_.receiver_count();
-}
-
-ipc::System TunerService::initial_system(std::uint8_t receiver) const noexcept
-{
-    // A dual-system receiver cannot stream before its first tune, which
-    // replaces this value with the tuned system.
-    return backend_.receiver_supports(receiver, ipc::System::ISDB_S) &&
-                   !backend_.receiver_supports(receiver, ipc::System::ISDB_T)
-        ? ipc::System::ISDB_S
-        : ipc::System::ISDB_T;
+    // Receivers beyond the backend count report `absent` in STATUS.
+    return static_cast<std::uint8_t>(std::min<std::size_t>(
+        backend.receiver_count(), ipc::kReceiverCount));
 }
 
 bool TunerService::valid_tune(const ipc::TuneRequestPayload& request) noexcept
@@ -77,429 +377,41 @@ bool TunerService::valid_tune(const ipc::TuneRequestPayload& request) noexcept
     return has_stream_id != has_slot && (!has_slot || request.slot < 12U);
 }
 
-int TunerService::find_lease_locked(std::uint64_t client_id,
-                                    std::uint64_t lease_id) const noexcept
-{
-    if (!valid_client(client_id) || lease_id == 0U) return -1;
-    for (std::size_t index = 0U; index < leases_.size(); ++index) {
-        const Lease& lease = leases_[index];
-        if (lease.active && lease.client_id == client_id &&
-            lease.lease_id == lease_id)
-            return static_cast<int>(index);
-    }
-    return -1;
-}
-
-bool TunerService::lease_id_in_use_locked(std::uint64_t lease_id) const noexcept
-{
-    if (lease_id == 0U) return true;
-    for (const Lease& lease : leases_) {
-        if (lease.active && lease.lease_id == lease_id) return true;
-    }
-    for (const std::uint64_t reserved : reserved_lease_ids_) {
-        if (reserved == lease_id) return true;
-    }
-    return false;
-}
-
-bool TunerService::attachment_id_in_use_locked(
-    std::uint64_t attachment_id) const noexcept
-{
-    if (attachment_id == 0U) return true;
-    for (const Lease& lease : leases_) {
-        if (lease.active && lease.attachment_id == attachment_id) return true;
-    }
-    for (const std::uint64_t reserved : reserved_attachment_ids_) {
-        if (reserved == attachment_id) return true;
-    }
-    return false;
-}
-
-Result<std::uint64_t> TunerService::allocate_lease_id_locked(
-    std::uint8_t receiver) noexcept
-{
-    constexpr std::size_t kMaxAttempts = ipc::kReceiverCount + 8U;
-    for (std::size_t attempt = 0U; attempt < kMaxAttempts; ++attempt) {
-        std::uint64_t candidate = 0U;
-        if (lease_id_source_ != nullptr) {
-            const auto next = lease_id_source_->next();
-            if (!next) return Result<std::uint64_t>::failure(next.error());
-            candidate = next.value();
-        } else {
-            candidate = next_lease_id_;
-            next_lease_id_ = candidate == std::numeric_limits<std::uint64_t>::max()
-                ? 1U
-                : candidate + 1U;
-        }
-        if (candidate == 0U) {
-            return Result<std::uint64_t>::failure(Error::INVALID_ARGUMENT);
-        }
-        if (!lease_id_in_use_locked(candidate)) {
-            reserved_lease_ids_[receiver] = candidate;
-            return Result<std::uint64_t>::success(candidate);
-        }
-    }
-    return Result<std::uint64_t>::failure(Error::BUSY);
-}
-
-Result<std::uint64_t> TunerService::allocate_attachment_id_locked(
-    std::uint8_t receiver) noexcept
-{
-    constexpr std::size_t kMaxAttempts = ipc::kReceiverCount + 8U;
-    for (std::size_t attempt = 0U; attempt < kMaxAttempts; ++attempt) {
-        std::uint64_t candidate = 0U;
-        if (attachment_id_source_ != nullptr) {
-            const auto next = attachment_id_source_->next();
-            if (!next) return Result<std::uint64_t>::failure(next.error());
-            candidate = next.value();
-        } else {
-            candidate = next_attachment_id_;
-            next_attachment_id_ = candidate == std::numeric_limits<std::uint64_t>::max()
-                ? 0U
-                : candidate + 1U;
-        }
-        if (candidate == 0U) {
-            return Result<std::uint64_t>::failure(Error::BUSY);
-        }
-        // Attachment identities are never reused during this service
-        // lifetime.  This remains true even when a deterministic test source
-        // offers a stale numeric value after the old stream detached.
-        if (candidate > last_attachment_id_ &&
-            !attachment_id_in_use_locked(candidate)) {
-            reserved_attachment_ids_[receiver] = candidate;
-            last_attachment_id_ = candidate;
-            return Result<std::uint64_t>::success(candidate);
-        }
-    }
-    return Result<std::uint64_t>::failure(Error::BUSY);
-}
-
-void TunerService::set_state_locked(std::uint8_t receiver,
-                                    ipc::ReceiverState state) noexcept
-{
-    if (states_[receiver] != state) {
-        states_[receiver] = state;
-        ++generation_;
-    }
-}
-
 Result<TunerAcquireResult> TunerService::acquire(std::uint64_t client_id,
                                                  std::uint8_t receiver) noexcept
 {
-    if (!valid_client(client_id) || !valid_receiver(receiver))
+    // The backend count is read on each ACQUIRE, as before the extraction.
+    if (client_id == 0U || receiver >= ipc::kReceiverCount ||
+        receiver >= backend_.legacy().receiver_count())
         return Result<TunerAcquireResult>::failure(Error::INVALID_ARGUMENT);
-    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[receiver]);
-    std::array<std::uint8_t, ipc::kNonceLength> nonce_value{};
-    std::uint64_t lease_id_value = 0U;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (leases_[receiver].active)
-            return Result<TunerAcquireResult>::failure(Error::BUSY);
-        if (states_[receiver] == ipc::ReceiverState::error)
-            return Result<TunerAcquireResult>::failure(Error::NOT_READY);
-
-        const auto nonce = nonce_source_.generate();
-        if (!nonce) return Result<TunerAcquireResult>::failure(nonce.error());
-        const auto lease_id = allocate_lease_id_locked(receiver);
-        if (!lease_id)
-            return Result<TunerAcquireResult>::failure(lease_id.error());
-        nonce_value = nonce.value();
-        lease_id_value = lease_id.value();
-    }
-
-    const auto opened = backend_.open_receiver(receiver);
-    if (!opened) {
-        observe_disconnect(receiver, opened.error());
-        std::lock_guard<std::mutex> lock(mutex_);
-        reserved_lease_ids_[receiver] = 0U;
-        return Result<TunerAcquireResult>::failure(opened.error());
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    // receiver_lock prevents another operation from changing this slot while
-    // the backend open is in flight.
-    Lease& lease = leases_[receiver];
-    reserved_lease_ids_[receiver] = 0U;
-    lease.active = true;
-    lease.client_id = client_id;
-    lease.lease_id = lease_id_value;
-    lease.receiver = receiver;
-    lease.system = initial_system(receiver);
-    lease.nonce = nonce_value;
-    set_state_locked(receiver, ipc::ReceiverState::leased);
+    const auto acquired = engine_.acquire(client_id, receiver);
+    if (!acquired) return Result<TunerAcquireResult>::failure(acquired.error());
     return Result<TunerAcquireResult>::success(
-        TunerAcquireResult{lease.lease_id, lease.nonce});
-}
-
-void TunerService::observe_disconnect(std::uint8_t receiver, Error error) noexcept
-{
-    if (error == Error::DISCONNECTED) {
-        backend_.mark_receiver_disconnected(receiver);
-    }
-}
-
-Result<void> TunerService::close_lease(const Lease& lease) noexcept
-{
-    const auto result = backend_.close_receiver(lease.receiver);
-    observe_disconnect(lease.receiver, result.error());
-    return result;
-}
-
-Result<void> TunerService::stop_capture_if_needed(const Lease& lease) noexcept
-{
-    if (lease.backend_disconnected)
-        return Result<void>::failure(Error::DISCONNECTED);
-    if (!lease.capture_maybe_active) return Result<void>::success();
-    const auto result = backend_.stop_capture(lease.receiver, lease.system);
-    observe_disconnect(lease.receiver, result.error());
-    return result;
-}
-
-Result<void> TunerService::detach_data_plane_if_needed(const Lease& lease) noexcept
-{
-    if (!lease.stream_maybe_attached || stream_control_ == nullptr)
-        return Result<void>::success();
-    const auto result = stream_control_->detach(TunerAttachment{
-        lease.client_id, lease.lease_id, lease.attachment_id, lease.receiver,
-        lease.system, lease.nonce});
-    observe_disconnect(lease.receiver, result.error());
-    return result;
-}
-
-Result<void> TunerService::release_lease(std::uint64_t client_id,
-                                         std::uint64_t lease_id) noexcept
-{
-    std::uint8_t receiver = 0U;
-    if (!valid_client(client_id) || lease_id == 0U)
-        return Result<void>::failure(Error::NOT_FOUND);
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, lease_id);
-        if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
-        receiver = leases_[static_cast<std::size_t>(index)].receiver;
-        // Linearize cleanup with ATTACH before waiting for the receiver
-        // operation.  ATTACH will compensate if its finite start is already
-        // in progress.
-        const StreamState stream = leases_[receiver].stream_state;
-        if (stream == StreamState::armed || stream == StreamState::attaching ||
-            stream == StreamState::active)
-            leases_[receiver].stream_state = StreamState::revoked;
-    }
-
-    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[receiver]);
-    Lease lease;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, lease_id);
-        if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
-        lease = leases_[static_cast<std::size_t>(index)];
-        leases_[static_cast<std::size_t>(index)] = Lease{};
-        set_state_locked(receiver, ipc::ReceiverState::free);
-    }
-
-    Error first = Error::OK;
-    const auto detached = detach_data_plane_if_needed(lease);
-    const bool detach_clean = detached || detached.error() == Error::NOT_FOUND;
-    if (!detach_clean) first = detached.error();
-    const bool disconnected = lease.backend_disconnected ||
-                              detached.error() == Error::DISCONNECTED;
-    const auto stopped = disconnected
-        ? Result<void>::failure(Error::DISCONNECTED)
-        : stop_capture_if_needed(lease);
-    if (!stopped && first == Error::OK) first = stopped.error();
-    // A disconnected transport is terminal for this cleanup path; do not
-    // issue a later close write to the same device.
-    if (!disconnected &&
-        stopped.error() != Error::DISCONNECTED) {
-        const auto closed = close_lease(lease);
-        if (!closed && first == Error::OK) first = closed.error();
-    }
-    if (!detach_clean || !stopped || disconnected) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        set_state_locked(receiver, ipc::ReceiverState::error);
-    }
-    return first == Error::OK ? Result<void>::success()
-                              : Result<void>::failure(first);
+        TunerAcquireResult{acquired.value().lease_id, acquired.value().token});
 }
 
 Result<void> TunerService::release(std::uint64_t client_id,
                                    std::uint64_t lease_id) noexcept
 {
-    return release_lease(client_id, lease_id);
-}
-
-Result<bool> TunerService::poll_lock(std::uint8_t receiver,
-                                     ipc::System system,
-                                     std::uint64_t start_ms,
-                                     std::uint32_t timeout_ms) noexcept
-{
-    const std::size_t max_polls = static_cast<std::size_t>(timeout_ms / 10U) + 1U;
-    for (std::size_t count = 0U; count < max_polls; ++count) {
-        const std::uint64_t before = time_.monotonic_ms();
-        if (before - start_ms >= timeout_ms) break;
-        const auto locked = backend_.is_locked(receiver, system);
-        if (!locked) {
-            observe_disconnect(receiver, locked.error());
-            return Result<bool>::failure(locked.error());
-        }
-        if (locked.value()) return Result<bool>::success(true);
-
-        const std::uint64_t now = time_.monotonic_ms();
-        const std::uint64_t elapsed = now - start_ms;
-        if (elapsed >= timeout_ms || count + 1U == max_polls)
-            break;
-        const std::uint64_t remaining = timeout_ms - elapsed;
-        if (remaining < 10U) break;
-        time_.sleep_ms(10U);
-    }
-    return Result<bool>::success(false);
+    return engine_.release(client_id, lease_id);
 }
 
 Result<ipc::TuneResponsePayload> TunerService::tune(
     std::uint64_t client_id, const ipc::TuneRequestPayload& request) noexcept
 {
-    std::uint8_t receiver = 0U;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, request.lease_id);
-        if (index < 0)
-            return Result<ipc::TuneResponsePayload>::failure(Error::NOT_FOUND);
-        receiver = leases_[static_cast<std::size_t>(index)].receiver;
-    }
-    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[receiver]);
-    Lease lease;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, request.lease_id);
-        if (index < 0)
-            return Result<ipc::TuneResponsePayload>::failure(Error::NOT_FOUND);
-        lease = leases_[static_cast<std::size_t>(index)];
-        if (states_[lease.receiver] == ipc::ReceiverState::error)
-            return Result<ipc::TuneResponsePayload>::failure(Error::NOT_READY);
-    }
-    if (lease.stream_state == StreamState::armed ||
-        lease.stream_state == StreamState::attaching ||
-        lease.stream_state == StreamState::active ||
-        lease.stream_state == StreamState::revoked)
-        return Result<ipc::TuneResponsePayload>::failure(Error::BUSY);
-    if (!backend_.receiver_supports(receiver, request.system))
-        return Result<ipc::TuneResponsePayload>::failure(Error::INVALID_ARGUMENT);
-    if (!valid_tune(request))
-        return Result<ipc::TuneResponsePayload>::failure(Error::INVALID_ARGUMENT);
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        set_state_locked(receiver, ipc::ReceiverState::leased);
-    }
-    const auto power_prepared = backend_.begin_tune_power(
-        receiver, request.system, request.lnb_voltage);
-    if (!power_prepared) {
-        observe_disconnect(receiver, power_prepared.error());
-        return Result<ipc::TuneResponsePayload>::failure(power_prepared.error());
-    }
-    const auto fail_after_power = [&](Error primary) noexcept {
-        // A transport-loss result is terminal before rollback: rollback may
-        // update logical references but must not write GPIO on that bridge.
-        observe_disconnect(receiver, primary);
-        const auto rollback = backend_.rollback_tune_power(receiver);
-        observe_disconnect(receiver, rollback.error());
-        if (!rollback) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            set_state_locked(receiver, ipc::ReceiverState::error);
-        }
-        return Result<ipc::TuneResponsePayload>::failure(primary);
-    };
-    const std::uint64_t start_ms = time_.monotonic_ms();
-    const auto remaining_before_tune = [&]() noexcept -> std::uint32_t {
-        const std::uint64_t elapsed = time_.monotonic_ms() - start_ms;
-        return elapsed >= request.timeout_ms
-            ? 0U
-            : static_cast<std::uint32_t>(request.timeout_ms - elapsed);
-    };
-    const bool select_before_tune = request.system == ipc::System::ISDB_S &&
-                                    backend_.selects_satellite_stream_before_tune();
-    const auto select_satellite_stream = [&](std::uint32_t remaining) noexcept {
-        return request.slot != 0xffffU
-            ? backend_.select_satellite_slot(
-                  receiver, static_cast<std::uint8_t>(request.slot), remaining)
-            : backend_.select_satellite_tsid(receiver, request.stream_id, remaining);
-    };
-    if (select_before_tune) {
-        const std::uint32_t select_timeout = remaining_before_tune();
-        if (select_timeout == 0U)
-            return fail_after_power(Error::TIMEOUT);
-        const auto selected = select_satellite_stream(select_timeout);
-        if (!selected)
-            return fail_after_power(selected.error());
-    }
-    const std::uint32_t tune_timeout = remaining_before_tune();
-    if (tune_timeout == 0U)
-        return fail_after_power(Error::TIMEOUT);
-    const auto tuned = request.system == ipc::System::ISDB_T
-        ? backend_.tune_terrestrial(
-              receiver, static_cast<std::uint32_t>(request.frequency_khz), tune_timeout)
-        : backend_.tune_satellite(
-              receiver, static_cast<std::uint32_t>(request.frequency_khz), tune_timeout);
-    if (!tuned)
-        return fail_after_power(tuned.error());
-
-    // Keep this origin separate from start_ms: the reference driver's
-    // PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T interval starts when check_lock begins,
-    // after the frontend tune operation has completed.
-    const std::uint64_t lock_poll_start_ms = time_.monotonic_ms();
-    const auto locked = poll_lock(receiver, request.system, start_ms,
-                                  request.timeout_ms);
-    if (!locked) return fail_after_power(locked.error());
-    if (!locked.value())
-        return fail_after_power(Error::TIMEOUT);
-
-    if (request.system == ipc::System::ISDB_T &&
-        backend_.requires_terrestrial_lock_settle()) {
-        const std::uint64_t now = time_.monotonic_ms();
-        const std::uint64_t elapsed_total = now - start_ms;
-        if (elapsed_total >= request.timeout_ms)
-            return fail_after_power(Error::TIMEOUT);
-
-        const std::uint64_t lock_poll_elapsed = now - lock_poll_start_ms;
-        if (lock_poll_elapsed < kWaitAfterLockTcTMs) {
-            const std::uint32_t settle_ms = static_cast<std::uint32_t>(
-                kWaitAfterLockTcTMs - lock_poll_elapsed);
-            const std::uint32_t remaining = static_cast<std::uint32_t>(
-                request.timeout_ms - elapsed_total);
-            if (remaining <= settle_ms)
-                return fail_after_power(Error::TIMEOUT);
-            time_.sleep_ms(settle_ms);
-        }
-    }
-
-    if (request.system == ipc::System::ISDB_S && !select_before_tune) {
-        const std::uint64_t elapsed = time_.monotonic_ms() - start_ms;
-        if (elapsed >= request.timeout_ms)
-            return fail_after_power(Error::TIMEOUT);
-        const auto remaining = static_cast<std::uint32_t>(
-            request.timeout_ms - elapsed);
-        const auto selected = select_satellite_stream(remaining);
-        if (!selected)
-            return fail_after_power(selected.error());
-        if (time_.monotonic_ms() - start_ms >= request.timeout_ms)
-            return fail_after_power(Error::TIMEOUT);
-    }
-
-    const auto committed = backend_.commit_tune_power(receiver);
-    if (!committed) return fail_after_power(committed.error());
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // receiver_lock keeps this lease in place since it was copied above.
-        leases_[receiver].system = request.system;
-        // A successful tune re-arms a lease whose previous stream ended:
-        // STOP_STREAM leaves the lease consumed, and START_STREAM must be
-        // possible again without RELEASE/ACQUIRE.  The attach nonce stays the
-        // one issued at ACQUIRE; its validity is per-arm (see SPEC 6.3).
-        if (leases_[receiver].stream_state == StreamState::consumed)
-            leases_[receiver].stream_state = StreamState::none;
-        set_state_locked(receiver, ipc::ReceiverState::tuned);
-    }
+    engine::TuneRequest neutral{};
+    neutral.lease_id = request.lease_id;
+    neutral.system = to_engine(request.system);
+    // A frequency above 32 bits is invalid as a legacy request; the engine
+    // returns that decision before the truncated value could be used.
+    neutral.frequency_khz = static_cast<std::uint32_t>(request.frequency_khz);
+    neutral.stream_id = request.stream_id;
+    neutral.slot = request.slot;
+    neutral.lnb_voltage = request.lnb_voltage;
+    neutral.timeout_ms = request.timeout_ms;
+    neutral.validation = valid_tune(request) ? Error::OK : Error::INVALID_ARGUMENT;
+    const auto tuned = engine_.tune(client_id, neutral);
+    if (!tuned) return Result<ipc::TuneResponsePayload>::failure(tuned.error());
     return Result<ipc::TuneResponsePayload>::success(
         ipc::TuneResponsePayload{1U, std::numeric_limits<std::int32_t>::min()});
 }
@@ -507,479 +419,381 @@ Result<ipc::TuneResponsePayload> TunerService::tune(
 Result<void> TunerService::start_stream(std::uint64_t client_id,
                                         std::uint64_t lease_id) noexcept
 {
-    if (!valid_client(client_id) || lease_id == 0U)
-        return Result<void>::failure(Error::NOT_FOUND);
-    std::lock_guard<std::mutex> lock(mutex_);
-    const int index = find_lease_locked(client_id, lease_id);
-    if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
-    Lease& lease = leases_[static_cast<std::size_t>(index)];
-    if (states_[lease.receiver] != ipc::ReceiverState::tuned)
-        return Result<void>::failure(Error::NOT_READY);
-    if (lease.stream_state != StreamState::none)
-        return Result<void>::failure(Error::BUSY);
-    lease.attach_started_ms = time_.monotonic_ms();
-    lease.stream_state = StreamState::armed;
-    return Result<void>::success();
+    return engine_.start_stream(client_id, lease_id);
 }
 
 Result<TunerAttachment> TunerService::attach_stream(
     std::uint64_t lease_id,
     const std::array<std::uint8_t, ipc::kNonceLength>& nonce) noexcept
 {
-    if (lease_id == 0U)
-        return Result<TunerAttachment>::failure(Error::NOT_FOUND);
-
-    std::uint8_t receiver = 0U;
-    Lease pending;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        int index = -1;
-        for (std::size_t candidate = 0U; candidate < leases_.size(); ++candidate) {
-            const Lease& lease = leases_[candidate];
-            if (lease.active && lease.lease_id == lease_id && lease.nonce == nonce) {
-                index = static_cast<int>(candidate);
-                break;
-            }
-        }
-        if (index < 0) return Result<TunerAttachment>::failure(Error::NOT_FOUND);
-        Lease& lease = leases_[static_cast<std::size_t>(index)];
-        receiver = lease.receiver;
-    }
-
-    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[receiver]);
-    std::uint64_t attachment_id = 0U;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        int index = -1;
-        for (std::size_t candidate = 0U; candidate < leases_.size(); ++candidate) {
-            const Lease& lease = leases_[candidate];
-            if (lease.active && lease.lease_id == lease_id && lease.nonce == nonce) {
-                index = static_cast<int>(candidate);
-                break;
-            }
-        }
-        if (index < 0) return Result<TunerAttachment>::failure(Error::NOT_FOUND);
-        Lease& lease = leases_[static_cast<std::size_t>(index)];
-        if (lease.receiver != receiver || lease.stream_state != StreamState::armed)
-            return Result<TunerAttachment>::failure(
-                lease.stream_state == StreamState::none
-                    ? Error::NOT_READY : Error::NOT_FOUND);
-        // Unsigned subtraction is defined modulo 2^64 and therefore remains
-        // correct when a monotonic counter wraps during the five-second arm.
-        if (time_.monotonic_ms() - lease.attach_started_ms >= 5000U) {
-            lease.stream_state = StreamState::consumed;
-            return Result<TunerAttachment>::failure(Error::TIMEOUT);
-        }
-        const auto allocated = allocate_attachment_id_locked(receiver);
-        if (!allocated)
-            return Result<TunerAttachment>::failure(allocated.error());
-        attachment_id = allocated.value();
-        lease.stream_state = StreamState::attaching;
-        pending = lease;
-    }
-    const TunerAttachment pending_attachment{
-        pending.client_id, pending.lease_id, attachment_id, pending.receiver,
-        pending.system, pending.nonce};
-    const auto started = backend_.start_capture(receiver, pending.system);
-    observe_disconnect(receiver, started.error());
-    bool data_attached = false;
-    Error data_error = Error::OK;
-    if (started && stream_control_ != nullptr) {
-        const auto attached = stream_control_->attach(pending_attachment);
-        observe_disconnect(receiver, attached.error());
-        if (!attached) {
-            data_error = attached.error();
-        } else {
-            data_attached = true;
-        }
-    }
-    if (!started || data_error != Error::OK) {
-        Error result_error = !started ? started.error() : data_error;
-        bool data_maybe_attached = false;
-        pending.capture_maybe_active = static_cast<bool>(started);
-        pending.backend_disconnected = started.error() == Error::DISCONNECTED ||
-                                       data_error == Error::DISCONNECTED;
-        if (data_attached || (started && stream_control_ != nullptr)) {
-            const auto detached = stream_control_->detach(pending_attachment);
-            observe_disconnect(receiver, detached.error());
-            data_maybe_attached = !detached && detached.error() != Error::NOT_FOUND;
-            if (detached.error() == Error::DISCONNECTED)
-                pending.backend_disconnected = true;
-        }
-        if (!pending.backend_disconnected) {
-            const auto stopped = backend_.stop_capture(receiver, pending.system);
-            observe_disconnect(receiver, stopped.error());
-            pending.backend_disconnected = stopped.error() == Error::DISCONNECTED;
-            pending.capture_maybe_active = !stopped;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        reserved_attachment_ids_[receiver] = 0U;
-        const int index = find_lease_locked(pending.client_id, pending.lease_id);
-        if (index >= 0) {
-            Lease& lease = leases_[static_cast<std::size_t>(index)];
-            lease.stream_state = StreamState::consumed;
-            // Keep the identity when compensating detach failed.  The
-            // subsequent lease release must retry that exact data session.
-            lease.attachment_id = data_maybe_attached ? attachment_id : 0U;
-            lease.capture_maybe_active = pending.capture_maybe_active;
-            lease.stream_maybe_attached = data_maybe_attached;
-            lease.backend_disconnected = pending.backend_disconnected;
-            if (pending.capture_maybe_active || data_maybe_attached ||
-                pending.backend_disconnected)
-                set_state_locked(receiver, ipc::ReceiverState::error);
-        }
-        return Result<TunerAttachment>::failure(result_error);
-    }
-
-    bool attach_accepted = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(pending.client_id, pending.lease_id);
-        if (index >= 0) {
-            Lease& lease = leases_[static_cast<std::size_t>(index)];
-            if (lease.stream_state == StreamState::attaching) {
-                lease.stream_state = StreamState::active;
-                lease.attachment_id = attachment_id;
-                lease.capture_maybe_active = true;
-                lease.stream_maybe_attached = data_attached;
-                set_state_locked(receiver, ipc::ReceiverState::streaming);
-                attach_accepted = true;
-            }
-        }
-    }
-    if (attach_accepted) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        reserved_attachment_ids_[receiver] = 0U;
-        const Lease& lease = leases_[receiver];
-        return Result<TunerAttachment>::success(
-            TunerAttachment{lease.client_id, lease.lease_id, lease.attachment_id,
-                            lease.receiver, lease.system, lease.nonce});
-    }
-
-    // revoke_stream() won the race while start_capture was in flight.  The
-    // physical start must be compensated before ATTACH can complete.
-    Error result_error = Error::NOT_FOUND;
-    const auto detached = data_attached && stream_control_ != nullptr
-        ? stream_control_->detach(pending_attachment)
-        : Result<void>::success();
-    observe_disconnect(receiver, detached.error());
-    const bool data_maybe_attached =
-        !detached && detached.error() != Error::NOT_FOUND;
-    if (!detached && detached.error() != Error::NOT_FOUND)
-        result_error = detached.error();
-    Result<void> stopped = Result<void>::failure(Error::DISCONNECTED);
-    if (detached.error() != Error::DISCONNECTED) {
-        stopped = backend_.stop_capture(receiver, pending.system);
-        observe_disconnect(receiver, stopped.error());
-    }
-    if (!stopped && result_error == Error::NOT_FOUND) result_error = stopped.error();
-    if (stopped.error() == Error::DISCONNECTED) result_error = Error::DISCONNECTED;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        reserved_attachment_ids_[receiver] = 0U;
-        const int index = find_lease_locked(pending.client_id, pending.lease_id);
-        if (index >= 0) {
-            Lease& lease = leases_[static_cast<std::size_t>(index)];
-            lease.stream_state = StreamState::consumed;
-            lease.attachment_id = data_maybe_attached ? attachment_id : 0U;
-            lease.capture_maybe_active = !stopped;
-            lease.stream_maybe_attached = data_maybe_attached;
-            lease.backend_disconnected = stopped.error() == Error::DISCONNECTED;
-            set_state_locked(receiver, stopped && !data_maybe_attached
-                                               ? ipc::ReceiverState::tuned
-                                               : ipc::ReceiverState::error);
-        }
-    }
-    return Result<TunerAttachment>::failure(result_error);
+    const auto attached = engine_.attach_stream(lease_id, nonce);
+    if (!attached) return Result<TunerAttachment>::failure(attached.error());
+    return Result<TunerAttachment>::success(to_legacy(attached.value()));
 }
 
 Result<TunerStreamFinalSnapshot> TunerService::stop_stream(
     std::uint64_t client_id, std::uint64_t lease_id) noexcept
 {
-    if (!valid_client(client_id) || lease_id == 0U)
-        return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
-    std::uint8_t receiver = 0U;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, lease_id);
-        if (index < 0)
-            return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
-        receiver = leases_[static_cast<std::size_t>(index)].receiver;
-    }
-    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[receiver]);
-    Lease pending;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, lease_id);
-        if (index < 0)
-            return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
-        pending = leases_[static_cast<std::size_t>(index)];
-        if (pending.receiver != receiver ||
-            (pending.stream_state != StreamState::active &&
-             pending.stream_state != StreamState::revoked) ||
-            !pending.capture_maybe_active)
-            return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_READY);
-    }
-    const TunerAttachment attachment{
-        pending.client_id, pending.lease_id, pending.attachment_id,
-        pending.receiver, pending.system, pending.nonce};
-    const auto detached = detach_data_plane_if_needed(pending);
-    const bool detach_clean = detached || detached.error() == Error::NOT_FOUND;
-    Error first = Error::OK;
-    if (!detach_clean) first = detached.error();
-    Result<void> stopped = Result<void>::failure(Error::DISCONNECTED);
-    if (detached.error() != Error::DISCONNECTED) {
-        stopped = backend_.stop_capture(receiver, pending.system);
-        observe_disconnect(receiver, stopped.error());
-    }
-    if (!stopped && first == Error::OK) first = stopped.error();
-    TunerStreamFinalSnapshot final_snapshot{};
-    bool snapshot_disconnected = false;
-    if (detach_clean && stream_control_ != nullptr &&
-        pending.stream_maybe_attached) {
-        const auto snapshot = stream_control_->final_snapshot(attachment);
-        if (snapshot) {
-            final_snapshot = snapshot.value();
-            snapshot_disconnected = final_snapshot.terminal ==
-                static_cast<std::uint8_t>(TunerStreamTerminal::disconnected);
-            if (snapshot_disconnected)
-                observe_disconnect(receiver, Error::DISCONNECTED);
-        } else {
-            snapshot_disconnected = snapshot.error() == Error::DISCONNECTED;
-            observe_disconnect(receiver, snapshot.error());
-            if (first == Error::OK) first = snapshot.error();
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, lease_id);
-        if (index >= 0) {
-            Lease& lease = leases_[static_cast<std::size_t>(index)];
-            lease.stream_state = StreamState::consumed;
-            lease.attachment_id = detach_clean ? 0U : pending.attachment_id;
-            lease.capture_maybe_active = !stopped;
-            lease.stream_maybe_attached = !detach_clean;
-            lease.backend_disconnected = detached.error() == Error::DISCONNECTED ||
-                                         stopped.error() == Error::DISCONNECTED ||
-                                         snapshot_disconnected;
-            set_state_locked(receiver, stopped && detach_clean
-                                                && !snapshot_disconnected
-                                                ? ipc::ReceiverState::tuned
-                                                : ipc::ReceiverState::error);
-        }
-    }
-    return first == Error::OK
-        ? Result<TunerStreamFinalSnapshot>::success(final_snapshot)
-        : Result<TunerStreamFinalSnapshot>::failure(first);
+    const auto stopped = engine_.stop_stream(client_id, lease_id);
+    if (!stopped) return Result<TunerStreamFinalSnapshot>::failure(stopped.error());
+    return Result<TunerStreamFinalSnapshot>::success(TunerStreamFinalSnapshot{
+        to_legacy(stopped.value().counters), stopped.value().terminal});
 }
 
 Result<TunerStreamCounters> TunerService::stats(
     std::uint64_t client_id, std::uint64_t lease_id) const noexcept
 {
-    if (!valid_client(client_id) || lease_id == 0U)
-        return Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
-    std::uint8_t receiver = 0U;
-    Lease lease;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, lease_id);
-        if (index < 0)
-            return Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
-        lease = leases_[static_cast<std::size_t>(index)];
-        receiver = lease.receiver;
-    }
-    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[receiver]);
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(client_id, lease_id);
-        if (index < 0)
-            return Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
-        lease = leases_[static_cast<std::size_t>(index)];
-        if (lease.receiver != receiver || lease.stream_state != StreamState::active ||
-            !lease.capture_maybe_active)
-            return Result<TunerStreamCounters>::failure(Error::NOT_READY);
-        if (stream_control_ == nullptr || !lease.stream_maybe_attached)
-            return Result<TunerStreamCounters>::failure(Error::UNSUPPORTED);
-    }
-    const TunerAttachment attachment{
-        lease.client_id, lease.lease_id, lease.attachment_id, lease.receiver,
-        lease.system, lease.nonce};
-    return stream_control_->stats(attachment);
+    const auto counters = engine_.stats(client_id, lease_id);
+    if (!counters) return Result<TunerStreamCounters>::failure(counters.error());
+    return Result<TunerStreamCounters>::success(to_legacy(counters.value()));
 }
 
 Result<void> TunerService::detach_stream(
     const TunerAttachment& attachment) noexcept
 {
-    if (attachment.owner_client_id == 0U || attachment.lease_id == 0U ||
-        attachment.attachment_id == 0U ||
-        attachment.receiver >= ipc::kReceiverCount)
-        return Result<void>::failure(Error::NOT_FOUND);
-    std::uint8_t receiver = attachment.receiver;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const Lease& lease = leases_[receiver];
-        if (!lease.active || lease.client_id != attachment.owner_client_id ||
-            lease.lease_id != attachment.lease_id ||
-            lease.attachment_id != attachment.attachment_id ||
-            lease.system != attachment.system || lease.nonce != attachment.nonce ||
-            (lease.stream_state != StreamState::active &&
-             lease.stream_state != StreamState::revoked))
-            return Result<void>::failure(Error::NOT_FOUND);
-        leases_[receiver].stream_state = StreamState::revoked;
-    }
-    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[receiver]);
-    Lease pending;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const Lease& lease = leases_[receiver];
-        if (!lease.active || lease.client_id != attachment.owner_client_id ||
-            lease.lease_id != attachment.lease_id ||
-            lease.attachment_id != attachment.attachment_id ||
-            lease.system != attachment.system || lease.nonce != attachment.nonce ||
-            (lease.stream_state != StreamState::active &&
-             lease.stream_state != StreamState::revoked))
-            return Result<void>::failure(Error::NOT_FOUND);
-        pending = lease;
-    }
-    const auto detached = detach_data_plane_if_needed(pending);
-    const bool detach_clean = detached || detached.error() == Error::NOT_FOUND;
-    Error first = Error::OK;
-    if (!detach_clean) first = detached.error();
-    Result<void> stopped = Result<void>::failure(Error::DISCONNECTED);
-    if (detached.error() != Error::DISCONNECTED) {
-        stopped = backend_.stop_capture(receiver, pending.system);
-        observe_disconnect(receiver, stopped.error());
-    }
-    if (!stopped && first == Error::OK) first = stopped.error();
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int index = find_lease_locked(attachment.owner_client_id,
-                                            attachment.lease_id);
-        if (index >= 0 && leases_[static_cast<std::size_t>(index)].attachment_id ==
-                              attachment.attachment_id) {
-            Lease& lease = leases_[static_cast<std::size_t>(index)];
-            lease.stream_state = StreamState::consumed;
-            lease.attachment_id = detach_clean ? 0U : attachment.attachment_id;
-            lease.capture_maybe_active = !stopped;
-            lease.stream_maybe_attached = !detach_clean;
-            lease.backend_disconnected = detached.error() == Error::DISCONNECTED ||
-                                         stopped.error() == Error::DISCONNECTED;
-            set_state_locked(receiver, stopped && detach_clean
-                                                ? ipc::ReceiverState::tuned
-                                               : ipc::ReceiverState::error);
-        }
-    }
-    return first == Error::OK ? Result<void>::success()
-                              : Result<void>::failure(first);
+    return engine_.detach_stream(to_engine(attachment));
 }
 
 Result<void> TunerService::revoke_stream(std::uint64_t client_id,
                                          std::uint64_t lease_id) noexcept
 {
-    if (!valid_client(client_id) || lease_id == 0U)
-        return Result<void>::failure(Error::NOT_FOUND);
-    std::lock_guard<std::mutex> lock(mutex_);
-    const int index = find_lease_locked(client_id, lease_id);
-    if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
-    Lease& lease = leases_[static_cast<std::size_t>(index)];
-    if (lease.stream_state == StreamState::armed ||
-        lease.stream_state == StreamState::attaching ||
-        lease.stream_state == StreamState::active)
-        lease.stream_state = StreamState::revoked;
-    return Result<void>::success();
+    return engine_.revoke_stream(client_id, lease_id);
 }
 
 Result<void> TunerService::revoke_stream(
     std::uint64_t client_id, std::uint64_t lease_id,
     const std::array<std::uint8_t, ipc::kNonceLength>& nonce) noexcept
 {
-    if (!valid_client(client_id) || lease_id == 0U)
-        return Result<void>::failure(Error::NOT_FOUND);
-    std::lock_guard<std::mutex> lock(mutex_);
-    const int index = find_lease_locked(client_id, lease_id);
-    if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
-    Lease& lease = leases_[static_cast<std::size_t>(index)];
-    if (lease.nonce != nonce) return Result<void>::failure(Error::NOT_FOUND);
-    if (lease.stream_state == StreamState::armed ||
-        lease.stream_state == StreamState::attaching ||
-        lease.stream_state == StreamState::active)
-        lease.stream_state = StreamState::revoked;
-    return Result<void>::success();
+    return engine_.revoke_stream(client_id, lease_id, nonce);
 }
 
 Result<TunerStatus> TunerService::status() const noexcept
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return Result<TunerStatus>::success(TunerStatus{generation_, states_});
-}
-
-Result<void> TunerService::cleanup_client(std::uint64_t client_id) noexcept
-{
-    if (!valid_client(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
-    std::array<std::uint64_t, ipc::kReceiverCount> lease_ids{};
-    // Revoke the complete connection atomically before any receiver I/O.  A
-    // slow cleanup on one bridge must not leave another lease attachable.
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (std::uint8_t receiver = 0U; receiver < ipc::kReceiverCount; ++receiver) {
-            Lease& lease = leases_[receiver];
-            if (!lease.active || lease.client_id != client_id) continue;
-            lease_ids[receiver] = lease.lease_id;
-            if (lease.stream_state == StreamState::armed ||
-                lease.stream_state == StreamState::attaching ||
-                lease.stream_state == StreamState::active)
-                lease.stream_state = StreamState::revoked;
-        }
+    const auto status = engine_.status();
+    if (!status) return Result<TunerStatus>::failure(status.error());
+    TunerStatus legacy{};
+    legacy.generation = status.value().generation;
+    for (std::size_t receiver = 0U; receiver < legacy.receiver_states.size(); ++receiver) {
+        legacy.receiver_states[receiver] = receiver < status.value().receiver_count
+            ? to_legacy(status.value().states[receiver])
+            : ipc::ReceiverState::absent;
     }
-    Error first = Error::OK;
-    for (std::uint8_t receiver = 0U; receiver < ipc::kReceiverCount; ++receiver) {
-        if (lease_ids[receiver] == 0U) continue;
-        const auto result = release_lease(client_id, lease_ids[receiver]);
-        if (first == Error::OK && !result) first = result.error();
-    }
-    return first == Error::OK ? Result<void>::success()
-                              : Result<void>::failure(first);
+    return Result<TunerStatus>::success(legacy);
 }
 
 Result<void> TunerService::disconnect_client(std::uint64_t client_id) noexcept
 {
-    return cleanup_client(client_id);
-}
-
-Result<void> TunerService::cleanup_all() noexcept
-{
-    std::array<std::uint64_t, ipc::kReceiverCount> client_ids{};
-    std::array<std::uint64_t, ipc::kReceiverCount> lease_ids{};
-    // Same two-phase rule as connection cleanup: revoke all logical stream
-    // credentials before the first potentially blocking backend operation.
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (std::uint8_t receiver = 0U; receiver < ipc::kReceiverCount; ++receiver) {
-            Lease& lease = leases_[receiver];
-            if (!lease.active) continue;
-            client_ids[receiver] = lease.client_id;
-            lease_ids[receiver] = lease.lease_id;
-            if (lease.stream_state == StreamState::armed ||
-                lease.stream_state == StreamState::attaching ||
-                lease.stream_state == StreamState::active)
-                lease.stream_state = StreamState::revoked;
-        }
-    }
-    Error first = Error::OK;
-    for (std::uint8_t receiver = 0U; receiver < ipc::kReceiverCount; ++receiver) {
-        if (client_ids[receiver] == 0U) continue;
-        const auto result = release_lease(client_ids[receiver], lease_ids[receiver]);
-        if (first == Error::OK && !result) first = result.error();
-    }
-    const auto backend_shutdown = backend_.shutdown();
-    if (first == Error::OK && !backend_shutdown) first = backend_shutdown.error();
-    return first == Error::OK ? Result<void>::success()
-                              : Result<void>::failure(first);
+    return engine_.disconnect_client(client_id);
 }
 
 Result<void> TunerService::shutdown() noexcept
 {
-    return cleanup_all();
+    return engine_.shutdown();
+}
+
+Result<void> TunerService::configure_strict_capabilities() noexcept
+{
+    // Build the immutable descriptor from the audited backend metadata once,
+    // outside all engine and worker locks.  The fixed legacy receiver IDs are
+    // the engine slot IDs 0..receiver_count_-1.
+    std::array<engine::ReceiverCapability, ipc::kReceiverCount> capabilities{};
+    std::array<std::array<TunerStrictProfile, 2U>, ipc::kReceiverCount> profiles{};
+    for (std::size_t index = 0U; index < receiver_count_; ++index) {
+        const std::uint8_t receiver = to_legacy(receiver_ids_[index]);
+        capabilities[index].receiver = receiver_ids_[index];
+        capabilities[index].supports_terrestrial =
+            backend_.legacy().receiver_supports(receiver, ipc::System::ISDB_T);
+        capabilities[index].supports_satellite =
+            backend_.legacy().receiver_supports(receiver, ipc::System::ISDB_S);
+        // R3 profile facts are copied here, once, outside every lock.  The
+        // native Hz entrance requires a native profile for every supported
+        // system of the receiver.
+        bool native = capabilities[index].supports_terrestrial ||
+                      capabilities[index].supports_satellite;
+        if (capabilities[index].supports_terrestrial) {
+            profiles[receiver][0] =
+                backend_.legacy().strict_profile(receiver, ipc::System::ISDB_T);
+            native = native && profiles[receiver][0].native_hz;
+        }
+        if (capabilities[index].supports_satellite) {
+            profiles[receiver][1] =
+                backend_.legacy().strict_profile(receiver, ipc::System::ISDB_S);
+            native = native && profiles[receiver][1].native_hz;
+        }
+        if (!valid_strict_profile(profiles[receiver][0]) ||
+            !valid_strict_profile(profiles[receiver][1]))
+            return Result<void>::failure(Error::INVALID_ARGUMENT);
+        if (!native) profiles[receiver] = {};
+        capabilities[index].native_hz = native;
+    }
+    strict_profiles_ = profiles;
+    const auto configured =
+        engine_.configure_strict_capabilities(capabilities.data(), receiver_count_);
+    if (!configured) strict_profiles_ = {};
+    return configured;
+}
+
+const TunerStrictProfile* TunerService::strict_profile_for(
+    std::uint8_t receiver, ipc::System system) const noexcept
+{
+    if (receiver >= receiver_count_) return nullptr;
+    if (system == ipc::System::ISDB_T) return &strict_profiles_[receiver][0];
+    if (system == ipc::System::ISDB_S) return &strict_profiles_[receiver][1];
+    return nullptr;
+}
+
+TunerPreparedTune TunerService::prepare_tune(
+    std::uint8_t receiver, const ipc::TuneRequestPayload& request) const noexcept
+{
+    TunerPreparedTune prepared{};
+    const Error decision = valid_tune(request) ? Error::OK : Error::INVALID_ARGUMENT;
+    const TunerStrictProfile* profile = strict_profile_for(receiver, request.system);
+    if (profile == nullptr || !profile->native_hz) {
+        // No native Hz profile: exactly the R2 kHz admission request.
+        engine::TuneRequest& legacy = prepared.legacy;
+        legacy.lease_id = request.lease_id;
+        legacy.system = to_engine(request.system);
+        legacy.frequency_khz = static_cast<std::uint32_t>(request.frequency_khz);
+        legacy.stream_id = request.stream_id;
+        legacy.slot = request.slot;
+        legacy.lnb_voltage = request.lnb_voltage;
+        legacy.timeout_ms = request.timeout_ms;
+        legacy.validation = decision;
+        return prepared;
+    }
+    prepared.hz_entrance = true;
+    engine::HzTuneRequest& hz = prepared.hz;
+    hz.lease_id = request.lease_id;
+    hz.prepared_receiver = receiver;
+    hz.system = to_engine(request.system);
+    // The old-wire scalar is u64 kHz: check it before multiplying; nothing
+    // is narrowed first.  An out-of-range value is already invalid above.
+    hz.requested_hz = request.frequency_khz <= engine::kMaxRequestedHz / 1000U
+        ? request.frequency_khz * 1000U
+        : 0U;
+    hz.stream_id = request.stream_id;
+    hz.slot = request.slot;
+    hz.lnb_voltage = request.lnb_voltage;
+    hz.timeout_ms = request.timeout_ms;
+    if (decision != Error::OK) {
+        hz.validation = decision;
+    } else if (!profile_admits_frequency(*profile, hz.requested_hz) ||
+               (request.system == ipc::System::ISDB_S &&
+                !profile_admits_selection(*profile, request.stream_id, request.slot))) {
+        hz.validation = Error::UNSUPPORTED;
+    }
+    return prepared;
+}
+
+TunerPreparedTune TunerService::prepare_tune_hz(
+    std::uint8_t receiver, const TunerHzTuneRequest& request) const noexcept
+{
+    using dtv::userland::wire::Selection;
+    TunerPreparedTune prepared{};
+    prepared.hz_entrance = true;
+    engine::HzTuneRequest& hz = prepared.hz;
+    hz.lease_id = request.lease_id;
+    hz.prepared_receiver = receiver;
+    hz.system = to_engine(request.system);
+    hz.requested_hz = request.frequency_hz;
+    hz.timeout_ms = request.timeout_ms;
+    hz.lnb_voltage = request.lnb_voltage.present ? request.lnb_voltage.value : 0U;
+    const bool satellite = request.system == ipc::System::ISDB_S;
+    if (satellite && request.selection == Selection::tsid) hz.stream_id = request.selection_value;
+    if (satellite && request.selection == Selection::slot) hz.slot = request.selection_value;
+
+    // Invalid common scalar/enum/coupling first (INVALID_ARGUMENT) ...
+    Error decision = Error::OK;
+    const bool known_selection = request.selection == Selection::automatic ||
+                                 request.selection == Selection::tsid ||
+                                 request.selection == Selection::slot;
+    if (request.frequency_hz == 0U || request.frequency_hz > engine::kMaxRequestedHz ||
+        request.timeout_ms < 100U || request.timeout_ms > 30000U || !known_selection) {
+        decision = Error::INVALID_ARGUMENT;
+    } else if (request.system == ipc::System::ISDB_T) {
+        if (request.selection != Selection::automatic || request.selection_value != 0U ||
+            hz.lnb_voltage != 0U)
+            decision = Error::INVALID_ARGUMENT;
+    } else if (satellite) {
+        if ((request.selection == Selection::automatic && request.selection_value != 0U) ||
+            (request.selection != Selection::automatic && request.selection_value == 0xffffU) ||
+            (hz.lnb_voltage != 0U && hz.lnb_voltage != 15U))
+            decision = Error::INVALID_ARGUMENT;
+    } else {
+        decision = Error::INVALID_ARGUMENT;
+    }
+    // ... then capabilities the receiver profile does not provide.
+    const TunerStrictProfile* profile = strict_profile_for(receiver, request.system);
+    if (decision == Error::OK) {
+        if (profile == nullptr || !profile->native_hz || request.lna.present ||
+            request.pid_subset || (satellite && request.selection == Selection::automatic) ||
+            (request.lnb_voltage.present &&
+             (profile->lnb_voltage_mask &
+              (request.lnb_voltage.value == 0U ? 0x01U : 0x02U)) == 0U) ||
+            !profile_admits_frequency(*profile, request.frequency_hz) ||
+            (satellite && !profile_admits_selection(*profile, hz.stream_id, hz.slot)))
+            decision = Error::UNSUPPORTED;
+    }
+    hz.validation = decision;
+    return prepared;
+}
+
+Result<TunerService::TunerAdmittedTune> TunerService::try_admit_prepared_tune(
+    std::uint64_t client_id, const TunerPreparedTune& prepared,
+    std::uint64_t accepted_at_ms) noexcept
+{
+    return prepared.hz_entrance
+        ? engine_.try_admit_tune(client_id, prepared.hz, accepted_at_ms)
+        : engine_.try_admit_tune(client_id, prepared.legacy, accepted_at_ms);
+}
+
+bool TunerService::strict_admission_enabled() const noexcept
+{
+    return engine_.strict_capabilities_configured();
+}
+
+std::uint64_t TunerService::monotonic_ms() const noexcept
+{
+    return const_cast<TunerService*>(this)->time_.monotonic_ms();
+}
+
+Result<TunerService::TunerAdmittedTune> TunerService::try_admit_tune(
+    std::uint64_t client_id, const ipc::TuneRequestPayload& request,
+    std::uint64_t accepted_at_ms) noexcept
+{
+    engine::TuneRequest neutral{};
+    neutral.lease_id = request.lease_id;
+    neutral.system = to_engine(request.system);
+    neutral.frequency_khz = static_cast<std::uint32_t>(request.frequency_khz);
+    neutral.stream_id = request.stream_id;
+    neutral.slot = request.slot;
+    neutral.lnb_voltage = request.lnb_voltage;
+    neutral.timeout_ms = request.timeout_ms;
+    neutral.validation = valid_tune(request) ? Error::OK : Error::INVALID_ARGUMENT;
+    return engine_.try_admit_tune(client_id, neutral, accepted_at_ms);
+}
+
+Result<void> TunerService::execute_admitted_tune(
+    const TunerAdmittedTune& ticket) noexcept
+{
+    return engine_.execute_admitted_tune(ticket);
+}
+
+Result<void> TunerService::abort_unstarted_tune(const TunerAdmittedTune& ticket,
+                                               Error error) noexcept
+{
+    return engine_.abort_unstarted_tune(ticket, error);
+}
+
+Result<void> TunerService::revoke_tune_ticket(std::uint64_t client_id,
+                                              std::uint64_t lease_id) noexcept
+{
+    return engine_.revoke_tune_ticket(client_id, lease_id);
+}
+
+Result<engine::TuneMetadata> TunerService::tune_metadata(
+    std::uint8_t receiver) const noexcept
+{
+    const auto status = engine_.status();
+    if (!status) return Result<engine::TuneMetadata>::failure(status.error());
+    for (std::size_t slot = 0U; slot < status.value().receiver_count; ++slot) {
+        if (status.value().receivers[slot] != receiver) continue;
+        return Result<engine::TuneMetadata>::success(
+            status.value().tune_metadata[slot]);
+    }
+    return Result<engine::TuneMetadata>::failure(Error::NOT_FOUND);
+}
+
+Result<engine::ReceiverEngineStatus> TunerService::engine_status() const noexcept
+{
+    return engine_.status();
+}
+
+bool TunerService::receiver_supports(std::uint8_t receiver,
+                                     ipc::System system) const noexcept
+{
+    return receiver < receiver_count_ &&
+           backend_.legacy().receiver_supports(receiver, system);
+}
+
+TunerStrictProfile TunerService::strict_profile(std::uint8_t receiver,
+                                                ipc::System system) const noexcept
+{
+    const TunerStrictProfile* profile = strict_profile_for(receiver, system);
+    return profile != nullptr ? *profile : TunerStrictProfile{};
+}
+
+Result<void> TunerService::configure_stream_contract(
+    TunerStreamContract contract, std::uint64_t context_epoch) noexcept
+{
+    return engine_.configure_stream_contract(contract, context_epoch);
+}
+
+Result<TunerService::TunerStreamStart> TunerService::start_stream_v1(
+    std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t revision,
+    std::uint64_t now_ms, std::uint64_t arm_budget_ms) noexcept
+{
+    return engine_.start_stream_v1(client_id, lease_id, revision, now_ms,
+                                   arm_budget_ms);
+}
+
+Result<TunerService::TunerStreamTicket> TunerService::reserve_attach_v1(
+    std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t epoch,
+    std::uint64_t stream_id, const dtv::userland::detail::ReceiverToken& token,
+    std::uint64_t now_ms) noexcept
+{
+    return engine_.reserve_attach_v1(client_id, lease_id, epoch, stream_id, token,
+                                     now_ms);
+}
+
+Result<void> TunerService::prepare_attach_v1(
+    const TunerStreamTicket& ticket) noexcept
+{
+    return engine_.prepare_attach_v1(ticket);
+}
+
+Result<void> TunerService::commit_attach_v1(
+    const TunerStreamTicket& ticket) noexcept
+{
+    return engine_.commit_attach_v1(ticket);
+}
+
+Result<void> TunerService::abort_attach_v1(const TunerStreamTicket& ticket,
+                                           Error cause) noexcept
+{
+    return engine_.abort_attach_v1(ticket, cause);
+}
+
+Result<TunerService::TunerStreamStop> TunerService::stop_stream_v1(
+    std::uint64_t client_id, std::uint64_t lease_id,
+    std::uint64_t stream_id) noexcept
+{
+    return engine_.stop_stream_v1(client_id, lease_id, stream_id);
+}
+
+Result<TunerService::TunerStreamStop> TunerService::expire_armed_v1(
+    std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t stream_id,
+    std::uint64_t now_ms) noexcept
+{
+    return engine_.expire_armed_v1(client_id, lease_id, stream_id, now_ms);
+}
+
+Result<void> TunerService::run_stream_cleanup_v1(
+    const TunerStreamTicket& ticket) noexcept
+{
+    return engine_.run_stream_cleanup_v1(ticket);
+}
+
+Result<void> TunerService::complete_stream_cleanup_v1(
+    const TunerStreamTicket& ticket, Error result, bool quiesced) noexcept
+{
+    return engine_.complete_stream_cleanup_v1(ticket, result, quiesced);
+}
+
+Result<TunerService::TunerStreamStop> TunerService::stream_last_terminal_v1(
+    std::uint64_t client_id, std::uint64_t lease_id) const noexcept
+{
+    return engine_.stream_last_terminal_v1(client_id, lease_id);
 }
 
 }  // namespace px4::userland

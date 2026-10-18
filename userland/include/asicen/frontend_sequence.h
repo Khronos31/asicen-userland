@@ -251,6 +251,11 @@ class FrontendTransport {
 // TunerControl.o .text 0x23bc-0x23f5 and 0x25c8/0x2788). Returns the value
 // actually passed to Adpater_SetFreqISDBT.
 std::uint32_t terrestrial_tune_center_khz(std::uint32_t freq_khz);
+// R3 continuous-Hz form of the same transform; the kHz function above is this
+// one at freq_khz * 1000.  It consumes only floor(hz / 1 MHz): the special
+// windows are the whole-MHz buckets [165, 168), [195, 198) and [471, 474) MHz,
+// and every other bucket maps to floor-MHz + 143 kHz.  Returns 0 for 0.
+std::uint64_t terrestrial_tune_center_hz(std::uint64_t frequency_hz);
 
 // Runs ops in order, stopping at the first libusb failure, short transfer or
 // (where `require_status` is set) non-success status byte.

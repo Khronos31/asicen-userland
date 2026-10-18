@@ -75,6 +75,30 @@ FIRMWARE_NOTICE = (
     "Redistribution rights: unresolved. Inclusion reflects the user's explicit candidate-distribution choice and does not assert that rights are cleared.\n"
     "This file is not relicensed under GPL, MIT, public domain, or this project's terms.\n"
 )
+COMMON_CORE_LICENSE = "repository/third_party/dtv-userland-core/LICENSE"
+COMMON_CORE_PROVENANCE = "repository/third_party/dtv-userland-core/PROVENANCE.json"
+COMMON_CORE_PREFIX = "repository/third_party/dtv-userland-core/"
+COMMON_CORE_BUILD_FILES = {
+    COMMON_CORE_PREFIX + "CMakeLists.txt",
+    COMMON_CORE_PREFIX + "cmake/dtv_userland_coreConfig.cmake.in",
+    COMMON_CORE_PREFIX + "include/dtv/userland/error.h",
+    COMMON_CORE_PREFIX + "include/dtv/userland/logging.h",
+    COMMON_CORE_PREFIX + "include/dtv/userland/mock_transport.h",
+    COMMON_CORE_PREFIX + "include/dtv/userland/transport.h",
+    COMMON_CORE_PREFIX + "include/dtv/userland/wire.h",
+    COMMON_CORE_PREFIX + "src/error.cpp",
+    COMMON_CORE_PREFIX + "src/logging.cpp",
+    COMMON_CORE_PREFIX + "src/mock_transport.cpp",
+    COMMON_CORE_PREFIX + "src/wire.cpp",
+}
+COMMON_CORE_RECEIVER_BUILD_FILES = {
+    COMMON_CORE_PREFIX + "include/dtv/userland/detail/receiver_engine.h",
+    COMMON_CORE_PREFIX + "src/receiver_engine.cpp",
+}
+COMMON_CORE_CARD_BUILD_FILES = {
+    COMMON_CORE_PREFIX + "include/dtv/userland/detail/card_ownership_engine.h",
+    COMMON_CORE_PREFIX + "include/dtv/userland/detail/card_ownership_engine.tpp",
+}
 LINUX_RUNTIME_LICENSE_SHA256 = {
     "toolchain/gcc-COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
     "toolchain/gcc-COPYING.RUNTIME": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
@@ -1701,6 +1725,7 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
             fail(f"forbidden source archive member: {name}")
         if SOURCE_WINDOWS_TOKEN.search(name) and not WINDOWS_SOURCE_ALLOWED.fullmatch(name):
             fail(f"forbidden source archive member: {name}")
+    common_lock = "repository/cmake/dtv-userland-core.revision"
     required = {
         "BUILD-RELINK.md",
         "source-manifest.json",
@@ -1714,12 +1739,23 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
         "repository/VERSION",
         "repository/README.md",
         "repository/THIRD_PARTY_NOTICES.md",
+        "repository/CMakeLists.txt",
         "repository/scripts/build-linux-static.sh",
         "repository/scripts/build-linux-ifd.sh",
         "repository/scripts/build-macos-static.sh",
         "repository/scripts/test-static-relink.sh",
         "repository/packaging/REBUILD.md.in",
     }
+    if common_lock in members:
+        required |= {common_lock, COMMON_CORE_LICENSE, COMMON_CORE_PROVENANCE,
+                     "repository/PROVENANCE.md",
+                     "repository/cmake/DtvUserlandCoreDependency.cmake"}
+        required |= COMMON_CORE_BUILD_FILES
+        product_cmake = read_archive_file(args.archive.resolve(), "repository/CMakeLists.txt")
+        if b"dtv::receiver" in product_cmake:
+            required |= COMMON_CORE_RECEIVER_BUILD_FILES
+        if b"dtv::card" in product_cmake:
+            required |= COMMON_CORE_CARD_BUILD_FILES
     if any(name.startswith(("repository/third_party/px4-userland/userland/src/windows/",
                             "repository/userland/src/windows/")) for name in members):
         # A committed Windows Phase 1 tree must ship the complete adapter,
@@ -1767,6 +1803,42 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
                 fail(f"vendor firmware bytes are forbidden in corresponding source: {name}")
     if manifest.get("libusb_archive_sha256") != LIBUSB_SHA256:
         fail("source manifest does not record the pinned libusb checksum")
+    if common_lock in members:
+        lock_revision = read_archive_file(args.archive.resolve(), common_lock).decode("ascii").strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", lock_revision) or lock_revision == "0" * 40:
+            fail("product snapshot does not pin a verified dtv-userland-core commit")
+        if manifest.get("dtv_userland_core_commit") != lock_revision:
+            fail("source manifest dtv-userland-core commit does not match the product lock")
+        if manifest.get("dtv_userland_core_license") != "MIT":
+            fail("source manifest does not record the dtv-userland-core license")
+        provenance_note = read_archive_file(
+            args.archive.resolve(), "repository/PROVENANCE.md").decode("utf-8")
+        if (lock_revision not in provenance_note or "dtv-userland-core" not in provenance_note or
+                "MIT" not in provenance_note):
+            fail("product provenance does not match the dtv-userland-core lock and license")
+        common_license = read_archive_file(args.archive.resolve(), COMMON_CORE_LICENSE)
+        notices = read_archive_file(args.archive.resolve(), "repository/THIRD_PARTY_NOTICES.md")
+        if common_license not in notices:
+            fail("product third-party notices do not include the exact dtv-userland-core MIT license")
+        try:
+            provenance = json.loads(read_archive_file(args.archive.resolve(), COMMON_CORE_PROVENANCE))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            fail("bundled dtv-userland-core PROVENANCE.json is invalid")
+        if not isinstance(provenance, dict) or not isinstance(provenance.get("source"), dict):
+            fail("bundled dtv-userland-core provenance has no source record")
+        license_scope = provenance.get("license_scope")
+        if not isinstance(license_scope, dict) or not isinstance(license_scope.get("applies_to"), str):
+            fail("bundled dtv-userland-core provenance has no license scope")
+        dependency_notice = read_archive_file(args.archive.resolve(), "DEPENDENCY-NOTICE.txt").decode("utf-8")
+        if (f"dependency.dtv-userland-core.license=MIT\n" not in dependency_notice or
+                f"dependency.dtv-userland-core.commit={lock_revision}\n" not in dependency_notice):
+            fail("source dependency notice does not match the dtv-userland-core lock")
+    else:
+        if manifest.get("dtv_userland_core_commit") is not None or \
+                manifest.get("dtv_userland_core_license") is not None:
+            fail("source manifest declares dtv-userland-core without a product lock")
+        if any(name.startswith(COMMON_CORE_PREFIX) for name in members):
+            fail("source archive bundles dtv-userland-core without a product lock")
     if "COPYING" not in "\n".join(members):
         fail("libusb COPYING is missing from source archive")
     embedded = read_archive_file(args.archive.resolve(), "third_party/libusb-1.0.30.tar.bz2")

@@ -4,6 +4,7 @@
 // product; the real-hardware daemon is asicend.
 #include "asicen/product_profile.h"
 #include "asicen/device_profile.h"
+#include "asicen/control_context_builder.h"
 #include "asicen/px4_mock_backend.h"
 #include "asicend_args.h"
 #include "px4d_signals.h"
@@ -88,7 +89,14 @@ int main(int argc, char** argv)
     const bool group = arguments.group;
     const bool allow_lnb_power = arguments.allow_lnb_power;
 
-    asicen::MockTunerBackend tuner_backend(*selected_model);
+    if (!px4::userland::px4d::install_signal_handlers()) {
+        std::fprintf(stderr, "signal setup failed\n");
+        return 70;
+    }
+
+    const std::uint8_t operational_receivers = selected_model->combined_isdb_ts
+        ? 1U : 2U;
+    asicen::MockTunerBackend tuner_backend(operational_receivers);
     tuner_backend.set_allow_lnb_power(allow_lnb_power);
     asicen::MockTunerStream stream;
     asicen::UnsupportedCardBackend card_backend;
@@ -103,21 +111,26 @@ int main(int argc, char** argv)
         instance.c_str(), px4::userland::ipc::posix::kControlEndpointName,
         group ? px4::userland::ipc::posix::EndpointAccess::shared_group
               : px4::userland::ipc::posix::EndpointAccess::private_user};
+    const auto epoch = nonce_source.generate();
+    if (!epoch) {
+        std::fprintf(stderr, "asicend-mock: %s\n", px4::userland::error_string(epoch.error()));
+        return asicen::cli::exit_status(epoch.error());
+    }
+    px4::userland::ipc::posix::ControlContext context;
+    if (!asicen::build_asicen_mock_control_context(*selected_model, tuner_service,
+            endpoint.instance, epoch.value(), context)) {
+        std::fprintf(stderr, "asicend-mock: invalid control context\n");
+        return 3;
+    }
     auto server = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card_service, tuner_service, {}, true,
-        asicen::profile::usb_present_mask(selected_model->enclosure_receiver_count), &stream,
-        selected_model->enclosure_receiver_count, selected_model->combined_isdb_ts);
+        endpoint, card_service, tuner_service, context, &stream);
     if (!server) {
         std::fprintf(stderr, "asicend-mock: %s\n", px4::userland::error_string(server.error()));
         return asicen::cli::exit_status(server.error());
     }
 
-    if (!px4::userland::px4d::install_signal_handlers()) {
-        std::fprintf(stderr, "signal setup failed\n");
-        return 70;
-    }
     std::fprintf(stderr, "asicend-mock ready backend=mock-only model=%s serial=none receivers=%u endpoint=%s\n",
-                 selected_model->model_key, static_cast<unsigned>(selected_model->enclosure_receiver_count),
+                 selected_model->model_key, static_cast<unsigned>(operational_receivers),
                  server.value()->endpoint_path());
     px4::userland::Error loop_error = px4::userland::Error::OK;
     while (!px4::userland::px4d::stop_requested()) {

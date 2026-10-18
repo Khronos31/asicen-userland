@@ -86,6 +86,43 @@ compiler, libc and license-file hashes. The reference license sources are
 [GCC 14.2.0](https://github.com/gcc-mirror/gcc/tree/releases/gcc-14.2.0)
 and [GCC 10.2.0](https://github.com/gcc-mirror/gcc/tree/releases/gcc-10.2.0).
 
+## Common foundation
+
+`dtv-userland-core` is included from the private repository
+`Khronos31/dtv-userland-core` at commit
+`b385ce8768259f8c2d69ce148d8a5d921d581847`. The selected subset is licensed
+under MIT. Its exact `LICENSE` and `PROVENANCE.json` are included in
+corresponding-source archives under
+`repository/third_party/dtv-userland-core/`. Binary archives that link this
+foundation include the MIT terms below. The pinned revision includes the
+optional receiver lifecycle and opaque-ATR card ownership engines, both covered
+by the same MIT license. The product's GPL terms and vendor firmware rights
+policy above are unchanged.
+
+```text
+MIT License
+
+Copyright (c) 2026 Khronos31
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Vendor firmware in binary packages
 
 On 2026-10-09 the user selected inclusion of the Linux loader image in binary
@@ -133,9 +170,9 @@ The repository's recpt1 `COPYING` is not a license for them. Linux's
 say `MODULE_LICENSE` is not a substitute for the source license. Attribution
 and the source checksums are kept in the local files and in
 [the V2 source facts](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/v2-nmi-families.md). The local adaptation is
-distributed as GPL-2.0-only, which is this product's license and the stricter
-reading of an unspecified GPL version. That is not a finding that upstream
-named GPL-2.0-only. Asking upstream remains open. Model-specific differences
+currently marked GPL-2.0-only under this product's policy. This records the
+local license choice; it does not establish a versioned upstream grant.
+Asking upstream remains open. Model-specific differences
 were cross-checked against official Windows object code by static inspection;
 no vendor executable code or application-key tables are incorporated.
 

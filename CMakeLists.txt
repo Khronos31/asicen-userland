@@ -153,10 +153,11 @@ function(asicen_enable_project_warnings target)
     )
 endfunction()
 
+include(cmake/DtvUserlandCoreDependency.cmake)
+asicen_add_dtv_userland_core()
+
 set(ASICEN_PX4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland)
 set(ASICEN_PX4_CORE_SOURCES
-    ${ASICEN_PX4_ROOT}/src/error.cpp
-    ${ASICEN_PX4_ROOT}/src/logging.cpp
     ${ASICEN_PX4_ROOT}/src/identity.cpp
     ${ASICEN_PX4_ROOT}/src/ipc.cpp
     ${ASICEN_PX4_ROOT}/src/control_client.cpp
@@ -164,6 +165,7 @@ set(ASICEN_PX4_CORE_SOURCES
     ${ASICEN_PX4_ROOT}/src/control_workers.cpp
     ${ASICEN_PX4_ROOT}/src/tuner_service.cpp
     ${ASICEN_PX4_ROOT}/src/card_service.cpp
+    ${ASICEN_PX4_ROOT}/src/enclosure_context.cpp
 )
 
 if(WIN32)
@@ -184,7 +186,7 @@ if(ASICEN_BUILD_TESTS)
     add_library(px4_portable_reference STATIC ${ASICEN_PX4_CORE_SOURCES})
     target_include_directories(px4_portable_reference PUBLIC
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src)
-    target_link_libraries(px4_portable_reference PUBLIC Threads::Threads)
+    target_link_libraries(px4_portable_reference PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control)
     target_compile_definitions(px4_portable_reference PUBLIC
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
     asicen_enable_project_warnings(px4_portable_reference)
@@ -199,7 +201,7 @@ target_include_directories(asicen_portable_core PUBLIC
 target_compile_definitions(asicen_portable_core PRIVATE ASICEN_PROFILE_ASICEN=1)
 target_compile_definitions(asicen_portable_core PUBLIC
     PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-target_link_libraries(asicen_portable_core PUBLIC Threads::Threads)
+target_link_libraries(asicen_portable_core PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control)
 asicen_enable_project_warnings(asicen_portable_core)
 set_target_properties(asicen_portable_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -219,6 +221,7 @@ target_link_libraries(asicen_hardware_session PUBLIC asicen_portable_core Thread
 asicen_enable_project_warnings(asicen_hardware_session)
 
 add_library(asicen_core STATIC
+    userland/src/control_context_builder.cpp
     userland/src/capture_drain.cpp
     userland/src/card_mailbox.cpp
     userland/src/channel_plan.cpp
@@ -244,7 +247,8 @@ add_library(asicen_core STATIC
     userland/src/write_protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include ${ASICEN_PX4_ROOT}/include)
-target_link_libraries(asicen_core PUBLIC Threads::Threads)
+target_compile_definitions(asicen_core PRIVATE ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
+target_link_libraries(asicen_core PUBLIC Threads::Threads dtv::core dtv::control asicen_portable_core)
 asicen_enable_project_warnings(asicen_core)
 
 if(ASICEN_ENABLE_LIBUSB)
@@ -254,6 +258,7 @@ if(ASICEN_ENABLE_LIBUSB)
         userland/src/card_mailbox_hardware.cpp
         userland/src/card_only_service.cpp
     )
+    target_compile_definitions(asicen_libusb PRIVATE ASICEN_PRODUCT_VERSION=\"${PROJECT_VERSION}\")
     target_include_directories(asicen_libusb PUBLIC userland/include)
     target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session
         ${ASICEN_LIBUSB_TARGET})
@@ -470,6 +475,29 @@ endif()
 if(ASICEN_BUILD_TESTS AND NOT WIN32)
     enable_testing()
 
+    add_executable(asicen-runtime-v1-server-tests
+        userland/tests/asicen_runtime_v1_server_tests.cpp
+        ${ASICEN_PX4_ROOT}/src/control_server.cpp
+        ${ASICEN_PX4_ROOT}/src/control_workers.cpp
+        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
+        ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp)
+    target_include_directories(asicen-runtime-v1-server-tests PRIVATE
+        userland/include userland/src
+        ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
+        ${ASICEN_PX4_ROOT}/tools
+        ${ASICEN_PX4_ROOT}/tests)
+    target_compile_definitions(asicen-runtime-v1-server-tests PRIVATE
+        ASICEN_PROFILE_ASICEN=1
+        ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}"
+        PX4_CONTROL_SERVER_TEST_ACCESS=1
+        PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+    target_link_libraries(asicen-runtime-v1-server-tests PRIVATE
+        asicen_core asicen_hardware_session asicen_px4_mock dtv::json)
+    asicen_enable_project_warnings(asicen-runtime-v1-server-tests)
+    add_test(NAME asicen-runtime-v1-server-tests
+        COMMAND asicen-runtime-v1-server-tests)
+    set_tests_properties(asicen-runtime-v1-server-tests PROPERTIES TIMEOUT 120)
+
     add_executable(px4-portable-tests
         ${ASICEN_PX4_CORE_SOURCES}
         ${ASICEN_PX4_ROOT}/src/card.cpp
@@ -499,9 +527,23 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_POSIX_IPC_TEST_ACCESS=1
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads)
+    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card)
     asicen_enable_project_warnings(px4-portable-tests)
     add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
+
+    add_executable(asicen-card-ownership-characterization
+        userland/tests/card_ownership_characterization.cpp)
+    target_link_libraries(asicen-card-ownership-characterization PRIVATE asicen_portable_core)
+    asicen_enable_project_warnings(asicen-card-ownership-characterization)
+    add_test(NAME asicen-card-ownership-characterization
+        COMMAND asicen-card-ownership-characterization)
+
+    add_executable(asicen-card-ownership-asicen-tests
+        userland/tests/card_ownership_asicen_tests.cpp)
+    target_link_libraries(asicen-card-ownership-asicen-tests PRIVATE asicen_portable_core)
+    asicen_enable_project_warnings(asicen-card-ownership-asicen-tests)
+    add_test(NAME asicen-card-ownership-asicen-tests
+        COMMAND asicen-card-ownership-asicen-tests)
 
     if(UNIX)
         if(ASICEN_PCSC_IFD_AVAILABLE)
@@ -533,6 +575,65 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
                 add_test(NAME asicen-card-only-service-tests
                     COMMAND asicen-card-only-service-tests)
                 set_tests_properties(asicen-card-only-service-tests PROPERTIES TIMEOUT 20)
+
+                add_executable(asicen-real-factory-proof-tests
+                    userland/tests/asicen_real_factory_proof_tests.cpp
+                    userland/tests/transport_transform_reference.cpp
+                    third_party/px4-userland/userland/tools/px4_ts_core.cpp
+                    third_party/px4-userland/userland/tools/px4_ts_posix.cpp)
+                target_include_directories(asicen-real-factory-proof-tests PRIVATE
+                    third_party/px4-userland/userland/include
+                    third_party/px4-userland/userland/tools
+                    third_party/px4-userland/userland/tests)
+                target_link_libraries(asicen-real-factory-proof-tests PRIVATE
+                    asicen_hardware_session asicen_libusb asicen_pcsc_ifd_core)
+                target_compile_definitions(asicen-real-factory-proof-tests PRIVATE
+                    ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
+                asicen_enable_project_warnings(asicen-real-factory-proof-tests)
+                add_test(NAME asicen-real-factory-proof-tests
+                    COMMAND asicen-real-factory-proof-tests)
+                set_tests_properties(asicen-real-factory-proof-tests PROPERTIES TIMEOUT 90)
+
+                add_executable(asicen-factory-shutdown-wiring-tests
+                    userland/tests/asicen_factory_shutdown_wiring_tests.cpp
+                    ${ASICEN_PX4_ROOT}/src/control_server.cpp
+                    ${ASICEN_PX4_ROOT}/src/control_workers.cpp)
+                target_include_directories(asicen-factory-shutdown-wiring-tests PRIVATE
+                    userland/tests
+                    third_party/px4-userland/userland/include
+                    third_party/px4-userland/userland/tests
+                    third_party/px4-userland/userland/src)
+                target_link_libraries(asicen-factory-shutdown-wiring-tests PRIVATE asicen_libusb)
+                target_compile_definitions(asicen-factory-shutdown-wiring-tests PRIVATE
+                    ASICEN_PROFILE_ASICEN=1
+                    ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}"
+                    PX4_CONTROL_SERVER_TEST_ACCESS=1
+                    PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+                asicen_enable_project_warnings(asicen-factory-shutdown-wiring-tests)
+                add_test(NAME asicen-factory-shutdown-wiring-tests
+                    COMMAND asicen-factory-shutdown-wiring-tests)
+                set_tests_properties(asicen-factory-shutdown-wiring-tests PROPERTIES TIMEOUT 15)
+
+                add_executable(asicen-hardware-stream-shutdown-tests
+                    userland/tests/asicen_hardware_stream_shutdown_tests.cpp)
+                target_include_directories(asicen-hardware-stream-shutdown-tests PRIVATE
+                    third_party/px4-userland/userland/include)
+                target_link_libraries(asicen-hardware-stream-shutdown-tests PRIVATE
+                    asicen_libusb asicen_px4_mock)
+                asicen_enable_project_warnings(asicen-hardware-stream-shutdown-tests)
+                add_test(NAME asicen-hardware-stream-shutdown-tests
+                    COMMAND asicen-hardware-stream-shutdown-tests)
+                set_tests_properties(asicen-hardware-stream-shutdown-tests PROPERTIES TIMEOUT 15)
+
+                add_executable(asicen-dynamic-card-quarantine-tests
+                    userland/tests/asicen_dynamic_card_quarantine_tests.cpp)
+                target_include_directories(asicen-dynamic-card-quarantine-tests PRIVATE
+                    third_party/px4-userland/userland/include)
+                target_link_libraries(asicen-dynamic-card-quarantine-tests PRIVATE asicen_libusb)
+                asicen_enable_project_warnings(asicen-dynamic-card-quarantine-tests)
+                add_test(NAME asicen-dynamic-card-quarantine-tests
+                    COMMAND asicen-dynamic-card-quarantine-tests)
+                set_tests_properties(asicen-dynamic-card-quarantine-tests PROPERTIES TIMEOUT 20)
             endif()
         endif()
     endif()
@@ -657,6 +758,17 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     asicen_enable_project_warnings(asicen-hardware-session-tests)
     add_test(NAME asicen-hardware-session-tests COMMAND asicen-hardware-session-tests)
     set_tests_properties(asicen-hardware-session-tests PROPERTIES TIMEOUT 10)
+
+    if(ASICEN_ENABLE_LIBUSB)
+        add_executable(asicen-strict-hz-stream-forwarding-tests
+            userland/tests/strict_hz_stream_forwarding_tests.cpp)
+        target_include_directories(asicen-strict-hz-stream-forwarding-tests PRIVATE
+            userland/include ${ASICEN_PX4_ROOT}/include)
+        target_link_libraries(asicen-strict-hz-stream-forwarding-tests PRIVATE asicen_libusb)
+        asicen_enable_project_warnings(asicen-strict-hz-stream-forwarding-tests)
+        add_test(NAME asicen-strict-hz-stream-forwarding-tests
+            COMMAND asicen-strict-hz-stream-forwarding-tests)
+    endif()
 
     add_executable(asicen-hardware-ipc-integration-tests
         userland/tests/hardware_ipc_integration_tests.cpp)
@@ -959,10 +1071,10 @@ if(ASICEN_BUILD_TESTS)
     add_test(NAME asicen-ts-continuity-tests COMMAND asicen-ts-continuity-tests)
 
     # Preserve the reference's portable helper API and FIFO oracle without
-    # including synthetic transports in production builds.
-    add_library(asicen_transport_mock STATIC ${ASICEN_PX4_ROOT}/src/mock_transport.cpp)
-    target_link_libraries(asicen_transport_mock PUBLIC asicen_portable_core)
-    asicen_enable_project_warnings(asicen_transport_mock)
+    # including synthetic transports in production builds.  The mock behavior
+    # now lives in dtv::core; this target only carries the build seam.
+    add_library(asicen_transport_mock INTERFACE)
+    target_link_libraries(asicen_transport_mock INTERFACE asicen_portable_core)
 
     add_executable(asicen-portable-helper-tests userland/tests/portable_helper_tests.cpp)
     target_link_libraries(asicen-portable-helper-tests PRIVATE asicen_transport_mock)
@@ -1100,6 +1212,34 @@ if(ASICEN_BUILD_TESTS)
     asicen_enable_project_warnings(asicen-product-worker-boundaries-tests)
     add_test(NAME asicen-product-worker-boundaries-tests COMMAND asicen-product-worker-boundaries-tests)
 
+    if(UNIX)
+        add_executable(asicen-dynamic-worker-routing-tests
+            userland/tests/asicen_dynamic_worker_routing_tests.cpp
+            ${ASICEN_PX4_ROOT}/src/control_workers.cpp)
+        target_include_directories(asicen-dynamic-worker-routing-tests PRIVATE
+            ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src)
+        target_compile_definitions(asicen-dynamic-worker-routing-tests PRIVATE
+            ASICEN_PROFILE_ASICEN=1)
+        target_link_libraries(asicen-dynamic-worker-routing-tests PRIVATE asicen_px4_mock)
+        asicen_enable_project_warnings(asicen-dynamic-worker-routing-tests)
+        add_test(NAME asicen-dynamic-worker-routing-tests
+            COMMAND asicen-dynamic-worker-routing-tests)
+        set_tests_properties(asicen-dynamic-worker-routing-tests PROPERTIES TIMEOUT 10)
+
+        add_executable(asicen-dynamic-shutdown-tests
+            userland/tests/asicen_dynamic_shutdown_tests.cpp
+            ${ASICEN_PX4_ROOT}/src/control_workers.cpp)
+        target_include_directories(asicen-dynamic-shutdown-tests PRIVATE
+            ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src)
+        target_compile_definitions(asicen-dynamic-shutdown-tests PRIVATE
+            ASICEN_PROFILE_ASICEN=1)
+        target_link_libraries(asicen-dynamic-shutdown-tests PRIVATE asicen_px4_mock)
+        asicen_enable_project_warnings(asicen-dynamic-shutdown-tests)
+        add_test(NAME asicen-dynamic-shutdown-tests
+            COMMAND asicen-dynamic-shutdown-tests)
+        set_tests_properties(asicen-dynamic-shutdown-tests PROPERTIES TIMEOUT 15)
+    endif()
+
     add_executable(asicen-ifd-capability-tests
         ${ASICEN_PX4_ROOT}/tests/asicen_ifd_capability_tests.cpp
         ${ASICEN_PX4_ROOT}/src/pcsc_ifd_adapter.cpp)
@@ -1151,6 +1291,26 @@ if(ASICEN_BUILD_TESTS)
     target_link_libraries(asicen-tuner-settle-tests PRIVATE px4_portable_reference)
     asicen_enable_project_warnings(asicen-tuner-settle-tests)
     add_test(NAME asicen-tuner-settle-tests COMMAND asicen-tuner-settle-tests)
+    add_executable(asicen-receiver-facade-tests
+        userland/tests/receiver_facade_compat_tests.cpp)
+    target_link_libraries(asicen-receiver-facade-tests PRIVATE asicen_portable_core)
+    asicen_enable_project_warnings(asicen-receiver-facade-tests)
+    add_test(NAME asicen-receiver-facade-tests COMMAND asicen-receiver-facade-tests)
+    set_tests_properties(asicen-receiver-facade-tests PROPERTIES TIMEOUT 10)
+    # R2 strict worker admission with a faithful ASICEN-shaped committed-power
+    # backend.  The test compiles its private-access copy of the worker lanes.
+    add_executable(asicen-receiver-r2-strict-tests
+        userland/tests/receiver_r2_strict_tests.cpp
+        ${ASICEN_PX4_ROOT}/src/control_workers.cpp)
+    target_include_directories(asicen-receiver-r2-strict-tests PRIVATE
+        ${ASICEN_PX4_ROOT}/src)
+    target_compile_definitions(asicen-receiver-r2-strict-tests PRIVATE
+        PX4_CONTROL_WORKERS_TEST_ACCESS=1 ASICEN_PROFILE_ASICEN=1)
+    target_link_libraries(asicen-receiver-r2-strict-tests PRIVATE asicen_portable_core)
+    asicen_enable_project_warnings(asicen-receiver-r2-strict-tests)
+    add_test(NAME asicen-receiver-r2-strict-tests
+             COMMAND asicen-receiver-r2-strict-tests)
+    set_tests_properties(asicen-receiver-r2-strict-tests PROPERTIES TIMEOUT 120)
     if(UNIX)
         add_executable(asicen-signals-tests
             userland/tests/signals_tests_main.cpp

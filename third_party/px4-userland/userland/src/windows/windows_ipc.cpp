@@ -49,9 +49,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
 
-// AF_UNIX on Windows uses a Win32 path. The whole <runtime>\px4-userland\
-// <instance>\<endpoint> path must stay under the small sun_path field of
-// SOCKADDR_UN, which is the practical endpoint length limit here.
+// AF_UNIX on Windows uses a Win32 path. The complete runtime, product,
+// instance, and endpoint path must fit the SOCKADDR_UN sun_path limit.
 // The endpoint path must fit the platform AF_UNIX address plus its terminating
 // NUL. Derive it from the actual SOCKADDR_UN field rather than a magic number.
 constexpr std::size_t kMaxEndpointPathBytes = sizeof(SOCKADDR_UN{}.sun_path);
@@ -792,7 +791,12 @@ Result<void> remove_stale_endpoint(
     }
     SOCKADDR_UN address{};
     address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, utf8.data(), sizeof(address.sun_path) - 1U);
+    if (static_cast<std::size_t>(converted) > sizeof(address.sun_path)) {
+        close_socket(static_cast<NativeHandle>(probe));
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
+    std::memcpy(address.sun_path, utf8.data(),
+                static_cast<std::size_t>(converted));
     const int connected = ::connect(probe, reinterpret_cast<const sockaddr*>(&address),
                                     sizeof(address));
     const int connect_error = connected == 0 ? 0 : ::WSAGetLastError();
@@ -885,7 +889,11 @@ bool make_address(const std::array<wchar_t, kStoredPathCapacity>& path,
     }
     std::memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, scratch.data(), sizeof(address.sun_path) - 1U);
+    if (static_cast<std::size_t>(converted) > sizeof(address.sun_path)) {
+        return false;
+    }
+    std::memcpy(address.sun_path, scratch.data(),
+                static_cast<std::size_t>(converted));
     return true;
 }
 

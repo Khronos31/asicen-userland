@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-10: ASICEN receiver-to-USB-function lane capacity.
-// The original license notice is unchanged.
 #include "control_workers.h"
+
 #if defined(ASICEN_PROFILE_ASICEN)
 #include "asicen/product_profile.h"
 #endif
 
 #include <atomic>
+#include <limits>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -45,26 +45,27 @@ bool operation_lane_valid(ControlWorkerLane lane,
     case ControlWorkerOperation::tuner_tune:
     case ControlWorkerOperation::tuner_start_stream:
     case ControlWorkerOperation::tuner_stop_stream:
+    case ControlWorkerOperation::tuner_start_stream_v1:
+    case ControlWorkerOperation::tuner_stop_stream_v1:
+    case ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1:
+    case ControlWorkerOperation::tuner_prepare_attach_v1:
+    case ControlWorkerOperation::tuner_run_stream_cleanup_v1:
     case ControlWorkerOperation::tuner_stats:
     case ControlWorkerOperation::tuner_attach_stream:
     case ControlWorkerOperation::tuner_detach_stream:
-        if (task.receiver >=
 #if defined(ASICEN_PROFILE_ASICEN)
-            asicen::profile::kReceiverCount
+        if (task.receiver >= asicen::profile::kReceiverCount) {
 #else
-            kReceiverCount
+        if (task.receiver >= kReceiverCount) {
 #endif
-        ) {
             return false;
         }
-        return lane == (task.receiver <
 #if defined(ASICEN_PROFILE_ASICEN)
-                            asicen::profile::kReceiversPerUsbFunction
+        return lane == (task.receiver < asicen::profile::kReceiversPerUsbFunction ?
 #else
-                            4U
+        return lane == (task.receiver < 4U ?
 #endif
-                            ? ControlWorkerLane::tuner_dev1 :
-                              ControlWorkerLane::tuner_dev2);
+                            ControlWorkerLane::tuner_dev1 : ControlWorkerLane::tuner_dev2);
     case ControlWorkerOperation::tuner_shutdown:
         return lane == ControlWorkerLane::tuner_dev1;
     case ControlWorkerOperation::card_status:
@@ -728,6 +729,59 @@ struct ControlWorkerLanes::Impl final {
             return Result<void>::success();
         }
 
+        // R2 bounded TUNE admission and publication.  The lane mutex is held
+        // across the capacity check, the callback-free registry try-lock
+        // admission, the fixed-size task copy and the signal, so normal
+        // execution/stop cannot interleave before publication.
+        Result<void> submit_tune(const ControlWorkerTask& task) noexcept
+        {
+            if (pthread_mutex_lock(&mutex) != 0) {
+                return Result<void>::failure(Error::INTERNAL);
+            }
+            if (stopping) {
+                (void)pthread_mutex_unlock(&mutex);
+                return Result<void>::failure(Error::NOT_READY);
+            }
+            if (task_count == tasks.size()) {
+                (void)pthread_mutex_unlock(&mutex);
+                return Result<void>::failure(Error::BUSY);
+            }
+            // The prepared outcome was computed before this lock; admission
+            // only consumes it (no planner or profile query here).
+            const auto admitted = task.tune_prepared
+                ? owner.tuner_service.try_admit_prepared_tune(
+                      task.client_id, task.prepared_tune, task.accepted_at_ms)
+                : owner.tuner_service.try_admit_tune(
+                      task.client_id, task.tune, task.accepted_at_ms);
+            if (!admitted) {
+                (void)pthread_mutex_unlock(&mutex);
+                return Result<void>::failure(admitted.error());
+            }
+            ControlWorkerTask entry = task;
+            entry.tune_admitted = true;
+            entry.admitted_tune = admitted.value();
+            const std::size_t position =
+                (task_head + task_count) % tasks.size();
+            tasks[position] = entry;
+            ++task_count;
+            bool signal_failed = pthread_cond_signal(&task_ready) != 0;
+#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
+            if (owner.fail_tune_signal) signal_failed = true;
+#endif
+            if (signal_failed) {
+                --task_count;
+                (void)pthread_mutex_unlock(&mutex);
+                // The admitted ticket was accepted but never published: abort
+                // it exactly once after unlock with an internal error.  Its
+                // advanced revision and invalidated current state stay.
+                (void)owner.tuner_service.abort_unstarted_tune(admitted.value(),
+                                                               Error::INTERNAL);
+                return Result<void>::failure(Error::INTERNAL);
+            }
+            (void)pthread_mutex_unlock(&mutex);
+            return Result<void>::success();
+        }
+
         bool try_pop(ControlWorkerCompletion& completion) noexcept
         {
             if (pthread_mutex_lock(&mutex) != 0) {
@@ -789,6 +843,7 @@ struct ControlWorkerLanes::Impl final {
     bool joined = false;
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
     bool fail_tuner_attach_submit = false;
+    bool fail_tune_signal = false;
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
 #endif
@@ -803,6 +858,7 @@ struct ControlWorkerLanes::Impl final {
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
         if (options != nullptr) {
             fail_tuner_attach_submit = options->fail_tuner_attach_submit;
+            fail_tune_signal = options->fail_tune_signal;
             before_tuner_attach_completion =
                 options->before_tuner_attach_completion;
             before_tuner_attach_completion_context =
@@ -814,7 +870,7 @@ struct ControlWorkerLanes::Impl final {
     ControlWorkerCompletion execute(const ControlWorkerTask& task) noexcept
     {
         ControlWorkerCompletion completion{};
-        completion.type = task.type;
+        completion.opcode = task.opcode;
         completion.kind = task.kind;
         completion.operation = task.operation;
         completion.client_id = task.client_id;
@@ -837,9 +893,30 @@ struct ControlWorkerLanes::Impl final {
             break;
         }
         case ControlWorkerOperation::tuner_tune: {
-            const auto result = tuner_service.tune(task.client_id, task.tune);
-            if (!result) operation_error = result.error();
-            else completion.tune_response = result.value();
+            if (task.tune_admitted) {
+                const auto result =
+                    tuner_service.execute_admitted_tune(task.admitted_tune);
+                if (!result) operation_error = result.error();
+                else {
+                    completion.tune_response = TuneResponsePayload{
+                        1U, std::numeric_limits<std::int32_t>::min()};
+                    // The typed result reports what the engine committed for
+                    // this exact ticket; it is never reconstructed from the
+                    // request.
+                    completion.tune_revision = task.admitted_tune.tune_revision;
+                    const auto metadata = tuner_service.tune_metadata(task.receiver);
+                    if (metadata && metadata.value().current_valid &&
+                        metadata.value().current_revision ==
+                            task.admitted_tune.tune_revision) {
+                        completion.tune_metadata = metadata.value();
+                        completion.tune_record_valid = true;
+                    }
+                }
+            } else {
+                const auto result = tuner_service.tune(task.client_id, task.tune);
+                if (!result) operation_error = result.error();
+                else completion.tune_response = result.value();
+            }
             break;
         }
         case ControlWorkerOperation::tuner_start_stream: {
@@ -856,6 +933,70 @@ struct ControlWorkerLanes::Impl final {
                 completion.stream_final_snapshot = result.value();
                 completion.stream_snapshot_valid = true;
             }
+            break;
+        }
+        case ControlWorkerOperation::tuner_start_stream_v1: {
+            const auto result = tuner_service.start_stream_v1(
+                task.client_id, task.lease_id, task.tune_revision,
+                task.now_ms, task.arm_budget_ms);
+            if (!result) operation_error = result.error();
+            else {
+                completion.v1_start = result.value();
+                completion.v1_start_valid = true;
+                const std::uint64_t expires = completion.v1_start.expires_at_ms;
+                const std::uint64_t now = task.now_ms;
+                const std::uint64_t remaining = expires > now ? expires - now : 0U;
+                completion.v1_expires_after_ms =
+                    remaining > std::numeric_limits<std::uint32_t>::max()
+                        ? std::numeric_limits<std::uint32_t>::max()
+                        : static_cast<std::uint32_t>(remaining);
+            }
+            break;
+        }
+        case ControlWorkerOperation::tuner_stop_stream_v1: {
+            const auto result = tuner_service.stop_stream_v1(
+                task.client_id, task.lease_id, task.stream_id);
+            if (!result) operation_error = result.error();
+            else {
+                completion.v1_stop = result.value();
+                completion.v1_stop_valid = true;
+            }
+            break;
+        }
+        case ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1: {
+            const auto stopped = tuner_service.stop_stream_v1(
+                task.stream_ticket.client_id, task.lease_id,
+                task.stream_ticket.stream_id);
+            if (!stopped) operation_error = stopped.error();
+            else {
+                const auto cleaned =
+                    tuner_service.run_stream_cleanup_v1(task.stream_ticket);
+                if (!cleaned && cleaned.error() != Error::NOT_FOUND)
+                    operation_error = cleaned.error();
+                const auto final = tuner_service.stream_last_terminal_v1(
+                    task.stream_ticket.client_id, task.lease_id);
+                if (final) {
+                    // Keep the exact STOP identity/revision; the cleanup
+                    // observation adds the settled quiescence and error.
+                    completion.v1_stop = stopped.value();
+                    completion.v1_stop.quiesced = final.value().quiesced;
+                    completion.v1_stop.cleanup_error = final.value().cleanup_error;
+                    completion.v1_stop.terminal = final.value().terminal;
+                    completion.v1_stop_valid = true;
+                } else if (operation_error == Error::OK) {
+                    operation_error = final.error();
+                }
+            }
+            break;
+        }
+        case ControlWorkerOperation::tuner_prepare_attach_v1: {
+            const auto result = tuner_service.prepare_attach_v1(task.stream_ticket);
+            if (!result) operation_error = result.error();
+            break;
+        }
+        case ControlWorkerOperation::tuner_run_stream_cleanup_v1: {
+            const auto result = tuner_service.run_stream_cleanup_v1(task.stream_ticket);
+            if (!result) operation_error = result.error();
             break;
         }
         case ControlWorkerOperation::tuner_stats: {
@@ -990,6 +1131,8 @@ struct ControlWorkerLanes::Impl final {
             task.operation == ControlWorkerOperation::tuner_tune ||
             task.operation == ControlWorkerOperation::tuner_start_stream ||
             task.operation == ControlWorkerOperation::tuner_stop_stream ||
+            task.operation == ControlWorkerOperation::tuner_start_stream_v1 ||
+            task.operation == ControlWorkerOperation::tuner_stop_stream_v1 ||
             task.operation == ControlWorkerOperation::tuner_stats ||
             task.operation == ControlWorkerOperation::tuner_attach_stream ||
             task.operation == ControlWorkerOperation::tuner_detach_stream) {
@@ -1133,6 +1276,13 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
     }
     if (!operation_lane_valid(lane, task)) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
+    // A real strict daemon routes TUNE through the bounded admission and
+    // publication transaction.  Callers that did not opt into strict mode keep
+    // the legacy direct queue submission.
+    if (task.operation == ControlWorkerOperation::tuner_tune &&
+        impl_->tuner_service.strict_admission_enabled()) {
+        return impl_->lanes[index]->submit_tune(task);
     }
     return impl_->lanes[index]->submit(task);
 }

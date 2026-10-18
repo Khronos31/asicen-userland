@@ -2,26 +2,55 @@
 #ifndef PX4_USERLAND_CONTROL_SERVER_H
 #define PX4_USERLAND_CONTROL_SERVER_H
 
+#include "dtv/userland/records.h"
 #include "px4/card_service.h"
 #include "px4/posix_ipc.h"
 #include "px4/tuner_service.h"
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <string_view>
 
 namespace px4::userland::ipc::posix {
 
+// The one canonical context a daemon serves.  list holds the immutable
+// producer, enclosure, topology, function, receiver and reader descriptors;
+// its epoch and snapshot are ignored and set by the server.  receiver_index
+// maps the i-th list receiver (public u16 ID) to its TunerService receiver.
+// The caller builds it once from the resolved product context.
+struct ControlContext final {
+    dtv::userland::wire::Uuid epoch{};
+    dtv::userland::wire::Optional<dtv::userland::wire::WString<64>> instance{};
+    dtv::userland::wire::ListResponse list{};
+    std::array<std::uint8_t, dtv::userland::wire::kMaxPublicReceivers> receiver_index{};
+};
+
 // POSIX control-plane engine used by px4d and socket integration tests. The
-// poll thread owns sockets, protocol state, responses, events, and leases;
-// finite CardService/TunerService calls run on private topology-specific
-// worker lanes. Same-bridge tuner operations remain serialized by the bank.
+// poll thread owns sockets, protocol state, responses, and leases; finite
+// CardService/TunerService calls run on private topology-specific worker
+// lanes. Same-bridge tuner operations remain serialized by the bank.
+//
+// The control endpoint speaks UDTV 1.0 (HELLO, LIST, STATUS, ACQUIRE, RELEASE,
+// TUNE).  Stream, card and event operations are not connected yet and are
+// refused with UNSUPPORTED; the data endpoint refuses ATTACH the same way.
 class PosixControlServer final {
 public:
+    // context must pass validate_list_response and map its receivers to
+    // distinct TunerService receivers; the server copies it.  TUNE uses only
+    // the strict Hz entrance and is UNSUPPORTED unless the tuner service has
+    // strict capabilities configured.
     static Result<std::unique_ptr<PosixControlServer>> create(
         const EndpointConfig& endpoint, CardService& card_service,
-        TunerService& tuner_service,
-        std::string_view base_serial, bool ready = true,
-        std::uint8_t usb_present_mask = 0x03U,
+        TunerService& tuner_service, const ControlContext& context,
+        TunerStreamControl* stream_control = nullptr) noexcept;
+
+    // Source compatibility for legacy fixtures.  The old arguments cannot
+    // describe an accepted UDTV context, so this overload never starts a server.
+    static Result<std::unique_ptr<PosixControlServer>> create(
+        const EndpointConfig& endpoint, CardService& card_service,
+        TunerService& tuner_service, std::string_view base_serial,
+        bool ready = true, std::uint8_t usb_present_mask = 0x03U,
         TunerStreamControl* stream_control = nullptr,
         std::uint8_t receiver_count = kQ3U4ReceiverCount,
         bool dual_system = false) noexcept;
@@ -30,7 +59,7 @@ public:
     PosixControlServer(const PosixControlServer&) = delete;
     PosixControlServer& operator=(const PosixControlServer&) = delete;
 
-    // Processes accept/read/dispatch/event work for at most timeout. Repeated
+    // Processes accept/read/dispatch/write work for at most timeout. Repeated
     // calls form the foreground daemon loop and give signal state a bounded
     // observation interval.
     Result<void> poll_once(Timeout timeout) noexcept;

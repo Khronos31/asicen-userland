@@ -207,6 +207,108 @@ userland/tests/windows_imported_tests_main.cpp
   the previously omitted complete wire-codec suite is registered. ASICEN-only
   runners exercise product codec/topology, TS options/usage, PC/SC capability,
   identity leases, and native firmware provider policy boundaries.
+- `userland/include/px4/error.h`, `logging.h`, `transport.h` and
+  `mock_transport.h`: replaced by thin facades that alias `dtv::userland`
+  (see the foundation dependency revision below). `userland/include/px4/firmware.h`
+  qualifies the `Result` friend declaration as `dtv::userland::Result` so the
+  shared `Result` alias still grants `FirmwareImage` access. This is the only
+  declaration adjustment; the firmware protocol/asset logic is untouched.
+
+## Common foundation dependency revision 1
+
+2026-10-18 JST. Base ASICEN main `76299585bbaf7dd77e579554565db2b050df4232`.
+The seven N08 foundation files (`include/px4/{error,logging,transport,mock_transport}.h`
+and `src/{error,logging,mock_transport}.cpp`) were compared against the fixed
+PX4 checkout `90f08a594487e2603bd5c09f778a0b3b64ac9a4d`; all seven were
+byte-identical to that upstream source, so ASICEN has no vendor delta in them.
+The reviewed shared alias/dependency pattern is therefore applied unchanged, and
+the canonical algorithms now come from the MIT `dtv-userland-core` commit
+`4873d346476e9bac9073bf39ffba807fdc892733`, pinned in
+`cmake/dtv-userland-core.revision` and linked as `dtv::core`.
+
+The four headers become aliases and keep only the product device constants and
+the PX4-preserving default `MockTransport` policy in the facade. The three
+duplicate algorithm sources are no longer vendored: `src/error.cpp`,
+`src/logging.cpp` and `src/mock_transport.cpp` are removed from this directory.
+The file list above remains the historical import record. Hardware, card,
+current IPC/wire byte content and CLI behavior are unchanged; the product
+VERSION stays 0.1.0.
+
+Pre-change (pin-identical) and post-change SHA-256:
+
+```text
+include/px4/error.h
+  pin  aba979d8421e9dab4513715bb4aa89e3c30ecfaee477054b99b974ad95ec0013
+  now  669a16caafcfc987c79b0944342dc9beda179ac7f62864be59da2b1fcedd2f25
+include/px4/logging.h
+  pin  e80b422205205976044328560c7d188dd7c64107fee0bfcde5c3aacf751979d9
+  now  73f4f91ac839c6bcf5046df28f787b0c247f006e2c6bdf2eed908366caf20062
+include/px4/transport.h
+  pin  0a594c7cb64057c66f614e9320df3383c02ad83e1acd69bbe143d01140b5426f
+  now  70da3cefa60bf0a85a940c00409c5e6d510499fcc86b21b17c3fc711a2de21f5
+include/px4/mock_transport.h
+  pin  59adf3ffe5a0dd16df2b6fd3d36c48c92db4c9aee6d45881f21814701985df2a
+  now  4b356a87584a4e79562b53eed4b13c8c70dd257952e2ac5e3d13db640e14e1ab
+include/px4/firmware.h
+  pin  4e455838d09988e5d377bb747278f27a24f673a3f654d5193e46ae17f7572edb
+  now  f60c682796145f216004c35a3451f2083f1f5c9e1eafd593ce1ed23386428e4d
+src/error.cpp
+  pin  0eecdb29a8f8cd7c023f7529638791354f69a732b56418e0ec6b7a02090604dc  (removed)
+src/logging.cpp
+  pin  8c1ee995fac110304bf2290a91e6c4f405bf17b970ec31dcd4cfc2a800767265  (removed)
+src/mock_transport.cpp
+  pin  9abadf6337034bc4143f952a8ae583075e9434e01dc0978eb559df78b8e97906  (removed)
+```
+
+Two additional Windows-only build corrections are retained: the trailing
+backslash comment in `src/windows/windows_ipc.cpp` is rephrased, and
+`tests/windows_ts_output_tests.cpp` includes `<cstring>`. Neither changes
+executable behavior or test expectations. No other vendored file changed.
+The corresponding local-adaptation record for
+ASICEN's own `userland/include/asicen/firmware.h` uses the same qualified
+`dtv::userland::Result` friend declaration.
+
+## Common receiver engine adoption revision 1
+
+2026-10-18 JST. The common lock is advanced to the reviewed combined MIT
+`dtv-userland-core` commit `121071c3458e6a03d69f05794c066b704996b13a`, which
+contains the optional `dtv::receiver` target. `userland/include/px4/tuner_service.h` and
+`userland/src/tuner_service.cpp` now use the accepted PX4 receiver facade as
+the compatibility adapter over that engine. The product facade continues to
+own legacy request validation, receiver IDs and active-profile count, timing
+policy, and backend type conversion. The engine receives the active profile's
+receiver count selected before service construction; hot-add and mutable
+backend counts remain unsupported.
+
+ASICEN retains the local `TunerServiceBackend::request_stop()` and
+`TunerStreamControl::request_stop()` hooks. `TunerService::request_stop()`
+notifies only the backend through the facade adapter. Existing control-server
+shutdown separately notifies tuner backend, card backend, and stream control
+in its existing order. No stop fan-out was added to the common engine, and
+`HardwareStreamService` remains in the ASICEN product layer. The imported
+facade remains GPL-2.0-only under the existing product source boundary; the
+receiver engine is covered by the common dependency's MIT notice above.
+
+## Common card ownership engine adoption revision 1
+
+2026-10-18 JST. The same reviewed combined dependency commit
+`121071c3458e6a03d69f05794c066b704996b13a` adds the optional `dtv::card`
+interface target and opaque-ATR `CardOwnershipEngine`. ASICEN's
+`userland/include/px4/card_service.h` facade and `userland/src/card_service.cpp`
+use the accepted PX4 facade template and engine adapter. The product keeps its
+NativeCardProtocolSession adapter behind the existing
+`PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION` guard, and `request_stop()` still
+notifies the backend before the protocol session without running cleanup.
+Card ATR parsing, APDU/T=1, hardware interfaces/defaults, and backend ownership
+remain in the GPL product layer. This reuse does not add a copied ownership
+engine, new hardware support, public v1/WinSCard behavior, or CLI migration.
+
+The unchanged P card ownership characterization harness was run against the
+pre-extraction ASICEN service and the new ASICEN facade. New ASICEN-specific
+coverage checks backend-before-session stop notification and deferred shutdown
+cleanup. `RESOURCE_LIMIT`, introduced by the combined common error enum but not
+represented by the current IPC `ErrorCode`, maps to the existing generic
+internal-error paths; existing wire values and product exit codes are unchanged.
 
 ## Current Windows subset
 
@@ -225,10 +327,15 @@ importing these files does not establish native Windows hardware support.
 
 ## Related native adaptation
 
-The N08 portable helpers `logging.h/.cpp` and `mock_transport.h/.cpp` are
-byte-identical to the pinned source. Logging is compiled into the portable core;
+The N08 portable helpers `logging.h/.cpp` and `mock_transport.h/.cpp` now come
+from the MIT `dtv-userland-core` foundation (see the foundation dependency
+revision above): the product headers are aliases and the duplicate
+implementations are no longer vendored. Logging is compiled into `dtv::core`;
 its helper/test scope matches the reference, which has no production Logger
-callers. MockTransport is built only when tests are enabled. The native
+callers. The mock implementation is compiled into a separate object in the
+`dtv::core` static archive; the product's mock test targets use that object.
+Compiling the archive does not itself mean a normal production link includes
+the mock object. The native
 `userland/tests/portable_helper_tests.cpp` extracts the reference's complete
 `SinkCapture`, `capture_log`, `test_logging`, `test_mock_transport` and
 `test_mock_failures_and_bounds` block without modifying its assertions, and adds

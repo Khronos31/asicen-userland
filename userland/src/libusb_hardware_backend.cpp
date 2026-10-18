@@ -942,6 +942,38 @@ std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
     return runtime_model_supported() ? (profile_->combined_isdb_ts ? 1U : 2U) : 0U;
 }
 
+px4::userland::Result<void> LibusbW3u3Hardware::claimed_function_observations(
+    std::array<ClaimedUsbFunctionObservation, 2U>& observations,
+    std::uint8_t& count) const noexcept
+{
+    count = 0U;
+    if (!claimed_ || profile_ == nullptr || profile_->expected_runtime_functions == 0U ||
+        profile_->expected_runtime_functions > observations.size())
+        return px4::userland::Result<void>::failure(px4::userland::Error::NOT_READY);
+    const std::array<const LibusbDevice*, 2U> devices{{&primary_, &sibling_}};
+    for (std::uint8_t i = 0U; i < profile_->expected_runtime_functions; ++i) {
+        libusb_device_descriptor descriptor{};
+        if (devices[i]->descriptor(&descriptor) != 0)
+            return px4::userland::Result<void>::failure(px4::userland::Error::USB_IO);
+        ClaimedUsbFunctionObservation& observation = observations[i];
+        observation.vendor_id = descriptor.idVendor;
+        observation.product_id = descriptor.idProduct;
+        observation.bus = devices[i]->bus_number();
+        observation.has_bus = true;
+        observation.address = devices[i]->device_address();
+        observation.has_address = true;
+        std::array<std::uint8_t, 8U> ports{};
+        const int port_count = devices[i]->port_numbers(ports.data(),
+                                                        static_cast<int>(ports.size()));
+        if (port_count < 0)
+            return px4::userland::Result<void>::failure(px4::userland::Error::USB_IO);
+        if (port_count > 0)
+            observation.port_path.assign(ports.begin(), ports.begin() + port_count);
+        ++count;
+    }
+    return px4::userland::Result<void>::success();
+}
+
 V2FrontendTarget LibusbW3u3Hardware::frontend_target(std::uint8_t receiver) const noexcept
 {
     if (profile_ == nullptr) {
@@ -958,6 +990,32 @@ bool LibusbW3u3Hardware::receiver_supports(std::uint8_t receiver, System system)
             (receiver == 0U && system == System::ISDB_S) ||
             (receiver == 1U && system == System::ISDB_T));
 }
+
+px4::userland::TunerStrictProfile LibusbW3u3Hardware::strict_profile(
+    std::uint8_t receiver, System system) const noexcept
+{
+    px4::userland::TunerStrictProfile strict{};
+    if (!receiver_supports(receiver, system)) {
+        return strict;
+    }
+    strict.native_hz = true;
+    if (system == System::ISDB_T) {
+        strict.min_hz = uses_v2_frontend() ? 90000000U : 40000000U;
+        strict.max_hz = uses_v2_frontend() ? 770000000U : 889999999U;
+        return strict;
+    }
+    strict.min_hz = 1049480000U;
+    strict.max_hz = 2053000000U;
+    strict.rows[0] = px4::userland::TunerFrequencyRows{1049480000U, 38360000U, 12U};
+    strict.rows[1] = px4::userland::TunerFrequencyRows{1613000000U, 40000000U, 12U};
+    strict.row_sets = 2U;
+    strict.slot_count = 8U;
+    if (profile_->model_id == ModelId::W3u2 || profile_->model_id == ModelId::W3u3 ||
+        profile_->model_id == ModelId::W3u3V2)
+        strict.lnb_voltage_mask = 0x03U;
+    return strict;
+}
+
 bool LibusbW3u3Hardware::selects_satellite_stream_before_tune() const noexcept
 {
     return false;
@@ -1348,6 +1406,31 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
                                                   std::uint32_t frequency_khz,
                                                   std::uint32_t timeout_ms) noexcept
 {
+    return terrestrial_tune(receiver, static_cast<std::uint64_t>(frequency_khz) * 1000U,
+                            timeout_ms);
+}
+
+Result<px4::userland::TunerHzProgramming>
+LibusbW3u3Hardware::tune_terrestrial_hz(std::uint8_t receiver, std::uint64_t frequency_hz,
+                                        std::uint32_t timeout_ms) noexcept
+{
+    const auto tuned = terrestrial_tune(receiver, frequency_hz, timeout_ms);
+    if (!tuned) {
+        return Result<px4::userland::TunerHzProgramming>::failure(tuned.error());
+    }
+    px4::userland::TunerHzProgramming programming{};
+    if (!uses_v2_frontend()) {
+        // The legacy/W3 command center actually passed to the FC0012 plan.
+        programming.programmed_hz.present = true;
+        programming.programmed_hz.value = terrestrial_tune_center_hz(frequency_hz);
+    }
+    return Result<px4::userland::TunerHzProgramming>::success(programming);
+}
+
+Result<void> LibusbW3u3Hardware::terrestrial_tune(std::uint8_t receiver,
+                                                  std::uint64_t frequency_hz,
+                                                  std::uint32_t timeout_ms) noexcept
+{
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return Result<void>::failure(Error::USB_IO);
     }
@@ -1358,9 +1441,17 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
     if (timeout_ms == 0U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
+    // Backend-local compatibility projection for the kHz-valued plan, lock
+    // read and diagnostics.  The W3/legacy transform consumes only
+    // floor(Hz / 1 MHz), so floor-kHz selects exactly
+    // terrestrial_tune_center_hz(frequency_hz); V2 receives the full Hz.
+    if (frequency_hz / 1000U > UINT32_MAX) {
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
+    const auto frequency_khz = static_cast<std::uint32_t>(frequency_hz / 1000U);
     if (uses_v2_frontend()) {
         if (!v2_identity_verified_ ||
-            v2_tune_frequency_hz(frontend_target(receiver), frequency_khz) == 0U) {
+            v2_tune_center_hz(frontend_target(receiver), frequency_hz) == 0U) {
             return Result<void>::failure(Error::INVALID_ARGUMENT);
         }
         const auto until = steady_now() + std::chrono::milliseconds(timeout_ms);
@@ -1373,8 +1464,8 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
         const bool previous_active = deadline_active_;
         deadline_ = previous_active ? std::min(previous_deadline, until) : until;
         deadline_active_ = true;
-        const auto result =
-            tune_v2_frontend(this, frontend_target(receiver), frequency_khz, nullptr, timeout_ms);
+        const auto result = tune_v2_frontend_hz(this, frontend_target(receiver), frequency_hz,
+                                                nullptr, timeout_ms);
         deadline_ = previous_deadline;
         deadline_active_ = previous_active;
         if (result != V2FrontendResult::Completed) {
@@ -1414,13 +1505,41 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
 Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint32_t frequency_khz,
                                                 std::uint32_t timeout_ms) noexcept
 {
+    std::uint32_t rf_khz = 0U;
+    const bool row = w3u3_satellite_if_to_rf_khz(frequency_khz, &rf_khz);
+    return satellite_tune(receiver, row, rf_khz, timeout_ms);
+}
+
+Result<px4::userland::TunerHzProgramming>
+LibusbW3u3Hardware::tune_satellite_hz(std::uint8_t receiver, std::uint64_t frequency_hz,
+                                      std::uint32_t timeout_ms) noexcept
+{
+    // Exact row membership in Hz; the IF->RF offset stays backend-local.
+    std::uint64_t rf_hz = 0U;
+    const bool row = w3u3_satellite_if_hz_to_rf_hz(frequency_hz, &rf_hz);
+    const auto tuned =
+        satellite_tune(receiver, row, row ? static_cast<std::uint32_t>(rf_hz / 1000U) : 0U,
+                       timeout_ms);
+    if (!tuned) {
+        return Result<px4::userland::TunerHzProgramming>::failure(tuned.error());
+    }
+    // The commanded row, expressed in the public IF domain.
+    px4::userland::TunerHzProgramming programming{};
+    programming.programmed_hz.present = true;
+    programming.programmed_hz.value = frequency_hz;
+    return Result<px4::userland::TunerHzProgramming>::success(programming);
+}
+
+Result<void> LibusbW3u3Hardware::satellite_tune(std::uint8_t receiver, bool row_matched,
+                                                std::uint32_t rf_khz,
+                                                std::uint32_t timeout_ms) noexcept
+{
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return Result<void>::failure(Error::USB_IO);
     }
-    std::uint32_t rf_khz = 0U;
     if (!claimed_ || !receiver_supports(receiver, System::ISDB_S) ||
         !active_receiver_.owns(receiver) || !initialized_ || timeout_ms == 0U ||
-        !w3u3_satellite_if_to_rf_khz(frequency_khz, &rf_khz)) {
+        !row_matched) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
     const auto gate_deadline = steady_now() + std::chrono::milliseconds(timeout_ms);

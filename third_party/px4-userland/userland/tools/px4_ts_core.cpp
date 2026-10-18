@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-10: ASICEN command spelling, absent serial and receiver capacity.
-// The original license notice is unchanged.
 #include "px4_ts_core.h"
 
 #include "px4/control_client.h"
-#if defined(ASICEN_PRODUCT_CLI)
-#include "asicen/product_profile.h"
-#endif
+
+#include "dtv/userland/control_client.h"
+#include "dtv/userland/control_connection.h"
+#include "dtv/userland/records.h"
+#include "dtv/userland/wire.h"
 
 #include <algorithm>
 #include <array>
@@ -130,15 +130,9 @@ bool valid_frequency(System system, std::uint64_t frequency) noexcept
 
 bool valid_arguments(const Px4TsArguments& arguments) noexcept
 {
-    if (
-#if defined(ASICEN_PRODUCT_CLI)
-        (!arguments.device.empty() || !valid_instance(arguments.instance) ||
-         arguments.receiver >= asicen::profile::kReceiverCount) ||
-#else
-        (arguments.instance.empty() ? !valid_serial(arguments.device) :
+    if ((arguments.instance.empty() ? !valid_serial(arguments.device) :
                                       (!arguments.device.empty() ||
                                        !valid_instance(arguments.instance))) ||
-#endif
         arguments.frequency_khz == 0U ||
         !valid_frequency(arguments.system, arguments.frequency_khz) ||
         arguments.tune_timeout_ms < 100U || arguments.tune_timeout_ms > 30000U ||
@@ -277,13 +271,9 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
         std::string_view value;
         if (!take_value(index, argc, argv, value)) return invalid("option requires a value");
         if (option == "--device") {
-#if defined(ASICEN_PRODUCT_CLI)
-            return invalid("ASICEN has no serial descriptor; use --instance");
-#else
             if (have_device) return invalid("duplicate --device");
             have_device = true;
             result.device.assign(value.data(), value.size());
-#endif
         } else if (option == "--instance") {
             if (have_instance) return invalid("duplicate --instance");
             have_instance = true;
@@ -297,11 +287,7 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
             result.output.assign(value.data(), value.size());
         } else if (option == "--receiver") {
             if (have_receiver || !parse_unsigned(value, result.receiver) ||
-#if defined(ASICEN_PRODUCT_CLI)
-                result.receiver >= asicen::profile::kReceiverCount) return invalid("receiver must be 0..3");
-#else
                 result.receiver >= kReceiverCount) return invalid("receiver must be 0..7");
-#endif
             have_receiver = true;
         } else if (option == "--system") {
             if (have_system || !parse_system(value, result.system))
@@ -347,13 +333,8 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
             result.packet_count_set = true;
         }
     }
-#if defined(ASICEN_PRODUCT_CLI)
-    if (have_device || !have_instance)
-        return invalid("ASICEN requires --instance; device serials are unavailable");
-#else
     if (have_device == have_instance)
         return invalid("exactly one of --device or --instance is required");
-#endif
     if (!have_receiver) return invalid("--receiver is required");
     if (have_channel) {
         if (have_system || have_frequency)
@@ -398,17 +379,10 @@ void print_px4_ts_usage(void* output) noexcept
     FILE* file = static_cast<FILE*>(output);
     if (file == nullptr) return;
     std::fprintf(file,
-#if defined(ASICEN_PRODUCT_CLI)
-                 "usage: asicen-ts --instance TOKEN --receiver 0..3 "
-                 "--system isdb-t|isdb-s --frequency-khz N [options]\n"
-                 "       asicen-ts --instance TOKEN --receiver 0..3 "
-                 "--channel CH [options]\n"
-#else
                  "usage: px4-ts (--device BASE_SERIAL | --instance TOKEN) --receiver 0..7 "
                  "--system isdb-t|isdb-s --frequency-khz N [options]\n"
                  "       px4-ts (--device BASE_SERIAL | --instance TOKEN) --receiver 0..7 "
                  "--channel CH [options]\n"
-#endif
                  "  --channel CH                   (T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>)\n"
                  "  --stream-id N | --slot 0..11   (isdb-s, exactly one)\n"
                  "  --bandwidth-hz N               (isdb-t default 6000000)\n"
@@ -439,6 +413,7 @@ int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
     case Error::CARD_REMOVED:
     case Error::BUFFER_TOO_SMALL: return 9;
     case Error::FIRMWARE_REJECTED: return 10;
+    case Error::RESOURCE_LIMIT: return 4;
     case Error::INTERNAL: return 70;
     }
     return 70;
@@ -652,6 +627,473 @@ private:
 };
 
 }  // namespace
+
+namespace {
+
+namespace wire = dtv::userland::wire;
+
+class SocketClientTransport final : public wire::ClientTransport {
+public:
+    explicit SocketClientTransport(SocketStream& stream) noexcept : stream_(stream) {}
+    Result<void> write_all(ByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.write_all(bytes, timeout);
+    }
+    Result<std::size_t> read_some(MutableByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.read_some(bytes, timeout);
+    }
+    std::uint64_t monotonic_ms() noexcept override
+    {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    void close() noexcept override { stream_.close(); }
+
+private:
+    SocketStream& stream_;
+};
+
+Error wire_error(std::uint32_t code) noexcept
+{
+    switch (code) {
+    case 1U: return Error::INVALID_ARGUMENT;
+    case 2U: return Error::VERSION_MISMATCH;
+    case 3U: return Error::NOT_FOUND;
+    case 4U: return Error::BUSY;
+    case 5U: return Error::NOT_READY;
+    case 6U: return Error::TIMEOUT;
+    case 7U: return Error::USB_IO;
+    case 8U: return Error::DISCONNECTED;
+    case 9U: return Error::PROTOCOL_ERROR;
+    case 10U: return Error::FIRMWARE_REJECTED;
+    case 11U: return Error::UNSUPPORTED;
+    case 12U: return Error::NO_CARD;
+    case 13U: return Error::CARD_REMOVED;
+    case 14U: return Error::BUFFER_TOO_SMALL;
+    case 15U: return Error::SLOW_CONSUMER;
+    case 17U: return Error::RESOURCE_LIMIT;
+    case 255U: return Error::INTERNAL;
+    default: return Error::PROTOCOL_ERROR;
+    }
+}
+
+CountersPayload wire_counters(const wire::StreamCounters& counters) noexcept
+{
+    CountersPayload result{};
+    for (std::size_t index = 0U; index < counters.entries.count; ++index) {
+        const auto& entry = counters.entries.items[index];
+        if (entry.counter.measurement.state != wire::MeasureState::valid) continue;
+        if (entry.id == wire::kCounterIdTransmittedPackets)
+            result.packets = entry.counter.measurement.value;
+        else if (entry.id == wire::kCounterIdQueueDroppedPackets)
+            result.queue_drops = entry.counter.measurement.value;
+    }
+    result.bytes = result.packets * 188U;
+    return result;
+}
+
+ErrorCode wire_end_error(wire::StreamEndReason reason) noexcept
+{
+    switch (reason) {
+    case wire::StreamEndReason::stopped:
+    case wire::StreamEndReason::shutdown: return ErrorCode::OK;
+    case wire::StreamEndReason::slow_consumer: return ErrorCode::SLOW_CONSUMER;
+    case wire::StreamEndReason::device_lost: return ErrorCode::DISCONNECTED;
+    case wire::StreamEndReason::backend_error: return ErrorCode::INTERNAL;
+    default: return ErrorCode::PROTOCOL_ERROR;
+    }
+}
+
+bool wire_system(ipc::System system, wire::System& output) noexcept
+{
+    if (system == ipc::System::ISDB_T) {
+        output = wire::System::isdb_t;
+        return true;
+    }
+    if (system == ipc::System::ISDB_S) {
+        output = wire::System::isdb_s;
+        return true;
+    }
+    return false;
+}
+
+template <typename Record>
+Result<std::size_t> encode_request(std::uint16_t opcode, std::uint32_t request_id,
+                                   const Record& value,
+                                   Result<std::size_t> (*encode)(const Record&,
+                                                                 MutableByteView) noexcept,
+                                   MutableByteView output) noexcept
+{
+    return wire::encode_record_frame(wire::Kind::request, opcode, request_id, value,
+                                     encode, output);
+}
+
+class WireTsReceiver final : public wire::FrameHandler {
+public:
+    WireTsReceiver(Px4TsOutput& output, const Px4TsArguments& arguments,
+                   Px4TsClock& clock, const Px4TsSignal& signal,
+                   std::uint64_t stream_id,
+                   Px4TsFailureKind& failure_kind) noexcept
+        : output_(output), arguments_(arguments), clock_(clock), signal_(signal),
+          stream_id_(stream_id), failure_kind_(failure_kind)
+    {
+    }
+
+    Result<void> on_frame(const wire::Frame& frame) noexcept override
+    {
+        if (frame.header.kind == wire::Kind::error_response) {
+            const auto error = wire::decode_error_response(frame.payload);
+            if (!error) return fail(error.error(), Px4TsFailureKind::ipc);
+            failure_ = wire_error(error.value().error.code);
+            return Result<void>::failure(failure_);
+        }
+        if (frame.header.kind == wire::Kind::response &&
+            frame.header.opcode == wire::kOpcodeAttachStream) {
+            if (attached_) return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
+            const auto response = wire::decode_attach_response(frame.payload);
+            if (!response || response.value().stream_id != stream_id_)
+                return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
+            attached_ = true;
+            duration_started_ = true;
+            duration_started_ms_ = clock_.monotonic_ms();
+            last_progress_ms_ = duration_started_ms_;
+            return Result<void>::success();
+        }
+        if (frame.header.kind == wire::Kind::event &&
+            frame.header.opcode == wire::kOpcodeTsDataEvent) {
+            if (!attached_) return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
+            const auto data = wire::decode_ts_data(frame.payload);
+            if (!data || data.value().stream_id != stream_id_ ||
+                data.value().packets.size == 0U ||
+                (data.value().packets.size % 188U) != 0U ||
+                data.value().packets.size > wire::kMaxTsPacketBytes)
+                return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ts_integrity);
+            if (data.value().sequence != expected_sequence_)
+                return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ts_integrity);
+            ++expected_sequence_;
+            for (std::size_t offset = 0U; offset < data.value().packets.size;
+                 offset += 188U) {
+                if (data.value().packets.data[offset] != 0x47U)
+                    return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ts_integrity);
+            }
+            std::size_t write_size = data.value().packets.size;
+            if (arguments_.packet_count_set) {
+                const std::uint64_t remaining = arguments_.packet_count - packets_written_;
+                const std::uint64_t available = data.value().packets.size / 188U;
+                write_size = static_cast<std::size_t>(
+                    std::min<std::uint64_t>(remaining, available) * 188U);
+            }
+            const std::size_t packets = write_size / 188U;
+            for (std::size_t packet = 0U; packet < packets; ++packet) {
+                const auto written = output_.write(
+                    ByteView{data.value().packets.data + packet * 188U, 188U}, signal_);
+                if (!written) return fail(written.error(), Px4TsFailureKind::output);
+            }
+            packets_written_ += packets;
+            last_progress_ms_ = clock_.monotonic_ms();
+            if (arguments_.packet_count_set &&
+                packets_written_ >= arguments_.packet_count)
+                limit_reached_ = true;
+            return Result<void>::success();
+        }
+        if (frame.header.kind == wire::Kind::event &&
+            frame.header.opcode == wire::kOpcodeStreamEndEvent) {
+            if (!attached_ || final_valid_)
+                return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
+            const auto end = wire::decode_stream_end_event(frame.payload);
+            if (!end || end.value().final.id != stream_id_)
+                return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
+            final_ = end.value().final;
+            final_valid_ = true;
+            return Result<void>::success();
+        }
+        return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
+    }
+
+    Result<void> fail(Error error, Px4TsFailureKind kind) noexcept
+    {
+        failure_ = error;
+        failure_kind_ = kind;
+        return Result<void>::failure(error);
+    }
+
+    bool attached() const noexcept { return attached_; }
+    bool limit_reached() const noexcept { return limit_reached_; }
+    bool final_valid() const noexcept { return final_valid_; }
+    const wire::StreamFinal& final() const noexcept { return final_; }
+    std::uint64_t packets_written() const noexcept { return packets_written_; }
+    std::uint64_t last_progress_ms() const noexcept { return last_progress_ms_; }
+    bool duration_started() const noexcept { return duration_started_; }
+    std::uint64_t duration_started_ms() const noexcept { return duration_started_ms_; }
+    Px4TsFailureKind failure_kind() const noexcept { return failure_kind_; }
+    Error failure() const noexcept { return failure_; }
+
+private:
+    Px4TsOutput& output_;
+    const Px4TsArguments& arguments_;
+    Px4TsClock& clock_;
+    const Px4TsSignal& signal_;
+    std::uint64_t stream_id_ = 0U;
+    Px4TsFailureKind& failure_kind_;
+    Error failure_ = Error::OK;
+    bool attached_ = false;
+    bool limit_reached_ = false;
+    bool final_valid_ = false;
+    bool duration_started_ = false;
+    std::uint64_t duration_started_ms_ = 0U;
+    std::uint64_t packets_written_ = 0U;
+    std::uint64_t expected_sequence_ = 0U;
+    std::uint64_t last_progress_ms_ = 0U;
+    wire::StreamFinal final_{};
+};
+
+}  // namespace
+
+Result<Px4TsRunResult> Px4TsRunner::run_wire(
+    const Px4TsArguments& arguments, Px4TsOutput& output, Px4TsClock& clock,
+    const Px4TsSignal& signal, Px4TsFailureKind* failure_kind,
+    Px4TsRunDiagnostics* diagnostics) noexcept
+{
+    if (failure_kind != nullptr) *failure_kind = Px4TsFailureKind::ipc;
+    if (diagnostics != nullptr) *diagnostics = Px4TsRunDiagnostics{};
+    Px4TsFailureKind local_failure_kind = Px4TsFailureKind::ipc;
+    Px4TsFailureKind& result_failure_kind =
+        failure_kind != nullptr ? *failure_kind : local_failure_kind;
+    if (!arguments.valid || !valid_arguments(arguments))
+        return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
+
+    const char* runtime_directory = arguments.runtime_directory.empty()
+                                        ? nullptr : arguments.runtime_directory.c_str();
+    const EndpointAccess access = arguments.group ? EndpointAccess::shared_group
+                                                  : EndpointAccess::private_user;
+    const char* instance = arguments.instance.empty() ? arguments.device.c_str()
+                                                       : arguments.instance.c_str();
+    const EndpointConfig control_endpoint{runtime_directory, instance,
+                                          kControlEndpointName, access};
+    const EndpointConfig stream_endpoint{runtime_directory, instance,
+                                         kStreamEndpointName, access};
+
+    auto control = SocketStream::connect(control_endpoint, Timeout{2000U});
+    if (!control) return Result<Px4TsRunResult>::failure(control.error());
+    SocketClientTransport control_transport(control.value());
+
+    wire::RecordingOptions options{};
+    options.receiver_id = arguments.receiver;
+    wire::System system{};
+    if (!wire_system(arguments.system, system)) {
+        control.value().close();
+        return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
+    }
+    options.tune.system = system;
+    options.tune.frequency_hz =
+        static_cast<std::uint64_t>(arguments.frequency_khz) * 1000U;
+    if (arguments.stream_id != 0xffffU) {
+        options.tune.selection = wire::Selection::tsid;
+        options.tune.selection_value = arguments.stream_id;
+    } else if (arguments.slot != 0xffffU) {
+        options.tune.selection = wire::Selection::slot;
+        options.tune.selection_value = arguments.slot;
+    } else {
+        options.tune.selection = wire::Selection::automatic;
+    }
+    if (arguments.lnb_voltage != 0U) {
+        options.tune.lnb_voltage.present = true;
+        options.tune.lnb_voltage.value = arguments.lnb_voltage;
+    }
+    options.tune.timeout_ms = arguments.tune_timeout_ms;
+
+    auto started = wire::begin_recording(
+        control_transport, options,
+        Timeout{arguments.tune_timeout_ms + 6000U});
+    if (!started) {
+        control.value().close();
+        return Result<Px4TsRunResult>::failure(started.error);
+    }
+    wire::RecordingSession session = started.session;
+
+    auto data = SocketStream::connect(stream_endpoint, Timeout{2000U});
+    if (!data) {
+        (void)wire::stop_recording(control_transport, session, Timeout{4000U});
+        (void)wire::release_recording(control_transport, session, Timeout{4000U});
+        control.value().close();
+        return Result<Px4TsRunResult>::failure(data.error());
+    }
+
+    wire::AttachRequest attach{};
+    attach.epoch = session.epoch;
+    attach.lease_id = session.lease_id;
+    attach.stream_id = session.stream_id;
+    attach.attach_token = session.attach_token;
+    std::array<std::uint8_t, wire::kHeaderSize + 128U> attach_frame{};
+    const auto attach_size = encode_request(
+        wire::kOpcodeAttachStream, 1U, attach, &wire::encode_attach_request,
+        MutableByteView{attach_frame.data(), attach_frame.size()});
+    if (!attach_size) {
+        data.value().close();
+        (void)wire::stop_recording(control_transport, session, Timeout{4000U});
+        (void)wire::release_recording(control_transport, session, Timeout{4000U});
+        control.value().close();
+        return Result<Px4TsRunResult>::failure(attach_size.error());
+    }
+    const auto attach_written =
+        data.value().write_all(ByteView{attach_frame.data(), attach_size.value()},
+                               Timeout{2000U});
+    if (!attach_written) {
+        data.value().close();
+        (void)wire::stop_recording(control_transport, session, Timeout{4000U});
+        (void)wire::release_recording(control_transport, session, Timeout{4000U});
+        control.value().close();
+        return Result<Px4TsRunResult>::failure(attach_written.error());
+    }
+
+    std::unique_ptr<std::uint8_t[]> frame_storage(
+        new (std::nothrow) std::uint8_t[wire::kMaxFrameSize]);
+    std::array<std::uint8_t, 8192U> read_buffer{};
+    if (!frame_storage) {
+        data.value().close();
+        control.value().close();
+        return Result<Px4TsRunResult>::failure(Error::INTERNAL);
+    }
+    wire::FrameReceiver receiver(
+        MutableByteView{frame_storage.get(), wire::kMaxFrameSize});
+    bool stop_requested_by_client = false;
+    WireTsReceiver reader(output, arguments, clock, signal, session.stream_id,
+                          result_failure_kind);
+
+    Error primary = Error::OK;
+    std::uint64_t partial_frame_progress_ms = 0U;
+    bool partial_frame_pending = false;
+    const std::uint64_t first_ts_deadline = reader.last_progress_ms() == 0U
+                                                ? clock.monotonic_ms() + kTsProgressTimeoutMs
+                                                : reader.last_progress_ms() +
+                                                      kTsProgressTimeoutMs;
+    while (!reader.final_valid() && primary == Error::OK) {
+        const std::uint64_t now = clock.monotonic_ms();
+        if (signal.stop_requested()) {
+            stop_requested_by_client = true;
+            break;
+        }
+        if (reader.duration_started() && arguments.duration_set &&
+            now >= reader.duration_started_ms() &&
+            now - reader.duration_started_ms() >= arguments.duration_seconds * 1000U) {
+            stop_requested_by_client = true;
+            break;
+        }
+        if (reader.limit_reached()) {
+            stop_requested_by_client = true;
+            break;
+        }
+        if (!reader.attached() && now >= first_ts_deadline) {
+            primary = Error::TIMEOUT;
+            result_failure_kind = Px4TsFailureKind::ts_integrity;
+            break;
+        }
+        if (partial_frame_pending && now >= partial_frame_progress_ms &&
+            now - partial_frame_progress_ms >= kTsProgressTimeoutMs) {
+            primary = Error::TIMEOUT;
+            result_failure_kind = Px4TsFailureKind::ts_integrity;
+            break;
+        }
+        const auto read = data.value().read_some(
+            MutableByteView{read_buffer.data(), read_buffer.size()}, Timeout{50U});
+        if (!read) {
+            if (read.error() == Error::TIMEOUT) {
+                clock.sleep_ms(10U);
+                continue;
+            }
+            primary = read.error();
+            break;
+        }
+        const auto fed = receiver.feed(
+            ByteView{read_buffer.data(), read.value()}, reader);
+        if (!fed) {
+            primary = fed.error();
+            break;
+        }
+        partial_frame_pending = receiver.pending_size() != 0U;
+        if (partial_frame_pending) partial_frame_progress_ms = clock.monotonic_ms();
+    }
+
+    if (!reader.final_valid() && data.value().valid()) {
+        const auto stopped =
+            wire::stop_recording(control_transport, session, Timeout{4000U});
+        if (!stopped && stopped.error != Error::NOT_FOUND && primary == Error::OK) {
+            primary = stopped.error;
+        }
+        const std::uint64_t deadline = clock.monotonic_ms() + 4000U;
+        while (!reader.final_valid() && primary == Error::OK &&
+               clock.monotonic_ms() < deadline) {
+            const auto read = data.value().read_some(
+                MutableByteView{read_buffer.data(), read_buffer.size()}, Timeout{50U});
+            if (!read) {
+                if (read.error() == Error::TIMEOUT) {
+                    clock.sleep_ms(10U);
+                    continue;
+                }
+                primary = read.error();
+                break;
+            }
+            const auto fed = receiver.feed(
+                ByteView{read_buffer.data(), read.value()}, reader);
+            if (!fed) {
+                primary = fed.error();
+                break;
+            }
+        }
+        if (primary == Error::OK && !reader.final_valid()) primary = Error::TIMEOUT;
+    }
+    if (data.value().valid()) data.value().close();
+
+    const auto released =
+        wire::release_recording(control_transport, session, Timeout{4000U});
+    if (!released && primary == Error::OK) {
+        primary = released.error;
+    }
+    control.value().close();
+
+    if (diagnostics != nullptr) {
+        if (reader.final_valid() && reader.final().statistics.entries.count == 2U) {
+            diagnostics->stop_counters_valid = true;
+            diagnostics->stop_counters = wire_counters(reader.final().statistics);
+        }
+        diagnostics->stream_end_valid = reader.final_valid();
+        if (reader.final_valid()) {
+            diagnostics->stream_end.counters =
+                wire_counters(reader.final().statistics);
+            diagnostics->stream_end.error_code = wire_end_error(reader.final().reason);
+        }
+        diagnostics->packets_written = reader.packets_written();
+    }
+    if (reader.failure() != Error::OK) primary = reader.failure();
+    if (primary != Error::OK) return Result<Px4TsRunResult>::failure(primary);
+    if (!reader.final_valid())
+        return Result<Px4TsRunResult>::failure(Error::PROTOCOL_ERROR);
+    const CountersPayload final_counters =
+        wire_counters(reader.final().statistics);
+    const ErrorCode end_error = wire_end_error(reader.final().reason);
+    if (end_error != ErrorCode::OK) {
+        if (end_error == ErrorCode::PROTOCOL_ERROR)
+            result_failure_kind = Px4TsFailureKind::ts_integrity;
+        return Result<Px4TsRunResult>::failure(
+            end_error == ErrorCode::SLOW_CONSUMER ? Error::SLOW_CONSUMER :
+            end_error == ErrorCode::USB_IO ? Error::USB_IO :
+            end_error == ErrorCode::DISCONNECTED ? Error::DISCONNECTED :
+            end_error == ErrorCode::PROTOCOL_ERROR ? Error::PROTOCOL_ERROR
+                                                    : Error::INTERNAL);
+    }
+    if (final_counters.packets < reader.packets_written())
+        return Result<Px4TsRunResult>::failure(Error::PROTOCOL_ERROR);
+    if (arguments.packet_count_set &&
+        reader.packets_written() != arguments.packet_count)
+        return Result<Px4TsRunResult>::failure(Error::PROTOCOL_ERROR);
+    if (!stop_requested_by_client && !arguments.duration_set &&
+        !arguments.packet_count_set)
+        return Result<Px4TsRunResult>::failure(Error::DISCONNECTED);
+    return Result<Px4TsRunResult>::success(
+        Px4TsRunResult{final_counters, signal.stop_requested()});
+}
 
 Result<Px4TsRunResult> Px4TsRunner::run(
     const Px4TsArguments& arguments, Px4TsOutput& output, Px4TsClock& clock,

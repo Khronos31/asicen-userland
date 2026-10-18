@@ -388,6 +388,18 @@ int LibusbDevice::descriptor(libusb_device_descriptor* output) const noexcept
     return api_.get_device_descriptor(device(), output);
 }
 
+std::uint8_t LibusbDevice::bus_number() const noexcept
+{
+    libusb_device* dev = device();
+    return dev == nullptr ? 0U : api_.get_bus_number(dev);
+}
+
+std::uint8_t LibusbDevice::device_address() const noexcept
+{
+    libusb_device* dev = device();
+    return dev == nullptr ? 0U : api_.get_device_address(dev);
+}
+
 int LibusbDevice::port_numbers(std::uint8_t* ports, int capacity) const noexcept
 {
     if (ports == nullptr || capacity <= 0) {

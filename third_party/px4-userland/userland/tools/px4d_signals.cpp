@@ -2,6 +2,7 @@
 #include "px4d_signals.h"
 
 #include <csignal>
+#include <cstdlib>
 #include <signal.h>
 
 #if defined(_WIN32)
@@ -78,6 +79,12 @@ bool cleanup_complete() noexcept
     return cleanup_complete_flag.load(std::memory_order_acquire);
 }
 
+[[noreturn]] void exit_after_close_deadline(int status) noexcept
+{
+    (void)::TerminateProcess(::GetCurrentProcess(), static_cast<UINT>(status));
+    std::_Exit(status);
+}
+
 bool install_signal_handlers() noexcept
 {
     if (cleanup_event == nullptr) {
@@ -123,6 +130,11 @@ void notify_cleanup_complete() noexcept
 bool cleanup_complete() noexcept
 {
     return false;
+}
+
+[[noreturn]] void exit_after_close_deadline(int status) noexcept
+{
+    std::_Exit(status);
 }
 
 bool install_signal_handlers() noexcept

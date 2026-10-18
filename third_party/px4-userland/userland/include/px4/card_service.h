@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// ASICEN modification, 2026-10-09: default no-op stop notifications, and the
-// native CardSession adapter is omitted when PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION
-// is set. The original license notice is unchanged.
 #ifndef PX4_USERLAND_CARD_SERVICE_H
 #define PX4_USERLAND_CARD_SERVICE_H
 
 #include "px4/card.h"
 #include "px4/ipc.h"
+#include "dtv/userland/detail/card_ownership_engine.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 namespace px4::userland {
+
+namespace detail = dtv::userland::detail;
 
 using CardClientId = std::uint64_t;
 
@@ -30,9 +29,6 @@ public:
     virtual void request_stop() noexcept {}
 };
 
-// Portable product profiles without the IT930x card transport keep the
-// protocol-session interface/service while excluding this adapter, whose
-// inline methods require the separately imported CardSession implementation.
 #if !defined(PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION)
 class NativeCardProtocolSession final : public CardProtocolSession {
 public:
@@ -87,7 +83,8 @@ struct CardPresenceChange final {
 class CardService final {
 public:
     CardService(CardServiceBackend& backend, CardProtocolSession& session) noexcept
-        : backend_(backend), session_(session)
+        : backend_(backend), session_(session), backend_adapter_(backend), session_adapter_(session),
+          engine_(backend_adapter_, session_adapter_, ipc::kMaxCardPayload)
     {
     }
     ~CardService() noexcept;
@@ -126,52 +123,44 @@ public:
         session_.request_stop();
     }
 
-    bool has_handles() const noexcept { return !handles_.empty(); }
-    std::size_t handle_count() const noexcept { return handles_.size(); }
-    bool powered() const noexcept { return powered_; }
-    std::uint64_t reader_generation() const noexcept { return reader_generation_; }
+    bool has_handles() const noexcept { return engine_.has_handles(); }
+    std::size_t handle_count() const noexcept { return engine_.handle_count(); }
+    bool powered() const noexcept { return engine_.powered(); }
+    std::uint64_t reader_generation() const noexcept { return engine_.reader_generation(); }
 
 private:
-    struct HandleRecord final {
-        std::uint64_t handle;
-        CardClientId client;
-        ipc::ShareMode share_mode;
-        bool generation_bound;
-        bool stale;
+    class BackendAdapter final : public detail::CardOwnershipBackend {
+    public:
+        explicit BackendAdapter(CardServiceBackend& backend) noexcept : backend_(backend) {}
+        Result<void> set_power(bool on) noexcept override { return backend_.set_power(on); }
+        Result<void> initialize_uart() noexcept override { return backend_.initialize_uart(); }
+        Result<bool> detect_card() noexcept override { return backend_.detect_card(); }
+    private:
+        CardServiceBackend& backend_;
     };
 
-    Result<void> power_up() noexcept;
-    Result<void> power_down() noexcept;
-    Result<void> ensure_session() noexcept;
-    Result<void> ensure_handle_session(std::size_t index) noexcept;
-    Result<CardAtr> reset_session(bool preserve_transaction = false) noexcept;
-    Result<bool> detect_and_record(bool report_initial_change,
-                                   CardPresenceChange* change) noexcept;
-    Result<void> apply_disposition(ipc::Disposition disposition) noexcept;
-    Result<void> release_handle(std::size_t index) noexcept;
-    Result<std::size_t> find_handle(CardClientId client,
-                                    std::uint64_t handle) const noexcept;
-    bool sharing_allowed(ipc::ShareMode requested,
-                         std::size_t excluded_index) const noexcept;
-    bool transaction_allows(std::uint64_t handle) const noexcept;
-    std::uint64_t allocate_handle() noexcept;
-    void invalidate_session() noexcept;
-    void invalidate_bound_handles() noexcept;
-    void abandon_disconnected_hardware() noexcept;
+    class SessionAdapter final : public detail::CardOwnershipSession<CardAtr> {
+    public:
+        explicit SessionAdapter(CardProtocolSession& session) noexcept : session_(session) {}
+        Result<void> initialize() noexcept override { return session_.initialize(); }
+        Result<std::size_t> transmit(detail::ByteSpan apdu,
+                                     detail::MutableByteSpan response) noexcept override
+        {
+            return session_.transmit(ByteView{apdu.data, apdu.size},
+                                     MutableByteView{response.data, response.size});
+        }
+        bool initialized() const noexcept override { return session_.initialized(); }
+        const CardAtr& atr() const noexcept override { return session_.atr(); }
+        void invalidate() noexcept override { session_.invalidate(); }
+    private:
+        CardProtocolSession& session_;
+    };
 
     CardServiceBackend& backend_;
     CardProtocolSession& session_;
-    std::vector<HandleRecord> handles_;
-    CardAtr cached_atr_{};
-    std::uint64_t next_handle_ = 1U;
-    std::uint64_t transaction_handle_ = 0U;
-    std::uint64_t reader_generation_ = 1U;
-    bool powered_ = false;
-    bool uart_initialized_ = false;
-    bool presence_known_ = false;
-    bool present_ = false;
-    bool presence_change_pending_ = false;
-    CardPresenceChange pending_presence_change_{};
+    BackendAdapter backend_adapter_;
+    SessionAdapter session_adapter_;
+    detail::CardOwnershipEngine<CardAtr> engine_;
 };
 
 }  // namespace px4::userland

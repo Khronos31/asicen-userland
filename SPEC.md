@@ -77,6 +77,40 @@ Bounded startup and 60-second primary T/S tests are recorded in
 [the W3U2 record](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md);
 they do not qualify other models, platforms or a release.
 
+Common foundation dependency revision 1 (2026-10-18 JST): the vendored
+error/Result, logging and neutral transport/mock foundation now resolves to the
+reviewed MIT `dtv-userland-core` commit
+`4873d346476e9bac9073bf39ffba807fdc892733` instead of a second in-tree copy.
+The seven foundation files were compared against the fixed PX4 source and had no
+ASICEN vendor delta, so `px4::userland::Error`/`Result`, `error_string`,
+the logging types and the neutral byte-view/transport types become aliases to
+`dtv::userland`, while the product keeps its endpoint/transfer constants
+(`kMaxCommandTransfer`, `kMaxStreamTransfer`, `kTsInEndpoint`) and the
+PX4-preserving default `MockTransport` policy in the local facade. The duplicate
+foundation algorithm sources are removed and the affected targets link
+`dtv::core`; the `firmware.h` `Result` friend declaration is namespace-qualified
+only as a compatibility declaration adjustment. Hardware, card, current IPC/wire
+byte content, CLI behavior, build features and the product VERSION 0.1.0 are
+unchanged. The dependency is pinned as a full commit in
+`cmake/dtv-userland-core.revision`, fetched by default or overridden explicitly,
+and the source archive bundles it under `repository/third_party/dtv-userland-core`.
+The exact base/pin/hash/provenance comparison is recorded in
+`third_party/px4-userland/UPSTREAM.md`.
+
+Common card ownership dependency revision 1 (2026-10-18 JST): ASICEN's
+serialized `CardService` facade delegates its handle ownership, share and
+transaction rules, presence generations, ATR snapshot cache, and cleanup
+behavior to the optional `dtv::card` engine in the same reviewed common commit
+`121071c3458e6a03d69f05794c066b704996b13a`. The GPL product facade retains
+ASICEN's Native card-session guard, backend-before-session stop notifications,
+hardware/card protocol implementation, and error-to-IPC/CLI adapters. This is
+an internal code-sharing change: no hardware support, public v1 card contract,
+WinSCard/IFD scope, CLI route, or VERSION change is implied. The P
+characterization harness is run unchanged against the old ASICEN service and
+new facade; ASICEN-specific shutdown and error-precedence coverage remains in
+new test files. The comparison and source provenance are recorded in
+`third_party/px4-userland/UPSTREAM.md` and `PROVENANCE.md`.
+
 ## Objective
 
 Receive real PX-W3U3 MPEG-TS with a direct libusb userland implementation and

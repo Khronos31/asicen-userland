@@ -46,7 +46,9 @@ HardwareStreamService::HardwareStreamService(px4::userland::TunerServiceBackend&
 HardwareStreamService::HardwareStreamService(px4::userland::TunerServiceBackend& frontend,
                                              StreamCaptureSource& source,
                                              TestQueueCapacityBytes queue_capacity,
-                                             NativeThread::Start thread_launcher)
+                                             NativeThread::Start thread_launcher,
+                                             void (*read_wait_observer)(void*) noexcept,
+                                             void* read_wait_observer_context)
     : frontend_(frontend), source_(source),
       queue_capacity_bytes_(queue_capacity.bytes > kMaxQueuePackets * 188U ||
                                     queue_capacity.bytes % 188U != 0U
@@ -54,7 +56,8 @@ HardwareStreamService::HardwareStreamService(px4::userland::TunerServiceBackend&
                                 : queue_capacity.bytes),
       queue_(new (std::nothrow) std::uint8_t[queue_capacity_bytes_]),
       continuity_(new (std::nothrow) px4::userland::TsContinuityChecker),
-      thread_launcher_(thread_launcher)
+      thread_launcher_(thread_launcher), read_wait_observer_(read_wait_observer),
+      read_wait_observer_context_(read_wait_observer_context)
 {
 }
 
@@ -113,6 +116,33 @@ Result<void> HardwareStreamService::tune_satellite(std::uint8_t receiver,
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     return frontend_.tune_satellite(receiver, frequency_khz, timeout_ms);
+}
+
+Result<px4::userland::TunerHzProgramming> HardwareStreamService::tune_terrestrial_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (!receiver_supports(receiver, System::ISDB_T)) {
+        return Result<px4::userland::TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    }
+    return frontend_.tune_terrestrial_hz(receiver, frequency_hz, timeout_ms);
+}
+
+Result<px4::userland::TunerHzProgramming> HardwareStreamService::tune_satellite_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (!receiver_supports(receiver, System::ISDB_S)) {
+        return Result<px4::userland::TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    }
+    return frontend_.tune_satellite_hz(receiver, frequency_hz, timeout_ms);
+}
+
+px4::userland::TunerStrictProfile HardwareStreamService::strict_profile(
+    std::uint8_t receiver, System system) const noexcept
+{
+    if (!receiver_supports(receiver, system)) {
+        return px4::userland::TunerStrictProfile{};
+    }
+    return frontend_.strict_profile(receiver, system);
 }
 
 Result<bool> HardwareStreamService::is_locked(std::uint8_t receiver, System system) noexcept
@@ -466,6 +496,8 @@ HardwareStreamService::read(const TunerAttachment& attachment,
         return Result<px4::userland::TunerStreamReadResult>::failure(Error::NOT_FOUND);
     }
     if (queue_bytes_ == 0U && !worker_done_ && state_ == State::running) {
+        if (read_wait_observer_ != nullptr)
+            read_wait_observer_(read_wait_observer_context_);
         condition_.wait_for(lock, std::chrono::milliseconds(timeout.milliseconds), [&] {
             return queue_bytes_ != 0U || worker_done_ || state_ != State::running;
         });
@@ -533,10 +565,14 @@ bool HardwareStreamService::emit(const std::uint8_t* bytes, std::size_t size) no
                 counters_.bytes += 188U;
                 if (queue_bytes_ == queue_capacity_bytes_) {
                     ++counters_.queue_drops;
-                    set_terminal_locked(TunerStreamTerminal::slow_consumer);
-                    cancelled_.store(true);
-                    overflow = true;
-                    break;
+                    if (!attachment_.evict_oldest) {
+                        set_terminal_locked(TunerStreamTerminal::slow_consumer);
+                        cancelled_.store(true);
+                        overflow = true;
+                        break;
+                    }
+                    queue_head_ = (queue_head_ + 188U) % queue_capacity_bytes_;
+                    queue_bytes_ -= 188U;
                 }
                 const std::size_t tail = (queue_head_ + queue_bytes_) % queue_capacity_bytes_;
                 std::memcpy(queue_.get() + tail, bytes + offset, 188U);
