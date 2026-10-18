@@ -154,8 +154,8 @@ int main(int argc, char** argv)
     WindowsSignal signal;
     Px4TsFailureKind failure_kind = Px4TsFailureKind::ipc;
     Px4TsRunDiagnostics diagnostics;
-    const auto result = Px4TsRunner::run(arguments, *output, clock, signal,
-                                         &failure_kind, &diagnostics);
+    const auto result = Px4TsRunner::run_wire(arguments, *output, clock, signal,
+                                              &failure_kind, &diagnostics);
     const auto finished = output->finish();
     const std::uint64_t completed = output->completed_packets();
     // Release a blocked console/termination handler only when the worker has

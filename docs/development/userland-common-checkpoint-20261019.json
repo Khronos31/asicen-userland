@@ -1,8 +1,8 @@
 {
-  "kind": "reviewed-increment-source-checkpoint",
+  "kind": "work-in-progress-source-checkpoint-cross-build-verified",
   "branch": "wip/userland-common-20261017",
   "upstream_main": "76299585bbaf7dd77e579554565db2b050df4232",
-  "snapshot_source": "/config/.work/userland-common-20261017/implementation/asicen-wire-idle-policy",
+  "snapshot_source": "/config/.work/userland-common-20261017/implementation/asicen-windows-wire-entry",
   "snapshot_file_count": 383,
   "snapshot_file_sha256": {
     ".editorconfig": "a38dc184aabf62d6bea89d602420a10eb74d0cf4c464968cf6b597670752e669",
@@ -159,7 +159,7 @@
     "third_party/px4-userland/userland/src/posix_tuner_nonce.cpp": "89b4dd8d0ce4b7ebe550e37e4c52e1c70d213b150ba005441848e47e454d8dd3",
     "third_party/px4-userland/userland/src/posix_tuner_nonce_internal.h": "b09f6b8af8393c5ebf9fcc98269a042c1c478502c8a750f4e3aaa98267a8f45b",
     "third_party/px4-userland/userland/src/tuner_service.cpp": "7b9039dfe6e2a73343dd2f94c36a9909b5bda8921bca1d7765363af859b48977",
-    "third_party/px4-userland/userland/src/windows/windows_ipc.cpp": "0ac787778e1e66306a101adf919f04dc8fbd8f9d1ae083afe98b109aed00220b",
+    "third_party/px4-userland/userland/src/windows/windows_ipc.cpp": "9c0b76c069ddc1d140fd6a1fc39b13c67c388f50f14833da341f8ae6a3104ece",
     "third_party/px4-userland/userland/src/windows/windows_security.h": "bc3bc165cb042021cfed7c65370627bd819533fec2c98afa115a188ecbec7641",
     "third_party/px4-userland/userland/src/windows/windows_sleep.cpp": "1af8147257bdde932972fd25a73563219eb0c38fb685f1750b1b479aa1025623",
     "third_party/px4-userland/userland/src/windows/windows_tuner_nonce.cpp": "8ec0a0d761cb0d737b4850f1a6ab4c4dec8a9806e5a9b9464a091c202e1b1353",
@@ -374,7 +374,7 @@
     "userland/tools/asicen_probe.cpp": "68f66d8f43304c1fa3ff942cfbe6062570186f706d87593ed1fa2ffbf9a8fad1",
     "userland/tools/asicen_transform.cpp": "fa377522baebb07e33b8402d728d7a2a442d4ec52d2963d291dd555e448bf00d",
     "userland/tools/asicen_ts.cpp": "b209a1198d4e9532ba6563931d2e0042cc6dda9cb77728571582afd9a4f12ed5",
-    "userland/tools/asicen_ts_windows.cpp": "f22d37780801c1868e4c794d9eeb4f9f761a7c80b783b4530a668a976f23ff85",
+    "userland/tools/asicen_ts_windows.cpp": "6995e5c57572afea5a436fafe4592e58646265a27bf3bde407b6f344d1f71867",
     "userland/tools/asicenctl.cpp": "f1d6b6cf115684c1bcf4b19ddbd1eaf83af9289270a342852cf5d98fbf56f6d9",
     "userland/tools/asicend.cpp": "9affdd7f4153abf0ef01d2b213aba7f3df1118e176c332f159f179ab2f2919b6",
     "userland/tools/asicend_args.h": "9170240b7a65f6572b56d03be19e301ce9592c483de8bdad844c432a2db6b4b6",
@@ -395,12 +395,15 @@
   ],
   "overlay_policy": "最新mainへ受入スナップショットの内容を重ねた。manifest外の既存upstream fileは保持した。このmetadata file自体は受入sourceスナップショットの範囲外。",
   "acceptance_scope": [
-    "common80ccc7b local overrideで実daemon/clientと関連2試験を親確認。W3U2/T27 6秒の新候補実機1回成功。",
-    "今回の受信は信号ありで、実機無TS試験ではない。Windows/全CLI/RCは後続。"
+    "Windows TS入口を既存run_wireへ接続。A vendorへ追加したSocketStream::write_allは既存P実装と同一。",
+    "P/A各daemon/TS/ctlと関連output/worker/platform試験exeのmingw cross-link成功。PEは実行しておらずnative受信/停止は後続。",
+    "Pでは先行共用ctlとWindows入口をdisjoint統合。新union全体のcross-buildは次CLI候補で確認予定。S/PIXのP pinは既検証4d5a982のまま。",
+    "旧Windows control fixtureはP Issue69/A旧IPC移行の追跡対象。既存test/期待値を変更しない。全CLI/全OS/CARD/RC認定ではない。"
   ],
   "acceptance_index": "https://github.com/Khronos31/agent-workspace/blob/design/userland-common-contract-20261017/implementation/accepted-source-index.md",
   "ci_policy": "このソース保全コミットは[skip ci]を含む。リリース・tag・mainへの反映は別の判断とする。",
   "known_followups": [
     "https://github.com/Khronos31/px4-userland/issues/68"
-  ]
+  ],
+  "previous_checkpoint_commit": "3f001455ef00d8824555db460d323a39a9f6860a"
 }
