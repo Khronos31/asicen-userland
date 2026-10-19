@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Adapted from px4-userland px4d_args.cpp at 1a1485d0c3e972e0a47be907edb67949564aa9a7.
 // ASICEN has no serial descriptor; explicit instances and observed USB topology
-// replace serial selection. Model and diagnostic options describe its adapter.
+// replace serial selection. The shared `--device` grammar is parsed by the
+// pinned core; this adapter only checks what the ASICEN hardware can open.
+// The runtime model is observed, never selected, in the hardware daemon.
 #ifndef ASICEN_USERLAND_ASICEND_ARGS_H
 #define ASICEN_USERLAND_ASICEND_ARGS_H
 
@@ -10,12 +12,16 @@
 #include "px4/identity.h"
 #include "px4/error.h"
 
+#include <dtv/userland/identity.h>
+
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdint>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace asicen::cli {
@@ -27,6 +33,9 @@ struct DaemonArguments final {
     bool list_json = false;
     bool models = false;
     std::string_view error;
+    // 2 for invalid syntax or combinations; 3 for a valid selector that no
+    // ASICEN function can satisfy.
+    int error_status = 2;
     const DeviceProfile* expected_model = nullptr;
     std::array<std::string, 2U> usb_paths;
     std::size_t usb_path_count = 0U;
@@ -189,6 +198,37 @@ inline DaemonArguments invalid(std::string_view message) noexcept
     return result;
 }
 
+inline DaemonArguments unsupported(std::string_view message) noexcept
+{
+    DaemonArguments result = invalid(message);
+    result.error_status = 3;
+    return result;
+}
+
+// Orders the core-canonical position set by function role. One position is a
+// single-function enclosure. Two positions must be the `.1` and `.2` functions
+// behind one parent; the input and canonical text order never assign roles.
+inline std::string_view assign_function_roles(std::array<std::string, 2U>& paths,
+                                              std::size_t count) noexcept
+{
+    if (count != 2U) return {};
+    std::uint8_t bus[2]{};
+    std::vector<std::uint8_t> ports[2];
+    for (std::size_t i = 0U; i < 2U; ++i) {
+        if (!parse_bus_port(paths[i], &bus[i], &ports[i]))
+            return "--device position is outside the USB bus/port range";
+    }
+    if (bus[0] != bus[1] || ports[0].size() < 2U || ports[0].size() != ports[1].size() ||
+        !std::equal(ports[0].begin(), ports[0].end() - 1, ports[1].begin()))
+        return "--device positions belong to different enclosures";
+    const std::uint8_t first = ports[0].back();
+    const std::uint8_t second = ports[1].back();
+    if (!((first == 1U && second == 2U) || (first == 2U && second == 1U)))
+        return "--device positions are not one enclosure's .1 and .2 functions";
+    if (first == 2U) std::swap(paths[0], paths[1]);
+    return {};
+}
+
 inline bool take_value(int& index, int argc, const char* const* argv,
                        std::string_view& value) noexcept
 {
@@ -210,7 +250,9 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
     bool have_firmware = false;
     bool have_runtime = false;
     bool have_instance = false;
+    bool have_device = false;
     bool have_allow_lnb_power = false;
+    std::string_view unsupported_device;
     for (int index = 1; index < argc; ++index) {
         if (argv[index] == nullptr) return invalid("null argument");
         const std::string_view option(argv[index]);
@@ -291,11 +333,14 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             }
             continue;
         }
-        if (mock && (option == "--firmware" || option == "--fd" || option == "--usb-path"))
+        if (mock && (option == "--firmware" || option == "-F" || option == "--fd" ||
+                     option == "--device" || option == "-d"))
             return invalid("unknown argument");
-        if (option != "--model" && option != "--firmware" &&
+        // The hardware daemon observes the model; only the mock selects one.
+        if (!mock && option == "--model") return invalid("unknown argument");
+        if (option != "--model" && option != "--firmware" && option != "-F" &&
             option != "--runtime-dir" && option != "--fd" &&
-            option != "--usb-path" && option != "--instance") {
+            option != "--device" && option != "-d" && option != "--instance") {
             return invalid("unknown argument");
         }
 
@@ -312,17 +357,30 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             if (have_instance) return invalid("duplicate --instance");
             have_instance = true;
             result.instance = value;
-        } else if (option == "--usb-path") {
-            if (result.usb_path_count >= result.usb_paths.size())
-                return invalid("at most two --usb-path values are supported");
-            if (!valid_usb_path(value)) return invalid("--usb-path is invalid");
-            for (std::size_t path_index = 0U; path_index < result.usb_path_count;
-                 ++path_index) {
-                if (result.usb_paths[path_index] == value)
-                    return invalid("--usb-path values must be distinct");
+        } else if (option == "--device" || option == "-d") {
+            if (have_device) return invalid("duplicate --device");
+            have_device = true;
+            namespace identity = dtv::userland::identity;
+            const auto selector = identity::parse_device_selector(value);
+            if (!selector) return invalid("--device is invalid");
+            if (selector.value().kind == identity::SelectorKind::serial) {
+                unsupported_device = "--device serial: matches no ASICEN function "
+                                     "(no serial descriptor); use usb:BUS-PORT";
+                continue;
             }
-            result.usb_paths[result.usb_path_count++] = value;
-        } else if (option == "--firmware") {
+            const identity::UsbTopology& topology = selector.value().topology;
+            if (topology.count > result.usb_paths.size()) {
+                unsupported_device = "--device names more USB functions than an ASICEN enclosure has";
+                continue;
+            }
+            for (std::size_t path_index = 0U; path_index < topology.count; ++path_index) {
+                const auto& path = topology.paths[path_index];
+                result.usb_paths[path_index].assign(path.bytes.data(), path.length);
+                if (!parse_bus_port(result.usb_paths[path_index], nullptr, nullptr))
+                    unsupported_device = "--device position is outside the USB bus/port range";
+            }
+            result.usb_path_count = topology.count;
+        } else if (option == "--firmware" || option == "-F") {
             if (have_firmware) return invalid("duplicate --firmware");
             have_firmware = true;
             result.firmware = value;
@@ -348,21 +406,22 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
     if (have_instance && !valid_instance(result.instance))
         return invalid("--instance is invalid");
     if (!mock) {
-        if (result.usb_path_count != 0U && result.file_descriptor_count != 0U)
-            return invalid("--usb-path and --fd cannot be combined");
-        if (result.usb_path_count == 0U && result.file_descriptor_count == 0U)
-            return invalid("native mode requires --usb-path");
-        if (result.usb_path_count != 0U && !have_instance &&
+        if (have_device && result.file_descriptor_count != 0U)
+            return invalid("--device and --fd cannot be combined");
+        if (!have_device && result.file_descriptor_count == 0U)
+            return invalid("native mode requires --device");
+        if (have_device && !have_instance &&
             !result.probe_card && !result.probe_satellite)
-            return invalid("--usb-path requires --instance");
+            return invalid("--device requires --instance");
         if (result.have_satellite_slot && !result.probe_satellite)
             return invalid("--slot requires --probe-satellite");
-        if (!result.firmware.empty() && result.expected_model == nullptr)
-            return invalid("--firmware requires --model");
     }
     if (have_runtime && result.runtime_directory.empty()) {
         return invalid("--runtime-dir must not be empty");
     }
+    if (!unsupported_device.empty()) return unsupported(unsupported_device);
+    const std::string_view roles = assign_function_roles(result.usb_paths, result.usb_path_count);
+    if (!roles.empty()) return invalid(roles);
     result.valid = true;
     return result;
 }

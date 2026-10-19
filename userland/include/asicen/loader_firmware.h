@@ -45,6 +45,10 @@ const LoaderFirmwareManifest& loader_firmware_manifest() noexcept;
 // Returns null for unknown models. The no-argument overload is the legacy image.
 const LoaderFirmwareManifest* loader_firmware_manifest(ModelId model) noexcept;
 bool loader_firmware_supports_model(ModelId model) noexcept;
+// The shared Windows image used by daemon startup before any model is known.
+// The runtime model is decided afterwards from the VID/PID that re-enumerates
+// at the same USB position; this image never identifies a model by itself.
+const LoaderFirmwareManifest& common_loader_firmware_manifest() noexcept;
 
 // Computes SHA-256 without retaining or logging the firmware bytes. A null
 // input is permitted only for an empty input; out must not be null.
@@ -55,6 +59,8 @@ const std::array<LoaderFirmwareStage, 4>& loader_firmware_stages();
 std::vector<LoaderTransfer> build_loader_transfer_plan();
 // Uses this model's verified image start address; unknown models return no plan.
 std::vector<LoaderTransfer> build_loader_transfer_plan(ModelId model);
+// Same stages at the shared Windows image start address, without a model.
+std::vector<LoaderTransfer> build_common_loader_transfer_plan();
 
 enum class LoaderFirmwareRead {
     Ok,

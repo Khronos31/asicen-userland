@@ -51,6 +51,9 @@ class FirmwareProvider final {
 public:
     explicit FirmwareProvider(std::string_view path, ModelId model) noexcept
         : path_(path), model_(model) {}
+    // Verifies the shared loader image used before the runtime model is known.
+    explicit FirmwareProvider(std::string_view path) noexcept
+        : path_(path), model_(), common_(true) {}
     ~FirmwareProvider() noexcept = default;
 
     FirmwareProvider(const FirmwareProvider&) = default;
@@ -64,6 +67,7 @@ public:
 private:
     std::string path_;
     ModelId model_;
+    bool common_ = false;
 };
 
 }  // namespace asicen

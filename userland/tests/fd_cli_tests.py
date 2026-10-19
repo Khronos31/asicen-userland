@@ -55,8 +55,8 @@ with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory) / 'invalid-product-firmware.bin'
     path.write_bytes(bytes(16384))
     for candidate, expected in ((path, 10), (path.with_name('missing.bin'), 3)):
-        result = run('--usb-path', '1:1', '--instance', 'preflight',
-                     '--model', 'w3u3', '--firmware', str(candidate))
+        result = run('--device', 'usb:1-1', '--instance', 'preflight',
+                     '--firmware', str(candidate))
         check(result.returncode == expected, result.stderr)
         check('libusb_init' not in result.stderr and 'enclosure identity' not in result.stderr,
               'rejected product firmware must not reach USB access')

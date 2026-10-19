@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// asicend: real-hardware daemon.  Mirrors px4d: native (--usb-path) or fd
+// asicend: real-hardware daemon.  Mirrors px4d: native (--device usb:) or fd
 // modes are selected by their options, and read-only discovery uses
 // --list-json.  The isolated mock service lives in the separate asicend-mock
 // binary; this binary never runs a mock backend.
@@ -35,19 +35,22 @@ void usage(FILE* output)
     std::fprintf(output,
         "usage: asicend --list | --list-json\n"
         "       asicend --models\n"
-        "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
-        "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
+        "       asicend -d|--device usb:BUS-PORT[,BUS-PORT]\n"
         "                 [--runtime-dir PATH] --instance TOKEN "
-        "[--group] [--allow-lnb-power] [--firmware PATH]\n"
-        "       asicend --fd FD [--fd FD] [--model MODEL]\n"
+        "[--group] [--allow-lnb-power] [-F|--firmware PATH]\n"
+        "       asicend --fd FD [--fd FD]\n"
         "                 [--runtime-dir PATH] [--instance TOKEN] "
-        "[--group] [--allow-lnb-power] [--firmware PATH]\n"
-        "  --usb-path   native topology; up to two values, primary first then\n"
-        "               sibling. Each value is BUS:ADDRESS or BUS-PORT.\n"
+        "[--group] [--allow-lnb-power] [-F|--firmware PATH]\n"
+        "  -d, --device usb:BUS-PORT[,BUS-PORT]  enclosure USB function positions:\n"
+        "               one for single-function models, both .1 and .2 functions\n"
+        "               for dual-function models; order does not assign roles.\n"
+        "               serial: matches nothing (ASICEN has no serial descriptor).\n"
         "  --fd         granted USB descriptors; up to two, primary first.\n"
         "               Without --instance, use the observed usb-BUS-PORT identity.\n"
         "  --allow-lnb-power  permit explicit ISDB-S 15 V requests; default off\n"
-        "  --firmware   loader image; loaded before claiming\n"
+        "  -F, --firmware  shared loader image; transferred only to loader\n"
+        "               functions. The model is taken from the runtime VID:PID\n"
+        "               that re-enumerates at the same position.\n"
         "  --probe-satellite RF_KHZ [--slot 0..7]  bounded legacy satellite diagnostic\n"
         "  --probe-card  bounded legacy card diagnostic\n"
         "  --card-only   serve the card reader without tuner operations\n"
@@ -161,7 +164,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "argument error: %.*s\n",
                      static_cast<int>(arguments.error.size()), arguments.error.data());
         usage(stderr);
-        return 2;
+        return arguments.error_status;
     }
     if (arguments.help) {
         usage(stdout);

@@ -408,7 +408,7 @@ if(UNIX OR WIN32)
     add_executable(asicend
         userland/tools/asicend.cpp
         ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp)
-    target_link_libraries(asicend PRIVATE asicen_core asicen_portable_core Threads::Threads)
+    target_link_libraries(asicend PRIVATE asicen_core asicen_portable_core dtv::identity Threads::Threads)
     target_include_directories(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools)
     if(WIN32)
         target_sources(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools/px4d_windows_stdin.cpp)
@@ -429,7 +429,7 @@ if(UNIX OR WIN32)
             userland/tools/asicend_mock.cpp
             ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp)
         target_include_directories(asicend-mock PRIVATE ${ASICEN_PX4_ROOT}/tools)
-        target_link_libraries(asicend-mock PRIVATE asicen_px4_mock asicen_core Threads::Threads)
+        target_link_libraries(asicend-mock PRIVATE asicen_px4_mock asicen_core dtv::identity Threads::Threads)
         asicen_enable_project_warnings(asicend-mock)
 
     endif()
@@ -470,6 +470,12 @@ if(ASICEN_BUILD_TESTS AND ASICEN_ENABLE_LIBUSB)
     target_link_libraries(asicen-libusb-acquisition-tests PRIVATE asicen_libusb)
     asicen_enable_project_warnings(asicen-libusb-acquisition-tests)
     add_test(NAME asicen-libusb-acquisition-tests COMMAND asicen-libusb-acquisition-tests)
+
+    add_executable(asicen-cold-fresh-usb-tests userland/tests/cold_fresh_usb_tests.cpp)
+    target_include_directories(asicen-cold-fresh-usb-tests PRIVATE userland/tools)
+    target_link_libraries(asicen-cold-fresh-usb-tests PRIVATE asicen_libusb asicen_core)
+    asicen_enable_project_warnings(asicen-cold-fresh-usb-tests)
+    add_test(NAME asicen-cold-fresh-usb-tests COMMAND asicen-cold-fresh-usb-tests)
 endif()
 
 if(ASICEN_BUILD_TESTS AND NOT WIN32)
@@ -653,6 +659,8 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     if(ASICEN_ENABLE_LIBUSB)
         add_test(NAME asicen-fd-cli-tests
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/fd_cli_tests.py $<TARGET_FILE_DIR:asicend>)
+        add_test(NAME asicen-device-cli-tests
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/userland/tests/device_cli_tests.py $<TARGET_FILE_DIR:asicend>)
     endif()
     add_executable(asicen-legacy-frontend-profile-tests userland/tests/legacy_frontend_profile_tests.cpp)
     target_link_libraries(asicen-legacy-frontend-profile-tests PRIVATE asicen_core)
@@ -1198,9 +1206,16 @@ if(ASICEN_BUILD_TESTS)
 
     add_executable(asicen-tools-parity-tests userland/tests/tools_parity_tests.cpp)
     target_include_directories(asicen-tools-parity-tests PRIVATE userland/tools)
-    target_link_libraries(asicen-tools-parity-tests PRIVATE asicen_core asicen_px4_mock)
+    target_link_libraries(asicen-tools-parity-tests PRIVATE asicen_core asicen_px4_mock dtv::identity)
     asicen_enable_project_warnings(asicen-tools-parity-tests)
     add_test(NAME asicen-tools-parity-tests COMMAND asicen-tools-parity-tests)
+
+    add_executable(asicen-canonical-startup-tests userland/tests/canonical_startup_tests.cpp)
+    target_include_directories(asicen-canonical-startup-tests PRIVATE userland/tools)
+    target_link_libraries(asicen-canonical-startup-tests PRIVATE asicen_core dtv::identity)
+    asicen_enable_project_warnings(asicen-canonical-startup-tests)
+    add_test(NAME asicen-canonical-startup-tests COMMAND asicen-canonical-startup-tests
+        ${CMAKE_CURRENT_BINARY_DIR}/canonical-startup-not-firmware.bin)
 
     add_executable(asicen-product-worker-boundaries-tests
         ${ASICEN_PX4_ROOT}/tests/windows_worker_tests_main.cpp

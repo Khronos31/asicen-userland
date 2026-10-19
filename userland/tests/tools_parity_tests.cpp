@@ -39,15 +39,15 @@ bool arguments_match_reference()
     CHECK(!parse({"-h"}).valid);
     CHECK(!parse({"--socket", "/unused"}, true).valid &&
           !parse({"--socket", "/unused"}).valid);
-    CHECK(!parse({"--usb-path", "1:2"}).valid);
-    CHECK(parse({"--usb-path", "1:2", "--instance", "test"}).valid);
+    CHECK(!parse({"--device", "usb:1-2"}).valid);
+    CHECK(parse({"--device", "usb:1-2", "--instance", "test"}).valid);
     CHECK(parse({"--fd", "3", "--instance", "test"}).valid);
     CHECK(parse({"--fd", "3"}).valid && parse({"--fd", "3"}).instance.empty());
     CHECK(parse({}, true).valid && parse({}, true).instance == "default");
-    for (const char* selector : {"0:1", "1:0", "256:1", "1:256", "0x1:2", "1:2:3",
-                                 "0-1", "1-0", "1-256", "1-1.", "1-1..2",
-                                 "1-1.2.3.4.5.6.7.8.9"}) {
-        CHECK(!parse({"--usb-path", selector, "--instance", "test"}).valid);
+    for (const char* selector : {"usb:0:1", "usb:1:0", "usb:256:1", "usb:1:256", "usb:0x1:2",
+                                 "usb:1:2:3", "usb:0-1", "usb:1-0", "usb:1-256", "usb:1-1.",
+                                 "usb:1-1..2", "usb:1-1.2.3.4.5.6.7.8.9"}) {
+        CHECK(!parse({"--device", selector, "--instance", "test"}).valid);
     }
     std::uint8_t bus = 0U;
     std::uint8_t address = 0U;
@@ -56,9 +56,9 @@ bool arguments_match_reference()
     std::vector<std::uint8_t> ports;
     CHECK(asicen::cli::parse_bus_port("010-008.001", &bus, &ports) &&
           bus == 10U && ports == std::vector<std::uint8_t>({8U, 1U}));
-    CHECK(!parse({"--usb-path", "1:2", "--fd", "3", "--instance", "test"}).valid);
-    CHECK(!parse({"--usb-path", "1:2", "--instance", "test", "--runtime-dir", ""}).valid);
-    CHECK(!parse({"--usb-path", "1:2", "--instance", "test", "--firmware", "--group"}).valid);
+    CHECK(!parse({"--device", "usb:1-2", "--fd", "3", "--instance", "test"}).valid);
+    CHECK(!parse({"--device", "usb:1-2", "--instance", "test", "--runtime-dir", ""}).valid);
+    CHECK(!parse({"--device", "usb:1-2", "--instance", "test", "--firmware", "--group"}).valid);
     CHECK(!parse({"--instance", "test", "--model", "s3u", "--model", "s3u"}, true).valid);
     CHECK(!parse({"--instance", "test", "--group", "--group"}, true).valid);
     CHECK(!parse({"--instance", "test", "--runtime-dir", "x", "--runtime-dir", "x"}, true).valid);

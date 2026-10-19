@@ -65,7 +65,8 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
         return Result<FirmwareImage>::failure(Error::NOT_FOUND);
     }
 
-    const auto* manifest = loader_firmware_manifest(model_);
+    const auto* manifest =
+        common_ ? &common_loader_firmware_manifest() : loader_firmware_manifest(model_);
     if (manifest == nullptr) {
         return Result<FirmwareImage>::failure(Error::FIRMWARE_REJECTED);
     }
@@ -91,7 +92,10 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
         }
     }
     const auto digest = sha256.finish();
-    if (!FirmwareImage::accepted_policy(model_, data.size(), digest)) {
+    const bool accepted = common_
+        ? data.size() == manifest->size && digest == manifest->sha256
+        : FirmwareImage::accepted_policy(model_, data.size(), digest);
+    if (!accepted) {
         return Result<FirmwareImage>::failure(Error::FIRMWARE_REJECTED);
     }
     return Result<FirmwareImage>::success(FirmwareImage(std::move(data)));

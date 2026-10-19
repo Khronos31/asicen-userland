@@ -24,7 +24,7 @@ const LoaderFirmwareManifest& loader_firmware_manifest() noexcept
     return manifest;
 }
 
-const LoaderFirmwareManifest* loader_firmware_manifest(ModelId model) noexcept
+const LoaderFirmwareManifest& common_loader_firmware_manifest() noexcept
 {
     // The identical x64 Windows loaders in the W3U2, W3U3 and W3U3 V2
     // packages decode a different static image. V2 is assigned that image
@@ -36,6 +36,11 @@ const LoaderFirmwareManifest* loader_firmware_manifest(ModelId model) noexcept
         {{0x5d, 0xb3, 0x9f, 0xac, 0xda, 0x14, 0x0b, 0xdc, 0xb3, 0xa2, 0x38,
           0xda, 0xd1, 0x0d, 0xa5, 0xaa, 0xc7, 0x52, 0xa1, 0xba, 0x3a, 0xaf,
           0x17, 0xe2, 0x23, 0x9f, 0x8d, 0x79, 0xa0, 0xad, 0x6a, 0x2a}}};
+    return windows;
+}
+
+const LoaderFirmwareManifest* loader_firmware_manifest(ModelId model) noexcept
+{
     switch (model) {
     case ModelId::S3u:
     case ModelId::S3u2:
@@ -43,7 +48,7 @@ const LoaderFirmwareManifest* loader_firmware_manifest(ModelId model) noexcept
     case ModelId::W3u3:
         return &loader_firmware_manifest();
     case ModelId::W3u3V2:
-        return &windows;
+        return &common_loader_firmware_manifest();
     }
     return nullptr;
 }
@@ -103,10 +108,11 @@ std::vector<LoaderTransfer> build_loader_transfer_plan()
     return build_loader_transfer_plan(ModelId::W3u3);
 }
 
-std::vector<LoaderTransfer> build_loader_transfer_plan(ModelId model)
+namespace {
+
+std::vector<LoaderTransfer> build_plan(const LoaderFirmwareManifest* manifest)
 {
     std::vector<LoaderTransfer> result;
-    const auto* manifest = loader_firmware_manifest(model);
     if (manifest == nullptr) {
         return result;
     }
@@ -131,6 +137,18 @@ std::vector<LoaderTransfer> build_loader_transfer_plan(ModelId model)
         }
     }
     return result;
+}
+
+} // namespace
+
+std::vector<LoaderTransfer> build_loader_transfer_plan(ModelId model)
+{
+    return build_plan(loader_firmware_manifest(model));
+}
+
+std::vector<LoaderTransfer> build_common_loader_transfer_plan()
+{
+    return build_plan(&common_loader_firmware_manifest());
 }
 
 } // namespace asicen
