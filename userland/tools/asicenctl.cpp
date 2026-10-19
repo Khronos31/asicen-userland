@@ -37,6 +37,7 @@ enum class Command : std::uint8_t {
 struct Arguments final {
     bool valid = false;
     bool help = false;
+    bool version = false;
     bool group = false;
     std::string device;
     std::string instance;
@@ -155,6 +156,12 @@ Arguments parse_arguments(int argc, const char* const* argv) noexcept
             result.help = true;
             return result;
         }
+        if (option == "--version") {
+            if (argc != 2) return invalid("--version cannot be combined");
+            result.valid = true;
+            result.version = true;
+            return result;
+        }
         if (option == "--group") {
             if (result.group) return invalid("duplicate --group");
             result.group = true;
@@ -239,7 +246,8 @@ void usage(FILE* output) noexcept
                  "COMMAND\n");
     std::fprintf(output,
                  "commands: list, status, card-status, card-atr, card-reset, "
-                 "card-apdu HEX [--repeat N]\n");
+                 "card-apdu HEX [--repeat N]\n"
+                 "standalone: --version\n");
 }
 
 bool is_card_command(Command command) noexcept
@@ -356,6 +364,11 @@ int main(int argc, char** argv)
     }
     if (arguments.help) {
         usage(stdout);
+        return 0;
+    }
+
+    if (arguments.version) {
+        std::printf("asicenctl %s\n", ASICEN_PRODUCT_VERSION);
         return 0;
     }
 
