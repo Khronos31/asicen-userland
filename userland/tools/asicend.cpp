@@ -33,7 +33,7 @@ void usage(FILE* output)
 {
 #ifdef ASICEN_ENABLE_LIBUSB
     std::fprintf(output,
-        "usage: asicend --list | --list-json\n"
+        "usage: asicend --list | --list-json | --version\n"
         "       asicend --models\n"
         "       asicend -d|--device usb:BUS-PORT[,BUS-PORT]\n"
         "                 [--runtime-dir PATH] --instance TOKEN "
@@ -64,7 +64,7 @@ void usage(FILE* output)
     );
 #else
     std::fprintf(output,
-        "usage: asicend --models | --list | --list-json\n"
+        "usage: asicend --models | --list | --list-json | --version\n"
         "The hardware backend is unavailable in this libusb-OFF build.\n");
 #endif
 }
@@ -168,6 +168,10 @@ int main(int argc, char** argv)
     }
     if (arguments.help) {
         usage(stdout);
+        return 0;
+    }
+    if (arguments.version) {
+        std::printf("asicend %s\n", ASICEN_PRODUCT_VERSION);
         return 0;
     }
     if (arguments.models) return list_models();
