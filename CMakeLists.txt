@@ -1227,7 +1227,7 @@ if(ASICEN_BUILD_TESTS)
 
     add_executable(asicen-tools-parity-tests userland/tests/tools_parity_tests.cpp)
     target_include_directories(asicen-tools-parity-tests PRIVATE userland/tools)
-    target_link_libraries(asicen-tools-parity-tests PRIVATE asicen_core asicen_px4_mock dtv::identity)
+    target_link_libraries(asicen-tools-parity-tests PRIVATE asicen_core asicen_px4_mock dtv::identity dtv::json)
     asicen_enable_project_warnings(asicen-tools-parity-tests)
     add_test(NAME asicen-tools-parity-tests COMMAND asicen-tools-parity-tests)
 

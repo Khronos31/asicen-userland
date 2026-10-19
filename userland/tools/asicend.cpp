@@ -68,7 +68,7 @@ void usage(FILE* output)
     );
 #else
     std::fprintf(output,
-        "usage: asicend --models | --list | --list-json | --version\n"
+        "usage: asicend --models | --list-json | --version\n"
         "The hardware backend is unavailable in this libusb-OFF build.\n");
 #endif
 }
@@ -137,6 +137,12 @@ int list_devices(bool json)
         observation.pid = descriptor.idProduct;
         observation.bus = libusb_get_bus_number(device);
         observation.address = libusb_get_device_address(device);
+        if (auto* parent = libusb_get_parent(device)) {
+            libusb_device_descriptor hub{};
+            if (libusb_get_device_descriptor(parent, &hub) == 0)
+                observation.parent_genesys_hub =
+                    hub.idVendor == 0x05e3U && hub.idProduct == 0x0608U;
+        }
         std::uint8_t ports[8]{};
         const int port_count = libusb_get_port_numbers(device, ports, sizeof(ports));
         if (port_count > 0 && port_count <= static_cast<int>(sizeof(ports)))
@@ -145,7 +151,13 @@ int list_devices(bool json)
     }
     libusb_free_device_list(list, 1);
     asicen::release_libusb_context(context);
-    const std::string output = asicen::cli::format_device_list(observations, json);
+    const std::string output = json
+        ? asicen::cli::format_discovery_json(observations, ASICEN_PRODUCT_VERSION)
+        : asicen::cli::format_device_list(observations, false);
+    if (json && output.empty()) {
+        std::fprintf(stderr, "list-json: unable to represent USB discovery\n");
+        return 2;
+    }
     if ((!output.empty() &&
          std::fwrite(output.data(), 1U, output.size(), stdout) != output.size()) ||
         std::fflush(stdout) != 0) {
@@ -185,11 +197,13 @@ int main(int argc, char** argv)
         return 0;
     }
     if (arguments.models) return list_models();
-    if (arguments.list || arguments.list_json) {
+    if (arguments.list_json) {
 #ifdef ASICEN_ENABLE_LIBUSB
-        return list_devices(arguments.list_json);
+        return list_devices(true);
 #else
-        const std::string output = asicen::cli::format_device_list({}, arguments.list_json);
+        const std::string output =
+            asicen::cli::format_discovery_json({}, ASICEN_PRODUCT_VERSION);
+        if (arguments.list_json && output.empty()) return 2;
         if ((!output.empty() &&
              std::fwrite(output.data(), 1U, output.size(), stdout) != output.size()) ||
             std::fflush(stdout) != 0) {

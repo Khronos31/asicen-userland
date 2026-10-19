@@ -15,6 +15,9 @@ struct UsbFunctionObservation {
     std::uint8_t bus = 0;
     std::vector<std::uint8_t> port_path;
     std::uint8_t address = 0;
+    // Read-only parent USB descriptor, not a guess from the child's VID:PID.
+    // 05e3:0608 hub ports 1/2 are the approved ASICEN enclosure topology.
+    bool parent_genesys_hub = false;
 };
 
 // Two runtime functions in a W3U3/W3U2 enclosure are expected to be siblings

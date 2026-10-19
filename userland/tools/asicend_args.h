@@ -257,7 +257,7 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
     for (int index = 1; index < argc; ++index) {
         if (argv[index] == nullptr) return invalid("null argument");
         const std::string_view option(argv[index]);
-        if (option == "--help") {
+        if (option == "--help" || option == "-h") {
             if (argc != 2) return invalid("--help cannot be combined");
             result.valid = true;
             result.help = true;
@@ -267,13 +267,6 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             if (argc != 2) return invalid("--version cannot be combined");
             result.valid = true;
             result.version = true;
-            return result;
-        }
-        if (option == "--list") {
-            if (argc != 2) return invalid("--list cannot be combined");
-            if (mock) return invalid("unknown argument");
-            result.valid = true;
-            result.list = true;
             return result;
         }
         if (option == "--list-json") {

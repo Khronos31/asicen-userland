@@ -31,12 +31,12 @@ asicen::cli::DaemonArguments parse(std::initializer_list<const char*> options, b
 
 bool arguments_match_reference()
 {
-    for (const char* option : {"--help", "--list", "--list-json", "--models"}) {
+    for (const char* option : {"--help", "--list-json", "--models"}) {
         CHECK(parse({option}).valid);
         CHECK(!parse({option, option}).valid);
         CHECK(!parse({option, "--group"}).valid);
     }
-    CHECK(!parse({"-h"}).valid);
+    CHECK(!parse({"--list"}).valid);
     CHECK(!parse({"--socket", "/unused"}, true).valid &&
           !parse({"--socket", "/unused"}).valid);
     CHECK(!parse({"--device", "usb:1-2"}).valid);
@@ -107,6 +107,48 @@ bool list_formats_share_observed_identity()
     CHECK(asicen::cli::format_device_list({}, true) ==
           "{\"enclosures\":[],\"ungrouped_usb_devices\":[]}\n");
     CHECK(asicen::cli::format_device_list({}, false).empty());
+
+    // The public --list-json now uses the shared schema. Only the physical
+    // observation is faked here; it must never invent a loader model/serial.
+    auto nested_pair = pair;
+    for (auto& usb : nested_pair) usb.parent_genesys_hub = true;
+    const std::string shared = asicen::cli::format_discovery_json(nested_pair, "0.1.0");
+    CHECK(shared.find("\"name\":\"userland.discovery\"") != std::string::npos);
+    CHECK(shared.find("\"model\":\"PX-W3U3\"") != std::string::npos);
+    CHECK(shared.find("\"receiver\":3,\"local\":1,\"systems\":[\"ISDB-T\"]") != std::string::npos);
+    CHECK(shared.find("\"readers\":[{") != std::string::npos);
+    CHECK(shared.find("\"enclosures\":[{") != std::string::npos);
+    CHECK(shared.find("\"ungrouped_usb_devices\":[]") != std::string::npos);
+    // Cold: one or both loader functions create an enclosure even without a
+    // resolved runtime model. No fictitious receivers or card readers.
+    const std::string cold = asicen::cli::format_discovery_json(
+        {{0x1738U,0x5211U,1U,{2U,1U},8U,true}}, "0.1.0");
+    CHECK(cold.find("\"model\":null") != std::string::npos);
+    CHECK(cold.find("\"in_loader_mode\":true") != std::string::npos);
+    CHECK(cold.find("\"port\":\"1-2.1\"") != std::string::npos);
+    CHECK(cold.find("\"enclosures\":[{") != std::string::npos);
+    CHECK(cold.find("\"receivers\":") == std::string::npos);
+    CHECK(cold.find("\"readers\":") == std::string::npos);
+    const std::string both_cold = asicen::cli::format_discovery_json(
+        {{0x1738U,0x5211U,1U,{2U,1U},8U,true},
+         {0x1738U,0x5211U,1U,{2U,2U},9U,true}}, "0.1.0");
+    CHECK(both_cold.find("\"device\":2,\"usb\":\"1738:5211\"") != std::string::npos);
+    CHECK(both_cold.find("\"ungrouped_usb_devices\":[]") != std::string::npos);
+    const std::string mixed = asicen::cli::format_discovery_json(
+        {{0x1738U,0x5211U,1U,{2U,1U},8U,true},
+         {0x0b06U,0x0005U,1U,{2U,2U},9U,true}}, "0.1.0");
+    CHECK(mixed.find("\"usb\":null") != std::string::npos);
+    CHECK(mixed.find("\"model\":null") != std::string::npos);
+    CHECK(mixed.find("\"receivers\":") == std::string::npos);
+    // Wrong hub / ports 3 and 4 must never be grouped.
+    const std::string unsupported_hub = asicen::cli::format_discovery_json(
+        {{0x1738U,0x5211U,1U,{2U,1U},8U,false},
+         {0x1738U,0x5211U,1U,{2U,2U},9U,false}}, "0.1.0");
+    CHECK(unsupported_hub.find("\"enclosures\":[]") != std::string::npos);
+    const std::string ports_34 = asicen::cli::format_discovery_json(
+        {{0x1738U,0x5211U,1U,{2U,3U},8U,true},
+         {0x1738U,0x5211U,1U,{2U,4U},9U,true}}, "0.1.0");
+    CHECK(ports_34.find("\"enclosures\":[]") != std::string::npos);
     return true;
 }
 
