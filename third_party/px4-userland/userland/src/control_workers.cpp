@@ -1037,13 +1037,19 @@ struct ControlWorkerLanes::Impl final {
         case ControlWorkerOperation::card_status: {
             const auto result = card_service.status();
             if (!result) operation_error = result.error();
-            else completion.card_status = result.value();
+            else {
+                completion.card_status = result.value();
+                completion.card_status_valid = true;
+            }
             break;
         }
         case ControlWorkerOperation::card_handle_status: {
             const auto result = card_service.handle_status(task.client_id, task.card_handle);
             if (!result) operation_error = result.error();
-            else completion.card_status = result.value();
+            else {
+                completion.card_status = result.value();
+                completion.card_status_valid = true;
+            }
             break;
         }
         case ControlWorkerOperation::card_status_combined: {
@@ -1053,6 +1059,7 @@ struct ControlWorkerLanes::Impl final {
                 break;
             }
             completion.card_status = card.value();
+            completion.card_status_valid = true;
             const auto tuner = tuner_service.status();
             if (!tuner) {
                 operation_error = tuner.error();
@@ -1113,6 +1120,18 @@ struct ControlWorkerLanes::Impl final {
             const auto result = card_service.end_transaction(
                 task.client_id, task.card_handle, task.disposition);
             if (!result) operation_error = result.error();
+            else {
+                // END carries no ATR of its own.  Re-read the owned handle
+                // afterwards so the typed CardSessionResult can report the
+                // settled card honestly; a stale or uninitialized handle is
+                // not an END failure.
+                const auto status = card_service.handle_status(task.client_id,
+                                                               task.card_handle);
+                if (status) {
+                    completion.card_status = status.value();
+                    completion.card_status_valid = true;
+                }
+            }
             break;
         }
         case ControlWorkerOperation::card_release_connection: {
@@ -1143,6 +1162,12 @@ struct ControlWorkerLanes::Impl final {
             } else if (operation_error == Error::OK) {
                 operation_error = status.error();
             }
+        }
+        if (operation_lane_valid(ControlWorkerLane::card, task)) {
+            // Sample the reader generation on the lane for every card
+            // operation, including a failed one, so the owning poll thread can
+            // bind or invalidate handles without touching CardService.
+            completion.card_generation = card_service.reader_generation();
         }
         completion.error = operation_error;
         return completion;

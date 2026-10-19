@@ -1312,7 +1312,9 @@ bool test_framing_and_handshake()
 
         auto card = TestClient::connect(f.endpoint);
         V1_CHECK(card);
-        V1_CHECK(!card->hello(nullptr, wire::kFeatureCardService));
+        // CARD_SERVICE is served now; STATE_EVENT is still unconnected and a
+        // required bit outside the offered set must be refused.
+        V1_CHECK(!card->hello(nullptr, wire::kFeatureStateEvent));
         V1_CHECK(card->closed_without_reply());
     }
     // Clean EOF and EOF inside a frame both end the connection; the truncated
@@ -1973,6 +1975,144 @@ bool test_pending_operations_fail_closed()
 }
 
 // ---------------------------------------------------------------------------
+// 14. Card service over the control connection
+
+bool test_card_service_over_control()
+{
+    Fixture f("v1-card");
+    V1_CHECK(f.start());
+
+    // CARD_SERVICE is refused with UNSUPPORTED until the client negotiates it,
+    // and that refusal never reaches the card backend.
+    {
+        auto client = TestClient::connect(f.endpoint);
+        V1_CHECK(client && client->hello());
+        wire::CardStatusRequest card;
+        card.key.epoch = client->epoch;
+        card.key.reader_id = 0U;
+        Reply reply;
+        V1_CHECK(client->request(
+            wire::kOpcodeCardStatus,
+            TestClient::encode(card, &wire::encode_card_status_request), reply));
+        V1_CHECK(TestClient::error_code(reply) ==
+                 static_cast<std::uint32_t>(Error::UNSUPPORTED));
+        V1_CHECK(card_untouched(f));
+    }
+
+    auto client = TestClient::connect(f.endpoint);
+    V1_CHECK(client && client->hello(nullptr, wire::kFeatureCardService));
+
+    // A reader id outside the canonical LIST is NOT_FOUND and powers nothing.
+    {
+        wire::CardStatusRequest card;
+        card.key.epoch = client->epoch;
+        card.key.reader_id = 0x1234U;
+        Reply reply;
+        V1_CHECK(client->request(
+            wire::kOpcodeCardStatus,
+            TestClient::encode(card, &wire::encode_card_status_request), reply));
+        V1_CHECK(TestClient::error_code(reply) ==
+                 static_cast<std::uint32_t>(Error::NOT_FOUND));
+        V1_CHECK(card_untouched(f));
+    }
+
+    // The listed reader is observed through the card lane: the synthetic
+    // backend reports a present but uninitialized card.
+    {
+        wire::CardStatusRequest card;
+        card.key.epoch = client->epoch;
+        card.key.reader_id = 0U;
+        Reply reply;
+        V1_CHECK(client->request(
+            wire::kOpcodeCardStatus,
+            TestClient::encode(card, &wire::encode_card_status_request), reply));
+        V1_CHECK(reply.header.kind == wire::Kind::response);
+        const auto decoded = wire::decode_card_status_response(reply.view());
+        V1_CHECK(decoded);
+        V1_CHECK(decoded.value().key.reader_id == 0U);
+        V1_CHECK(decoded.value().current_generation != 0U);
+        V1_CHECK(decoded.value().present && !decoded.value().initialized);
+        V1_CHECK(!decoded.value().protocol.present && !decoded.value().atr.present);
+        V1_CHECK(f.card_backend.detect_calls.load() != 0U);
+    }
+
+    // CONNECT reaches the lane and returns a bound handle.  The synthetic
+    // session exposes no ATR, so the handle is reported not usable rather than
+    // carrying a fabricated ATR.
+    std::uint64_t handle = 0U;
+    {
+        wire::CardConnectRequest connect;
+        connect.key.epoch = client->epoch;
+        connect.key.reader_id = 0U;
+        connect.share = wire::Share::shared;
+        connect.preferred_protocols = 1U;
+        Reply reply;
+        V1_CHECK(client->request(
+            wire::kOpcodeCardConnect,
+            TestClient::encode(connect, &wire::encode_card_connect_request), reply));
+        V1_CHECK(reply.header.kind == wire::Kind::response);
+        const auto decoded = wire::decode_card_session_result(reply.view());
+        V1_CHECK(decoded && decoded.value().card_handle != 0U);
+        V1_CHECK(decoded.value().reader_id == 0U);
+        V1_CHECK(!decoded.value().usable);
+        handle = decoded.value().card_handle;
+    }
+
+    // A live handle presented with the wrong stored generation is STALE_HANDLE
+    // (the wire code 16), and the APDU never reaches the session.
+    {
+        wire::CardTransmitRequest transmit;
+        transmit.key.epoch = client->epoch;
+        transmit.key.reader_id = 0U;
+        transmit.key.bound_generation = 2U;
+        transmit.key.card_handle = handle;
+        transmit.command.length = 1U;
+        transmit.command.bytes[0] = 0x00U;
+        Reply reply;
+        V1_CHECK(client->request(
+            wire::kOpcodeCardTransmit,
+            TestClient::encode(transmit, &wire::encode_card_transmit_request), reply));
+        V1_CHECK(TestClient::error_code(reply) == wire::kWireErrorStaleHandle);
+        V1_CHECK(f.card_session.transmit_calls.load() == 0U);
+    }
+
+    // DISCONNECT consumes the handle even though the session has no ATR.
+    {
+        wire::CardDisconnectRequest disconnect;
+        disconnect.key.epoch = client->epoch;
+        disconnect.key.reader_id = 0U;
+        disconnect.key.bound_generation = 1U;
+        disconnect.key.card_handle = handle;
+        disconnect.disposition = wire::Disposition::leave;
+        Reply reply;
+        V1_CHECK(client->request(
+            wire::kOpcodeCardDisconnect,
+            TestClient::encode(disconnect, &wire::encode_card_disconnect_request), reply));
+        V1_CHECK(reply.header.kind == wire::Kind::response);
+        const auto decoded = wire::decode_card_disconnect_response(reply.view());
+        V1_CHECK(decoded && decoded.value().consumed && decoded.value().quiesced);
+    }
+
+    // The consumed handle is now unknown to this owner.
+    {
+        wire::CardHandleStatusRequest status;
+        status.key.epoch = client->epoch;
+        status.key.reader_id = 0U;
+        status.key.bound_generation = 1U;
+        status.key.card_handle = handle;
+        Reply reply;
+        V1_CHECK(client->request(
+            wire::kOpcodeCardHandleStatus,
+            TestClient::encode(status, &wire::encode_card_handle_status_request), reply));
+        V1_CHECK(TestClient::error_code(reply) ==
+                 static_cast<std::uint32_t>(Error::NOT_FOUND));
+    }
+
+    V1_CHECK(f.server_ok.load());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Separate process: a fresh epoch per daemon context, and a restarted daemon
 // rejects the previous epoch.
 
@@ -2135,6 +2275,7 @@ int main()
         {"owner_eof_during_tune_and_blocked_cleanup",
          test_owner_eof_during_tune_and_blocked_cleanup},
         {"pending_operations_fail_closed", test_pending_operations_fail_closed},
+        {"card_service_over_control", test_card_service_over_control},
         {"fresh_epoch_after_restart", test_fresh_epoch_after_restart},
     };
     int failures = 0;

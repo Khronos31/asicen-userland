@@ -142,6 +142,49 @@ wire::Scope receiver_scope(std::uint16_t id) noexcept
     return wire::Scope{wire::ScopeKind::receiver, id};
 }
 
+wire::Scope reader_scope(std::uint16_t id) noexcept
+{
+    return wire::Scope{wire::ScopeKind::reader, id};
+}
+
+bool is_card_operation(ControlWorkerOperation operation) noexcept
+{
+    switch (operation) {
+    case ControlWorkerOperation::card_status:
+    case ControlWorkerOperation::card_handle_status:
+    case ControlWorkerOperation::card_status_combined:
+    case ControlWorkerOperation::card_presence:
+    case ControlWorkerOperation::card_connect:
+    case ControlWorkerOperation::card_reconnect:
+    case ControlWorkerOperation::card_disconnect:
+    case ControlWorkerOperation::card_reset:
+    case ControlWorkerOperation::card_transmit:
+    case ControlWorkerOperation::card_begin_transaction:
+    case ControlWorkerOperation::card_end_transaction:
+    case ControlWorkerOperation::card_release_connection:
+    case ControlWorkerOperation::card_shutdown:
+        return true;
+    default:
+        return false;
+    }
+}
+
+const char* card_operation_name(std::uint16_t opcode) noexcept
+{
+    switch (opcode) {
+    case wire::kOpcodeCardStatus: return "card_status";
+    case wire::kOpcodeCardConnect: return "card_connect";
+    case wire::kOpcodeCardReconnect: return "card_reconnect";
+    case wire::kOpcodeCardDisconnect: return "card_disconnect";
+    case wire::kOpcodeCardReset: return "card_reset";
+    case wire::kOpcodeCardTransmit: return "card_transmit";
+    case wire::kOpcodeBeginTransaction: return "begin_transaction";
+    case wire::kOpcodeEndTransaction: return "end_transaction";
+    case wire::kOpcodeCardHandleStatus: return "card_handle_status";
+    default: return "card";
+    }
+}
+
 wire::System wire_system(dtv::userland::detail::ReceiverSystem system) noexcept
 {
     return system == dtv::userland::detail::ReceiverSystem::satellite ? wire::System::isdb_s
@@ -453,9 +496,61 @@ struct PosixControlServer::Impl final {
             }
         }
 
+        struct CardHandleRecord final {
+            std::uint64_t handle = 0U;
+            std::uint64_t bound_generation = 0U;
+        };
+
         std::array<LeaseRecord, kReceiverCount>& leases() noexcept { return leases_; }
-        std::vector<std::uint64_t>& card_handles() noexcept { return card_handles_; }
-        const std::vector<std::uint64_t>& card_handles() const noexcept
+
+        bool add_card_handle(std::uint64_t handle, std::uint64_t bound_generation) noexcept
+        {
+            if (handle == 0U || bound_generation == 0U) return false;
+            for (const CardHandleRecord& record : card_handles_) {
+                if (record.handle == handle) {
+                    return record.bound_generation == bound_generation;
+                }
+            }
+            card_handles_.push_back(CardHandleRecord{handle, bound_generation});
+            return true;
+        }
+
+        bool find_card_handle(std::uint64_t handle,
+                              std::uint64_t& bound_generation) const noexcept
+        {
+            for (const CardHandleRecord& record : card_handles_) {
+                if (record.handle == handle) {
+                    bound_generation = record.bound_generation;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void rebind_card_handle(std::uint64_t handle,
+                                std::uint64_t bound_generation) noexcept
+        {
+            for (CardHandleRecord& record : card_handles_) {
+                if (record.handle == handle) {
+                    record.bound_generation = bound_generation;
+                    return;
+                }
+            }
+        }
+
+        void remove_card_handle(std::uint64_t handle) noexcept
+        {
+            for (std::size_t index = card_handles_.size(); index > 0U; --index) {
+                if (card_handles_[index - 1U].handle == handle) {
+                    card_handles_.erase(card_handles_.begin() +
+                                        static_cast<std::ptrdiff_t>(index - 1U));
+                    return;
+                }
+            }
+        }
+
+        std::vector<CardHandleRecord>& card_handles() noexcept { return card_handles_; }
+        const std::vector<CardHandleRecord>& card_handles() const noexcept
         {
             return card_handles_;
         }
@@ -493,7 +588,7 @@ struct PosixControlServer::Impl final {
         std::chrono::steady_clock::time_point tx_deadline_{};
         bool close_after_flush_ = false;
         std::array<LeaseRecord, kReceiverCount> leases_{};
-        std::vector<std::uint64_t> card_handles_;
+        std::vector<CardHandleRecord> card_handles_;
         Outstanding outstanding_{};
     };
 
@@ -906,6 +1001,112 @@ struct PosixControlServer::Impl final {
         return -1;
     }
 
+    // True when id names a reader in the canonical same-epoch LIST.  The core
+    // already refused a non-daemon epoch; the caller refuses an unknown reader.
+    bool find_reader(std::uint16_t id) const noexcept
+    {
+        const auto& readers = context->list.readers;
+        if (!readers.present) return false;
+        for (std::size_t index = 0U; index < readers.value.count; ++index) {
+            if (readers.value.items[index].id == id) return true;
+        }
+        return false;
+    }
+
+    static ipc::ShareMode to_share(wire::Share share) noexcept
+    {
+        return share == wire::Share::exclusive ? ipc::ShareMode::exclusive
+                                                : ipc::ShareMode::shared;
+    }
+
+    static ipc::Disposition to_disposition(wire::Disposition disposition) noexcept
+    {
+        return disposition == wire::Disposition::reset ? ipc::Disposition::reset
+                                                       : ipc::Disposition::leave;
+    }
+
+    // ATR is carried only when this exact handle has a live initialized
+    // session; a zero-length ATR never becomes a present one.
+    static wire::Optional<wire::BBytes<wire::kMaxAtrBytes>> wire_atr(
+        const CardAtr& atr) noexcept
+    {
+        wire::Optional<wire::BBytes<wire::kMaxAtrBytes>> out;
+        if (atr.length == 0U) return out;
+        const std::size_t length =
+            std::min<std::size_t>(atr.length, wire::kMaxAtrBytes);
+        out.present = true;
+        out.value.length = static_cast<std::uint32_t>(length);
+        std::memcpy(out.value.bytes.data(), atr.bytes.data(), length);
+        return out;
+    }
+
+    // CardSessionResult describes one handle.  usable requires this handle's
+    // bound generation to still be current; a stale or uninitialized handle
+    // never claims a protocol or ATR.
+    void build_card_session_result(wire::CardSessionResult& result,
+                                   std::uint16_t reader_id,
+                                   std::uint64_t card_handle,
+                                   std::uint64_t bound_generation,
+                                   std::uint64_t current_generation,
+                                   bool present, bool initialized,
+                                   const CardAtr& atr) const noexcept
+    {
+        result = wire::CardSessionResult{};
+        result.epoch = hello.epoch;
+        result.reader_id = reader_id;
+        result.card_handle = card_handle;
+        result.bound_generation = bound_generation;
+        result.current_generation = current_generation;
+        result.present = present;
+        result.initialized = initialized;
+        // usable requires a current binding *and* a real (non-empty) ATR for
+        // this exact handle.  A handle that cannot present an ATR is reported
+        // not usable, never with a fabricated protocol or ATR.
+        const auto atr_value = wire_atr(atr);
+        result.usable = present && initialized &&
+                        bound_generation == current_generation && atr_value.present;
+        if (result.usable) {
+            result.protocol.present = true;
+            result.protocol.value = wire::CardProtocol::t1;
+            result.atr = atr_value;
+        }
+    }
+
+    // Handle ownership and generation check for every HKey request.  Returns a
+    // wire error code (0 = accepted), matching the adopted rule: an unknown or
+    // foreign handle is NOT_FOUND and a stored-generation mismatch is
+    // STALE_HANDLE.  The bound generation is read back for the reply.
+    std::uint32_t check_card_handle(Client& client, const wire::CardHandleKey& key,
+                                    std::uint64_t& bound_generation) const noexcept
+    {
+        if (!find_reader(key.reader_id)) return wire_code(Error::NOT_FOUND);
+        if (!client.find_card_handle(key.card_handle, bound_generation)) {
+            return wire_code(Error::NOT_FOUND);
+        }
+        if (key.bound_generation != bound_generation) {
+            return wire::kWireErrorStaleHandle;
+        }
+        return 0U;
+    }
+
+    // Serializes one CardSessionResult only after validate_card_session_result
+    // accepts it; an internally inconsistent record is an internal error and is
+    // never published on the wire.
+    void reply_card_session(Client& client, std::uint16_t opcode,
+                            std::uint32_t request_id,
+                            const wire::CardSessionResult& value,
+                            const char* operation,
+                            const wire::Scope& target) noexcept
+    {
+        if (wire::validate_card_session_result(value) != Error::OK) {
+            reply_error(client, opcode, request_id, wire_code(Error::INTERNAL),
+                        operation, target);
+            return;
+        }
+        reply_record(client, opcode, request_id, value,
+                     &wire::encode_card_session_result, operation, target);
+    }
+
     Result<void> submit(Client& client, std::uint16_t opcode, std::uint32_t request_id,
                         std::uint16_t public_id, ControlWorkerTask task) noexcept
     {
@@ -919,6 +1120,11 @@ struct PosixControlServer::Impl final {
         const auto submitted = workers->submit(lane, task);
         if (submitted) return Result<void>::success();
         client.clear_outstanding();
+        if (is_card_operation(task.operation)) {
+            reply_error(client, opcode, request_id, wire_code(submitted.error()),
+                        card_operation_name(opcode), reader_scope(public_id));
+            return Result<void>::success();
+        }
         reply_error(client, opcode, request_id, wire_code(submitted.error()),
                     opcode == wire::kOpcodeTune ? "tune"
                     : opcode == wire::kOpcodeRelease ? "release"
@@ -1244,6 +1450,156 @@ struct PosixControlServer::Impl final {
                 break;
             }
             (void)submit(client, request.opcode, request.request_id, lease.public_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::card_status: {
+            const std::uint16_t reader_id = request.card_status.key.reader_id;
+            if (!find_reader(reader_id)) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "card_status",
+                            reader_scope(reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_status;
+            (void)submit(client, request.opcode, request.request_id, reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::card_connect: {
+            const std::uint16_t reader_id = request.card_connect.key.reader_id;
+            if (!find_reader(reader_id)) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "card_connect",
+                            reader_scope(reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_connect;
+            task.share_mode = to_share(request.card_connect.share);
+            // Every UDTV control handle is bound to the reader generation it
+            // was created in; a later card change invalidates it as stale.
+            task.card_generation_bound = true;
+            (void)submit(client, request.opcode, request.request_id, reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::card_reconnect: {
+            const wire::CardHandleKey& key = request.card_reconnect.key;
+            std::uint64_t bound_generation = 0U;
+            const std::uint32_t rejection =
+                check_card_handle(client, key, bound_generation);
+            if (rejection != 0U) {
+                reply_error(client, request.opcode, request.request_id, rejection,
+                            "card_reconnect", reader_scope(key.reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_reconnect;
+            task.card_handle = key.card_handle;
+            task.share_mode = to_share(request.card_reconnect.share);
+            task.disposition = to_disposition(request.card_reconnect.disposition);
+            (void)submit(client, request.opcode, request.request_id, key.reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::card_disconnect: {
+            const wire::CardHandleKey& key = request.card_disconnect.key;
+            std::uint64_t bound_generation = 0U;
+            const std::uint32_t rejection =
+                check_card_handle(client, key, bound_generation);
+            if (rejection != 0U) {
+                reply_error(client, request.opcode, request.request_id, rejection,
+                            "card_disconnect", reader_scope(key.reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_disconnect;
+            task.card_handle = key.card_handle;
+            task.disposition = to_disposition(request.card_disconnect.disposition);
+            (void)submit(client, request.opcode, request.request_id, key.reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::card_reset: {
+            const wire::CardHandleKey& key = request.card_reset.key;
+            std::uint64_t bound_generation = 0U;
+            const std::uint32_t rejection =
+                check_card_handle(client, key, bound_generation);
+            if (rejection != 0U) {
+                reply_error(client, request.opcode, request.request_id, rejection,
+                            "card_reset", reader_scope(key.reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_reset;
+            task.card_handle = key.card_handle;
+            (void)submit(client, request.opcode, request.request_id, key.reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::card_transmit: {
+            const wire::CardHandleKey& key = request.card_transmit.key;
+            std::uint64_t bound_generation = 0U;
+            const std::uint32_t rejection =
+                check_card_handle(client, key, bound_generation);
+            if (rejection != 0U) {
+                reply_error(client, request.opcode, request.request_id, rejection,
+                            "card_transmit", reader_scope(key.reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_transmit;
+            task.card_handle = key.card_handle;
+            task.apdu_size = std::min<std::size_t>(request.card_transmit.command.length,
+                                                   task.apdu.size());
+            std::memcpy(task.apdu.data(), request.card_transmit.command.bytes.data(),
+                        task.apdu_size);
+            (void)submit(client, request.opcode, request.request_id, key.reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::begin_transaction: {
+            const wire::CardHandleKey& key = request.begin_transaction.key;
+            std::uint64_t bound_generation = 0U;
+            const std::uint32_t rejection =
+                check_card_handle(client, key, bound_generation);
+            if (rejection != 0U) {
+                reply_error(client, request.opcode, request.request_id, rejection,
+                            "begin_transaction", reader_scope(key.reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_begin_transaction;
+            task.card_handle = key.card_handle;
+            (void)submit(client, request.opcode, request.request_id, key.reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::end_transaction: {
+            const wire::CardHandleKey& key = request.end_transaction.key;
+            std::uint64_t bound_generation = 0U;
+            const std::uint32_t rejection =
+                check_card_handle(client, key, bound_generation);
+            if (rejection != 0U) {
+                reply_error(client, request.opcode, request.request_id, rejection,
+                            "end_transaction", reader_scope(key.reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_end_transaction;
+            task.card_handle = key.card_handle;
+            task.disposition = to_disposition(request.end_transaction.disposition);
+            (void)submit(client, request.opcode, request.request_id, key.reader_id, task);
+            return;
+        }
+        case wire::ControlRequestKind::card_handle_status: {
+            const wire::CardHandleKey& key = request.card_handle_status.key;
+            std::uint64_t bound_generation = 0U;
+            const std::uint32_t rejection =
+                check_card_handle(client, key, bound_generation);
+            if (rejection != 0U) {
+                reply_error(client, request.opcode, request.request_id, rejection,
+                            "card_handle_status", reader_scope(key.reader_id));
+                return;
+            }
+            ControlWorkerTask task{};
+            task.operation = ControlWorkerOperation::card_handle_status;
+            task.card_handle = key.card_handle;
+            (void)submit(client, request.opcode, request.request_id, key.reader_id, task);
             return;
         }
         }
@@ -1672,10 +2028,244 @@ struct PosixControlServer::Impl final {
                     const auto snapshot =
                         stream_control->final_snapshot(stream.attachment);
                     if (snapshot) begin_stream_end(stream, snapshot.value());
-                    else stream.request_remove();
+                     else stream.request_remove();
                     break;
                 }
             }
+            return;
+        }
+        case ControlWorkerOperation::card_status: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "card_status", reader);
+                return;
+            }
+            wire::CardStatusResponse response;
+            response.key.epoch = hello.epoch;
+            response.key.reader_id = outstanding.public_id;
+            response.current_generation = completion.card_status.reader_generation;
+            response.present = completion.card_status.present;
+            const auto atr = wire_atr(completion.card_status.atr);
+            response.initialized = completion.card_status.present &&
+                                   completion.card_status.initialized && atr.present;
+            if (response.initialized) {
+                response.protocol.present = true;
+                response.protocol.value = wire::CardProtocol::t1;
+                response.atr = atr;
+            }
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_card_status_response, "card_status", reader);
+            return;
+        }
+        case ControlWorkerOperation::card_connect: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "card_connect", reader);
+                return;
+            }
+            const std::uint64_t handle = completion.card_connect.handle;
+            const std::uint64_t generation = completion.card_generation;
+            if (handle == 0U || generation == 0U ||
+                !client.add_card_handle(handle, generation)) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::INTERNAL), "card_connect", reader);
+                return;
+            }
+            wire::CardSessionResult response;
+            build_card_session_result(response, outstanding.public_id, handle,
+                                      generation, generation, true, true,
+                                      completion.card_connect.atr);
+            reply_card_session(client, outstanding.opcode, completion.request_id,
+                               response, "card_connect", reader);
+            return;
+        }
+        case ControlWorkerOperation::card_reconnect: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "card_reconnect", reader);
+                return;
+            }
+            std::uint64_t bound_generation = 0U;
+            if (!client.find_card_handle(completion.card_handle, bound_generation)) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::NOT_FOUND), "card_reconnect", reader);
+                return;
+            }
+            const std::uint64_t generation = completion.card_generation != 0U
+                                                 ? completion.card_generation
+                                                 : bound_generation;
+            client.rebind_card_handle(completion.card_handle, generation);
+            wire::CardSessionResult response;
+            build_card_session_result(response, outstanding.public_id,
+                                      completion.card_handle, generation, generation,
+                                      true, true, completion.atr);
+            reply_card_session(client, outstanding.opcode, completion.request_id,
+                               response, "card_reconnect", reader);
+            return;
+        }
+        case ControlWorkerOperation::card_disconnect: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            // Ownership and arguments were accepted before the task ran, so
+            // the logical handle is consumed even when cleanup fails.  Only a
+            // pre-acceptance rejection is a generic error reply.
+            if (completion.error == Error::NOT_FOUND ||
+                completion.error == Error::BUSY ||
+                completion.error == Error::INVALID_ARGUMENT) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "card_disconnect", reader);
+                return;
+            }
+            client.remove_card_handle(completion.card_handle);
+            wire::CardDisconnectResponse response;
+            response.key.epoch = hello.epoch;
+            response.key.reader_id = outstanding.public_id;
+            response.card_handle = completion.card_handle;
+            response.consumed = true;
+            response.quiesced = completion.error == Error::OK;
+            response.error.present = completion.error != Error::OK;
+            if (response.error.present) {
+                response.error.value = wire::make_error_record(
+                    wire_code(completion.error), "card_disconnect");
+            }
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_card_disconnect_response, "card_disconnect",
+                         reader);
+            return;
+        }
+        case ControlWorkerOperation::card_reset: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "card_reset", reader);
+                return;
+            }
+            std::uint64_t bound_generation = 0U;
+            if (!client.find_card_handle(completion.card_handle, bound_generation)) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::NOT_FOUND), "card_reset", reader);
+                return;
+            }
+            // An explicit RESET may rebind the handle to the reader's current
+            // generation; the successful reply carries the new binding.
+            const std::uint64_t generation = completion.card_generation != 0U
+                                                 ? completion.card_generation
+                                                 : bound_generation;
+            client.rebind_card_handle(completion.card_handle, generation);
+            wire::CardSessionResult response;
+            build_card_session_result(response, outstanding.public_id,
+                                      completion.card_handle, generation, generation,
+                                      true, true, completion.atr);
+            reply_card_session(client, outstanding.opcode, completion.request_id,
+                               response, "card_reset", reader);
+            return;
+        }
+        case ControlWorkerOperation::card_transmit: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "card_transmit", reader);
+                return;
+            }
+            std::uint64_t bound_generation = 0U;
+            (void)client.find_card_handle(completion.card_handle, bound_generation);
+            wire::CardTransmitResponse response;
+            response.key.epoch = hello.epoch;
+            response.key.reader_id = outstanding.public_id;
+            response.key.bound_generation = bound_generation;
+            response.key.card_handle = completion.card_handle;
+            const std::size_t length = std::min<std::size_t>(
+                completion.card_response_size, response.response.bytes.size());
+            response.response.length = static_cast<std::uint32_t>(length);
+            std::memcpy(response.response.bytes.data(), completion.card_response.data(),
+                        length);
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_card_transmit_response, "card_transmit", reader);
+            return;
+        }
+        case ControlWorkerOperation::card_begin_transaction: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "begin_transaction", reader);
+                return;
+            }
+            std::uint64_t bound_generation = 0U;
+            (void)client.find_card_handle(completion.card_handle, bound_generation);
+            wire::BeginTransactionResponse response;
+            response.key.epoch = hello.epoch;
+            response.key.reader_id = outstanding.public_id;
+            response.key.bound_generation = bound_generation;
+            response.key.card_handle = completion.card_handle;
+            reply_record(client, outstanding.opcode, completion.request_id, response,
+                         &wire::encode_begin_transaction_response, "begin_transaction",
+                         reader);
+            return;
+        }
+        case ControlWorkerOperation::card_end_transaction: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "end_transaction", reader);
+                return;
+            }
+            std::uint64_t bound_generation = 0U;
+            if (!client.find_card_handle(completion.card_handle, bound_generation)) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::NOT_FOUND), "end_transaction", reader);
+                return;
+            }
+            std::uint64_t current = completion.card_generation != 0U
+                                        ? completion.card_generation
+                                        : bound_generation;
+            bool present = false;
+            bool initialized = false;
+            CardAtr atr{};
+            if (completion.card_status_valid) {
+                current = completion.card_status.reader_generation != 0U
+                              ? completion.card_status.reader_generation
+                              : current;
+                present = completion.card_status.present;
+                initialized = completion.card_status.initialized;
+                atr = completion.card_status.atr;
+            }
+            wire::CardSessionResult response;
+            build_card_session_result(response, outstanding.public_id,
+                                      completion.card_handle, bound_generation,
+                                      current, present, initialized, atr);
+            reply_card_session(client, outstanding.opcode, completion.request_id,
+                               response, "end_transaction", reader);
+            return;
+        }
+        case ControlWorkerOperation::card_handle_status: {
+            const wire::Scope reader = reader_scope(outstanding.public_id);
+            if (completion.error != Error::OK) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(completion.error), "card_handle_status", reader);
+                return;
+            }
+            if (!completion.card_status_valid) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::INTERNAL), "card_handle_status", reader);
+                return;
+            }
+            std::uint64_t bound_generation = 0U;
+            if (!client.find_card_handle(completion.card_handle, bound_generation)) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::NOT_FOUND), "card_handle_status", reader);
+                return;
+            }
+            wire::CardSessionResult response;
+            build_card_session_result(response, outstanding.public_id,
+                                      completion.card_handle, bound_generation,
+                                       completion.card_status.reader_generation,
+                                      completion.card_status.present,
+                                      completion.card_status.initialized,
+                                      completion.card_status.atr);
+            reply_card_session(client, outstanding.opcode, completion.request_id,
+                               response, "card_handle_status", reader);
             return;
         }
         default:
@@ -2780,9 +3370,11 @@ Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
     if (!impl) return Result<std::unique_ptr<PosixControlServer>>::failure(Error::INTERNAL);
     impl->hello.epoch = context.epoch;
     impl->hello.producer = context.list.producer;
-    // No optional feature is connected in this increment: no STATE_EVENT,
-    // CARD_SERVICE or PID_FILTER is offered.
-    impl->hello.features = 0U;
+    // CARD_SERVICE is offered only because every adopted card request is now
+    // decoded and served: CARD_STATUS/CONNECT/RECONNECT/DISCONNECT/RESET/
+    // TRANSMIT/BEGIN_TRANSACTION/END_TRANSACTION/CARD_HANDLE_STATUS all reach
+    // the card lane.  STATE_EVENT and PID_FILTER remain unconnected.
+    impl->hello.features = wire::kFeatureCardService;
     impl->context = std::move(owned);
     impl->request_scratch = std::move(request);
     impl->list_scratch = std::move(list);

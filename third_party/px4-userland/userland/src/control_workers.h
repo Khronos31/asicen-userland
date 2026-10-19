@@ -166,8 +166,13 @@ struct ControlWorkerCompletion final {
     dtv::userland::detail::StreamStopResult v1_stop{};
     bool v1_stop_valid = false;
     CardServiceStatus card_status{};
+    bool card_status_valid = false;
     CardPresenceChange card_presence{};
     CardServiceConnectResult card_connect{};
+    // Reader generation sampled on the card lane after this operation, so the
+    // poll thread never reads service state directly.  Zero only for
+    // non-card operations.
+    std::uint64_t card_generation = 0U;
     CardAtr atr{};
     std::array<std::uint8_t, kMaxCardPayload> card_response{};
     std::size_t card_response_size = 0U;
