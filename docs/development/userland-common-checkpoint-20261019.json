@@ -1,9 +1,9 @@
 {
-  "kind": "work-in-progress-source-checkpoint-cross-build-verified",
+  "kind": "work-in-progress-source-checkpoint-limited-review-ready",
   "branch": "wip/userland-common-20261017",
   "upstream_main": "76299585bbaf7dd77e579554565db2b050df4232",
-  "snapshot_source": "/config/.work/userland-common-20261017/implementation/asicen-windows-wire-entry",
-  "snapshot_file_count": 383,
+  "snapshot_source": "/config/.work/userland-common-20261017/implementation/asicen-ts-cli-hz",
+  "snapshot_file_count": 384,
   "snapshot_file_sha256": {
     ".editorconfig": "a38dc184aabf62d6bea89d602420a10eb74d0cf4c464968cf6b597670752e669",
     ".gitattributes": "eb6f2ade15127f9340a5a7e1c751656f61772c07da65e22785d7b2b831919344",
@@ -16,7 +16,7 @@
     ".gitignore": "c5631f70eb5c7158a99914abe82474a218ccb496e5461c75b0ef1ee333ed20d7",
     "AGENTS.md": "d47364267d64ef5bf0f0d743fd3c4260b33cc62939da9377e1ca940589c69f87",
     "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49",
-    "CMakeLists.txt": "07de2ea8d2d28459cc6602b572ce7897ec23af73cbb3a02ca9c10f01233cf591",
+    "CMakeLists.txt": "768aae1ab4951fbd69474d5fcee0ff12a215e3ab32ede57cacf1459e3a95a578",
     "COPYING.gpl2": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
     "HANDOFF-2026-10-08.md": "e4ceefd5983704775fade3b2681117797832aedb49a56e2838bc101667775d61",
     "HANDOFF-CODEX.md": "800241712f054d131e945616ca88b7fc98e352cb06237ad32ad35e0ef4faa401",
@@ -195,9 +195,9 @@
     "third_party/px4-userland/userland/tests/windows_stdin_monitor_tests.cpp": "015801d2814377303fe1cc32bf685238bada324e20de1d0f6b8de245f4fdf99b",
     "third_party/px4-userland/userland/tests/windows_ts_output_tests.cpp": "a279af55dd4dc9d11142d747cf324c5f54c649c3d7f8f602d4823cec3ba81a2d",
     "third_party/px4-userland/userland/tests/windows_worker_tests_main.cpp": "333737d8d778abf189f71aa0829cb3bd12ff71452a0204280ef67b0c17c85a49",
-    "third_party/px4-userland/userland/tools/px4_ts.cpp": "a89ce93df131b149f14f3ab694790a47d26a5e39116a648f23442d8e7b2ea9d1",
-    "third_party/px4-userland/userland/tools/px4_ts_core.cpp": "fd4733e838054b1264f56deeb057577e8b2ca1ef804825f84863c46a4c6cc975",
-    "third_party/px4-userland/userland/tools/px4_ts_core.h": "b6fbae5a2da8f8531fae3b0a9d8cfff36ab15a01fdf715230bea77ce4f7895ce",
+    "third_party/px4-userland/userland/tools/px4_ts.cpp": "5d64659bdeac74226b48b733cea2662f071e9ae0386962e5fb4f9e4f44a9f06d",
+    "third_party/px4-userland/userland/tools/px4_ts_core.cpp": "15e017d9a58a8fbbc811d0afcccffa6d9362291fd4d5b87a331323c3e589fd28",
+    "third_party/px4-userland/userland/tools/px4_ts_core.h": "42ad48a8926a4916735d8885cae1d577eec9b9798966c275db2c473df7a81486",
     "third_party/px4-userland/userland/tools/px4_ts_posix.cpp": "bcfbe08772c9e48d586fdb432e71ce2a7352466c0895cd81f9c602fef3da6ac2",
     "third_party/px4-userland/userland/tools/px4_ts_posix.h": "b63e61601432d770ae2c6e6b476911508211cd97db3a3a8144dbdf06c190d24e",
     "third_party/px4-userland/userland/tools/px4_ts_windows.cpp": "d2ee784e7dc5d0a3545c3f6dd205fdf547b79af53a156959259c2ab01b936d07",
@@ -295,6 +295,7 @@
     "userland/tests/asicen_ifd_prefix_tests.cpp": "b941eb66edc0dcaf5b5bb24fb4d4fb84c7a8ccc2e7a8c038994841d92652eafd",
     "userland/tests/asicen_real_factory_proof_tests.cpp": "b280df2533264c9b6c17fe9911999fd7aa70a85c94113a5270da6e539125c7ce",
     "userland/tests/asicen_runtime_v1_server_tests.cpp": "ee28e32075974514816b41ff18fc18e169a2fbd77edca1387abd246db9606270",
+    "userland/tests/asicen_ts_product_cli_tests.cpp": "cd9a41fb9bfca9bf72f3167e98135aa7ade0e461c5113f97e75f1226c0afe539",
     "userland/tests/capture_drain_tests.cpp": "015b42db358f7b2ddfbcc3c50eb27a4ebe85f3d08d24f3397ed00ddca599bb3d",
     "userland/tests/capture_stdout_tests.cpp": "c369918cfdb18f8f4336f8f0026c10ea504b95fb46727dea79a4574a00e86c38",
     "userland/tests/capture_transport_tests.cpp": "88cac098d748180204c1c8c25831989fe9e1f81a92c414b5d294d39d7ff2ab2e",
@@ -373,8 +374,8 @@
     "userland/tools/asicen_frontend.cpp": "91c6be3eba930a9ba247782d98c0c80903da6541621578138f1810b131c9140d",
     "userland/tools/asicen_probe.cpp": "68f66d8f43304c1fa3ff942cfbe6062570186f706d87593ed1fa2ffbf9a8fad1",
     "userland/tools/asicen_transform.cpp": "fa377522baebb07e33b8402d728d7a2a442d4ec52d2963d291dd555e448bf00d",
-    "userland/tools/asicen_ts.cpp": "b209a1198d4e9532ba6563931d2e0042cc6dda9cb77728571582afd9a4f12ed5",
-    "userland/tools/asicen_ts_windows.cpp": "6995e5c57572afea5a436fafe4592e58646265a27bf3bde407b6f344d1f71867",
+    "userland/tools/asicen_ts.cpp": "ebffbcc2052bee5b3327c71803fd292dd792e05055e3bdc24b9e315bd472bcec",
+    "userland/tools/asicen_ts_windows.cpp": "bf35a6c0ae01da9af57de8cc8c8a1d3fcd7676a569afff02a54c9ffe36aa5155",
     "userland/tools/asicenctl.cpp": "f1d6b6cf115684c1bcf4b19ddbd1eaf83af9289270a342852cf5d98fbf56f6d9",
     "userland/tools/asicend.cpp": "9affdd7f4153abf0ef01d2b213aba7f3df1118e176c332f159f179ab2f2919b6",
     "userland/tools/asicend_args.h": "9170240b7a65f6572b56d03be19e301ce9592c483de8bdad844c432a2db6b4b6",
@@ -395,15 +396,16 @@
   ],
   "overlay_policy": "最新mainへ受入スナップショットの内容を重ねた。manifest外の既存upstream fileは保持した。このmetadata file自体は受入sourceスナップショットの範囲外。",
   "acceptance_scope": [
-    "Windows TS入口を既存run_wireへ接続。A vendorへ追加したSocketStream::write_allは既存P実装と同一。",
-    "P/A各daemon/TS/ctlと関連output/worker/platform試験exeのmingw cross-link成功。PEは実行しておらずnative受信/停止は後続。",
-    "Pでは先行共用ctlとWindows入口をdisjoint統合。新union全体のcross-buildは次CLI候補で確認予定。S/PIXのP pinは既検証4d5a982のまま。",
-    "旧Windows control fixtureはP Issue69/A旧IPC移行の追跡対象。既存test/期待値を変更しない。全CLI/全OS/CARD/RC認定ではない。"
+    "新公開TS parserは共通tuning::resolveを使いHz/time/shortsへ統一。旧long aliasは公開経路で拒否し、旧internal parser/既存fixtureは保持。",
+    "P/A Linux関連新試験と別process通常proof、Windows実daemon/TS/ctl cross-link成功。独立review限定READY。",
+    "親のQ3U4/W3U3各代表地上receiverで-f 557142857 -s isdb-t -t 6実機受信とclient/daemon exit0、188整列/sync/TEIを確認。",
+    "既存broad P control integration/A旧argument試験は凍結baselineでも同じ赤。全suite green/全CLI/device/FD/common loader/CARD/native Windows/RCの認定ではない。",
+    "A canonical起動は別候補の未受入sourceでありこのcheckpointに含めない。S/PIX pinはP4d5a982を保持。"
   ],
   "acceptance_index": "https://github.com/Khronos31/agent-workspace/blob/design/userland-common-contract-20261017/implementation/accepted-source-index.md",
   "ci_policy": "このソース保全コミットは[skip ci]を含む。リリース・tag・mainへの反映は別の判断とする。",
   "known_followups": [
     "https://github.com/Khronos31/px4-userland/issues/68"
   ],
-  "previous_checkpoint_commit": "3f001455ef00d8824555db460d323a39a9f6860a"
+  "previous_checkpoint_commit": "5e4a02c921f0ee34c715220c985e9d3cf55d136f"
 }

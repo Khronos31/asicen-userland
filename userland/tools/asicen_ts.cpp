@@ -80,7 +80,7 @@ void print_counters(const char* label, const ipc::CountersPayload& counters) noe
 int main(int argc, char** argv)
 {
     const Px4TsArguments arguments =
-        parse_px4_ts_arguments(argc, const_cast<const char* const*>(argv));
+        parse_px4_ts_product_arguments(argc, const_cast<const char* const*>(argv));
     if (!arguments.valid) {
         std::fprintf(stderr, "argument error: %s\n", arguments.error.c_str());
         print_px4_ts_usage(stderr);

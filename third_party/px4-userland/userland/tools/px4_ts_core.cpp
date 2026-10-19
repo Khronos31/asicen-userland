@@ -6,6 +6,7 @@
 #include "dtv/userland/control_client.h"
 #include "dtv/userland/control_connection.h"
 #include "dtv/userland/records.h"
+#include "dtv/userland/tuning.h"
 #include "dtv/userland/wire.h"
 
 #include <algorithm>
@@ -130,11 +131,41 @@ bool valid_frequency(System system, std::uint64_t frequency) noexcept
 
 bool valid_arguments(const Px4TsArguments& arguments) noexcept
 {
+    if (arguments.product_cli) {
+        constexpr std::uint64_t kMaxRequestedHz = (std::uint64_t{1U} << 53U) - 1U;
+        if ((arguments.instance.empty() ? !valid_serial(arguments.device) :
+                                          (!arguments.device.empty() ||
+                                           !valid_instance(arguments.instance))) ||
+            arguments.frequency_hz == 0U || arguments.frequency_hz > kMaxRequestedHz ||
+            arguments.frequency_khz != 0U || arguments.tune_timeout_ms < 100U ||
+            arguments.tune_timeout_ms > 30000U ||
+            (arguments.duration_set && arguments.duration_seconds == 0U) ||
+            (arguments.duration_set &&
+             arguments.duration_seconds > std::numeric_limits<std::uint64_t>::max() / 1000U) ||
+            (arguments.packet_count_set && arguments.packet_count == 0U) ||
+            (arguments.duration_set && arguments.packet_count_set)) {
+            return false;
+        }
+        if (arguments.system == System::ISDB_T) {
+            return arguments.stream_id == 0xffffU && arguments.slot == 0xffffU &&
+                   arguments.lnb_voltage == 0U;
+        }
+        return arguments.system == System::ISDB_S && arguments.bandwidth_hz == 0U &&
+               arguments.lnb_voltage <= 15U &&
+               (arguments.stream_id != 0xffffU) != (arguments.slot != 0xffffU) &&
+               (arguments.slot == 0xffffU || arguments.slot <= 11U);
+    }
+    const bool have_khz = arguments.frequency_khz != 0U;
+    const bool have_hz = arguments.frequency_hz != 0U;
+    constexpr std::uint64_t kMaxRequestedHz = (std::uint64_t{1U} << 53U) - 1U;
+    const bool valid_frequency_entrance =
+        have_khz != have_hz &&
+        (have_khz ? valid_frequency(arguments.system, arguments.frequency_khz)
+                  : arguments.frequency_hz <= kMaxRequestedHz);
     if ((arguments.instance.empty() ? !valid_serial(arguments.device) :
                                       (!arguments.device.empty() ||
                                        !valid_instance(arguments.instance))) ||
-        arguments.frequency_khz == 0U ||
-        !valid_frequency(arguments.system, arguments.frequency_khz) ||
+        !valid_frequency_entrance ||
         arguments.tune_timeout_ms < 100U || arguments.tune_timeout_ms > 30000U ||
         (arguments.duration_set && arguments.duration_seconds == 0U) ||
         (arguments.duration_set &&
@@ -374,22 +405,189 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
     return result;
 }
 
+Px4TsArguments parse_px4_ts_product_arguments(int argc,
+                                              const char* const* argv) noexcept
+{
+    using WireSystem = dtv::userland::wire::System;
+    if (argc < 1 || argv == nullptr || argv[0] == nullptr)
+        return invalid("invalid argument vector");
+    Px4TsArguments result;
+    result.product_cli = true;
+    result.bandwidth_hz = 6000000U;
+    bool have_device = false;
+    bool have_instance = false;
+    bool have_receiver = false;
+    bool have_channel = false;
+    bool have_frequency = false;
+    bool have_system = false;
+    bool have_slot = false;
+    bool have_tsid = false;
+    bool have_output = false;
+    bool have_lnb = false;
+    bool have_timeout = false;
+    bool have_time = false;
+    std::string_view channel;
+    std::optional<std::uint64_t> frequency_hz;
+    std::optional<WireSystem> system;
+    std::optional<std::uint16_t> slot;
+    std::optional<std::uint16_t> tsid;
+
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) return invalid("null argument");
+        const std::string_view option(argv[index]);
+        if (option == "-h" || option == "--help") {
+            if (argc != 2) return invalid("--help cannot be combined");
+            result.valid = true;
+            result.help = true;
+            return result;
+        }
+        if (option == "--group") {
+            if (result.group) return invalid("duplicate --group");
+            result.group = true;
+            continue;
+        }
+        const bool takes_value = option == "-d" || option == "--device" ||
+                                 option == "--instance" || option == "--runtime-dir" ||
+                                 option == "--receiver" || option == "-c" ||
+                                 option == "--channel" || option == "-f" ||
+                                 option == "--freq" || option == "-s" ||
+                                 option == "--system" || option == "--slot" ||
+                                 option == "--tsid" || option == "-t" ||
+                                 option == "--time" || option == "-o" ||
+                                 option == "--output" || option == "--packet-count" ||
+                                 option == "--lnb-voltage" ||
+                                 option == "--tune-timeout-ms";
+        if (!takes_value) return invalid("unknown argument");
+        if (index + 1 >= argc || argv[index + 1] == nullptr)
+            return invalid("option requires a value");
+        const std::string_view value(argv[++index]);
+        if (value.empty() || (value.rfind("--", 0U) == 0U && value != "--"))
+            return invalid("option requires a value");
+
+        if (option == "-d" || option == "--device") {
+            if (have_device) return invalid("duplicate --device");
+            have_device = true;
+            result.device.assign(value.data(), value.size());
+        } else if (option == "--instance") {
+            if (have_instance) return invalid("duplicate --instance");
+            have_instance = true;
+            result.instance.assign(value.data(), value.size());
+        } else if (option == "--runtime-dir") {
+            if (!result.runtime_directory.empty()) return invalid("duplicate --runtime-dir");
+            result.runtime_directory.assign(value.data(), value.size());
+        } else if (option == "--receiver") {
+            if (have_receiver || !parse_unsigned(value, result.receiver) ||
+                result.receiver >= kReceiverCount)
+                return invalid("receiver must be 0..7");
+            have_receiver = true;
+        } else if (option == "-c" || option == "--channel") {
+            if (have_channel) return invalid("duplicate --channel");
+            have_channel = true;
+            channel = value;
+        } else if (option == "-f" || option == "--freq") {
+            std::uint64_t parsed = 0U;
+            if (have_frequency || !parse_unsigned(value, parsed))
+                return invalid("freq must be an unsigned decimal Hz value");
+            have_frequency = true;
+            frequency_hz = parsed;
+        } else if (option == "-s" || option == "--system") {
+            if (have_system) return invalid("duplicate --system");
+            have_system = true;
+            if (value == "isdb-t") system = WireSystem::isdb_t;
+            else if (value == "isdb-s") system = WireSystem::isdb_s;
+            else return invalid("system must be isdb-t or isdb-s");
+        } else if (option == "--slot") {
+            std::uint16_t parsed = 0U;
+            if (have_slot || !parse_unsigned(value, parsed))
+                return invalid("slot is invalid");
+            have_slot = true;
+            slot = parsed;
+        } else if (option == "--tsid") {
+            std::uint16_t parsed = 0U;
+            if (have_tsid || !parse_unsigned(value, parsed))
+                return invalid("tsid is invalid");
+            have_tsid = true;
+            tsid = parsed;
+        } else if (option == "-t" || option == "--time") {
+            if (have_time) return invalid("duplicate --time");
+            have_time = true;
+            if (value != "-") {
+                if (!parse_unsigned(value, result.duration_seconds))
+                    return invalid("time must be seconds or -");
+                result.duration_set = true;
+            }
+        } else if (option == "-o" || option == "--output") {
+            if (have_output) return invalid("duplicate --output");
+            have_output = true;
+            result.output.assign(value.data(), value.size());
+        } else if (option == "--packet-count") {
+            if (result.packet_count_set || !parse_unsigned(value, result.packet_count))
+                return invalid("packet-count is invalid");
+            result.packet_count_set = true;
+        } else if (option == "--lnb-voltage") {
+            if (have_lnb || !parse_unsigned(value, result.lnb_voltage) ||
+                (result.lnb_voltage != 0U && result.lnb_voltage != 15U))
+                return invalid("lnb-voltage must be 0 or 15");
+            have_lnb = true;
+        } else {
+            if (have_timeout || !parse_unsigned(value, result.tune_timeout_ms))
+                return invalid("tune-timeout-ms is invalid");
+            have_timeout = true;
+        }
+    }
+    if (have_device == have_instance)
+        return invalid("exactly one of --device or --instance is required");
+    if (!have_receiver) return invalid("--receiver is required");
+    if (have_channel == have_frequency)
+        return invalid("exactly one of --channel or --freq is required");
+    if (have_frequency && !have_system)
+        return invalid("--freq requires --system");
+    if (result.output.empty()) result.output = "-";
+    if (result.duration_set && result.duration_seconds == 0U)
+        return invalid("time must be greater than zero");
+    if (result.duration_set && result.packet_count_set)
+        return invalid("--time and --packet-count are exclusive");
+
+    const dtv::tuning::Request request{have_channel
+                                           ? std::optional<std::string_view>(channel)
+                                           : std::nullopt,
+                                       frequency_hz, system, slot, tsid};
+    const auto resolved = dtv::tuning::resolve(request);
+    if (!resolved)
+        return invalid("channel, frequency, system, slot, or tsid is invalid");
+    result.system = resolved.value().system == WireSystem::isdb_t
+                        ? System::ISDB_T : System::ISDB_S;
+    result.frequency_hz = resolved.value().frequency_hz;
+    if (resolved.value().selection == dtv::userland::wire::Selection::slot) {
+        result.slot = resolved.value().selection_value;
+    } else if (resolved.value().selection == dtv::userland::wire::Selection::tsid) {
+        result.stream_id = resolved.value().selection_value;
+    }
+    if (result.system == System::ISDB_S) result.bandwidth_hz = 0U;
+    if (result.system == System::ISDB_T && have_lnb)
+        return invalid("lnb-voltage is satellite-only");
+    if (!valid_arguments(result)) return invalid("argument value is out of range");
+    result.valid = true;
+    return result;
+}
+
 void print_px4_ts_usage(void* output) noexcept
 {
     FILE* file = static_cast<FILE*>(output);
     if (file == nullptr) return;
     std::fprintf(file,
                  "usage: px4-ts (--device BASE_SERIAL | --instance TOKEN) --receiver 0..7 "
-                 "--system isdb-t|isdb-s --frequency-khz N [options]\n"
-                 "       px4-ts (--device BASE_SERIAL | --instance TOKEN) --receiver 0..7 "
-                 "--channel CH [options]\n"
-                 "  --channel CH                   (T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>)\n"
-                 "  --stream-id N | --slot 0..11   (isdb-s, exactly one)\n"
-                 "  --bandwidth-hz N               (isdb-t default 6000000)\n"
-                 "  --lnb-voltage 0|15             (isdb-s; 15 is daemon-dependent)\n"
-                 "  --tune-timeout-ms 100..30000  (default 10000)\n"
-                 "  --output PATH|- --duration-seconds N | --packet-count N\n"
-                 "  --runtime-dir PATH --group --help\n");
+                 "(-c|--channel CH | -f|--freq HZ -s|--system isdb-t|isdb-s) [options]\n"
+                 "  -c, --channel CH              (T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>)\n"
+                 "  -f, --freq HZ                 (unsigned decimal Hz)\n"
+                 "  -s, --system isdb-t|isdb-s    (required with --freq)\n"
+                 "      --slot N | --tsid N       (satellite selection, exactly one)\n"
+                 "  -t, --time SECONDS|-          (default unlimited)\n"
+                 "  -o, --output PATH|-           (default stdout)\n"
+                 "  -d, --device BASE_SERIAL      --instance TOKEN\n"
+                 "      --receiver 0..7 --runtime-dir PATH --group\n"
+                 "      --packet-count N --lnb-voltage 0|15 --tune-timeout-ms N\n"
+                 "  -h, --help\n");
 }
 
 int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
@@ -887,8 +1085,9 @@ Result<Px4TsRunResult> Px4TsRunner::run_wire(
         return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
     }
     options.tune.system = system;
-    options.tune.frequency_hz =
-        static_cast<std::uint64_t>(arguments.frequency_khz) * 1000U;
+    options.tune.frequency_hz = arguments.frequency_hz != 0U
+                                    ? arguments.frequency_hz
+                                    : static_cast<std::uint64_t>(arguments.frequency_khz) * 1000U;
     if (arguments.stream_id != 0xffffU) {
         options.tune.selection = wire::Selection::tsid;
         options.tune.selection_value = arguments.stream_id;
@@ -1106,6 +1305,11 @@ Result<Px4TsRunResult> Px4TsRunner::run(
     Px4TsFailureKind& result_failure_kind = failure_kind != nullptr ?
                                                  *failure_kind : local_failure_kind;
     if (!arguments.valid || !valid_arguments(arguments)) {
+        return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
+    }
+    // The legacy internal-IPC runner has no exact-Hz entrance; the kHz field
+    // stays authoritative there.
+    if (arguments.frequency_hz != 0U) {
         return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
     }
     const char* runtime_directory = arguments.runtime_directory.empty() ?

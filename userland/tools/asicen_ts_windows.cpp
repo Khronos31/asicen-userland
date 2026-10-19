@@ -109,7 +109,7 @@ int main(int argc, char** argv)
         views.push_back(value.c_str());
     }
     const Px4TsArguments arguments =
-        parse_px4_ts_arguments(static_cast<int>(views.size()), views.data());
+        parse_px4_ts_product_arguments(static_cast<int>(views.size()), views.data());
     if (!arguments.valid) {
         std::fprintf(stderr, "argument error: %s\n", arguments.error.c_str());
         print_px4_ts_usage(stderr);
