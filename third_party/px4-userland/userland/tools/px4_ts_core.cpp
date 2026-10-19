@@ -57,13 +57,25 @@ bool parse_unsigned(std::string_view value, T& output) noexcept
     return true;
 }
 
+// ASCII-only case folding for CLI system-name tokens.
+bool ascii_system_equals(std::string_view value, std::string_view expected) noexcept
+{
+    if (value.size() != expected.size()) return false;
+    for (std::size_t i = 0U; i < value.size(); ++i) {
+        char ch = value[i];
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+        if (ch != expected[i]) return false;
+    }
+    return true;
+}
+
 bool parse_system(std::string_view value, System& system) noexcept
 {
-    if (value == "isdb-t") {
+    if (ascii_system_equals(value, "isdb-t")) {
         system = System::ISDB_T;
         return true;
     }
-    if (value == "isdb-s") {
+    if (ascii_system_equals(value, "isdb-s")) {
         system = System::ISDB_S;
         return true;
     }
@@ -501,8 +513,8 @@ Px4TsArguments parse_px4_ts_product_arguments(int argc,
         } else if (option == "-s" || option == "--system") {
             if (have_system) return invalid("duplicate --system");
             have_system = true;
-            if (value == "isdb-t") system = WireSystem::isdb_t;
-            else if (value == "isdb-s") system = WireSystem::isdb_s;
+            if (ascii_system_equals(value, "isdb-t")) system = WireSystem::isdb_t;
+            else if (ascii_system_equals(value, "isdb-s")) system = WireSystem::isdb_s;
             else return invalid("system must be isdb-t or isdb-s");
         } else if (option == "--slot") {
             std::uint16_t parsed = 0U;

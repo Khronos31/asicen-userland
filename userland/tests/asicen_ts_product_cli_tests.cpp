@@ -44,6 +44,21 @@ int main()
                             "-f", "557142857", "-s", "isdb-t", "-o", "-"});
     ok &= check(t27.valid && t27.frequency_hz == 557142857U && t27.output == "-",
                 "Hz input and stdout output are retained");
+    for (const char* spelling : {"isdb-t", "ISDB-T", "IsDb-T"}) {
+        const auto parsed = parse({"asicen-ts", "-d", "usb:3-1.1", "--receiver", "1",
+                                   "--freq", "557142857", "--system", spelling});
+        ok &= check(parsed.valid && parsed.system == px4::userland::ipc::System::ISDB_T,
+                    "case-insensitive ISDB-T");
+    }
+    for (const char* spelling : {"isdb-s", "ISDB-S", "IsDb-S"}) {
+        const auto parsed = parse({"asicen-ts", "-d", "usb:3-1.1", "--receiver", "0",
+                                   "--channel", "BS15", "--system", spelling, "--slot", "2"});
+        ok &= check(parsed.valid && parsed.system == px4::userland::ipc::System::ISDB_S,
+                    "case-insensitive ISDB-S");
+    }
+    ok &= check(!parse({"asicen-ts", "-d", "usb:3-1.1", "--receiver", "1",
+                        "--freq", "557142857", "--system", "ISDB-T2"}).valid,
+                "unknown system rejected");
     const auto bs = parse({"asicen-ts", "--device", "serial:00001205000960", "--receiver", "0",
                            "-c", "BS15", "-s", "isdb-s", "--slot", "2"});
     ok &= check(bs.valid && bs.frequency_hz == 1318000000U && bs.slot == 2U,
