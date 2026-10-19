@@ -14,24 +14,18 @@ def check(condition, message):
     if not condition:
         raise AssertionError(message)
 
-catalog = run('asicend', '--models')
-check(catalog.returncode == 0, catalog.stderr)
-rows = catalog.stdout.splitlines()
-check(len(rows) == 5, catalog.stdout)
-for key, pid, count in [('s3u', '0001', 1), ('s3u2', '0003', 2),
-                        ('w3u2', '0004', 4), ('w3u3', '0005', 4),
-                        ('w3u3-v2', '0006', 4)]:
-    row = next((r for r in rows if r.startswith(key + ' ')), '')
-    check(f'vid_pid=0b06:{pid}' in row and f'capacity={count}' in row, row)
-    check('family=' in row and 'runtime=' in row, row)
-    if key in ('s3u', 's3u2'):
-        check('lnb_control=external-unconfirmed' in row and
-              'lnb_15v_request=unsupported' in row, row)
-    else:
-        check('lnb_control=source-backed-software' in row and
-              'lnb_15v_request=supported' in row, row)
-    check('lnb_validation=pending' in row, row)
-check('verified' not in catalog.stdout, 'catalog must not imply hardware validation')
+models = run('asicend', '--models')
+check(models.returncode == 0, models.stderr)
+expected = [
+    'PX-S3U 1738:5211 0b06:0001',
+    'PX-S3U2 1738:5211 0b06:0003',
+    'PX-W3U2 1738:5211 0b06:0004',
+    'PX-W3U3 1738:5211 0b06:0005',
+    'PX-W3U3 V2 1738:5211 0b06:0006',
+]
+check(models.stdout.splitlines() == expected, models.stdout)
+check(not models.stdout.startswith('{'),
+      '--models is not the JSON discovery of connected devices')
 check(run('asicend-mock', '--model', 'not-an-asicen').returncode == 2,
       'unknown mock model must fail before a server is created')
 check(run('asicend', '--model', 'not-an-asicen').returncode in (2, 3),

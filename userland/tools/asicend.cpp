@@ -76,64 +76,29 @@ void usage(FILE* output)
 int list_models()
 {
     namespace w = dtv::userland::wire;
-    auto copy = [](auto& dest, const char* value) -> bool {
-        if (value == nullptr) return false;
-        const std::size_t count = std::strlen(value);
-        if (count == 0U || count > dest.bytes.size()) return false;
-        dest.length = static_cast<std::uint16_t>(count);
-        std::memcpy(dest.bytes.data(), value, count);
-        return true;
-    };
-
-    // Product profiles are a fixed, source-backed table; listing them neither
-    // starts nor probes USB hardware. The shared cold loader ID deliberately
-    // appears for each compatible model without implying identification.
-    std::array<w::ModelCatalogEntry, 5U> records{};
+    // The list is a static set of supported product models, independent of
+    // what USB hardware happens to be connected or loaded right now.
+    std::array<w::SupportedModel, 5U> records{};
     if (asicen::profile_count() != records.size()) return 70;
     for (std::size_t i = 0U; i < records.size(); ++i) {
         const auto& profile = asicen::profiles()[i];
-        auto& record = records[i];
-        if (!copy(record.model.id, profile.model_key) ||
-            !copy(record.model.name, profile.model)) return 70;
-        record.usb_ids.count = 2U;
-        record.usb_ids.items[0] = {0x1738U, 0x5211U, w::Mode::cold};
-        record.usb_ids.items[1] = {profile.vid, profile.pid, w::Mode::runtime};
-        record.nominal_receiver_count = {true, profile.enclosure_receiver_count};
-        record.nominal_usb_function_count = {true, profile.expected_runtime_functions};
-
-#ifdef ASICEN_ENABLE_LIBUSB
-        record.available_in_build = asicen::profile_runtime_supported(profile);
-#else
-        record.available_in_build = false;
-#endif
-        record.receivers.present = true;
-        if (!record.available_in_build) {
-            // Profiles remain visible when the build excludes the USB backend.
-            record.max_concurrent_streams = {true, 0U};
-            continue;
-        }
-        // Public runtime currently exposes one receiver for combined S3U,
-        // otherwise 2 public receiver IDs, independent of nominal circuitry.
-        record.receivers.value.count = profile.combined_isdb_ts ? 1U : 2U;
-        for (std::size_t j = 0U; j < record.receivers.value.count; ++j) {
-            auto& receiver = record.receivers.value.items[j];
-            receiver.id = static_cast<std::uint16_t>(j);
-            receiver.systems.mask = profile.combined_isdb_ts ? 3U :
-                                    j == 0U ? 2U : 1U;
-        }
-        record.max_concurrent_streams = {true, 1U};
+        const std::size_t count = std::strlen(profile.model);
+        if (count == 0U || count > records[i].name.bytes.size()) return 70;
+        records[i].name.length = static_cast<std::uint16_t>(count);
+        std::memcpy(records[i].name.bytes.data(), profile.model, count);
+        // A shared loader is not a unique model identifier. Both the loader
+        // and the model-specific runtime USB IDs are supported.
+        records[i].usb_ids.count = 2U;
+        records[i].usb_ids.items[0] = {0x1738U, 0x5211U};
+        records[i].usb_ids.items[1] = {profile.vid, profile.pid};
     }
-
-    w::ModelsResponse document{};
-    if (!copy(document.producer.product, "asicen-userland") ||
-        !copy(document.producer.version, ASICEN_PRODUCT_VERSION)) return 70;
-    document.models = {records.data(), records.size()};
-    const auto size = w::models_json_size(document);
+    const w::SupportedModels models{{records.data(), records.size()}};
+    const auto size = w::models_text_size(models);
     if (!size) return 70;
-    std::vector<std::uint8_t> json(size.value(), 0U);
-    const auto written = w::encode_models_json(document, {json.data(), json.size()});
-    if (!written || written.value() != json.size() ||
-        std::fwrite(json.data(), 1U, json.size(), stdout) != json.size() ||
+    std::vector<std::uint8_t> text(size.value());
+    const auto written = w::encode_models_text(models, {text.data(), text.size()});
+    if (!written || written.value() != text.size() ||
+        std::fwrite(text.data(), 1U, text.size(), stdout) != text.size() ||
         std::fflush(stdout) != 0) {
         std::fprintf(stderr, "models: write to stdout failed\n");
         return 70;
