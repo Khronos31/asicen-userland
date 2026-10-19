@@ -460,7 +460,7 @@ if(UNIX OR WIN32)
     target_include_directories(asicen-ts PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicen-ts PRIVATE ASICEN_PRODUCT_CLI=1)
-    target_link_libraries(asicen-ts PRIVATE asicen_core asicen_portable_core dtv::tuning)
+    target_link_libraries(asicen-ts PRIVATE asicen_core asicen_portable_core dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-ts)
 endif()
 
@@ -498,7 +498,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_CONTROL_WORKERS_TEST_ACCESS=1)
     target_link_libraries(asicen-runtime-v1-server-tests PRIVATE
-        asicen_core asicen_hardware_session asicen_px4_mock dtv::json dtv::tuning)
+        asicen_core asicen_hardware_session asicen_px4_mock dtv::json dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-runtime-v1-server-tests)
     add_test(NAME asicen-runtime-v1-server-tests
         COMMAND asicen-runtime-v1-server-tests)
@@ -546,7 +546,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_POSIX_IPC_TEST_ACCESS=1
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card)
+    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity)
     asicen_enable_project_warnings(px4-portable-tests)
     add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
 
@@ -605,7 +605,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
                     third_party/px4-userland/userland/tools
                     third_party/px4-userland/userland/tests)
                 target_link_libraries(asicen-real-factory-proof-tests PRIVATE
-                    asicen_hardware_session asicen_libusb asicen_pcsc_ifd_core dtv::tuning)
+                    asicen_hardware_session asicen_libusb asicen_pcsc_ifd_core dtv::tuning dtv::identity)
                 target_compile_definitions(asicen-real-factory-proof-tests PRIVATE
                     ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
                 asicen_enable_project_warnings(asicen-real-factory-proof-tests)
@@ -698,7 +698,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     target_include_directories(asicen-product-lnb-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicen-product-lnb-tests PRIVATE ASICEN_PRODUCT_CLI=1)
     target_link_libraries(asicen-product-lnb-tests PRIVATE
-        asicen_core asicen_px4_mock dtv::tuning)
+        asicen_core asicen_px4_mock dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-product-lnb-tests)
     add_test(NAME asicen-product-lnb-tests COMMAND asicen-product-lnb-tests)
 
@@ -1145,7 +1145,7 @@ if(ASICEN_BUILD_TESTS AND WIN32)
         ${ASICEN_PX4_ROOT}/tools/px4_ts_windows_output.cpp
         ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
     target_link_libraries(asicen_windows_ts_output_tests PRIVATE px4_portable_reference)
-    target_link_libraries(asicen_windows_ts_output_tests PRIVATE dtv::tuning)
+    target_link_libraries(asicen_windows_ts_output_tests PRIVATE dtv::tuning dtv::identity)
     add_executable(asicen_windows_control_tests ${ASICEN_PX4_ROOT}/tests/windows_control_tests.cpp)
     target_link_libraries(asicen_windows_control_tests PRIVATE px4_portable_reference)
     add_executable(asicen_windows_stdin_tests
@@ -1311,7 +1311,7 @@ if(ASICEN_BUILD_TESTS)
         ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
     target_compile_definitions(asicen-ts-argument-tests PRIVATE ASICEN_PRODUCT_CLI=1)
     target_include_directories(asicen-ts-argument-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
-    target_link_libraries(asicen-ts-argument-tests PRIVATE asicen_px4_mock dtv::tuning)
+    target_link_libraries(asicen-ts-argument-tests PRIVATE asicen_px4_mock dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-ts-argument-tests)
     add_test(NAME asicen-ts-argument-tests COMMAND asicen-ts-argument-tests)
 
@@ -1321,7 +1321,7 @@ if(ASICEN_BUILD_TESTS)
     target_include_directories(asicen-ts-product-cli-tests PRIVATE
         ${ASICEN_PX4_ROOT}/tools)
     target_link_libraries(asicen-ts-product-cli-tests PRIVATE
-        asicen_core asicen_portable_core dtv::tuning)
+        asicen_core asicen_portable_core dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-ts-product-cli-tests)
     add_test(NAME asicen-ts-product-cli-tests COMMAND asicen-ts-product-cli-tests)
 endif()

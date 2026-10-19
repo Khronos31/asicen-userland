@@ -5,6 +5,7 @@
 
 #include "dtv/userland/control_client.h"
 #include "dtv/userland/control_connection.h"
+#include "dtv/userland/identity.h"
 #include "dtv/userland/records.h"
 #include "dtv/userland/tuning.h"
 #include "dtv/userland/wire.h"
@@ -133,9 +134,10 @@ bool valid_arguments(const Px4TsArguments& arguments) noexcept
 {
     if (arguments.product_cli) {
         constexpr std::uint64_t kMaxRequestedHz = (std::uint64_t{1U} << 53U) - 1U;
-        if ((arguments.instance.empty() ? !valid_serial(arguments.device) :
-                                          (!arguments.device.empty() ||
-                                           !valid_instance(arguments.instance))) ||
+        if ((!arguments.device.empty() &&
+             !dtv::userland::identity::parse_device_selector(arguments.device)) ||
+            (!arguments.instance.empty() && !valid_instance(arguments.instance)) ||
+            (arguments.device.empty() && arguments.instance.empty()) ||
             arguments.frequency_hz == 0U || arguments.frequency_hz > kMaxRequestedHz ||
             arguments.frequency_khz != 0U || arguments.tune_timeout_ms < 100U ||
             arguments.tune_timeout_ms > 30000U ||
@@ -535,8 +537,10 @@ Px4TsArguments parse_px4_ts_product_arguments(int argc,
             have_timeout = true;
         }
     }
-    if (have_device == have_instance)
-        return invalid("exactly one of --device or --instance is required");
+    if (!have_device && !have_instance)
+        return invalid("--device or --instance is required");
+    if (have_device && !dtv::userland::identity::parse_device_selector(result.device))
+        return invalid("device must be a canonical serial: or usb: selector");
     if (!have_receiver) return invalid("--receiver is required");
     if (have_channel == have_frequency)
         return invalid("exactly one of --channel or --freq is required");
@@ -576,7 +580,7 @@ void print_px4_ts_usage(void* output) noexcept
     FILE* file = static_cast<FILE*>(output);
     if (file == nullptr) return;
     std::fprintf(file,
-                 "usage: px4-ts (--device BASE_SERIAL | --instance TOKEN) --receiver 0..7 "
+                 "usage: px4-ts (-d|--device SELECTOR [--instance TOKEN] | --instance TOKEN) --receiver 0..7 "
                  "(-c|--channel CH | -f|--freq HZ -s|--system isdb-t|isdb-s) [options]\n"
                  "  -c, --channel CH              (T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>)\n"
                  "  -f, --freq HZ                 (unsigned decimal Hz)\n"
@@ -584,7 +588,7 @@ void print_px4_ts_usage(void* output) noexcept
                  "      --slot N | --tsid N       (satellite selection, exactly one)\n"
                  "  -t, --time SECONDS|-          (default unlimited)\n"
                  "  -o, --output PATH|-           (default stdout)\n"
-                 "  -d, --device BASE_SERIAL      --instance TOKEN\n"
+                 "  -d, --device serial:...|usb:... [--instance TOKEN]\n"
                  "      --receiver 0..7 --runtime-dir PATH --group\n"
                  "      --packet-count N --lnb-voltage 0|15 --tune-timeout-ms N\n"
                  "  -h, --help\n");
@@ -1047,6 +1051,117 @@ private:
     wire::StreamFinal final_{};
 };
 
+struct ProductStatusAssertion final {
+    const dtv::userland::identity::ResolvedIdentity* identity = nullptr;
+    std::string_view instance;
+    const wire::StatusSnapshot* discovered = nullptr;
+};
+
+template <std::size_t N>
+bool equal_text(const dtv::userland::wire::WString<N>& text,
+                std::string_view value) noexcept
+{
+    return text.length == value.size() &&
+           std::memcmp(text.bytes.data(), value.data(), value.size()) == 0;
+}
+
+bool matches_product_identity(const wire::ListResponse& list,
+                              const dtv::userland::identity::ResolvedIdentity& expected) noexcept
+{
+    if (!list.enclosure.present || list.functions.count == 0U ||
+        list.topology.state != wire::TopologyState::complete ||
+        !list.topology.expected_function_count.present ||
+        list.topology.expected_function_count.value != list.functions.count)
+        return false;
+    if (expected.kind == dtv::userland::identity::IdentityKind::serial) {
+        const auto& observed = list.enclosure.value.identity;
+        return observed.serial_state == wire::IdentitySerialState::present &&
+               observed.uniqueness == wire::Uniqueness::unique_in_scan &&
+               observed.serial.present &&
+               observed.serial.value.length == expected.serial.length &&
+               std::memcmp(observed.serial.value.bytes.data(), expected.serial.bytes.data(),
+                           expected.serial.length) == 0;
+    }
+    if (expected.topology.count == 0U) return false;
+    std::size_t matched = 0U;
+    for (std::size_t i = 0U; i < list.functions.count; ++i) {
+        const auto& path = list.functions.items[i].location.usb_path;
+        if (!path.present) return false;
+        for (std::size_t j = 0U; j < i; ++j) {
+            const auto& prior = list.functions.items[j].location.usb_path;
+            if (prior.present && prior.value.length == path.value.length &&
+                std::memcmp(prior.value.bytes.data(), path.value.bytes.data(),
+                            path.value.length) == 0)
+                return false;
+        }
+        for (std::size_t j = 0U; j < expected.topology.count; ++j) {
+            const auto& wanted = expected.topology.paths[j];
+            if (path.value.length == wanted.length &&
+                std::memcmp(path.value.bytes.data(), wanted.bytes.data(), wanted.length) == 0)
+                ++matched;
+        }
+    }
+    return expected.topology.count == 1U ? matched == 1U
+                                          : matched == list.functions.count &&
+                                                list.functions.count == expected.topology.count;
+}
+
+Error validate_product_status(const wire::StatusSnapshot& snapshot,
+                              void* context) noexcept
+{
+    const auto* assertion = static_cast<const ProductStatusAssertion*>(context);
+    if (assertion == nullptr ||
+        !equal_text(snapshot.status.producer.product, "asicen-userland") ||
+        !snapshot.status.context.instance.present ||
+        (!assertion->instance.empty() &&
+         !equal_text(snapshot.status.context.instance.value, assertion->instance)) ||
+        (assertion->identity != nullptr &&
+         !matches_product_identity(snapshot.list, *assertion->identity)))
+        return Error::NOT_FOUND;
+    if (assertion->discovered != nullptr) {
+        const auto& prior = *assertion->discovered;
+        if (snapshot.status.context.epoch != prior.status.context.epoch ||
+            snapshot.list.functions.count != prior.list.functions.count ||
+            snapshot.list.enclosure.present != prior.list.enclosure.present ||
+            snapshot.list.enclosure.value.model.present !=
+                prior.list.enclosure.value.model.present ||
+            (snapshot.list.enclosure.value.model.present &&
+             !equal_text(snapshot.list.enclosure.value.model.value.id,
+                         std::string_view(prior.list.enclosure.value.model.value.id.bytes.data(),
+                                          prior.list.enclosure.value.model.value.id.length))))
+            return Error::NOT_FOUND;
+        const auto& current_identity = snapshot.list.enclosure.value.identity;
+        const auto& prior_identity = prior.list.enclosure.value.identity;
+        if (current_identity.serial_state != prior_identity.serial_state ||
+            current_identity.serial.present != prior_identity.serial.present ||
+            (current_identity.serial.present &&
+             (current_identity.serial.value.length != prior_identity.serial.value.length ||
+              std::memcmp(current_identity.serial.value.bytes.data(),
+                          prior_identity.serial.value.bytes.data(),
+                          current_identity.serial.value.length) != 0)))
+            return Error::NOT_FOUND;
+        for (std::size_t i = 0U; i < snapshot.list.functions.count; ++i) {
+            const auto& current = snapshot.list.functions.items[i];
+            bool found = false;
+            for (std::size_t j = 0U; j < prior.list.functions.count; ++j) {
+                const auto& old = prior.list.functions.items[j];
+                if (current.vid == old.vid && current.pid == old.pid &&
+                    current.location.usb_path.present == old.location.usb_path.present &&
+                    (!current.location.usb_path.present ||
+                     (current.location.usb_path.value.length == old.location.usb_path.value.length &&
+                      std::memcmp(current.location.usb_path.value.bytes.data(),
+                                  old.location.usb_path.value.bytes.data(),
+                                  current.location.usb_path.value.length) == 0))) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return Error::NOT_FOUND;
+        }
+    }
+    return Error::OK;
+}
+
 }  // namespace
 
 Result<Px4TsRunResult> Px4TsRunner::run_wire(
@@ -1062,12 +1177,98 @@ Result<Px4TsRunResult> Px4TsRunner::run_wire(
     if (!arguments.valid || !valid_arguments(arguments))
         return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
 
-    const char* runtime_directory = arguments.runtime_directory.empty()
-                                        ? nullptr : arguments.runtime_directory.c_str();
     const EndpointAccess access = arguments.group ? EndpointAccess::shared_group
                                                   : EndpointAccess::private_user;
-    const char* instance = arguments.instance.empty() ? arguments.device.c_str()
-                                                       : arguments.instance.c_str();
+    dtv::userland::identity::ResolvedIdentity resolved_identity{};
+    bool has_device_assertion = false;
+    if (arguments.product_cli && !arguments.device.empty()) {
+        const auto selector = dtv::userland::identity::parse_device_selector(arguments.device);
+        if (!selector) return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
+        const auto resolved = dtv::userland::identity::resolve_selector(
+            dtv::userland::identity::Product::asicen, selector.value());
+        if (!resolved) return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
+        resolved_identity = resolved.value();
+        has_device_assertion = true;
+    }
+    std::string selected_runtime_directory = arguments.runtime_directory;
+    std::string selected_instance = arguments.instance;
+    wire::StatusSnapshot discovered_snapshot{};
+    bool has_discovered_snapshot = false;
+    if (arguments.product_cli && arguments.instance.empty()) {
+        ipc::posix::RuntimeRootCandidates roots{};
+        if (!arguments.runtime_directory.empty()) {
+            roots.count = 1U;
+            if (arguments.runtime_directory.size() >= roots.paths[0].size())
+                return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
+            std::memcpy(roots.paths[0].data(), arguments.runtime_directory.c_str(),
+                        arguments.runtime_directory.size() + 1U);
+        } else {
+            const auto candidates = client_runtime_roots();
+            if (!candidates) return Result<Px4TsRunResult>::failure(candidates.error());
+            roots = candidates.value();
+        }
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(2000);
+        std::size_t matches = 0U;
+        std::string matched_root;
+        std::string matched_instance;
+        const auto remaining = [&deadline]() noexcept -> std::uint32_t {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) return 0U;
+            const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now).count();
+            return static_cast<std::uint32_t>(value > 0 ? value : 1);
+        };
+        for (std::size_t root_index = 0U; root_index < roots.count; ++root_index) {
+            const std::string root(roots.paths[root_index].data());
+            const auto discovered = discover_runtime_instances(root.c_str(), access);
+            if (!discovered) return Result<Px4TsRunResult>::failure(discovered.error());
+            if (discovered.value().canonical_collision)
+                return Result<Px4TsRunResult>::failure(Error::NOT_FOUND);
+            for (std::size_t candidate = 0U; candidate < discovered.value().count; ++candidate) {
+                const std::uint32_t budget = remaining();
+                if (budget == 0U) return Result<Px4TsRunResult>::failure(Error::TIMEOUT);
+                const std::string candidate_instance(discovered.value().instances[candidate].data());
+                const EndpointConfig endpoint{root.c_str(), candidate_instance.c_str(),
+                                              kControlEndpointName, access};
+                auto probe = SocketStream::connect(endpoint, Timeout{budget});
+                if (!probe) {
+                    if (probe.error() == Error::NOT_FOUND) continue;
+                    return Result<Px4TsRunResult>::failure(probe.error());
+                }
+                SocketClientTransport probe_transport(probe.value());
+                const std::uint32_t fetch_budget = remaining();
+                if (fetch_budget == 0U) {
+                    probe.value().close();
+                    return Result<Px4TsRunResult>::failure(Error::TIMEOUT);
+                }
+                const auto snapshot = wire::fetch_status(probe_transport, Timeout{fetch_budget});
+                probe.value().close();
+                if (!snapshot)
+                    return Result<Px4TsRunResult>::failure(snapshot.error);
+                if (!equal_text(snapshot.snapshot.status.producer.product, "asicen-userland") ||
+                    !snapshot.snapshot.status.context.instance.present ||
+                    !equal_text(snapshot.snapshot.status.context.instance.value,
+                                candidate_instance) ||
+                    !matches_product_identity(snapshot.snapshot.list, resolved_identity))
+                    continue;
+                ++matches;
+                if (matches == 1U) {
+                    matched_root = root;
+                    matched_instance = candidate_instance;
+                    discovered_snapshot = snapshot.snapshot;
+                }
+            }
+        }
+        if (matches != 1U) return Result<Px4TsRunResult>::failure(Error::NOT_FOUND);
+        selected_runtime_directory = matched_root;
+        selected_instance = matched_instance;
+        has_discovered_snapshot = true;
+    }
+    const char* runtime_directory = selected_runtime_directory.empty()
+                                        ? nullptr : selected_runtime_directory.c_str();
+    const char* instance = selected_instance.empty() ? arguments.device.c_str()
+                                                       : selected_instance.c_str();
     const EndpointConfig control_endpoint{runtime_directory, instance,
                                           kControlEndpointName, access};
     const EndpointConfig stream_endpoint{runtime_directory, instance,
@@ -1103,9 +1304,16 @@ Result<Px4TsRunResult> Px4TsRunner::run_wire(
     }
     options.tune.timeout_ms = arguments.tune_timeout_ms;
 
-    auto started = wire::begin_recording(
-        control_transport, options,
-        Timeout{arguments.tune_timeout_ms + 6000U});
+    ProductStatusAssertion assertion{};
+    assertion.identity = has_device_assertion ? &resolved_identity : nullptr;
+    assertion.instance = selected_instance;
+    assertion.discovered = has_discovered_snapshot ? &discovered_snapshot : nullptr;
+    auto started = arguments.product_cli
+        ? wire::begin_recording(control_transport, options,
+                                Timeout{arguments.tune_timeout_ms + 6000U},
+                                validate_product_status, &assertion)
+        : wire::begin_recording(control_transport, options,
+                                Timeout{arguments.tune_timeout_ms + 6000U});
     if (!started) {
         control.value().close();
         return Result<Px4TsRunResult>::failure(started.error);
@@ -1304,6 +1512,8 @@ Result<Px4TsRunResult> Px4TsRunner::run(
     Px4TsFailureKind local_failure_kind = Px4TsFailureKind::ipc;
     Px4TsFailureKind& result_failure_kind = failure_kind != nullptr ?
                                                  *failure_kind : local_failure_kind;
+    if (arguments.product_cli)
+        return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
     if (!arguments.valid || !valid_arguments(arguments)) {
         return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
     }

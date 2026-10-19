@@ -471,14 +471,15 @@ ClaimedUsbFunctionObservation bridge(std::uint8_t dev, std::uint8_t address)
 // The product builder over a PX-Q3U4-shaped service and two observed bridges.
 bool product_context(const TunerService& tuner, const wire::Uuid& epoch,
                      ControlContext& context, ClaimedUsbFunctionObservation& first,
-                     ClaimedUsbFunctionObservation& second)
+                     ClaimedUsbFunctionObservation& second,
+                     const char* instance = "w3u3-test")
 {
     first = bridge(1U, 11U);
     second = bridge(2U, 12U);
     const auto* profile = asicen::find_profile(asicen::ModelId::W3u3);
     return profile != nullptr && asicen::build_asicen_control_context(
         *profile, std::array<ClaimedUsbFunctionObservation, 2U>{first, second}.data(),
-        2U, 2U, tuner, "w3u3-test", epoch, context);
+        2U, 2U, tuner, instance, epoch, context);
 }
 
 bool test_asicen_context_profile_facts()
@@ -867,12 +868,14 @@ struct Fixture final {
                                      tuner_stream));
     }
 
-    bool start(bool sparse = false, std::uint8_t epoch_seed = 0x10U)
+    bool start(bool sparse = false, std::uint8_t epoch_seed = 0x10U,
+               const char* product_instance = "w3u3-test")
     {
         if (!runtime.valid() || !tuner->configure_strict_capabilities()) return false;
         if (sparse) {
             sparse_context(*context, make_epoch(epoch_seed));
-        } else if (!product_context(*tuner, make_epoch(epoch_seed), *context, first, second)) {
+        } else if (!product_context(*tuner, make_epoch(epoch_seed), *context, first, second,
+                                    product_instance)) {
             return false;
         }
         TunerStreamControl* stream = recording_stream
@@ -1034,6 +1037,88 @@ bool test_normal_recording_duration_without_ts()
     V1_CHECK(read_recording_file(path).empty());
     V1_CHECK(fixture.server_ok.load());
     return true;
+}
+
+bool product_recording_case(const char* name, const char* device, bool include_instance,
+                            bool expect_success, Error expected_error)
+{
+    Fixture fixture(name, true);
+    fixture.recording_source.packets = recording_packets(32U);
+    V1_CHECK(fixture.start(false, 0x10U, fixture.instance.c_str()));
+    const std::string path = fixture.runtime.path() + "/product.ts";
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    V1_CHECK(fd >= 0);
+
+    px4::userland::cli::Px4TsArguments arguments{};
+    arguments.valid = true;
+    arguments.product_cli = true;
+    if (device != nullptr) arguments.device = device;
+    if (include_instance) arguments.instance = fixture.instance;
+    arguments.runtime_directory = fixture.runtime.path();
+    arguments.receiver = 1U;
+    arguments.system = System::ISDB_T;
+    arguments.frequency_hz = 473142857U;
+    arguments.tune_timeout_ms = 3000U;
+    arguments.output = "-";
+    arguments.packet_count_set = true;
+    arguments.packet_count = 32U;
+
+    px4::userland::cli::Px4TsFailureKind failure =
+        px4::userland::cli::Px4TsFailureKind::ipc;
+    px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
+    {
+        px4::userland::cli::Px4TsFdOutput output(fd, true);
+        V1_CHECK(output.ready());
+        RecordingClientClock clock;
+        RecordingClientSignal signal;
+        const auto result = px4::userland::cli::Px4TsRunner::run_wire(
+            arguments, output, clock, signal, &failure, &diagnostics);
+        if (expect_success) {
+            if (!result) std::fprintf(stderr, "product recording runner: %s\n",
+                                      error_string(result.error()));
+            V1_CHECK(result);
+        } else {
+            V1_CHECK(!result && result.error() == expected_error);
+        }
+    }
+    if (expect_success) {
+        V1_CHECK(read_recording_file(path) == recording_packets(32U));
+        V1_CHECK(diagnostics.stream_end_valid && diagnostics.packets_written == 32U);
+        V1_CHECK(total(fixture.backend.open_calls) != 0U);
+    } else {
+        V1_CHECK(total(fixture.backend.open_calls) == 0U);
+        V1_CHECK(total(fixture.backend.hz_calls) == 0U);
+        V1_CHECK(read_recording_file(path).empty());
+    }
+    V1_CHECK(fixture.server_ok.load());
+    return true;
+}
+
+bool test_product_device_only_usb_recording()
+{
+    return product_recording_case("product-device-only", "usb:3-1.1", false, true, Error::OK);
+}
+
+bool test_product_device_instance_recording()
+{
+    return product_recording_case("product-device-instance", "usb:3-1.1", true, true, Error::OK);
+}
+
+bool test_product_instance_only_recording()
+{
+    return product_recording_case("product-instance-only", nullptr, true, true, Error::OK);
+}
+
+bool test_product_device_instance_mismatch_no_acquire()
+{
+    return product_recording_case("product-device-mismatch", "usb:9-9.9", true, false,
+                                  Error::NOT_FOUND);
+}
+
+bool test_product_serial_absence_not_found()
+{
+    return product_recording_case("product-serial-absent", "serial:00001205000960", false,
+                                  false, Error::NOT_FOUND);
 }
 
 bool card_untouched(const Fixture& f)
@@ -2031,6 +2116,12 @@ int main()
         {"normal_recording_file_output", test_normal_recording_file_output},
         {"normal_recording_duration_without_ts",
          test_normal_recording_duration_without_ts},
+        {"product_device_only_usb_recording", test_product_device_only_usb_recording},
+        {"product_device_instance_recording", test_product_device_instance_recording},
+        {"product_instance_only_recording", test_product_instance_only_recording},
+        {"product_device_instance_mismatch_no_acquire",
+         test_product_device_instance_mismatch_no_acquire},
+        {"product_serial_absence_not_found", test_product_serial_absence_not_found},
         {"framing_and_handshake", test_framing_and_handshake},
         {"partial_response_write", test_partial_response_write},
         {"asicen_context_profile_facts", test_asicen_context_profile_facts},
