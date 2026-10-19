@@ -414,6 +414,7 @@ if(UNIX OR WIN32)
         target_sources(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools/px4d_windows_stdin.cpp)
         target_link_libraries(asicend PRIVATE shell32)
     endif()
+    target_compile_definitions(asicend PRIVATE ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
     asicen_enable_project_warnings(asicend)
 
     if(ASICEN_ENABLE_LIBUSB)
@@ -439,7 +440,8 @@ if(UNIX OR WIN32)
         ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp)
     target_include_directories(asicenctl PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
-    target_compile_definitions(asicenctl PRIVATE ASICEN_PRODUCT_CLI=1)
+    target_compile_definitions(asicenctl PRIVATE
+        ASICEN_PRODUCT_CLI=1 ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
     target_link_libraries(asicenctl PRIVATE asicen_portable_core)
     asicen_enable_project_warnings(asicenctl)
 
@@ -459,7 +461,8 @@ if(UNIX OR WIN32)
     endif()
     target_include_directories(asicen-ts PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
-    target_compile_definitions(asicen-ts PRIVATE ASICEN_PRODUCT_CLI=1)
+    target_compile_definitions(asicen-ts PRIVATE
+        ASICEN_PRODUCT_CLI=1 ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
     target_link_libraries(asicen-ts PRIVATE asicen_core asicen_portable_core dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-ts)
 endif()
