@@ -8,6 +8,10 @@
 #include "asicen/enclosure_grouping.h"
 #include "asicend_args.h"
 #include "asicend_list_format.h"
+
+#include <dtv/userland/json.h>
+
+#include <array>
 #if defined(_WIN32)
 #include "px4_windows_args.h"
 #endif
@@ -71,26 +75,67 @@ void usage(FILE* output)
 
 int list_models()
 {
-    for (std::size_t i = 0; i < asicen::profile_count(); ++i) {
-        const auto& p = asicen::profiles()[i];
-        // These are source capabilities, independent of this build's USB
-        // support. The legacy S3 setters provide no verified power control;
-        // mock ON/OFF simulation must not advertise physical S3 support.
-        const bool lnb_control = p.model_id == asicen::ModelId::W3u2 ||
-                                 p.model_id == asicen::ModelId::W3u3 ||
-                                 p.model_id == asicen::ModelId::W3u3V2;
-        std::printf("%s vid_pid=%04x:%04x model=\"%s\" capacity=%u functions=%u family=%s runtime=%s "
-                    "lnb_control=%s lnb_15v_request=%s lnb_validation=pending\n",
-            p.model_key, p.vid, p.pid, p.model,
-            static_cast<unsigned>(p.enclosure_receiver_count),
-            static_cast<unsigned>(p.expected_runtime_functions),
-            asicen::frontend_family_name(p.frontend_family),
-            asicen::profile_runtime_supported(p) ? "source-backed-experimental" : "not-enabled",
-            lnb_control ? "source-backed-software" : "external-unconfirmed",
-            lnb_control ? "supported" : "unsupported");
+    namespace w = dtv::userland::wire;
+    auto copy = [](auto& dest, const char* value) -> bool {
+        if (value == nullptr) return false;
+        const std::size_t count = std::strlen(value);
+        if (count == 0U || count > dest.bytes.size()) return false;
+        dest.length = static_cast<std::uint16_t>(count);
+        std::memcpy(dest.bytes.data(), value, count);
+        return true;
+    };
+
+    // Product profiles are a fixed, source-backed table; listing them neither
+    // starts nor probes USB hardware. The shared cold loader ID deliberately
+    // appears for each compatible model without implying identification.
+    std::array<w::ModelCatalogEntry, 5U> records{};
+    if (asicen::profile_count() != records.size()) return 70;
+    for (std::size_t i = 0U; i < records.size(); ++i) {
+        const auto& profile = asicen::profiles()[i];
+        auto& record = records[i];
+        if (!copy(record.model.id, profile.model_key) ||
+            !copy(record.model.name, profile.model)) return 70;
+        record.usb_ids.count = 2U;
+        record.usb_ids.items[0] = {0x1738U, 0x5211U, w::Mode::cold};
+        record.usb_ids.items[1] = {profile.vid, profile.pid, w::Mode::runtime};
+        record.nominal_receiver_count = {true, profile.enclosure_receiver_count};
+        record.nominal_usb_function_count = {true, profile.expected_runtime_functions};
+
+#ifdef ASICEN_ENABLE_LIBUSB
+        record.available_in_build = asicen::profile_runtime_supported(profile);
+#else
+        record.available_in_build = false;
+#endif
+        record.receivers.present = true;
+        if (!record.available_in_build) {
+            // Profiles remain visible when the build excludes the USB backend.
+            record.max_concurrent_streams = {true, 0U};
+            continue;
+        }
+        // Public runtime currently exposes one receiver for combined S3U,
+        // otherwise 2 public receiver IDs, independent of nominal circuitry.
+        record.receivers.value.count = profile.combined_isdb_ts ? 1U : 2U;
+        for (std::size_t j = 0U; j < record.receivers.value.count; ++j) {
+            auto& receiver = record.receivers.value.items[j];
+            receiver.id = static_cast<std::uint16_t>(j);
+            receiver.systems.mask = profile.combined_isdb_ts ? 3U :
+                                    j == 0U ? 2U : 1U;
+        }
+        record.max_concurrent_streams = {true, 1U};
     }
-    if (std::ferror(stdout) != 0 || std::fflush(stdout) != 0) {
-        std::fprintf(stderr, "list: write to stdout failed\n");
+
+    w::ModelsResponse document{};
+    if (!copy(document.producer.product, "asicen-userland") ||
+        !copy(document.producer.version, ASICEN_PRODUCT_VERSION)) return 70;
+    document.models = {records.data(), records.size()};
+    const auto size = w::models_json_size(document);
+    if (!size) return 70;
+    std::vector<std::uint8_t> json(size.value(), 0U);
+    const auto written = w::encode_models_json(document, {json.data(), json.size()});
+    if (!written || written.value() != json.size() ||
+        std::fwrite(json.data(), 1U, json.size(), stdout) != json.size() ||
+        std::fflush(stdout) != 0) {
+        std::fprintf(stderr, "models: write to stdout failed\n");
         return 70;
     }
     return 0;
