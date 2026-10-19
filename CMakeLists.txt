@@ -293,7 +293,7 @@ if(ASICEN_BUILD_PCSC_IFD AND UNIX AND NOT ANDROID)
         target_compile_definitions(asicen_pcsc_ifd_core PRIVATE
             ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:" ASICEN_PROFILE_ASICEN=1)
         target_compile_features(asicen_pcsc_ifd_core PUBLIC cxx_std_17)
-        target_link_libraries(asicen_pcsc_ifd_core PUBLIC asicen_portable_core)
+        target_link_libraries(asicen_pcsc_ifd_core PUBLIC asicen_portable_core dtv::control)
         set_target_properties(asicen_pcsc_ifd_core PROPERTIES
             POSITION_INDEPENDENT_CODE ON
         )
@@ -490,6 +490,11 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         ${ASICEN_PX4_ROOT}/src/control_workers.cpp
         ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
         ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp)
+    if(ASICEN_PCSC_IFD_AVAILABLE)
+        target_link_libraries(asicen-runtime-v1-server-tests PRIVATE asicen_pcsc_ifd_core)
+        target_compile_definitions(asicen-runtime-v1-server-tests PRIVATE
+            ASICEN_IFD_NEW_WIRE_PROOF=1)
+    endif()
     target_include_directories(asicen-runtime-v1-server-tests PRIVATE
         userland/include userland/src
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src

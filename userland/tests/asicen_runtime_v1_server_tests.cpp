@@ -7,6 +7,9 @@
 #include "control_server_test_access.h"
 #include "control_workers.h"
 #include "px4/card_service.h"
+#if defined(ASICEN_IFD_NEW_WIRE_PROOF)
+#include "px4/pcsc_ifd_adapter.h"
+#endif
 #include "asicen/control_context_builder.h"
 #include "asicen/device_profile.h"
 #include "asicen/hardware_stream_session.h"
@@ -161,19 +164,27 @@ public:
 
 class CardSession final : public CardProtocolSession {
 public:
+    void enable_mock_apdu() noexcept { mock_apdu_ = true; }
     Result<void> initialize() noexcept override
     {
         initialize_calls.fetch_add(1U);
+        if (mock_apdu_) {
+            ready_ = true;
+            atr_.length = 2U; atr_.bytes[0U] = 0x3bU; atr_.bytes[1U] = 0x00U;
+        }
         return Result<void>::success();
     }
-    Result<std::size_t> transmit(ByteView, MutableByteView) noexcept override
+    Result<std::size_t> transmit(ByteView, MutableByteView response) noexcept override
     {
         transmit_calls.fetch_add(1U);
-        return Result<std::size_t>::failure(Error::UNSUPPORTED);
+        if (!mock_apdu_ || !ready_ || response.data == nullptr || response.size < 2U)
+            return Result<std::size_t>::failure(Error::UNSUPPORTED);
+        response.data[0U] = 0x90U; response.data[1U] = 0x00U;
+        return Result<std::size_t>::success(2U);
     }
-    bool initialized() const noexcept override { return false; }
+    bool initialized() const noexcept override { return ready_; }
     const CardAtr& atr() const noexcept override { return atr_; }
-    void invalidate() noexcept override {}
+    void invalidate() noexcept override { ready_ = false; }
     void request_stop() noexcept override
     {
         stop_calls.fetch_add(1U);
@@ -185,6 +196,8 @@ public:
     std::atomic<std::size_t> stop_calls{0U};
 
 private:
+    bool mock_apdu_ = false;
+    bool ready_ = false;
     CardAtr atr_{};
 };
 
@@ -1977,6 +1990,39 @@ bool test_pending_operations_fail_closed()
 // ---------------------------------------------------------------------------
 // 14. Card service over the control connection
 
+#if defined(ASICEN_IFD_NEW_WIRE_PROOF)
+// Existing ASICEN PC/SC client through a real product UDTV socket/server.
+// Only the card hardware APDU is synthetic.
+bool test_public_asicen_ifd_newwire()
+{
+    Fixture f("AsicenIFDMixedCase");
+    f.card_session.enable_mock_apdu();
+    V1_CHECK(f.start(false, 0x10U, f.instance.c_str()));
+    pcsc::PosixIfdCardClientFactory factory;
+    pcsc::IfdEndpoint endpoint{};
+    endpoint.runtime_directory = f.runtime.path();
+    endpoint.device_instance = f.instance;
+    const auto created = factory.connect(endpoint);
+    V1_CHECK(created && created.value());
+    auto& client = *created.value();
+    const auto before = client.status();
+    V1_CHECK(before && before.value().present);
+    const auto opened = client.connect_shared();
+    V1_CHECK(opened && opened.value().handle != 0U && opened.value().atr_length == 2U);
+    const std::uint8_t apdu = 0x00U;
+    std::array<std::uint8_t, 16> response{};
+    const auto result = client.transmit(
+        opened.value().handle, ByteView{&apdu,1U},
+        MutableByteView{response.data(),response.size()});
+    V1_CHECK(result && result.value() == 2U &&
+             response[0U] == 0x90U && response[1U] == 0x00U);
+    V1_CHECK(client.disconnect(opened.value().handle));
+    client.close();
+    V1_CHECK(f.card_session.transmit_calls.load() == 1U && f.server_ok.load());
+    return true;
+}
+#endif
+
 bool test_card_service_over_control()
 {
     Fixture f("v1-card");
@@ -2276,6 +2322,9 @@ int main()
          test_owner_eof_during_tune_and_blocked_cleanup},
         {"pending_operations_fail_closed", test_pending_operations_fail_closed},
         {"card_service_over_control", test_card_service_over_control},
+#if defined(ASICEN_IFD_NEW_WIRE_PROOF)
+        {"public_asicen_ifd_newwire", test_public_asicen_ifd_newwire},
+#endif
         {"fresh_epoch_after_restart", test_fresh_epoch_after_restart},
     };
     int failures = 0;
