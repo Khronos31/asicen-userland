@@ -511,6 +511,8 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     target_include_directories(asicen-endpoint-discovery-tests PRIVATE
         userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
         ${ASICEN_PX4_ROOT}/tests)
+    target_compile_definitions(asicen-endpoint-discovery-tests PRIVATE
+        ASICEN_PROFILE_ASICEN=1)
     target_link_libraries(asicen-endpoint-discovery-tests PRIVATE Threads::Threads dtv::core)
     asicen_enable_project_warnings(asicen-endpoint-discovery-tests)
     add_test(NAME asicen-endpoint-discovery-tests COMMAND asicen-endpoint-discovery-tests)

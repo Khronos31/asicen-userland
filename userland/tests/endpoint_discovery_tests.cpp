@@ -87,7 +87,7 @@ private:
 
 std::string product_directory(const TemporaryDirectory& runtime)
 {
-    return runtime.path() + "/px4-userland";
+    return runtime.path() + "/asicen-userland";
 }
 
 bool create_private_directory(const std::string& path)
