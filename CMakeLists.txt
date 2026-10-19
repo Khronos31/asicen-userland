@@ -504,6 +504,17 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         COMMAND asicen-runtime-v1-server-tests)
     set_tests_properties(asicen-runtime-v1-server-tests PROPERTIES TIMEOUT 120)
 
+    add_executable(asicen-endpoint-discovery-tests
+        userland/tests/endpoint_discovery_tests.cpp
+        ${ASICEN_PX4_ROOT}/src/ipc.cpp
+        ${ASICEN_PX4_ROOT}/src/posix_ipc.cpp)
+    target_include_directories(asicen-endpoint-discovery-tests PRIVATE
+        userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
+        ${ASICEN_PX4_ROOT}/tests)
+    target_link_libraries(asicen-endpoint-discovery-tests PRIVATE Threads::Threads dtv::core)
+    asicen_enable_project_warnings(asicen-endpoint-discovery-tests)
+    add_test(NAME asicen-endpoint-discovery-tests COMMAND asicen-endpoint-discovery-tests)
+
     add_executable(px4-portable-tests
         ${ASICEN_PX4_CORE_SOURCES}
         ${ASICEN_PX4_ROOT}/src/card.cpp

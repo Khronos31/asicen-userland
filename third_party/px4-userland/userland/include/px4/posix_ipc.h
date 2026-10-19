@@ -50,6 +50,28 @@ struct EndpointConfig final {
     EndpointAccess access = EndpointAccess::private_user;
 };
 
+// Ordered private runtime-directory candidates for a client. A null runtime
+// origin resolves $XDG_RUNTIME_DIR first, then per-user temporary roots. The
+// existing private roots are returned; a missing root is not created here.
+struct RuntimeRootCandidates final {
+    std::array<std::array<char, kStoredPathCapacity>, 3U> paths{};
+    std::array<bool, 3U> create_if_missing{};
+    std::size_t count = 0U;
+};
+
+// Bounded list of published instance names found under one runtime directory.
+// canonical_collision marks that two entries denote the same ASCII
+// case-insensitive instance, which is not an unqualified success.
+struct RuntimeInstanceDiscovery final {
+    std::array<std::array<char, 65U>, 256U> instances{};
+    std::size_t count = 0U;
+    bool canonical_collision = false;
+};
+
+Result<RuntimeRootCandidates> client_runtime_roots() noexcept;
+Result<RuntimeInstanceDiscovery> discover_runtime_instances(
+    const char* runtime_directory, EndpointAccess access) noexcept;
+
 // Holds the serial endpoint namespace while a daemon publishes its sockets.
 // A serial-named endpoint is exclusive; custom instances of that observed
 // serial share the lease. Close the sockets before releasing this lease.

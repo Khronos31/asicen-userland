@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits>
 #include <poll.h>
@@ -497,7 +498,194 @@ void remove_owned_directory(const char* path, const NativeIdentity& identity,
     }
 }
 
+bool safe_private_runtime_root(const char* path) noexcept
+{
+    struct stat status {};
+    return path != nullptr && ::lstat(path, &status) == 0 &&
+           S_ISDIR(status.st_mode) && !S_ISLNK(status.st_mode) &&
+           status.st_uid == ::geteuid() && (status.st_mode & 07777) == 0700;
+}
+
+bool add_runtime_root(RuntimeRootCandidates& candidates, const char* path,
+                     bool create_if_missing = false) noexcept
+{
+    const std::size_t length = bounded_length(path, kStoredPathCapacity);
+    if (length == 0U || length == kStoredPathCapacity || path[0] != '/') return false;
+    std::size_t normalized = length;
+    while (normalized > 1U && path[normalized - 1U] == '/') --normalized;
+    for (std::size_t index = 0U; index < candidates.count; ++index) {
+        if (std::strlen(candidates.paths[index].data()) == normalized &&
+            std::memcmp(candidates.paths[index].data(), path, normalized) == 0)
+            return true;
+    }
+    if (candidates.count >= candidates.paths.size() || normalized >= kStoredPathCapacity)
+        return false;
+    std::memcpy(candidates.paths[candidates.count].data(), path, normalized);
+    candidates.paths[candidates.count][normalized] = '\0';
+    candidates.create_if_missing[candidates.count] = create_if_missing;
+    ++candidates.count;
+    return true;
+}
+
+// Ordered private runtime roots for a client. A null runtime origin resolves
+// $XDG_RUNTIME_DIR first, then the per-user temporary root. The existing
+// private roots are returned; a missing root is not created here.
+RuntimeRootCandidates make_runtime_root_candidates() noexcept
+{
+    RuntimeRootCandidates candidates{};
+    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
+    if (xdg != nullptr && xdg[0] != '\0') (void)add_runtime_root(candidates, xdg);
+    const char* temp = std::getenv("TMPDIR");
+    if (temp == nullptr || temp[0] != '/') temp = "/tmp";
+    char user_root[kStoredPathCapacity]{};
+    const int count = std::snprintf(
+        user_root, sizeof(user_root), "%s%s%s-%llu", temp,
+        temp[std::strlen(temp) - 1U] == '/' ? "" : "/", kProductDirectoryName,
+        static_cast<unsigned long long>(::geteuid()));
+    if (count > 0 && static_cast<std::size_t>(count) < sizeof(user_root))
+        (void)add_runtime_root(candidates, user_root);
+    return candidates;
+}
+
+// ASCII case-folded instance name used only to detect two directories that
+// denote the same instance. The published on-disk name is what is returned.
+std::array<char, 65U> canonical_instance_token(const char* name) noexcept
+{
+    std::array<char, 65U> token{};
+    std::size_t length = 0U;
+    while (length < token.size() - 1U && name[length] != '\0') {
+        char character = name[length];
+        if (character >= 'A' && character <= 'Z')
+            character = static_cast<char>(character - 'A' + 'a');
+        token[length++] = character;
+    }
+    token[length] = '\0';
+    return token;
+}
+
 }  // namespace
+
+Result<RuntimeRootCandidates> client_runtime_roots() noexcept
+{
+    const RuntimeRootCandidates candidates = make_runtime_root_candidates();
+    RuntimeRootCandidates safe{};
+    for (std::size_t index = 0U; index < candidates.count; ++index) {
+        if (safe_private_runtime_root(candidates.paths[index].data()))
+            (void)add_runtime_root(safe, candidates.paths[index].data());
+    }
+    return safe.count == 0U ?
+        Result<RuntimeRootCandidates>::failure(Error::NOT_FOUND) :
+        Result<RuntimeRootCandidates>::success(std::move(safe));
+}
+
+Result<RuntimeInstanceDiscovery> discover_runtime_instances(
+    const char* runtime_directory, EndpointAccess access) noexcept
+{
+    // A null or invalid runtime_directory is resolved by make_layout exactly
+    // once. The explicit root is never replaced with another candidate root.
+    EndpointConfig probe{runtime_directory, "probe", kControlEndpointName, access};
+    const auto probe_layout = make_layout(probe);
+    if (!probe_layout)
+        return Result<RuntimeInstanceDiscovery>::failure(probe_layout.error());
+    const Layout& layout = probe_layout.value();
+
+    const auto runtime = validate_directory(layout.runtime_directory.data(),
+                                            layout.directory_mode, layout.group_access);
+    const auto product = validate_directory(layout.product_directory.data(),
+                                            layout.directory_mode, layout.group_access);
+    if (!runtime || !product)
+        return Result<RuntimeInstanceDiscovery>::failure(
+            !runtime ? runtime.error() : product.error());
+
+    const int product_fd = ::open(layout.product_directory.data(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (product_fd < 0)
+        return Result<RuntimeInstanceDiscovery>::failure(map_errno(errno));
+    struct stat opened_product {};
+    if (::fstat(product_fd, &opened_product) != 0 ||
+        !same_identity(opened_product, product.value())) {
+        close_fd(product_fd);
+        return Result<RuntimeInstanceDiscovery>::failure(Error::BUSY);
+    }
+    DIR* directories = ::fdopendir(product_fd);
+    if (directories == nullptr) {
+        const Error error = map_errno(errno);
+        close_fd(product_fd);
+        return Result<RuntimeInstanceDiscovery>::failure(error);
+    }
+
+    RuntimeInstanceDiscovery discovery{};
+    std::array<std::array<char, 65U>, 256U> seen{};
+    std::size_t seen_count = 0U;
+    while (dirent* entry = ::readdir(directories)) {
+        if (entry->d_name[0] == '.' &&
+            (entry->d_name[1] == '\0' ||
+             (entry->d_name[1] == '.' && entry->d_name[2] == '\0')))
+            continue;
+        // Names the bounded P-compatible record cannot carry are skipped, the
+        // same way a non-canonical name is skipped by the reference layout.
+        const std::size_t name_length = bounded_length(entry->d_name, 65U);
+        if (!valid_component(entry->d_name) || name_length >= 65U) continue;
+        const std::array<char, 65U> token = canonical_instance_token(entry->d_name);
+        for (std::size_t index = 0U; index < seen_count; ++index) {
+            if (std::strcmp(seen[index].data(), token.data()) == 0) {
+                discovery.canonical_collision = true;
+                (void)::closedir(directories);
+                return Result<RuntimeInstanceDiscovery>::success(discovery);
+            }
+        }
+        if (seen_count >= seen.size()) {
+            (void)::closedir(directories);
+            return Result<RuntimeInstanceDiscovery>::failure(Error::RESOURCE_LIMIT);
+        }
+        seen[seen_count++] = token;
+
+        struct stat instance_status {};
+        if (::fstatat(::dirfd(directories), entry->d_name, &instance_status,
+                      AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno == ENOENT) continue;
+            const Error error = map_errno(errno);
+            (void)::closedir(directories);
+            return Result<RuntimeInstanceDiscovery>::failure(error);
+        }
+        if (!S_ISDIR(instance_status.st_mode) || S_ISLNK(instance_status.st_mode) ||
+            !ownership_allowed(instance_status, layout.group_access) ||
+            (instance_status.st_mode & 07777) != layout.directory_mode) {
+            (void)::closedir(directories);
+            return Result<RuntimeInstanceDiscovery>::failure(Error::INVALID_ARGUMENT);
+        }
+
+        EndpointConfig endpoint{layout.runtime_directory.data(), entry->d_name,
+                                kControlEndpointName, access};
+        const auto endpoint_layout = make_layout(endpoint);
+        if (!endpoint_layout) {
+            (void)::closedir(directories);
+            return Result<RuntimeInstanceDiscovery>::failure(endpoint_layout.error());
+        }
+        const auto socket = validate_socket_path(
+            endpoint_layout.value().endpoint_path.data(), layout.socket_mode,
+            layout.group_access);
+        if (!socket) {
+            // An instance directory without a live control endpoint is not a
+            // published endpoint and is not reported.
+            if (socket.error() == Error::NOT_FOUND) continue;
+            (void)::closedir(directories);
+            return Result<RuntimeInstanceDiscovery>::failure(socket.error());
+        }
+        if (discovery.count >= discovery.instances.size()) {
+            (void)::closedir(directories);
+            return Result<RuntimeInstanceDiscovery>::failure(Error::RESOURCE_LIMIT);
+        }
+        // The on-disk published name is returned unchanged. A canonical
+        // lowercase migration of the daemon publication is a separate change.
+        std::memcpy(discovery.instances[discovery.count].data(), entry->d_name,
+                    name_length);
+        discovery.instances[discovery.count][name_length] = '\0';
+        ++discovery.count;
+    }
+    (void)::closedir(directories);
+    return Result<RuntimeInstanceDiscovery>::success(discovery);
+}
 
 #if defined(PX4_POSIX_IPC_TEST_ACCESS)
 bool PosixIpcTestAccess::ownership_allowed(uid_t owner_uid, gid_t owner_gid,

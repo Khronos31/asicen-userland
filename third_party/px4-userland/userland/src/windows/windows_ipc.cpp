@@ -899,6 +899,124 @@ bool make_address(const std::array<wchar_t, kStoredPathCapacity>& path,
 
 }  // namespace
 
+Result<RuntimeRootCandidates> client_runtime_roots() noexcept
+{
+    const EndpointConfig endpoint{nullptr, "probe", kControlEndpointName,
+                                  EndpointAccess::private_user};
+    const auto layout = make_layout(endpoint);
+    if (!layout) return Result<RuntimeRootCandidates>::failure(layout.error());
+    const auto runtime = validate_directory(layout.value().runtime_directory, true,
+                                            SecurityPolicy::runtime_parent);
+    if (!runtime) return Result<RuntimeRootCandidates>::failure(runtime.error());
+    const int length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        layout.value().runtime_directory.data(), -1, nullptr, 0, nullptr, nullptr);
+    if (length <= 0 || static_cast<std::size_t>(length) >= kStoredPathCapacity)
+        return Result<RuntimeRootCandidates>::failure(Error::INVALID_ARGUMENT);
+    RuntimeRootCandidates roots{};
+    if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+            layout.value().runtime_directory.data(), -1, roots.paths[0].data(),
+            static_cast<int>(roots.paths[0].size()), nullptr, nullptr) != length)
+        return Result<RuntimeRootCandidates>::failure(Error::INTERNAL);
+    roots.count = 1U;
+    return Result<RuntimeRootCandidates>::success(std::move(roots));
+}
+
+Result<RuntimeInstanceDiscovery> discover_runtime_instances(
+    const char* runtime_directory, EndpointAccess access) noexcept
+{
+    if (access == EndpointAccess::shared_group)
+        return Result<RuntimeInstanceDiscovery>::failure(Error::UNSUPPORTED);
+    // A null or invalid runtime_directory is resolved by make_layout exactly
+    // once. The explicit root is never replaced with another candidate root.
+    const EndpointConfig probe{runtime_directory, "probe", kControlEndpointName,
+                               EndpointAccess::private_user};
+    const auto layout = make_layout(probe);
+    if (!layout) return Result<RuntimeInstanceDiscovery>::failure(layout.error());
+    const auto runtime = validate_directory(layout.value().runtime_directory, true,
+                                            SecurityPolicy::runtime_parent);
+    const auto product = validate_directory(layout.value().product_directory, true,
+                                            SecurityPolicy::private_user);
+    if (!runtime || !product)
+        return Result<RuntimeInstanceDiscovery>::failure(
+            !runtime ? runtime.error() : product.error());
+
+    std::array<wchar_t, kStoredPathCapacity> search_path =
+        layout.value().product_directory;
+    std::size_t search_length = std::wcslen(search_path.data());
+    if (!append_component(search_path, search_length, L"*", true))
+        return Result<RuntimeInstanceDiscovery>::failure(Error::INVALID_ARGUMENT);
+    WIN32_FIND_DATAW entry{};
+    const HANDLE search = ::FindFirstFileW(search_path.data(), &entry);
+    if (search == INVALID_HANDLE_VALUE)
+        return Result<RuntimeInstanceDiscovery>::success(RuntimeInstanceDiscovery{});
+
+    RuntimeInstanceDiscovery discovery{};
+    std::array<std::array<char, 65U>, 256U> seen{};
+    std::size_t seen_count = 0U;
+    do {
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
+            std::wcscmp(entry.cFileName, L".") == 0 ||
+            std::wcscmp(entry.cFileName, L"..") == 0)
+            continue;
+        std::array<char, 65U> name{};
+        const int converted = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+            entry.cFileName, -1, name.data(), static_cast<int>(name.size()),
+            nullptr, nullptr);
+        // Names the bounded P-compatible record cannot carry are skipped, the
+        // same way a non-canonical name is skipped by the reference layout.
+        if (converted <= 0) continue;
+        const std::size_t name_length = std::strlen(name.data());
+        if (!valid_component(name.data()) || name_length >= name.size()) continue;
+        std::array<char, 65U> token{};
+        for (std::size_t index = 0U; index < name_length; ++index) {
+            char character = name[index];
+            if (character >= 'A' && character <= 'Z')
+                character = static_cast<char>(character - 'A' + 'a');
+            token[index] = character;
+        }
+        token[name_length] = '\0';
+        for (std::size_t index = 0U; index < seen_count; ++index) {
+            if (std::strcmp(seen[index].data(), token.data()) == 0) {
+                discovery.canonical_collision = true;
+                (void)::FindClose(search);
+                return Result<RuntimeInstanceDiscovery>::success(discovery);
+            }
+        }
+        if (seen_count >= seen.size()) {
+            (void)::FindClose(search);
+            return Result<RuntimeInstanceDiscovery>::failure(Error::RESOURCE_LIMIT);
+        }
+        seen[seen_count++] = token;
+
+        EndpointConfig endpoint{runtime_directory, name.data(), kControlEndpointName,
+                                EndpointAccess::private_user};
+        const auto candidate = make_layout(endpoint);
+        if (!candidate) {
+            (void)::FindClose(search);
+            return Result<RuntimeInstanceDiscovery>::failure(candidate.error());
+        }
+        const auto instance = validate_directory(candidate.value().instance_directory,
+                                                 true, SecurityPolicy::private_user);
+        if (!instance) continue;
+        const DWORD attributes = ::GetFileAttributesW(candidate.value().endpoint_path.data());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U ||
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U ||
+            !is_af_unix_reparse_path(candidate.value().endpoint_path.data()) ||
+            !verify_existing_security(candidate.value().endpoint_path.data()))
+            continue;
+        if (discovery.count >= discovery.instances.size()) {
+            (void)::FindClose(search);
+            return Result<RuntimeInstanceDiscovery>::failure(Error::RESOURCE_LIMIT);
+        }
+        // The on-disk published name is returned unchanged. Windows resolves it
+        // case-insensitively, matching the reference discovery contract.
+        discovery.instances[discovery.count++] = name;
+    } while (::FindNextFileW(search, &entry) != 0);
+    (void)::FindClose(search);
+    return Result<RuntimeInstanceDiscovery>::success(discovery);
+}
+
 SerialEndpointLease::~SerialEndpointLease() noexcept
 {
     close();
