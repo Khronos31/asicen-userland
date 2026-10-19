@@ -30,6 +30,11 @@ bool check(bool condition, const char* message)
 int main()
 {
     bool ok = true;
+    const auto version = parse({"asicen-ts", "--version"});
+    ok &= check(version.valid && version.version && version.product_cli && !version.help,
+                "--version returns early before receiver selection");
+    ok &= check(!parse({"asicen-ts", "--version", "--receiver", "0"}).valid,
+                "--version must be a standalone option");
     const auto t13 = parse({"asicen-ts", "-d", "serial:00001205000960", "--receiver", "0",
                             "-c", "T13", "-t", "-"});
     ok &= check(t13.valid && t13.product_cli && t13.system == px4::userland::ipc::System::ISDB_T &&
