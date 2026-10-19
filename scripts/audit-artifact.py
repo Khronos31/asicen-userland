@@ -63,15 +63,19 @@ LINUX_TARGETS = {
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 LIBUSB_SHA256 = "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
 LIBUSB_COPYING_SHA256 = "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a"
-FIRMWARE_SHA256 = "b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8"
+# The shared Windows loader image that asicend verifies before any model is
+# known; scripts/extract-windows-loader-firmware.py records the same values.
+FIRMWARE_SHA256 = "5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a"
 FIRMWARE_SIZE = 16384
 FIRMWARE_MEMBER = "firmware/asicen-loader.bin"
 FIRMWARE_NOTICE_MEMBER = "licenses/VENDOR-FIRMWARE-NOTICE.txt"
 FIRMWARE_NOTICE = (
     "Vendor component: PLEX loader firmware, distributed separately from this project's license.\n"
-    "Source artifact SHA-256: 11a84eaef0157ac08c0b4128aa622a625e8914a28c59ef06e76378ee6094c5de\n"
-    "Original loader object: loader.ko, SHA-256 10ad321dd47d93f89fde556ec8683b7a8ce0fcc74cd90e4a04308592dc9719f0\n"
-    f"Extracted component: FirmBin, {FIRMWARE_SIZE} bytes, SHA-256 {FIRMWARE_SHA256}\n"
+    "Source artifact: x64 BDA loader SYS, byte-identical in PLEX W3U2 1.0.3, W3U3 1.1 and W3U3 V2 1.0 "
+    "Windows packages, 59904 bytes, SHA-256 edd9badb7588f59c6438e1ceaa0e0f3f33b2ce75667e541e51d75c45e2c485e5\n"
+    "Recovery: static decoding by scripts/extract-windows-loader-firmware.py; no vendor code is executed.\n"
+    f"Recovered component: shared Windows loader image, {FIRMWARE_SIZE} bytes, start address 0x55d6, "
+    f"SHA-256 {FIRMWARE_SHA256}\n"
     "Redistribution rights: unresolved. Inclusion reflects the user's explicit candidate-distribution choice and does not assert that rights are cleared.\n"
     "This file is not relicensed under GPL, MIT, public domain, or this project's terms.\n"
 )

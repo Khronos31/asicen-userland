@@ -192,14 +192,15 @@ mkdir "$termux_pid_dir" "$callback_pid_dir"
 PATH="$fake_bin:$PATH" FAKE_ASICEND_LOG="$log" FAKE_ASICEND_PID="$pid_file" \
     FAKE_TERMUX_PID_DIR="$termux_pid_dir" FAKE_CALLBACK_PID_DIR="$callback_pid_dir" \
     sh "$launcher" --usb-device "$usb_one" --usb-device "$usb_two" \
-    --firmware "$firmware" --model w3u3 --instance termux.one \
+    --firmware "$firmware" --instance termux.one \
     --runtime-dir "$runtime" --group --allow-lnb-power
 assert_log_line '[--fd]' 'normal argument forwarding'
 assert_log_line '[7]' 'normal first fd forwarding'
 assert_log_line '[8]' 'normal second fd forwarding'
 assert_log_line "[$firmware]" 'normal firmware forwarding'
-assert_log_line '[--model]' 'normal model option forwarding'
-assert_log_line '[w3u3]' 'normal model forwarding'
+if grep -Fx '[--model]' "$log" >/dev/null; then
+    fail_test 'normal forwarding passed a model option to asicend'
+fi
 assert_log_line '[--instance]' 'normal instance option forwarding'
 assert_log_line '[termux.one]' 'normal instance forwarding'
 assert_log_line "[$runtime]" 'normal runtime directory forwarding'
@@ -431,11 +432,11 @@ PATH="$fake_bin:$PATH" sh "$launcher" --help >/dev/null
 : > "$log"
 PATH="$fake_bin:$PATH" FAKE_ASICEND_LOG="$log" FAKE_ASICEND_PID="$pid_file" \
     FAKE_TERMUX_PID_DIR="$termux_pid_dir" \
-    sh "$launcher" --usb-device "$usb_one" --firmware "$firmware" --model s3u
-assert_equal 6 "$(head -n 1 "$log")" 'single-device argument count'
+    sh "$launcher" --usb-device "$usb_one" --firmware "$firmware"
+assert_equal 4 "$(head -n 1 "$log")" 'single-device argument count'
 assert_log_line '[--fd]' 'single-device fd option'
 assert_log_line '[7]' 'single-device fd forwarding'
-assert_log_line '[s3u]' 'single-device model forwarding'
+assert_log_line "[$firmware]" 'single-device firmware forwarding'
 if grep -Fx '[8]' "$log" >/dev/null; then
     fail_test 'single-device path opened a second device'
 fi
@@ -497,6 +498,13 @@ assert_log_line '[7]' 'runtime fd value'
 if PATH="$fake_bin:$PATH" sh "$launcher" --usb-device "$usb_one" --model w3u3 --model s3u; then
     fail_test 'duplicate model accepted'
 fi
+# asicend decides the model from the runtime USB ID; the launcher has no model option.
+for model_argv in '--model w3u3' '--model=w3u3'; do
+    # shellcheck disable=SC2086 # split the option and its value deliberately
+    if PATH="$fake_bin:$PATH" sh "$launcher" --usb-device "$usb_one" $model_argv; then
+        fail_test "model option accepted: $model_argv"
+    fi
+done
 if PATH="$fake_bin:$PATH" sh "$launcher" --help --usb-device "$usb_one"; then
     fail_test 'help combined with arguments accepted'
 fi

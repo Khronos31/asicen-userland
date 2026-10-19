@@ -8,10 +8,11 @@ usage()
 {
     printf '%s\n' \
         'usage: asicen-termux --usb-device PATH [--usb-device PATH] [--firmware PATH]' \
-        '                    [--model MODEL] [--instance TOKEN] [--runtime-dir PATH]' \
+        '                    [--instance TOKEN] [--runtime-dir PATH]' \
         '                    [--group] [--allow-lnb-power]' \
         '' \
-        'Pass --usb-device once for a single-function model or twice (primary first) for a paired model.'
+        'Pass --usb-device once for a single-function model or twice (primary first) for a paired model.' \
+        'asicend decides the model from the runtime USB ID; there is no model option.'
 }
 
 fail()
@@ -54,9 +55,6 @@ exec_asicend()
     if [ -n "${ASICEN_TERMUX_FIRMWARE-}" ]; then
         set -- "$@" --firmware "$ASICEN_TERMUX_FIRMWARE"
     fi
-    if [ -n "${ASICEN_TERMUX_MODEL-}" ]; then
-        set -- "$@" --model "$ASICEN_TERMUX_MODEL"
-    fi
     if [ -n "${ASICEN_TERMUX_INSTANCE-}" ]; then
         set -- "$@" --instance "$ASICEN_TERMUX_INSTANCE"
     fi
@@ -69,7 +67,7 @@ exec_asicend()
     if [ "${ASICEN_TERMUX_ALLOW_LNB_POWER-0}" -eq 1 ]; then
         set -- "$@" --allow-lnb-power
     fi
-    unset ASICEN_TERMUX_STAGE ASICEN_TERMUX_USB2 ASICEN_TERMUX_FIRMWARE ASICEN_TERMUX_MODEL \
+    unset ASICEN_TERMUX_STAGE ASICEN_TERMUX_USB2 ASICEN_TERMUX_FIRMWARE \
         ASICEN_TERMUX_INSTANCE \
         ASICEN_TERMUX_RUNTIME_DIR ASICEN_TERMUX_GROUP ASICEN_TERMUX_ALLOW_LNB_POWER ASICEN_TERMUX_FD1
     exec "$@"
@@ -90,7 +88,6 @@ case "$stage" in
     usb_device_1=
     usb_device_2=
     firmware=
-    model=
     instance=
     runtime_dir=
     group=0
@@ -120,13 +117,6 @@ case "$stage" in
                 firmware=$2
                 shift 2
                 ;;
-            --model)
-                [ "$#" -ge 2 ] || fail '--model requires a model'
-                [ -z "$model" ] || fail '--model must be specified once'
-                [ -n "$2" ] || fail '--model must not be empty'
-                model=$2
-                shift 2
-                ;;
             --instance)
                 [ "$#" -ge 2 ] || fail '--instance requires a token'
                 [ -z "$instance" ] || fail '--instance must be specified once'
@@ -153,7 +143,7 @@ case "$stage" in
                 ;;
             --fd|--fd=*) fail '--fd is not accepted; use --usb-device' ;;
             --usb-device=*) fail '--usb-device requires a separate path argument' ;;
-            --firmware=*|--model=*|--instance=*|--runtime-dir=*) fail 'options require separate arguments' ;;
+            --firmware=*|--instance=*|--runtime-dir=*) fail 'options require separate arguments' ;;
             *) fail "unknown argument: $1" ;;
         esac
     done
@@ -166,7 +156,6 @@ case "$stage" in
     export ASICEN_TERMUX_STAGE=1
     export ASICEN_TERMUX_USB2="$usb_device_2"
     export ASICEN_TERMUX_FIRMWARE="$firmware"
-    export ASICEN_TERMUX_MODEL="$model"
     export ASICEN_TERMUX_INSTANCE="$instance"
     export ASICEN_TERMUX_RUNTIME_DIR="$runtime_dir"
     export ASICEN_TERMUX_GROUP="$group"

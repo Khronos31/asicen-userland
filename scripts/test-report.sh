@@ -75,13 +75,15 @@ if name == "dmesg":
 
     output, calls = run({})
     assert "explicit topology/model selection" in output
-    assert not any(call[0] == "asicend" and "--usb-path" in call for call in calls)
+    assert not any(call[0] == "asicend" and "--device" in call for call in calls)
     selection = dict(ASICEN_REPORT_USB_PATH="1-2.1", ASICEN_REPORT_MODEL="w3u3")
     run(selection, 2)
     paired = dict(selection, ASICEN_REPORT_USB_PATH2="1-2.2", ASICEN_FIRMWARE=str(firmware))
     output, calls = run(paired)
-    daemon = next(call for call in calls if call[0] == "asicend" and "--usb-path" in call)
-    assert daemon.count("--usb-path") == 2
+    daemon = next(call for call in calls if call[0] == "asicend" and "--device" in call)
+    assert daemon.count("--device") == 1
+    assert daemon[daemon.index("--device") + 1] == "usb:1-2.1,1-2.2"
+    assert "--usb-path" not in daemon and "--model" not in daemon
     assert daemon[daemon.index("--firmware") + 1] == str(firmware)
     assert daemon[daemon.index("--instance") + 1] == "report"
     runtime = Path(daemon[daemon.index("--runtime-dir") + 1])
@@ -93,12 +95,21 @@ if name == "dmesg":
     assert len(captures) == 2
     assert [call[call.index("--receiver") + 1] for call in captures] == ["1", "0"]
     assert captures[1][captures[1].index("--lnb-voltage") + 1] == "0"
+    for call, system, freq in ((captures[0], "isdb-t", "527143000"),
+                               (captures[1], "isdb-s", "1318000000")):
+        assert call[call.index("--system") + 1] == system
+        assert call[call.index("--freq") + 1] == freq
+        assert call[call.index("--time") + 1] == "5"
+        assert "--frequency-khz" not in call and "--duration-seconds" not in call
+    assert captures[1][captures[1].index("--slot") + 1] == "0"
     output, calls = run(dict(paired, ASICEN_REPORT_TUNE="0"))
     assert not any(call[0] == "asicen-ts" for call in calls)
     output, calls = run(dict(ASICEN_REPORT_USB_PATH="1-2.1", ASICEN_REPORT_MODEL="s3u"))
     captures = [call for call in calls if call[0] == "asicen-ts"]
     assert [call[call.index("--receiver") + 1] for call in captures] == ["0", "0"]
     assert all("--firmware" not in call for call in calls if call[0] == "asicend")
+    daemon = next(call for call in calls if call[0] == "asicend" and "--device" in call)
+    assert daemon[daemon.index("--device") + 1] == "usb:1-2.1" and "--model" not in daemon
     output, calls = run(dict(paired, REPORT_TEST_FAIL_DAEMON="1"))
     assert "ready=0" in output and "synthetic daemon failure" in output
     assert not any(call[0] == "asicenctl" for call in calls)
@@ -109,7 +120,7 @@ if name == "dmesg":
     long_root = root / ("long-" + "x" * 100)
     long_root.mkdir()
     output, calls = run(dict(paired, TMPDIR=str(long_root)))
-    daemon = next(call for call in calls if call[0] == "asicend" and "--usb-path" in call)
+    daemon = next(call for call in calls if call[0] == "asicend" and "--device" in call)
     runtime = Path(daemon[daemon.index("--runtime-dir") + 1])
     assert len(os.fsencode(runtime)) <= 64 and not runtime.exists()
     assert not list(long_root.iterdir()), "long TMPDIR report directory leaked"

@@ -172,9 +172,11 @@ if [ "$(printf '%s' "$runtime" | LC_ALL=C wc -c)" -gt 64 ]; then
 fi
 chmod 700 "$runtime"
 log=$runtime/asicend.log
-set -- "$asicend" --usb-path "$usb_path"
-if [ -n "$usb_path2" ]; then set -- "$@" --usb-path "$usb_path2"; fi
-set -- "$@" --model "$model" --instance "$instance" --runtime-dir "$runtime"
+# asicend decides the model from the runtime USB ID. The report keeps its
+# model hint only to choose receivers below.
+device=usb:$usb_path
+if [ -n "$usb_path2" ]; then device=$device,$usb_path2; fi
+set -- "$asicend" --device "$device" --instance "$instance" --runtime-dir "$runtime"
 if [ -n "$firmware" ]; then set -- "$@" --firmware "$firmware"; fi
 "$@" >"$log" 2>&1 &
 asicend_pid=$!
@@ -202,14 +204,14 @@ if [ "$ready" -eq 1 ]; then
     "$asicenctl" --instance "$instance" --runtime-dir "$runtime" card-status || true
     "$asicenctl" --instance "$instance" --runtime-dir "$runtime" card-atr || true
     if [ -n "$asicents" ] && [ "${ASICEN_REPORT_TUNE:-1}" != 0 ]; then
-        note "--- terrestrial receiver $terrestrial_receiver, 5s, 527143 kHz ---"
+        note "--- terrestrial receiver $terrestrial_receiver, 5s, 527143000 Hz ---"
         "$asicents" --instance "$instance" --runtime-dir "$runtime" \
-            --receiver "$terrestrial_receiver" --system isdb-t --frequency-khz 527143 \
-            --duration-seconds 5 --output /dev/null || true
-        note '--- satellite receiver 0, 5s, 1318000 kHz, slot 0, LNB 0V ---'
+            --receiver "$terrestrial_receiver" --system isdb-t --freq 527143000 \
+            --time 5 --output /dev/null || true
+        note '--- satellite receiver 0, 5s, 1318000000 Hz, slot 0, LNB 0V ---'
         "$asicents" --instance "$instance" --runtime-dir "$runtime" \
-            --receiver 0 --system isdb-s --frequency-khz 1318000 \
-            --slot 0 --lnb-voltage 0 --duration-seconds 5 --output /dev/null || true
+            --receiver 0 --system isdb-s --freq 1318000000 \
+            --slot 0 --lnb-voltage 0 --time 5 --output /dev/null || true
         note '--- asicenctl status after tune ---'
         "$asicenctl" --instance "$instance" --runtime-dir "$runtime" status || true
     fi

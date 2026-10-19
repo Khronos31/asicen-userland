@@ -12,9 +12,10 @@ Type=simple
 User=asicend
 Group=pcscd
 SupplementaryGroups=video
-# ASICEN has no USB serial. A root-owned instance file supplies one or two
-# topology selectors plus --model (required when a loader image is supplied).
-# Example: ASICEN_DEVICE_ARGUMENTS="--usb-path 1-2.1 --usb-path 1-2.2 --model w3u3"
+# ASICEN has no USB serial. A root-owned instance file supplies the enclosure's
+# USB positions: one for a single-function model, its .1 and .2 functions for a
+# dual-function model. asicend decides the model from the runtime USB ID.
+# Example: ASICEN_DEVICE_ARGUMENTS="--device usb:1-2.1,1-2.2"
 EnvironmentFile=/etc/asicen-userland/%i.conf
 ExecStart=/opt/asicen-userland/asicend $ASICEN_DEVICE_ARGUMENTS --instance %i --firmware /opt/asicen-userland/firmware/asicen-loader.bin --runtime-dir /run/asicen-userland --group
 # Hardware absence and firmware errors require an explicit operator recovery;

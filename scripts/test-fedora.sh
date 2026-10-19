@@ -62,6 +62,11 @@ grep -F 'EnvironmentFile=/etc/asicen-userland/%i.conf' "$unit" >/dev/null
 grep -F 'asicend $ASICEN_DEVICE_ARGUMENTS --instance %i' "$unit" >/dev/null
 grep -F -- '--firmware /opt/asicen-userland/firmware/asicen-loader.bin' "$unit" >/dev/null
 grep -F -- '--runtime-dir /run/asicen-userland --group' "$unit" >/dev/null
+grep -F 'ASICEN_DEVICE_ARGUMENTS="--device usb:1-2.1,1-2.2"' "$unit" >/dev/null
+if grep -E -- '--usb-path|--model' "$unit" >/dev/null; then
+    printf '%s\n' 'systemd unit must use the canonical --device selector without a model' >&2
+    exit 1
+fi
 # SocketListener validates the explicit runtime base as daemon-owned with mode
 # 0750.  The daemon then appends asicen-userland/<instance>, so this unit's actual
 # socket hierarchy is /run/asicen-userland/asicen-userland/<instance>/.  Keep the
