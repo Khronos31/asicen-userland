@@ -45,6 +45,7 @@ Px4TsChannel parse_px4_ts_channel(std::string_view text) noexcept;
 struct Px4TsArguments final {
     bool valid = false;
     bool help = false;
+    bool version = false;
     bool product_cli = false;
     bool group = false;
     std::string device;
