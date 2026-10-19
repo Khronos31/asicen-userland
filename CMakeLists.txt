@@ -408,7 +408,7 @@ if(UNIX OR WIN32)
     add_executable(asicend
         userland/tools/asicend.cpp
         ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp)
-    target_link_libraries(asicend PRIVATE asicen_core asicen_portable_core dtv::identity Threads::Threads)
+    target_link_libraries(asicend PRIVATE asicen_core asicen_portable_core dtv::identity dtv::json Threads::Threads)
     target_include_directories(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools)
     if(WIN32)
         target_sources(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools/px4d_windows_stdin.cpp)
