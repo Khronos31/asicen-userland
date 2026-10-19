@@ -29,6 +29,7 @@ namespace asicen::cli {
 struct DaemonArguments final {
     bool valid = false;
     bool help = false;
+    bool version = false;
     bool list = false;
     bool list_json = false;
     bool models = false;
@@ -260,6 +261,12 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             if (argc != 2) return invalid("--help cannot be combined");
             result.valid = true;
             result.help = true;
+            return result;
+        }
+        if (option == "--version") {
+            if (argc != 2) return invalid("--version cannot be combined");
+            result.valid = true;
+            result.version = true;
             return result;
         }
         if (option == "--list") {
