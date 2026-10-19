@@ -443,6 +443,12 @@ Px4TsArguments parse_px4_ts_product_arguments(int argc,
             result.help = true;
             return result;
         }
+        if (option == "--version") {
+            if (argc != 2) return invalid("--version cannot be combined");
+            result.valid = true;
+            result.version = true;
+            return result;
+        }
         if (option == "--group") {
             if (result.group) return invalid("duplicate --group");
             result.group = true;
@@ -591,7 +597,8 @@ void print_px4_ts_usage(void* output) noexcept
                  "  -d, --device serial:...|usb:... [--instance TOKEN]\n"
                  "      --receiver 0..7 --runtime-dir PATH --group\n"
                  "      --packet-count N --lnb-voltage 0|15 --tune-timeout-ms N\n"
-                 "  -h, --help\n");
+                 "  -h, --help\n"
+                 "      --version\n");
 }
 
 int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
