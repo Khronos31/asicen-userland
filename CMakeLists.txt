@@ -591,11 +591,16 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
             add_executable(px4-pcsc-ifd-tests
                 third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp
                 third_party/px4-userland/userland/src/pcsc_ifd.cpp
+                userland/src/control_context_builder.cpp
+                userland/src/device_profile.cpp
                 third_party/px4-userland/userland/tests/pcsc_ifd_tests.cpp)
             target_include_directories(px4-pcsc-ifd-tests PRIVATE
                 third_party/px4-userland/userland/include
                 third_party/px4-userland/userland/tests
+                userland/include
                 ${ASICEN_PCSC_IFD_INCLUDE_DIR})
+            target_compile_definitions(px4-pcsc-ifd-tests PRIVATE
+                ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
             target_link_libraries(px4-pcsc-ifd-tests PRIVATE
                 px4_portable_reference Threads::Threads)
             asicen_enable_project_warnings(px4-pcsc-ifd-tests)
