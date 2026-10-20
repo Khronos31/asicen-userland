@@ -4,6 +4,7 @@
 #include "px4/posix_tuner_nonce.h"
 #include "px4/tuner_service.h"
 #include "asicen/product_profile.h"
+#include "asicen/control_context_builder.h"
 #include "test_temp_directory.h"
 
 #include <array>
@@ -172,8 +173,12 @@ int main()
     CardService card(card_backend, card_session);
     TunerService tuner_service(tuner_backend, nonce, time, nullptr, nullptr, &stream);
     const EndpointConfig endpoint{root.c_str(), "hooks", kControlEndpointName};
-    auto server = PosixControlServer::create(endpoint, card, tuner_service, {}, true,
-                                              0x03U, &stream, 4U, false);
+    ControlContext context{};
+    const auto epoch = nonce.generate();
+    const auto* profile = asicen::find_profile(asicen::ModelId::W3u3);
+    if (!epoch || profile == nullptr || !asicen::build_asicen_mock_control_context(
+            *profile, tuner_service, endpoint.instance, epoch.value(), context)) return 2;
+    auto server = PosixControlServer::create(endpoint, card, tuner_service, context, &stream);
     if (!server) {
         std::filesystem::remove_all(root);
         return 2;

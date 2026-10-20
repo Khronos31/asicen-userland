@@ -827,7 +827,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         userland/tests/hardware_ipc_integration_tests.cpp)
     target_include_directories(asicen-hardware-ipc-integration-tests PRIVATE
         userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tests)
-    target_link_libraries(asicen-hardware-ipc-integration-tests PRIVATE asicen_hardware_session asicen_px4_mock)
+    target_link_libraries(asicen-hardware-ipc-integration-tests PRIVATE asicen_core asicen_hardware_session asicen_px4_mock)
     asicen_enable_project_warnings(asicen-hardware-ipc-integration-tests)
     add_test(NAME asicen-hardware-ipc-integration-tests
         COMMAND asicen-hardware-ipc-integration-tests)
@@ -872,7 +872,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         userland/tests/product_shutdown_hooks_tests.cpp)
     target_include_directories(asicen-product-shutdown-tests PRIVATE
         userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tests)
-    target_link_libraries(asicen-product-shutdown-tests PRIVATE asicen_px4_mock)
+    target_link_libraries(asicen-product-shutdown-tests PRIVATE asicen_core asicen_px4_mock)
     asicen_enable_project_warnings(asicen-product-shutdown-tests)
     add_test(NAME asicen-product-shutdown-tests COMMAND asicen-product-shutdown-tests)
     set_tests_properties(asicen-product-shutdown-tests PROPERTIES TIMEOUT 10)
@@ -881,7 +881,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         userland/tests/product_worker_routing_tests.cpp)
     target_include_directories(asicen-product-worker-routing-tests PRIVATE
         userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tests)
-    target_link_libraries(asicen-product-worker-routing-tests PRIVATE asicen_px4_mock)
+    target_link_libraries(asicen-product-worker-routing-tests PRIVATE asicen_core asicen_px4_mock)
     asicen_enable_project_warnings(asicen-product-worker-routing-tests)
     add_test(NAME asicen-product-worker-routing-tests
         COMMAND asicen-product-worker-routing-tests)

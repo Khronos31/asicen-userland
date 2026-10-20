@@ -4,6 +4,7 @@
 #include "test_temp_directory.h"
 #include "px4/control_client.h"
 #include "asicen/product_profile.h"
+#include "asicen/control_context_builder.h"
 #include "px4/card_service.h"
 #include "px4/posix_ipc.h"
 #include "px4/control_server.h"
@@ -38,9 +39,10 @@ using namespace px4::userland::pcsc;
         }                                                                                          \
     } while (false)
 
-class SingleFrame final : public FrameConsumer {
+namespace wire = dtv::userland::wire;
+class SingleFrame final : public wire::FrameHandler {
 public:
-    Result<void> on_frame(const FrameView& frame) noexcept override
+    Result<void> on_frame(const wire::Frame& frame) noexcept override
     {
         header = frame.header;
         if (frame.payload.size > payload.size()) {
@@ -51,37 +53,42 @@ public:
         received = true;
         return Result<void>::success();
     }
-    FrameHeader header{};
-    std::array<std::uint8_t, kMaxControlPayload> payload{};
+    wire::Header header{};
+    std::array<std::uint8_t, wire::kMaxControlPayload> payload{};
     std::size_t payload_size = 0U;
     bool received = false;
 };
 
-Result<void> send_raw_request(SocketStream& stream, MessageType type, std::uint32_t request_id,
+Result<void> send_raw_request(SocketStream& stream, std::uint16_t opcode, std::uint32_t request_id,
                               ByteView payload)
 {
-    std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> frame{};
+    std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxControlPayload> frame{};
+    wire::Header header{};
+    header.kind = wire::Kind::request;
+    header.opcode = opcode;
+    header.request_id = request_id;
+    header.payload_length = static_cast<std::uint32_t>(payload.size);
     const auto encoded =
-        encode_frame(FrameHeader{kProtocolMajor, kProtocolMinor, type, MessageKind::request,
-                                 request_id, static_cast<std::uint32_t>(payload.size)},
+        wire::encode_frame(header,
                      payload, MutableByteView{frame.data(), frame.size()});
     if (!encoded) {
         return Result<void>::failure(encoded.error());
     }
-    return stream.write_frame(ByteView{frame.data(), encoded.value()}, Timeout{2000U});
+    return stream.write_all(ByteView{frame.data(), encoded.value()}, Timeout{2000U});
 }
 
-Result<void> read_one_raw_response(SocketStream& stream, StreamFramer& framer,
+Result<void> read_one_raw_response(SocketStream& stream, wire::FrameReceiver& framer,
                                    SingleFrame& response)
 {
     std::array<std::uint8_t, 8192U> read_buffer{};
     for (unsigned attempt = 0U; attempt < 20U && !response.received; ++attempt) {
-        const auto read =
-            stream.read_frames(MutableByteView{read_buffer.data(), read_buffer.size()}, framer,
-                               response, Timeout{100U});
+        const auto read = stream.read_some(
+            MutableByteView{read_buffer.data(), read_buffer.size()}, Timeout{100U});
         if (!read) {
             return Result<void>::failure(read.error());
         }
+        const auto decoded = framer.feed(ByteView{read_buffer.data(), read.value()}, response);
+        if (!decoded) return Result<void>::failure(decoded.error());
     }
     return response.received ? Result<void>::success() : Result<void>::failure(Error::TIMEOUT);
 }
@@ -403,9 +410,18 @@ bool test_card_service_through_product_ifd()
     TestTime time;
     TunerService tuner(tuner_backend, nonce, time);
     const EndpointConfig endpoint{directory, "card-test", kControlEndpointName};
-    auto created = PosixControlServer::create(endpoint, card, tuner, {}, true,
-                                              asicen::profile::kUsbPresentMask, nullptr,
-                                              asicen::profile::kReceiverCount, false);
+    ControlContext context{};
+    const auto epoch = nonce.generate();
+    const auto* profile = asicen::find_profile(asicen::ModelId::W3u3);
+    std::array<asicen::ClaimedUsbFunctionObservation, 2U> observations{};
+    CHECK(epoch && profile != nullptr);
+    for (auto& observed : observations) {
+        observed.vendor_id = profile->vid;
+        observed.product_id = profile->pid;
+    }
+    CHECK(asicen::build_asicen_control_context(*profile, observations.data(), 2U, 2U,
+        tuner, endpoint.instance, epoch.value(), context, false));
+    auto created = PosixControlServer::create(endpoint, card, tuner, context);
     CHECK(created);
     auto server = std::move(created.value());
     std::atomic<bool> done{false};
@@ -454,36 +470,45 @@ bool test_card_service_through_product_ifd()
     CHECK(response_length == 61U && response[59] == 0x90U && response[60] == 0x00U);
     CHECK(observed_session.transmit_timeout == 15000U);
 
-    // Exercise the actual IPC route: card-only mode rejects tuner access
-    // before any operation reaches receiver hardware.
+    // Card-only LIST publishes no receivers: ACQUIRE of receiver 1 is
+    // NOT_FOUND, before any operation reaches receiver hardware.
     auto raw_result = SocketStream::connect(endpoint, Timeout{2000U});
     CHECK(raw_result);
     auto raw = std::move(raw_result.value());
     std::array<std::uint8_t, kMaxControlPayload> hello_bytes{};
+    wire::HelloRequest hello_request{};
+    hello_request.min = wire::Version{1U, 0U};
+    hello_request.max = wire::Version{1U, 0U};
     const auto hello_size =
-        encode_payload(HelloRequestPayload{kProtocolMajor, kProtocolMinor, kProtocolMajor,
-                                           kProtocolMinor, kCapabilityCard},
+        wire::encode_hello_request(hello_request,
                        MutableByteView{hello_bytes.data(), hello_bytes.size()});
-    CHECK(hello_size && send_raw_request(raw, MessageType::HELLO, 1U,
+    CHECK(hello_size && send_raw_request(raw, wire::kOpcodeHello, 1U,
                                          ByteView{hello_bytes.data(), hello_size.value()}));
-    std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> frame_storage{};
-    StreamFramer framer(MutableByteView{frame_storage.data(), frame_storage.size()});
+    std::array<std::uint8_t, wire::kMaxControlPayload> frame_storage{};
+    wire::FrameReceiver framer(MutableByteView{frame_storage.data(), frame_storage.size()});
     SingleFrame hello_response;
     CHECK(read_one_raw_response(raw, framer, hello_response));
-    CHECK(hello_response.header.kind == MessageKind::response &&
-          hello_response.header.type == MessageType::HELLO);
+    CHECK(hello_response.header.kind == wire::Kind::response &&
+          hello_response.header.opcode == wire::kOpcodeHello);
+    const auto hello = wire::decode_hello_response(
+        ByteView{hello_response.payload.data(), hello_response.payload_size});
+    CHECK(hello);
     std::array<std::uint8_t, kMaxControlPayload> acquire_bytes{};
-    const auto acquire_size = encode_payload(
-        AcquireRequestPayload{1U}, MutableByteView{acquire_bytes.data(), acquire_bytes.size()});
+    wire::AcquireRequest acquire{};
+    acquire.epoch = hello.value().epoch;
+    acquire.receiver_id = 1U;
+    const auto acquire_size = wire::encode_acquire_request(
+        acquire, MutableByteView{acquire_bytes.data(), acquire_bytes.size()});
     CHECK(acquire_size);
-    CHECK(send_raw_request(raw, MessageType::ACQUIRE, 2U,
+    CHECK(send_raw_request(raw, wire::kOpcodeAcquire, 2U,
                            ByteView{acquire_bytes.data(), acquire_size.value()}));
     SingleFrame unsupported;
     CHECK(read_one_raw_response(raw, framer, unsupported));
-    CHECK(unsupported.header.kind == MessageKind::error_response);
-    const auto unsupported_error = decode_error_response_payload(
+    CHECK(unsupported.header.kind == wire::Kind::error_response);
+    const auto unsupported_error = wire::decode_error_response(
         ByteView{unsupported.payload.data(), unsupported.payload_size});
-    CHECK(unsupported_error && unsupported_error.value().error_code == ErrorCode::UNSUPPORTED);
+    CHECK(unsupported_error && unsupported_error.value().error.code ==
+        static_cast<std::uint32_t>(Error::NOT_FOUND));
     raw.close();
 
     CHECK(ifd.close_channel(0U) == IfdResult::success);

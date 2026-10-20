@@ -598,7 +598,11 @@ void print_px4_ts_usage(void* output) noexcept
     FILE* file = static_cast<FILE*>(output);
     if (file == nullptr) return;
     std::fprintf(file,
+#if defined(ASICEN_PRODUCT_CLI)
+                 "usage: asicen-ts (-d|--device SELECTOR [--instance TOKEN] | --instance TOKEN) --receiver 0..7 "
+#else
                  "usage: px4-ts (-d|--device SELECTOR [--instance TOKEN] | --instance TOKEN) --receiver 0..7 "
+#endif
                  "(-c|--channel CH | -f|--freq HZ -s|--system isdb-t|isdb-s) [options]\n"
                  "  -c, --channel CH              (T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>)\n"
                  "  -f, --freq HZ                 (unsigned decimal Hz)\n"

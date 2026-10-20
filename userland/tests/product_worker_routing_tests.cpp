@@ -4,6 +4,8 @@
 #include "px4/control_server.h"
 #include "px4/posix_tuner_nonce.h"
 #include "asicen/product_profile.h"
+#include "asicen/control_context_builder.h"
+#include "test_wire_client.h"
 #include "test_temp_directory.h"
 
 #include <array>
@@ -93,15 +95,14 @@ public:
     void sleep_ms(std::uint32_t) noexcept override {}
 };
 
-bool acquire(PosixControlClient& client, std::uint8_t receiver,
+bool acquire(asicen::test::WireClient& client, std::uint8_t receiver,
              std::atomic<bool>& completed, bool& success)
 {
-    std::array<std::uint8_t, kMaxControlPayload> payload{};
-    const auto encoded = encode_payload(AcquireRequestPayload{receiver},
-                                        MutableByteView{payload.data(), payload.size()});
-    if (!encoded) return false;
-    auto response = client.request(MessageType::ACQUIRE,
-        ByteView{payload.data(), encoded.value()}, Timeout{2000U});
+    namespace wire = dtv::userland::wire;
+    wire::AcquireRequest request{};
+    request.epoch = client.epoch;
+    request.receiver_id = receiver;
+    auto response = client.request(wire::kOpcodeAcquire, request, wire::encode_acquire_request);
     success = static_cast<bool>(response);
     completed.store(true);
     return true;
@@ -130,17 +131,21 @@ int main()
     Time time;
     TunerService tuner(backend, nonce, time);
     const EndpointConfig endpoint{root.c_str(), "routing", kControlEndpointName};
-    auto server_result = PosixControlServer::create(endpoint, card, tuner, {}, true,
-                                                     0x03U, nullptr, 4U, false);
+    ControlContext context{};
+    const auto epoch = nonce.generate();
+    const auto* profile = asicen::find_profile(asicen::ModelId::W3u3);
+    if (!epoch || profile == nullptr || !asicen::build_asicen_mock_control_context(
+            *profile, tuner, endpoint.instance, epoch.value(), context)) return 2;
+    auto server_result = PosixControlServer::create(endpoint, card, tuner, context);
     if (!server_result) return 2;
     auto server = std::move(server_result.value());
     std::atomic<bool> polling{true};
     std::thread poller([&] {
         while (polling.load()) (void)server->poll_once(Timeout{20U});
     });
-    auto zero_result = PosixControlClient::connect(endpoint, 0U, Timeout{2000U});
-    auto one_result = PosixControlClient::connect(endpoint, 0U, Timeout{2000U});
-    auto two_result = PosixControlClient::connect(endpoint, 0U, Timeout{2000U});
+    auto zero_result = asicen::test::WireClient::connect(endpoint);
+    auto one_result = asicen::test::WireClient::connect(endpoint);
+    auto two_result = asicen::test::WireClient::connect(endpoint);
     if (!zero_result || !one_result || !two_result) {
         backend.request_stop();
         polling.store(false);
@@ -148,9 +153,9 @@ int main()
         (void)server->shutdown();
         return 3;
     }
-    auto zero = std::move(zero_result.value());
-    auto one = std::move(one_result.value());
-    auto two = std::move(two_result.value());
+    auto zero = std::move(zero_result);
+    auto one = std::move(one_result);
+    auto two = std::move(two_result);
     std::atomic<bool> zero_done{false}, one_done{false}, two_done{false};
     bool zero_ok = false, one_ok = false, two_ok = false;
     std::thread zero_request([&] { (void)acquire(*zero, 0U, zero_done, zero_ok); });

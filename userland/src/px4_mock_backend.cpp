@@ -92,6 +92,44 @@ Result<void> MockTunerBackend::tune_satellite(std::uint8_t receiver, std::uint32
     return available(stopping_);
 }
 
+TunerStrictProfile MockTunerBackend::strict_profile(std::uint8_t receiver,
+                                                   ipc::System system) const noexcept
+{
+    if (!receiver_supports(receiver, system)) return {};
+    TunerStrictProfile result{};
+    result.native_hz = true;
+    result.min_hz = system == ipc::System::ISDB_T ? 40000000ULL : 146875000ULL;
+    result.max_hz = system == ipc::System::ISDB_T ? 1002000000ULL : 2350000000ULL;
+    if (system == ipc::System::ISDB_S) {
+        result.lnb_voltage_mask = allow_lnb_power_ ? 3U : 1U;
+        result.slot_count = 8U;
+    }
+    return result;
+}
+
+Result<TunerHzProgramming> MockTunerBackend::tune_terrestrial_hz(
+    std::uint8_t receiver, std::uint64_t hz, std::uint32_t timeout_ms) noexcept
+{
+    if (!receiver_supports(receiver, ipc::System::ISDB_T) || hz < 40000000ULL ||
+        hz > 1002000000ULL || timeout_ms < 100U)
+        return Result<TunerHzProgramming>::failure(Error::INVALID_ARGUMENT);
+    const auto ready = available(stopping_);
+    if (!ready) return Result<TunerHzProgramming>::failure(ready.error());
+    // Synthetic exact-Hz programming; this is not measured RF evidence.
+    return Result<TunerHzProgramming>::success({});
+}
+
+Result<TunerHzProgramming> MockTunerBackend::tune_satellite_hz(
+    std::uint8_t receiver, std::uint64_t hz, std::uint32_t timeout_ms) noexcept
+{
+    if (!receiver_supports(receiver, ipc::System::ISDB_S) || hz < 146875000ULL ||
+        hz > 2350000000ULL || timeout_ms < 100U)
+        return Result<TunerHzProgramming>::failure(Error::INVALID_ARGUMENT);
+    const auto ready = available(stopping_);
+    if (!ready) return Result<TunerHzProgramming>::failure(ready.error());
+    return Result<TunerHzProgramming>::success({});
+}
+
 Result<bool> MockTunerBackend::is_locked(std::uint8_t receiver, ipc::System system) noexcept
 {
     if (!receiver_supports(receiver, system)) {

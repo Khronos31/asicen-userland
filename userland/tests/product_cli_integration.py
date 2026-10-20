@@ -3,6 +3,7 @@
 """Process-level acceptance for the ASICEN mock-only command profile."""
 
 import os
+import json
 import signal
 import socket
 import subprocess
@@ -106,7 +107,7 @@ with temporary_runtime_root() as temp:
         listing = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                       instance, "list", capture_output=True, text=True)
         assert listing.returncode == 0, listing.stderr
-        assert listing.stdout.startswith("serial= "), listing.stdout
+        assert listing.stdout.startswith("serial=unknown ready=ready "), listing.stdout
         assert "backend=mock-only" not in listing.stdout, listing.stdout
         expected = ["receiver=0 device=1 local=0 system=ISDB-S",
                     "receiver=1 device=1 local=1 system=ISDB-T",
@@ -116,13 +117,18 @@ with temporary_runtime_root() as temp:
 
         status = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                      instance, "status", capture_output=True, text=True)
-        assert status.returncode == 3 and "UNSUPPORTED" in status.stderr
+        assert status.returncode == 0, status.stderr
+        status_json = json.loads(status.stdout)
+        assert status_json["schema"] == {"name": "userland.status", "major": 1, "minor": 0}
+        assert [r["descriptor"]["id"] for r in status_json["receivers"]] == ["0", "1", "2", "3"]
+        assert all(r["state"] == "free" and r["leased"] is False
+                   for r in status_json["receivers"]), status.stdout
         no_daemon = run(str(CTL), "--runtime-dir", str(root / "missing"),
                         "--instance", instance, "list", capture_output=True, text=True)
-        assert no_daemon.returncode == 3 and "NOT_FOUND" in no_daemon.stderr
+        assert no_daemon.returncode == 3 and "connect failed (3)" in no_daemon.stderr, no_daemon.stderr
         card = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                    instance, "card-status", capture_output=True, text=True)
-        assert card.returncode == 3 and "UNSUPPORTED" in card.stderr
+        assert card.returncode == 3 and "card-status failed (11)" in card.stderr, card.stderr
         unsupported = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                           instance, "card-atr", capture_output=True, text=True)
         assert unsupported.returncode == 3, (unsupported.returncode, unsupported.stderr)
@@ -183,7 +189,7 @@ with temporary_runtime_root() as temp:
         assert endpoint.is_socket(), "rejected legacy selector unlinked product endpoint"
         still_live = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                          instance, "list", capture_output=True, text=True)
-        assert still_live.returncode == 0 and still_live.stdout.startswith("serial= ")
+        assert still_live.returncode == 0 and still_live.stdout.startswith("serial=unknown ready=ready ")
 
         # Closing a stream consumer must not wedge either client or daemon.
         consumer = subprocess.Popen(

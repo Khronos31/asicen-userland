@@ -33,7 +33,7 @@ bool build_asicen_control_context(
         profile.expected_runtime_functions == 0U ||
         profile.expected_runtime_functions > wire::kMaxFunctions ||
         function_count != profile.expected_runtime_functions ||
-        receiver_count != (profile.combined_isdb_ts ? 1U : 2U) ||
+        receiver_count == 0U || receiver_count > profile.enclosure_receiver_count ||
         receiver_count > wire::kMaxPublicReceivers ||
         (tuner_enabled && tuner.receiver_count() < receiver_count)) return false;
 
@@ -117,8 +117,8 @@ bool build_asicen_control_context(
                                                           (satellite ? 2U : 0U));
         if (receiver.systems.mask == 0U) return false;
         receiver.binding.present = true;
-        receiver.binding.value.function_id = 0U;
-        receiver.binding.value.local_id = i;
+        receiver.binding.value.function_id = i / 2U;
+        receiver.binding.value.local_id = i % 2U;
         receiver.capabilities.ts_scope = wire::TsScope::multiplex;
         if (satellite) {
             const auto strict = tuner.strict_profile(i, px4::userland::ipc::System::ISDB_S);
@@ -151,7 +151,7 @@ bool build_asicen_mock_control_context(
         observations[i].vendor_id = profile.vid;
         observations[i].product_id = profile.pid;
     }
-    const std::uint8_t receivers = profile.combined_isdb_ts ? 1U : 2U;
+    const std::uint8_t receivers = tuner.receiver_count();
     return build_asicen_control_context(profile, observations.data(),
         profile.expected_runtime_functions, receivers, tuner, instance, epoch, out);
 }
