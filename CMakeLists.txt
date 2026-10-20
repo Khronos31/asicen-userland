@@ -208,7 +208,20 @@ else()
     set(DTV_USERLAND_BUILD_WINDOWS_WINSCARD OFF CACHE BOOL
         "Build the optional GPL Windows WinSCard adapter" FORCE)
 endif()
-asicen_add_dtv_userland_core()
+set(_dtv_userland_core_requirements
+    REQUIRE_CONTROL
+    REQUIRE_HOST_CTL
+    REQUIRE_HOST_DAEMON
+    REQUIRE_HOST_FACADE)
+if(UNIX OR WIN32)
+    list(APPEND _dtv_userland_core_requirements
+        REQUIRE_HOST_RUNTIME
+        REQUIRE_HOST_TS)
+endif()
+if(WIN32 AND ASICEN_BUILD_WINSCARD)
+    list(APPEND _dtv_userland_core_requirements REQUIRE_WINDOWS_WINSCARD)
+endif()
+asicen_add_dtv_userland_core(${_dtv_userland_core_requirements})
 
 get_target_property(_host_daemon_target_source_dir dtv_userland_host_daemon SOURCE_DIR)
 set(ASICEN_HOST_DAEMON_INCLUDE_DIR
@@ -639,7 +652,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_POSIX_IPC_TEST_ACCESS=1
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity dtv::host_ts)
+    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity dtv::host_ts dtv::control dtv::tuning)
     asicen_enable_project_warnings(px4-portable-tests)
     add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
 

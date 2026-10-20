@@ -46,6 +46,9 @@ function(asicen_dtv_userland_core_revision out_var)
 endfunction()
 
 function(asicen_add_dtv_userland_core)
+    cmake_parse_arguments(ARG
+        "REQUIRE_CONTROL;REQUIRE_HOST_CTL;REQUIRE_HOST_RUNTIME;REQUIRE_HOST_TS;REQUIRE_HOST_DAEMON;REQUIRE_HOST_FACADE;REQUIRE_WINDOWS_WINSCARD"
+        "" "" ${ARGN})
     set(_bundled "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dtv-userland-core")
 
     if(DTV_USERLAND_CORE_SOURCE_DIR)
@@ -123,13 +126,36 @@ function(asicen_add_dtv_userland_core)
             "dtv-userland-core did not define the dtv::card target; "
             "the pinned commit predates the card ownership engine")
     endif()
-    if(NOT TARGET dtv::control)
+    if(ARG_REQUIRE_CONTROL AND NOT TARGET dtv::control)
         message(FATAL_ERROR
             "dtv-userland-core did not define the dtv::control target; "
             "the pinned commit predates the control connection")
     endif()
-    if(NOT TARGET dtv::host_ctl)
+    if(ARG_REQUIRE_HOST_CTL AND NOT TARGET dtv::host_ctl)
         message(FATAL_ERROR
             "dtv-userland-core did not define the optional GPL host control frontend")
+    endif()
+    if(ARG_REQUIRE_HOST_RUNTIME AND NOT TARGET dtv::host_runtime)
+        message(FATAL_ERROR
+            "dtv-userland-core did not define the optional GPL host runtime adapter")
+    endif()
+    if(ARG_REQUIRE_HOST_TS AND NOT TARGET dtv::host_ts)
+        message(FATAL_ERROR
+            "dtv-userland-core did not define the optional GPL host TS consumer")
+    endif()
+    if(ARG_REQUIRE_HOST_DAEMON AND NOT TARGET dtv::host_daemon)
+        message(FATAL_ERROR
+            "dtv-userland-core did not define the optional GPL host daemon services")
+    endif()
+    if(ARG_REQUIRE_HOST_FACADE AND NOT TARGET dtv::host_facade)
+        message(FATAL_ERROR
+            "dtv-userland-core did not define the optional GPL host facade")
+    endif()
+    if(ARG_REQUIRE_WINDOWS_WINSCARD)
+        if(NOT TARGET dtv::windows_winscard_client OR
+            NOT TARGET dtv::windows_winscard_settings)
+            message(FATAL_ERROR
+                "dtv-userland-core did not define the optional GPL Windows WinSCard targets")
+        endif()
     endif()
 endfunction()
