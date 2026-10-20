@@ -115,9 +115,9 @@ USB 転送の成功や GPIO の読み戻しを、端子電圧の合格にしな�
 
 ### 短時間の回帰
 
-接続確認は `asicend --list-json` を使う。アドレスは挿し直すと変わるので、再現性のために `--usb-path BUS-PORT` 形式を使う。
+接続確認は `asicend --list-json` を使う。native起動時に観測位置で選ぶ場合は `--device usb:BUS-PORT[,BUS-PORT]` を使う。USB位置は物理個体を再接続後も追跡するIDではない。
 
-1. 候補の `asicend --usb-path BUS:ADDRESS|BUS-PORT --instance TOKEN`（または Termux では `--fd FD [--fd FD]`）で起動する。USB 機能が 2 つの W3U2 / W3U3 / V2 は primary と sibling を指定する。USB 機能が 1 つの S3U / S3U2 は primary だけを指定する。15V の試験にはデーモン起動時の `--allow-lnb-power` も指定する。
+1. 候補のnative起動は `asicend --device usb:BUS-PORT[,BUS-PORT] --instance TOKEN`（または Termuxではlauncherから渡すFD経路）で行う。USB機能が2つのW3U2 / W3U3 / V2は観測したprimaryとsiblingを `usb:<primary>,<sibling>` の順で指定し、1機能のS3U / S3U2はprimaryだけを指定する。native `--device`起動では`--instance`が必要です。Termux FD経路はnative `--device`選択とは別です。15Vの試験にはdaemon起動時の`--allow-lnb-power`も指定する。
 2. 地デジを有限長で受信する。4 チューナー機の露出は primary の receiver 1。S3U は receiver 0 の地デジ側。S3U2 は receiver 1。
 3. 衛星を `--lnb-voltage 0` で有限長受信する。4 チューナー機と S3U2 は receiver 0。S3U は receiver 0 を地デジと排他で使う。
 4. 同時ストリームは 1 本のままにする。sibling 側の受信や 4 本同時は、この手順の合格条件にしない。

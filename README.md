@@ -135,7 +135,7 @@ asicen-ts --runtime-dir "$runtime_dir" --instance test \
 
 ### 実機ハードウェアでの実行
 
-接続機器は `asicend --list-json` で確認します（USB 接続を挿し直すとアドレスが変わります。再現には `--usb-path BUS-PORT` 形式を使います）。
+接続機器は `asicend --list-json` で確認します。現在のUSB位置を選ぶ場合は `--device usb:BUS-PORT[,BUS-PORT]` を使います。これは物理個体IDではなく、再接続後も同じ位置を保証しません。
 
 ```sh
 runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/asicen-userland.XXXXXX")
@@ -146,8 +146,8 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-asicend --usb-path 1-2.1 --usb-path 1-2.2 \
-  --runtime-dir "$runtime_dir" --instance w3u3 &
+asicend --device usb:1-2.1,1-2.2 --instance w3u3 \
+  --runtime-dir "$runtime_dir" &
 asicend_pid=$!
 ready=0
 i=0
@@ -167,7 +167,7 @@ asicen-ts --runtime-dir "$runtime_dir" --instance w3u3 \
   --receiver 0 --channel BS01_0 --lnb-voltage 0 --packet-count 30000 --output satellite.ts
 ```
 
-USB 機能が 1 つの PX-S3U と PX-S3U2 では `--usb-path` を 1 つだけ指定します。USB 機能が 2 つの PX-W3U2、PX-W3U3、PX-W3U3 V2 では primary（先）と sibling（後）の 2 つを指定します。Termux ではランチャーが `--fd` を渡します。
+native起動では `--device usb:BUS-PORT[,BUS-PORT]` を使い、PX-S3U / PX-S3U2 は1つ、PX-W3U2 / PX-W3U3 / PX-W3U3 V2 は `usb:<primary>,<sibling>` の順で観測位置を指定します。例では `usb:1-2.1,1-2.2` です。native `--device` には `--instance TOKEN` が必要です。Termuxは `--usb-device` launcherからFDを渡す別経路で、native selectorとは異なります。
 
 ### Android (Termux) での実行
 
@@ -199,7 +199,7 @@ px4-userland のチャンネル表記を踏襲しています。
 ### キャプチャ制御オプション
 
 - `--tune-timeout-ms`: 選局タイムアウト時間（100〜30000 ミリ秒、既定値 10000）
-- `--duration-seconds` と `--packet-count`: 取得時間またはパケット数を指定します。これらは同時に指定できません。
+- `--time SECONDS|-` と `--packet-count`: 取得時間またはパケット数を指定します。これらは同時に指定できません。`--time -` は時間制限なしです。
 - `--output -`: 出力先に標準出力を指定した場合、MPEG-TS のみを出力します。
 
 ### 終了コード
@@ -249,7 +249,7 @@ DEVICENAME asicen-userland:runtime=/tmp/asicen-example:instance=w3u3:access=user
 - **公開される受信部**: 機種ごとの割り当ては上の表のとおりです。4 チューナー機で公開しているのは primary の 2 系統だけです。
 - **対応ハードウェア revision**: 実行時に対応している内部経路はブリッジ revision 11 / ASIC type 0f / version 7 のみです。revision 16 は未実装のため起動前に失敗します。すべての個体がこの revision に該当するとは限りません。
 - **TS 品質カウンタ**: デーモンは受信 TS の TEI・continuity・同期の統計を計数します。取得パケット数と終了状態も確認してください。値が 0 だけでは「無誤りで受信できた証明」にはなりません。
-- **ハードウェアの列挙**: 接続機器の確認は `asicend --list` または `asicend --list-json` を使います。ASICEN は USB serial を持たないため、JSON の `serial` は null、識別は観測した USB topology です。
+- **ハードウェアの列挙**: 接続機器の確認は `asicend --list-json` を使います。ASICEN は USB serial を持たないため、JSON の `serial` は null、識別は観測した USB topology です。
 - **過去の受信記録と本配布物の位置づけ**: 過去の開発ビルドにおいて、PX-W3U3 の primary 受信部（receiver 1 の T27、receiver 0 の BS01_0）を受信し、内蔵カード経由の B25 復号まで成功した記録があります。ただし、これは過去の開発ビルドでの記録であり、今回の 0.1.0 配布候補バイナリの実機検証を証明するものではありません。
 
 ## ソースからのビルド
