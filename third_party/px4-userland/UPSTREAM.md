@@ -388,6 +388,18 @@ their capture and shutdown scenarios use canonical runtime/instance endpoints.
 No legacy raw-path socket API was added to the vendor boundary. The complete
 POSIX `SocketStream` implementation remains byte-identical to the pinned source.
 
+## 2026-10-20 production POSIX runtime extraction
+
+The production POSIX target now links the optional GPL `dtv::host_runtime`
+adapter in dtv-userland-core instead of compiling this subset's POSIX IPC and
+nonce sources. The old sources remain only for the unchanged reference-profile
+tests. The product IPC header forwards to the Core adapter's common declaration,
+including the serial-free exclusive identity lease API. The Core target receives
+`asicen-userland` and the preserve-case instance policy explicitly. Production
+endpoints now use `asicen-userland/v1/<instance>`; daemon and clients move together.
+Windows IPC/nonce implementation migration is a separate increment. This does
+not remove the remaining vendored service, worker, protocol, and hardware code.
+
 ## Updating this subset
 
 Compare every imported file with this pin, preserve each documented value or

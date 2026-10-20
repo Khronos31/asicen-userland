@@ -2,6 +2,10 @@
 
 `asicen-userland` は、ASICEN チップを搭載した PLEX 製 USB チューナーに対応した、ユーザー空間で動作するドライバおよびツール群です。カーネルモジュールを使用せず、ユーザー空間から選局、MPEG-TS ストリームの取得、および内蔵 IC カードリーダーの制御を行います。
 
+## v1開発版のPOSIX通信先
+
+現在のWIPでは、daemonとclientの通信先を `<runtime>/asicen-userland/v1/<instance>/` に統一しています。旧開発版の `<runtime>/asicen-userland/<instance>/` から変わるため、daemon・ctl・TS clientは同じ候補の組で使用してください。instanceの大文字小文字は保持し、無指定の自動探索でも元の表記を使います。これはPOSIX経路の移行で、Windows経路のv1化・WinSCard接続と正式配布は別途進めています。
+
 ## 対応機種
 
 本ソフトウェアがプロファイルとして識別する機種は以下のとおりです。

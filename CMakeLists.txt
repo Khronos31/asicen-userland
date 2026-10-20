@@ -154,12 +154,27 @@ function(asicen_enable_project_warnings target)
 endfunction()
 
 include(cmake/DtvUserlandCoreDependency.cmake)
+if(UNIX)
+    set(DTV_USERLAND_BUILD_HOST_RUNTIME ON CACHE BOOL
+        "Build the optional GPL POSIX host runtime adapter" FORCE)
+    set(DTV_USERLAND_HOST_RUNTIME_PRODUCT "asicen-userland" CACHE STRING
+        "Product runtime namespace component required by the GPL POSIX host runtime adapter" FORCE)
+    set(DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY "preserve-case" CACHE STRING
+        "Instance-name policy for the GPL POSIX host runtime adapter" FORCE)
+    set(DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland/include"
+        CACHE STRING
+        "Private product facade include directories required by the GPL POSIX host runtime adapter"
+        FORCE)
+else()
+    set(DTV_USERLAND_BUILD_HOST_RUNTIME OFF CACHE BOOL
+        "Build the optional GPL POSIX host runtime adapter" FORCE)
+endif()
 asicen_add_dtv_userland_core()
 
 set(ASICEN_PX4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland)
-set(ASICEN_PX4_CORE_SOURCES
+set(ASICEN_PX4_COMMON_SOURCES
     ${ASICEN_PX4_ROOT}/src/identity.cpp
-    ${ASICEN_PX4_ROOT}/src/ipc.cpp
     ${ASICEN_PX4_ROOT}/src/control_client.cpp
     ${ASICEN_PX4_ROOT}/src/control_server.cpp
     ${ASICEN_PX4_ROOT}/src/control_workers.cpp
@@ -168,6 +183,9 @@ set(ASICEN_PX4_CORE_SOURCES
     ${ASICEN_PX4_ROOT}/src/enclosure_context.cpp
 )
 
+set(ASICEN_PX4_CORE_SOURCES
+    ${ASICEN_PX4_COMMON_SOURCES}
+    ${ASICEN_PX4_ROOT}/src/ipc.cpp)
 if(WIN32)
     list(APPEND ASICEN_PX4_CORE_SOURCES
         ${ASICEN_PX4_ROOT}/src/windows/windows_ipc.cpp
@@ -181,11 +199,20 @@ else()
     )
 endif()
 
+set(ASICEN_PX4_PRODUCT_PLATFORM_SOURCES)
+if(WIN32)
+    list(APPEND ASICEN_PX4_PRODUCT_PLATFORM_SOURCES
+        ${ASICEN_PX4_ROOT}/src/windows/windows_ipc.cpp
+        ${ASICEN_PX4_ROOT}/src/windows/windows_tuner_nonce.cpp
+        ${ASICEN_PX4_ROOT}/src/windows/windows_sleep.cpp)
+endif()
+
 if(ASICEN_BUILD_TESTS)
     # The reference profile is built unchanged for its original lifecycle tests.
     add_library(px4_portable_reference STATIC ${ASICEN_PX4_CORE_SOURCES})
     target_include_directories(px4_portable_reference PUBLIC
-        ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src)
+        ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
+        ${ASICEN_DTV_CORE_SOURCE_DIR}/adapters/host_runtime/include)
     target_link_libraries(px4_portable_reference PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control)
     target_compile_definitions(px4_portable_reference PUBLIC
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
@@ -194,14 +221,29 @@ endif()
 
 # Product profile compiles the same portable lifecycle with ASICEN's local
 # receiver mapping, product directory, and wire magic.
-add_library(asicen_portable_core STATIC ${ASICEN_PX4_CORE_SOURCES}
+add_library(asicen_px4_ipc STATIC ${ASICEN_PX4_ROOT}/src/ipc.cpp)
+target_include_directories(asicen_px4_ipc PUBLIC
+    ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
+target_compile_definitions(asicen_px4_ipc PRIVATE ASICEN_PROFILE_ASICEN=1)
+target_link_libraries(asicen_px4_ipc PUBLIC dtv::wire)
+asicen_enable_project_warnings(asicen_px4_ipc)
+
+add_library(asicen_portable_core STATIC
+    ${ASICEN_PX4_COMMON_SOURCES}
+    ${ASICEN_PX4_PRODUCT_PLATFORM_SOURCES}
     ${ASICEN_PX4_ROOT}/src/card.cpp)
 target_include_directories(asicen_portable_core PUBLIC
-    ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
+    ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include
+    ${ASICEN_DTV_CORE_SOURCE_DIR}/adapters/host_runtime/include)
 target_compile_definitions(asicen_portable_core PRIVATE ASICEN_PROFILE_ASICEN=1)
 target_compile_definitions(asicen_portable_core PUBLIC
     PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
 target_link_libraries(asicen_portable_core PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control)
+if(UNIX)
+    target_link_libraries(asicen_portable_core PUBLIC dtv::host_runtime asicen_px4_ipc)
+else()
+    target_link_libraries(asicen_portable_core PUBLIC asicen_px4_ipc)
+endif()
 asicen_enable_project_warnings(asicen_portable_core)
 set_target_properties(asicen_portable_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -284,6 +326,14 @@ if(ASICEN_BUILD_PCSC_IFD AND UNIX AND NOT ANDROID)
         set_target_properties(asicen_portable_core PROPERTIES
             POSITION_INDEPENDENT_CODE ON
         )
+        set_target_properties(asicen_px4_ipc PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+        )
+        if(TARGET dtv_userland_host_runtime)
+            set_target_properties(dtv_userland_host_runtime PROPERTIES
+                POSITION_INDEPENDENT_CODE ON
+            )
+        endif()
         add_library(asicen_pcsc_ifd_core STATIC
             ${ASICEN_PX4_ROOT}/src/pcsc_ifd_adapter.cpp
         )
@@ -442,6 +492,9 @@ if(UNIX OR WIN32)
     target_compile_definitions(asicenctl PRIVATE
         ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
     target_link_libraries(asicenctl PRIVATE dtv::host_ctl asicen_portable_core)
+    if(UNIX)
+        target_link_libraries(asicenctl PRIVATE dtv::host_runtime)
+    endif()
     asicen_enable_project_warnings(asicenctl)
 
     if(WIN32)
