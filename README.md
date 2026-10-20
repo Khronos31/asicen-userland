@@ -4,7 +4,9 @@
 
 ## v1開発版のPOSIX通信先
 
-現在のWIPでは、daemonとclientの通信先を `<runtime>/asicen-userland/v1/<instance>/` に統一しています。旧開発版の `<runtime>/asicen-userland/<instance>/` から変わるため、daemon・ctl・TS clientは同じ候補の組で使用してください。instanceの大文字小文字は保持し、無指定の自動探索でも元の表記を使います。これはPOSIX経路の移行で、Windows経路のv1化・WinSCard接続と正式配布は別途進めています。
+現在のWIPでは、POSIX・Windowsともdaemonとclientの通信先を `<runtime>/asicen-userland/v1/<instance>/` に統一しています。旧開発版の `<runtime>/asicen-userland/<instance>/` から変わるため、daemon・ctl・TS clientは同じ候補の組で使用してください。instanceの大文字小文字は保持し、無指定の自動探索でも元の表記を使います。
+
+Windowsでは `-DASICEN_BUILD_WINSCARD=ON` で、共通Coreの実装からASICEN用のアプリ内配置用 `WinSCard.dll` をビルドできます（既定OFF）。DLLのロードとexportはWindows実機で確認済みですが、実カードとの通信・B25アプリとの接続・正式配布は未確認です。
 
 ## 対応機種
 

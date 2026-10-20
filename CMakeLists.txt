@@ -24,6 +24,7 @@ option(ASICEN_RELEASE_ASICEND_NO_BUILD_ID
     "Omit the GNU Build ID note from the release asicend executable only" OFF)
 option(ASICEN_BUILD_PCSC_IFD "Build the POSIX PC/SC IFD Handler when headers are available" ON)
 option(ASICEN_REQUIRE_PCSC_IFD "Fail configuration when the PC/SC IFD Handler cannot be built" OFF)
+option(ASICEN_BUILD_WINSCARD "Build the optional ASICEN Windows WinSCard.dll" OFF)
 set(ASICEN_ANDROID_NDK_ROOT_MAP "" CACHE PATH
     "Android NDK root to remove from compiler debug paths")
 set(ASICEN_STATIC_LINK_MAP_DIR "" CACHE PATH "Optional static release executable link maps")
@@ -142,6 +143,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(ASICEN_BUILD_WINSCARD AND NOT WIN32)
+    message(FATAL_ERROR "ASICEN_BUILD_WINSCARD requires a Windows target")
+endif()
+
 function(asicen_enable_project_warnings target)
     target_compile_options(${target} PRIVATE
         -Wall
@@ -169,6 +174,26 @@ if(UNIX OR WIN32)
 else()
     set(DTV_USERLAND_BUILD_HOST_RUNTIME OFF CACHE BOOL
         "Build the optional GPL host runtime adapter" FORCE)
+endif()
+if(WIN32 AND ASICEN_BUILD_WINSCARD)
+    set(DTV_USERLAND_BUILD_WINDOWS_WINSCARD ON CACHE BOOL
+        "Build the optional GPL Windows WinSCard adapter" FORCE)
+    set(DTV_WINDOWS_WINSCARD_NAMESPACE_COMPONENT "asicen-userland" CACHE STRING
+        "Windows WinSCard runtime namespace" FORCE)
+    set(DTV_WINDOWS_WINSCARD_VERSION_COMPONENT "v1" CACHE STRING
+        "Windows WinSCard runtime version" FORCE)
+    set(DTV_WINDOWS_WINSCARD_PRODUCT_SLUG "asicen-userland" CACHE STRING
+        "Windows WinSCard expected UDTV product" FORCE)
+    set(DTV_WINDOWS_WINSCARD_READER_PREFIX "ASICEN userland (" CACHE STRING
+        "Windows WinSCard reader display prefix" FORCE)
+    set(DTV_WINDOWS_WINSCARD_RUNTIME_ENV "ASICEN_WINSCARD_RUNTIME_DIR" CACHE STRING
+        "Windows WinSCard runtime root environment variable" FORCE)
+    set(DTV_WINDOWS_WINSCARD_HOST_INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland/include"
+        CACHE STRING "Windows WinSCard product facade include directories" FORCE)
+else()
+    set(DTV_USERLAND_BUILD_WINDOWS_WINSCARD OFF CACHE BOOL
+        "Build the optional GPL Windows WinSCard adapter" FORCE)
 endif()
 asicen_add_dtv_userland_core()
 
@@ -225,6 +250,16 @@ target_include_directories(asicen_px4_ipc PUBLIC
 target_compile_definitions(asicen_px4_ipc PRIVATE ASICEN_PROFILE_ASICEN=1)
 target_link_libraries(asicen_px4_ipc PUBLIC dtv::wire)
 asicen_enable_project_warnings(asicen_px4_ipc)
+
+if(WIN32 AND ASICEN_BUILD_WINSCARD)
+    add_library(asicen_winscard_support INTERFACE)
+    target_include_directories(asicen_winscard_support INTERFACE
+        ${ASICEN_PX4_ROOT}/include)
+    target_link_libraries(asicen_winscard_support INTERFACE
+        asicen_px4_ipc dtv::host_runtime)
+    dtv_add_windows_winscard_dll(asicen_winscard_dll
+        SUPPORT asicen_winscard_support)
+endif()
 
 add_library(asicen_portable_core STATIC
     ${ASICEN_PX4_COMMON_SOURCES}
