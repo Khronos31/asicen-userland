@@ -1,7 +1,7 @@
 # Source provenance
 
 The shared `dtv-userland-core` dependency is pinned to commit
-`9591ed861291f6d718ac9943328df20b2d3f1463` in
+`35249f85347093ca3b431cbe4a730b2366de7ada` in
 `cmake/dtv-userland-core.revision`. Normal builds fetch that exact revision from
 `Khronos31/dtv-userland-core`; corresponding-source archives include a Git
 archive of the same commit, including its root `LICENSE`, `PROVENANCE.json`,

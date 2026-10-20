@@ -91,7 +91,7 @@ and [GCC 10.2.0](https://github.com/gcc-mirror/gcc/tree/releases/gcc-10.2.0).
 `dtv-userland-core` is included from the public repository
 `Khronos31/dtv-userland-core` at the commit pinned in
 `cmake/dtv-userland-core.revision`:
-`9591ed861291f6d718ac9943328df20b2d3f1463`. Its corresponding-source archive
+`35249f85347093ca3b431cbe4a730b2366de7ada`. Its corresponding-source archive
 contains that exact Git commit and its root `LICENSE` and `PROVENANCE.json`.
 Binary archives that link the foundation include the MIT terms below.
 
