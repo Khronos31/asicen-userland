@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "px4/identity.h"
+#include <dtv/userland/host_facade/identity.h>
 
 #include "host_ctl.h"
 
@@ -20,7 +20,7 @@ namespace {
 bool preserve_instance(std::string_view value,
                        dtv::userland::identity::InstanceText& output) noexcept
 {
-    if (!px4::userland::valid_runtime_instance(value) ||
+    if (!dtv::userland::host_facade::valid_runtime_instance(value) ||
         value.size() > output.bytes.size())
         return false;
     output.length = static_cast<std::uint16_t>(value.size());

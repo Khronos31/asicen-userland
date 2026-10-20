@@ -16,6 +16,7 @@
 #include "px4/error.h"
 #include "px4/it930x.h"
 #include "px4/transport.h"
+#include "px4/card_atr_bytes.h"
 
 #include <array>
 #include <cstddef>
@@ -23,22 +24,17 @@
 
 namespace px4::userland {
 
-inline constexpr std::size_t kCardAtrMaxLength = 33U;
-
 enum class CardEdc : std::uint8_t {
     lrc = 0,
     crc = 1,
 };
 
-struct CardAtr final {
-    std::array<std::uint8_t, kCardAtrMaxLength> bytes{};
-    std::size_t length = 0U;
+struct CardAtr : CardAtrBytes {
     It930xCardBaudRate baud_rate = It930xCardBaudRate::baud_9600;
     std::uint8_t ifsc = 32U;
     CardEdc edc = CardEdc::lrc;
     std::uint32_t block_timeout_ms = 500U;
 
-    ByteView view() const noexcept { return ByteView{bytes.data(), length}; }
 };
 
 // One timing seam serves both ATR polling and the 5 ms H14 reset pulse used by

@@ -99,6 +99,24 @@ bool equal(const CardAtr& a, const CardAtr& b)
            a.ifsc == b.ifsc && a.edc == b.edc && a.block_timeout_ms == b.block_timeout_ms;
 }
 
+bool same_bytes(const CardAtrBytes& bytes, const CardAtr& native)
+{
+    return bytes.bytes == native.bytes && bytes.length == native.length;
+}
+
+CardAtr expected_native_atr()
+{
+    CardAtr expected{};
+    expected.bytes[0] = 0x3bU;
+    expected.bytes[1] = 0x91U;
+    expected.length = 2U;
+    expected.baud_rate = It930xCardBaudRate::baud_19200;
+    expected.ifsc = 41U;
+    expected.edc = CardEdc::crc;
+    expected.block_timeout_ms = 731U;
+    return expected;
+}
+
 }  // namespace
 
 int main()
@@ -142,7 +160,8 @@ int main()
     fresh_session.order = &fresh_order;
     CardService fresh_service(fresh_backend, fresh_session);
     const auto fresh = fresh_service.connect(2U, ipc::ShareMode::shared);
-    if (!fresh || !equal(fresh.value().atr, fresh_session.atr())) return 9;
+    if (!fresh || !same_bytes(fresh.value().atr, fresh_session.atr()) ||
+        !equal(expected_native_atr(), fresh_session.atr())) return 9;
     if (fresh_backend.trace != std::vector<std::string>{"power-on", "uart"} ||
         fresh_session.trace != std::vector<std::string>{"initialize"}) return 10;
     if (fresh_order != std::vector<std::string>{"power-on", "uart", "initialize"}) return 26;
@@ -192,7 +211,8 @@ int main()
     const auto recovered = shared_service.reconnect(
         3U, shared_first.value().handle, ipc::ShareMode::shared,
         ipc::Disposition::leave);
-    if (!recovered || !equal(recovered.value(), shared_session.atr())) return 19;
+    if (!recovered || !same_bytes(recovered.value(), shared_session.atr()) ||
+        !equal(expected_native_atr(), shared_session.atr())) return 19;
     if (!shared_service.reconnect(4U, shared_second.value().handle,
                                   ipc::ShareMode::shared, ipc::Disposition::leave)) return 20;
     if (!shared_service.begin_transaction(3U, shared_first.value().handle)) return 20;

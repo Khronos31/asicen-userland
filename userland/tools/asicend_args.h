@@ -9,9 +9,9 @@
 
 #include "asicen/device_profile.h"
 #include "asicen/satellite_tune.h"
-#include "px4/identity.h"
 #include "px4/error.h"
 
+#include <dtv/userland/host_facade/identity.h>
 #include <dtv/userland/identity.h>
 
 #include <algorithm>
@@ -188,8 +188,7 @@ inline bool parse_bus_port(std::string_view value, std::uint8_t* bus,
 
 inline bool valid_instance(std::string_view value) noexcept
 {
-    return px4::userland::valid_runtime_instance(value) &&
-           !px4::userland::valid_device_instance(value);
+    return dtv::userland::host_facade::valid_runtime_instance(value);
 }
 
 inline DaemonArguments invalid(std::string_view message) noexcept

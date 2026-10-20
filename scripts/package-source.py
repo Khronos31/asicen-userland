@@ -237,7 +237,7 @@ def main() -> int:
     parser.add_argument("--common-core-source-root", type=Path, default=None,
                         help="Git checkout used to export the pinned dtv-userland-core dependency")
     parser.add_argument("--common-core-repository",
-                        default="git@github.com:Khronos31/dtv-userland-core.git",
+                        default="https://github.com/Khronos31/dtv-userland-core.git",
                         help="repository used to resolve the pinned dtv-userland-core commit")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()

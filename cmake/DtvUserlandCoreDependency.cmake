@@ -14,7 +14,7 @@ include_guard(GLOBAL)
 include(FetchContent)
 
 set(DTV_USERLAND_CORE_REPOSITORY
-    "git@github.com:Khronos31/dtv-userland-core.git"
+    "https://github.com/Khronos31/dtv-userland-core.git"
     CACHE STRING "Git repository for the dtv-userland-core dependency")
 set(DTV_USERLAND_CORE_SOURCE_DIR "" CACHE PATH
     "Explicit local dtv-userland-core source tree (local/modified override)")
@@ -84,6 +84,11 @@ function(asicen_add_dtv_userland_core)
     set(BUILD_TESTING OFF)
     set(DTV_USERLAND_BUILD_RECEIVER ON)
     set(DTV_USERLAND_BUILD_CARD ON)
+    set(DTV_USERLAND_BUILD_CAPTURE ON)
+    set(DTV_USERLAND_BUILD_HOST_FACADE ON CACHE BOOL
+        "Build the optional GPL host facade" FORCE)
+    set(DTV_USERLAND_BUILD_HOST_DAEMON ON CACHE BOOL
+        "Build the optional GPL host daemon services" FORCE)
     set(DTV_USERLAND_BUILD_HOST_CTL ON CACHE BOOL
         "Build the optional GPL host control frontend" FORCE)
     set(DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS
@@ -98,6 +103,12 @@ function(asicen_add_dtv_userland_core)
         message(FATAL_ERROR "dtv-userland-core source directory was not populated")
     endif()
     set(ASICEN_DTV_CORE_SOURCE_DIR "${_dtv_userland_core_source_dir}" PARENT_SCOPE)
+    get_target_property(_host_daemon_source_dir dtv_userland_host_daemon SOURCE_DIR)
+    set(ASICEN_HOST_DAEMON_INCLUDE_DIR
+        "${_host_daemon_source_dir}/adapters/host_daemon/include" PARENT_SCOPE)
+    get_target_property(_host_facade_source_dir dtv_userland_host_facade SOURCE_DIR)
+    set(ASICEN_HOST_FACADE_INCLUDE_DIR
+        "${_host_facade_source_dir}/adapters/host_facade/include" PARENT_SCOPE)
 
     if(NOT TARGET dtv::core)
         message(FATAL_ERROR "dtv-userland-core did not define the dtv::core target")

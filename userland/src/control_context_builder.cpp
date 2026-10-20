@@ -108,6 +108,7 @@ bool build_asicen_control_context(
 
     list.receivers.present = true;
     list.receivers.value.count = tuner_enabled ? receiver_count : 0U;
+    out.execution.receiver_count = tuner_enabled ? receiver_count : 0U;
     for (std::uint8_t i = 0U; tuner_enabled && i < receiver_count; ++i) {
         wire::ReceiverDescriptor& receiver = list.receivers.value.items[i];
         receiver.id = i;
@@ -130,6 +131,11 @@ bool build_asicen_control_context(
                 receiver.capabilities.controls |= wire::kControlBitLnb;
         }
         out.receiver_index[i] = i;
+        out.execution.receiver_lane[i] =
+            profile.expected_runtime_functions > 1U &&
+                    i >= asicen::profile::kReceiversPerUsbFunction
+                ? px4::userland::ipc::posix::ControlWorkerLane::tuner_dev2
+                : px4::userland::ipc::posix::ControlWorkerLane::tuner_dev1;
     }
     list.readers.present = true;
     list.readers.value.count = 1U;

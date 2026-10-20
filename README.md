@@ -262,7 +262,7 @@ cmake --build build --parallel 2
 (cd build && ctest --output-on-failure)
 ```
 
-共通基盤 `dtv-userland-core` は `cmake/dtv-userland-core.revision` の commit に固定しています。通常の Git checkout では、CMake が GitHub の private repository からその commit を取得するため、SSH 認証を設定してください。対応ソースアーカイブには同じ commit のソースを `third_party/dtv-userland-core` に同梱しており、アーカイブを展開したビルドはネットワーク接続なしで行えます。別のローカル checkout を使う場合は、CMake に `-DFETCHCONTENT_SOURCE_DIR_DTV_USERLAND_CORE=/path/to/dtv-userland-core` を指定します。
+共通基盤 `dtv-userland-core` は `cmake/dtv-userland-core.revision` の commit に固定しています。通常の Git checkout では、CMake が GitHub の public repository からその commit を取得します。対応ソースアーカイブには同じ commit のソースを `third_party/dtv-userland-core` に同梱しており、アーカイブを展開したビルドはネットワーク接続なしで行えます。別のローカル checkout を使う場合は、CMake に `-DFETCHCONTENT_SOURCE_DIR_DTV_USERLAND_CORE=/path/to/dtv-userland-core` を指定します。
 
 実機でのキャプチャには Release ビルドを推奨します。同一ソースコードを用いた比較において、最適化なしのビルドでは両レーンで TS エラーが発生したのに対し、Release ビルドではレーンあたり 30,000 パケットで TEI（Transport Error Indicator）および連続性エラーが 0 であったという開発時の記録に基づきます。ただし、この記録は本 0.1.0 配布候補の実機合格を証明するものではありません。
 
