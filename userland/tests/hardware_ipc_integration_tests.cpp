@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/hardware_stream_session.h"
 #include "asicen/px4_mock_backend.h"
+#include "asicen/control_context_builder.h"
+#include "test_wire_client.h"
 #include "px4/card_service.h"
 #include "px4/control_client.h"
 #include "px4/control_server.h"
@@ -22,6 +24,7 @@ namespace {
 using namespace px4::userland;
 using namespace px4::userland::ipc;
 using namespace px4::userland::ipc::posix;
+namespace wire = dtv::userland::wire;
 
 class Time final : public TunerServiceTime {
 public:
@@ -99,24 +102,24 @@ private:
     std::atomic<bool> interrupt_seen_{false};
 };
 
-class FrameCounter final : public FrameConsumer {
+class FrameCounter final : public wire::FrameHandler {
 public:
-    Result<void> on_frame(const FrameView& frame) noexcept override
+    Result<void> on_frame(const wire::Frame& frame) noexcept override
     {
-        if (frame.header.type == MessageType::ATTACH_STREAM &&
-            frame.header.kind == MessageKind::response) {
+        if (frame.header.opcode == wire::kOpcodeAttachStream &&
+            frame.header.kind == wire::Kind::response) {
             attached = true;
         }
-        if (frame.header.type == MessageType::TS_DATA && frame.header.kind == MessageKind::event) {
-            const auto data = decode_ts_data_event_payload(frame.payload);
-            if (!data || data.value().bytes.size != 188U || data.value().bytes.data[0] != 0x47U) {
+        if (frame.header.opcode == wire::kOpcodeTsData && frame.header.kind == wire::Kind::event) {
+            const auto data = wire::decode_ts_data(frame.payload);
+            if (!data || data.value().packets.size != 188U || data.value().packets.data[0] != 0x47U) {
                 return Result<void>::failure(Error::PROTOCOL_ERROR);
             }
-            ts_packets += data.value().bytes.size / 188U;
+            ts_packets += data.value().packets.size / 188U;
         }
-        if (frame.header.type == MessageType::STREAM_END &&
-            frame.header.kind == MessageKind::event) {
-            const auto end = decode_stream_end_event_payload(frame.payload);
+        if (frame.header.opcode == wire::kOpcodeStreamEndEvent &&
+            frame.header.kind == wire::Kind::event) {
+            const auto end = wire::decode_stream_end_event(frame.payload);
             if (!end) {
                 return Result<void>::failure(Error::PROTOCOL_ERROR);
             }
@@ -128,20 +131,8 @@ public:
     bool attached = false;
     std::size_t ts_packets = 0U;
     bool stream_end_seen = false;
-    StreamEndEventPayload stream_end{};
+    wire::StreamEndEvent stream_end{};
 };
-
-template <typename T>
-Result<ControlResponse> typed_request(PosixControlClient& client, MessageType type,
-                                      const T& payload)
-{
-    std::array<std::uint8_t, kMaxControlPayload> encoded{};
-    const auto size = encode_payload(payload, {encoded.data(), encoded.size()});
-    if (!size) {
-        return Result<ControlResponse>::failure(size.error());
-    }
-    return client.request(type, {encoded.data(), size.value()}, Timeout{2000U});
-}
 
 bool run(bool hold_detach = false)
 {
@@ -164,9 +155,14 @@ bool run(bool hold_detach = false)
     px4::userland::ipc::posix::PosixTunerNonceSource nonce;
     Time time;
     TunerService tuner(stream, nonce, time, nullptr, nullptr, &stream);
+    if (!tuner.configure_strict_capabilities()) return false;
     const EndpointConfig endpoint{root.c_str(), "receiver1", kControlEndpointName};
-    auto server_result =
-        PosixControlServer::create(endpoint, card, tuner, {}, true, 0x03U, &stream, 4U, false);
+    ControlContext context{};
+    const auto epoch = nonce.generate();
+    const auto* profile = asicen::find_profile(asicen::ModelId::W3u3);
+    if (!epoch || profile == nullptr || !asicen::build_asicen_mock_control_context(
+            *profile, tuner, endpoint.instance, epoch.value(), context)) return false;
+    auto server_result = PosixControlServer::create(endpoint, card, tuner, context, &stream);
     if (!server_result) {
         std::filesystem::remove_all(root);
         return false;
@@ -178,7 +174,7 @@ bool run(bool hold_detach = false)
             (void)server->poll_once(Timeout{10U});
         }
     });
-    auto client_result = PosixControlClient::connect(endpoint, 0U, Timeout{2000U});
+    auto client_result = asicen::test::WireClient::connect(endpoint);
     if (!client_result) {
         polling.store(false);
         poller.join();
@@ -186,29 +182,41 @@ bool run(bool hold_detach = false)
         std::filesystem::remove_all(root);
         return false;
     }
-    auto client = std::move(client_result.value());
+    auto client = std::move(client_result);
     const char* stage = "acquire";
-    const auto acquired = typed_request(*client, MessageType::ACQUIRE, AcquireRequestPayload{1U});
+    wire::AcquireRequest acquire{};
+    acquire.epoch = client->epoch;
+    acquire.receiver_id = 1U;
+    const auto acquired = client->request(wire::kOpcodeAcquire, acquire, wire::encode_acquire_request);
     if (!acquired) {
         goto fail;
     }
     {
-        const auto lease = decode_acquire_response_payload(
+        const auto lease = wire::decode_acquire_response(
             {acquired.value().payload.data(), acquired.value().payload.size()});
         if (!lease) {
             goto fail;
         }
         stage = "tune";
-        const auto tune =
-            typed_request(*client, MessageType::TUNE,
-                          TuneRequestPayload{lease.value().lease_id, System::ISDB_T, 557142U,
-                                             0xffffU, 0xffffU, 6000000U, 0U, 500U});
+        wire::TuneRequest tune_request{};
+        tune_request.epoch = client->epoch;
+        tune_request.lease_id = lease.value().lease_id;
+        tune_request.system = wire::System::isdb_t;
+        tune_request.frequency_hz = 557142857U;
+        tune_request.timeout_ms = 500U;
+        const auto tune = client->request(wire::kOpcodeTune, tune_request, wire::encode_tune_request);
         if (!tune) {
             goto fail;
         }
         stage = "start-stream";
-        const auto start = typed_request(*client, MessageType::START_STREAM,
-                                         LeaseRequestPayload{lease.value().lease_id});
+        const auto tuned = wire::decode_tune_result(
+            ByteView{tune.value().payload.data(), tune.value().payload.size()});
+        if (!tuned) goto fail;
+        wire::StartRequest start_request{};
+        start_request.epoch = client->epoch;
+        start_request.lease_id = lease.value().lease_id;
+        start_request.tune_revision = tuned.value().tune_revision;
+        const auto start = client->request(wire::kOpcodeStartStream, start_request, wire::encode_start_request);
         if (!start) {
             goto fail;
         }
@@ -220,34 +228,47 @@ bool run(bool hold_detach = false)
         }
         auto socket = std::move(stream_result.value());
         std::array<std::uint8_t, kMaxControlPayload> payload{};
+        const auto started = wire::decode_start_response(
+            ByteView{start.value().payload.data(), start.value().payload.size()});
+        if (!started) goto fail;
+        wire::AttachRequest attach{};
+        attach.epoch = client->epoch;
+        attach.lease_id = lease.value().lease_id;
+        attach.stream_id = started.value().stream_id;
+        attach.attach_token = started.value().attach_token;
         const auto payload_size =
-            encode_payload(AttachStreamRequestPayload{lease.value().lease_id, lease.value().nonce},
+            wire::encode_attach_request(attach,
                            {payload.data(), payload.size()});
         if (!payload_size) {
             goto fail;
         }
         stage = "attach-write";
-        const FrameHeader header{kProtocolMajor,
-                                 kProtocolMinor,
-                                 MessageType::ATTACH_STREAM,
-                                 MessageKind::request,
-                                 1U,
-                                 static_cast<std::uint32_t>(payload_size.value())};
-        std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> frame{};
-        const auto frame_size = encode_frame(header, {payload.data(), payload_size.value()},
+        wire::Header header{};
+        header.kind = wire::Kind::request;
+        header.opcode = wire::kOpcodeAttachStream;
+        header.request_id = 1U;
+        header.payload_length = static_cast<std::uint32_t>(payload_size.value());
+        std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxControlPayload> frame{};
+        const auto frame_size = wire::encode_frame(header, {payload.data(), payload_size.value()},
                                              {frame.data(), frame.size()});
         if (!frame_size ||
-            !socket.write_frame({frame.data(), frame_size.value()}, Timeout{1000U})) {
+            !socket.write_all({frame.data(), frame_size.value()}, Timeout{1000U})) {
             goto fail;
         }
-        std::array<std::uint8_t, kFrameHeaderSize + kMaxTsDataPayload> storage{};
-        StreamFramer framer({storage.data(), storage.size()});
+        std::vector<std::uint8_t> storage(wire::kMaxTsDataPayload);
+        wire::FrameReceiver framer({storage.data(), storage.size()});
         FrameCounter counter;
+        const auto read_frames = [&](Timeout timeout) {
+            std::array<std::uint8_t, 4096U> bytes{};
+            const auto read = socket.read_some({bytes.data(), bytes.size()}, timeout);
+            if (!read) return Result<void>::failure(read.error());
+            const auto fed = framer.feed({bytes.data(), read.value()}, counter);
+            return fed ? Result<void>::success() : Result<void>::failure(fed.error());
+        };
         const auto read_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         bool read_ok = true;
         while (counter.ts_packets == 0U && std::chrono::steady_clock::now() < read_deadline) {
-            const auto received = socket.read_frames({storage.data(), storage.size()}, framer,
-                                                     counter, Timeout{200U});
+            const auto received = read_frames(Timeout{200U});
             if (!received) {
                 read_ok = false;
                 break;
@@ -258,9 +279,12 @@ bool run(bool hold_detach = false)
             goto fail;
         }
         stage = "stop-stream";
+        wire::StopRequest stop_request{};
+        stop_request.epoch = client->epoch;
+        stop_request.lease_id = lease.value().lease_id;
+        stop_request.stream_id = started.value().stream_id;
         if (!hold_detach) {
-            const auto stop = typed_request(*client, MessageType::STOP_STREAM,
-                                            LeaseRequestPayload{lease.value().lease_id});
+            const auto stop = client->request(wire::kOpcodeStopStream, stop_request, wire::encode_stop_request);
             if (!stop) {
                 goto fail;
             }
@@ -274,10 +298,9 @@ bool run(bool hold_detach = false)
             return static_cast<bool>(stopped);
         }
 
-        Result<ControlResponse> stop = Result<ControlResponse>::failure(Error::INTERNAL);
+        Result<asicen::test::Reply> stop = Result<asicen::test::Reply>::failure(Error::INTERNAL);
         std::thread stop_thread([&] {
-            stop = typed_request(*client, MessageType::STOP_STREAM,
-                                 LeaseRequestPayload{lease.value().lease_id});
+            stop = client->request(wire::kOpcodeStopStream, stop_request, wire::encode_stop_request);
         });
         const auto interrupt_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (!source.interrupt_seen() && std::chrono::steady_clock::now() < interrupt_deadline) {
@@ -297,23 +320,30 @@ bool run(bool hold_detach = false)
             goto fail;
         }
         const auto stop_counters =
-            decode_counters_payload({stop.value().payload.data(), stop.value().payload.size()});
+            wire::decode_stop_response({stop.value().payload.data(), stop.value().payload.size()});
         if (!stop_counters) {
             goto fail;
         }
         stage = "stream-end-after-stop";
         const auto end_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (!counter.stream_end_seen && std::chrono::steady_clock::now() < end_deadline) {
-            const auto received = socket.read_frames({storage.data(), storage.size()}, framer,
-                                                     counter, Timeout{100U});
+            const auto received = read_frames(Timeout{100U});
             if (!received && received.error() != Error::TIMEOUT) {
                 goto fail;
             }
         }
-        if (!counter.stream_end_seen || counter.stream_end.error_code != ErrorCode::OK ||
-            counter.stream_end.counters.packets != stop_counters.value().packets ||
-            counter.stream_end.counters.bytes != stop_counters.value().bytes) {
+        if (!counter.stream_end_seen || counter.stream_end.final.error.present ||
+            counter.stream_end.final.statistics.entries.count !=
+                stop_counters.value().final.statistics.entries.count) {
             goto fail;
+        }
+        for (std::uint16_t i = 0U; i < counter.stream_end.final.statistics.entries.count; ++i) {
+            const auto& event = counter.stream_end.final.statistics.entries.items[i];
+            const auto& response = stop_counters.value().final.statistics.entries.items[i];
+            if (event.id != response.id ||
+                event.counter.measurement.value != response.counter.measurement.value ||
+                event.counter.measurement.state != response.counter.measurement.state ||
+                event.counter.overflow != response.counter.overflow) goto fail;
         }
         socket.close();
         client->close();

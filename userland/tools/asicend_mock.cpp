@@ -94,9 +94,7 @@ int main(int argc, char** argv)
         return 70;
     }
 
-    const std::uint8_t operational_receivers = selected_model->combined_isdb_ts
-        ? 1U : 2U;
-    asicen::MockTunerBackend tuner_backend(operational_receivers);
+    asicen::MockTunerBackend tuner_backend(*selected_model);
     tuner_backend.set_allow_lnb_power(allow_lnb_power);
     asicen::MockTunerStream stream;
     asicen::UnsupportedCardBackend card_backend;
@@ -106,6 +104,8 @@ int main(int argc, char** argv)
     MockTime time;
     px4::userland::TunerService tuner_service(
         tuner_backend, nonce_source, time, nullptr, nullptr, &stream);
+    const auto configured = tuner_service.configure_strict_capabilities();
+    if (!configured) return asicen::cli::exit_status(configured.error());
     const px4::userland::ipc::posix::EndpointConfig endpoint{
         runtime_directory.empty() ? nullptr : runtime_directory.c_str(),
         instance.c_str(), px4::userland::ipc::posix::kControlEndpointName,
@@ -130,7 +130,7 @@ int main(int argc, char** argv)
     }
 
     std::fprintf(stderr, "asicend-mock ready backend=mock-only model=%s serial=none receivers=%u endpoint=%s\n",
-                 selected_model->model_key, static_cast<unsigned>(operational_receivers),
+                 selected_model->model_key, static_cast<unsigned>(tuner_backend.receiver_count()),
                  server.value()->endpoint_path());
     px4::userland::Error loop_error = px4::userland::Error::OK;
     while (!px4::userland::px4d::stop_requested()) {

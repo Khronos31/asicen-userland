@@ -7,6 +7,7 @@
 
 #include "asicen/device_profile.h"
 #include "asicen/enclosure_grouping.h"
+#include "asicen/product_profile.h"
 #include "asicend_identity.h"
 #include "px4/ipc.h"
 
@@ -65,10 +66,28 @@ inline void append_json_observation(std::string& out, unsigned int device,
     out.push_back('}');
 }
 
+inline px4::userland::Result<std::array<px4::userland::ipc::ReceiverRecord,
+                                      px4::userland::ipc::kReceiverCount>>
+product_receiver_records(const DeviceProfile& profile)
+{
+    using namespace px4::userland;
+    using Records = std::array<ipc::ReceiverRecord, ipc::kReceiverCount>;
+    if (!asicen::profile::valid_receiver_count(profile.enclosure_receiver_count))
+        return Result<Records>::failure(Error::INVALID_ARGUMENT);
+    Records records{};
+    for (std::uint8_t id = 0U; id < profile.enclosure_receiver_count; ++id) {
+        records[id] = ipc::ReceiverRecord{
+            id, static_cast<std::uint8_t>(asicen::profile::usb_function_for_receiver(id) + 1U),
+            asicen::profile::local_receiver_for(id),
+            profile.combined_isdb_ts ? ipc::System::ISDB_T_OR_S :
+                asicen::profile::is_satellite_receiver(id) ? ipc::System::ISDB_S : ipc::System::ISDB_T};
+    }
+    return Result<Records>::success(records);
+}
+
 inline void append_receivers(std::string& out, const DeviceProfile& profile, bool json)
 {
-    const auto records = px4::userland::ipc::receiver_records(
-        profile.enclosure_receiver_count, profile.combined_isdb_ts);
+    const auto records = product_receiver_records(profile);
     if (!records) return;
     const bool lnb_control = profile.model_id == ModelId::W3u2 ||
                              profile.model_id == ModelId::W3u3 ||
@@ -452,8 +471,7 @@ inline std::string format_discovery_json(
             enclosures.push_back(std::move(enclosure));
             continue;
         }
-        const auto records = px4::userland::ipc::receiver_records(
-            profile->enclosure_receiver_count, profile->combined_isdb_ts);
+        const auto records = product_receiver_records(*profile);
         if (!records) return {};
         enclosure.receivers.present = true;
         enclosure.receivers.value.count = profile->enclosure_receiver_count;

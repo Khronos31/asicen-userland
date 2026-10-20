@@ -3,6 +3,7 @@
 """Process-level acceptance for the ASICEN mock-only command profile."""
 
 import os
+import json
 import signal
 import socket
 import subprocess
@@ -40,7 +41,7 @@ def temporary_runtime_root():
     if not os.path.isabs(configured_root):
         configured_root = "/tmp"
     with tempfile.TemporaryDirectory(prefix="asicen-cli-", dir=configured_root) as temp:
-        longest = Path(temp) / "runtime/asicen-userland/partial-request/control.sock"
+        longest = Path(temp) / "runtime/asicen-userland/v1/partial-request/control.sock"
         if len(os.fsencode(longest)) + 1 < 104:
             yield temp
             return
@@ -53,7 +54,7 @@ with temporary_runtime_root() as temp:
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)
     instance = "acceptance"
-    endpoint_dir = runtime / "asicen-userland" / instance
+    endpoint_dir = runtime / "asicen-userland" / "v1" / instance
     endpoint = endpoint_dir / "control.sock"
     log = open(root / "daemon.log", "wb")
     daemon = subprocess.Popen(
@@ -73,7 +74,7 @@ with temporary_runtime_root() as temp:
             [str(DAEMON), "--runtime-dir", str(runtime), "--instance", "independent"],
             stdout=subprocess.DEVNULL, stderr=independent_log)
         children.append(independent)
-        independent_endpoint = runtime / "asicen-userland" / "independent" / "control.sock"
+        independent_endpoint = runtime / "asicen-userland" / "v1" / "independent" / "control.sock"
         wait_socket(independent_endpoint, independent)
         independent.send_signal(signal.SIGHUP)
         assert independent.wait(timeout=2) == 0
@@ -106,7 +107,7 @@ with temporary_runtime_root() as temp:
         listing = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                       instance, "list", capture_output=True, text=True)
         assert listing.returncode == 0, listing.stderr
-        assert listing.stdout.startswith("serial= "), listing.stdout
+        assert listing.stdout.startswith("serial=unknown ready=ready "), listing.stdout
         assert "backend=mock-only" not in listing.stdout, listing.stdout
         expected = ["receiver=0 device=1 local=0 system=ISDB-S",
                     "receiver=1 device=1 local=1 system=ISDB-T",
@@ -116,13 +117,18 @@ with temporary_runtime_root() as temp:
 
         status = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                      instance, "status", capture_output=True, text=True)
-        assert status.returncode == 3 and "UNSUPPORTED" in status.stderr
+        assert status.returncode == 0, status.stderr
+        status_json = json.loads(status.stdout)
+        assert status_json["schema"] == {"name": "userland.status", "major": 1, "minor": 0}
+        assert [r["descriptor"]["id"] for r in status_json["receivers"]] == ["0", "1", "2", "3"]
+        assert all(r["state"] == "free" and r["leased"] is False
+                   for r in status_json["receivers"]), status.stdout
         no_daemon = run(str(CTL), "--runtime-dir", str(root / "missing"),
                         "--instance", instance, "list", capture_output=True, text=True)
-        assert no_daemon.returncode == 3 and "NOT_FOUND" in no_daemon.stderr
+        assert no_daemon.returncode == 3 and "connect failed (3)" in no_daemon.stderr, no_daemon.stderr
         card = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                    instance, "card-status", capture_output=True, text=True)
-        assert card.returncode == 3 and "UNSUPPORTED" in card.stderr
+        assert card.returncode == 3 and "card-status failed (11)" in card.stderr, card.stderr
         unsupported = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                           instance, "card-atr", capture_output=True, text=True)
         assert unsupported.returncode == 3, (unsupported.returncode, unsupported.stderr)
@@ -183,7 +189,7 @@ with temporary_runtime_root() as temp:
         assert endpoint.is_socket(), "rejected legacy selector unlinked product endpoint"
         still_live = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                          instance, "list", capture_output=True, text=True)
-        assert still_live.returncode == 0 and still_live.stdout.startswith("serial= ")
+        assert still_live.returncode == 0 and still_live.stdout.startswith("serial=unknown ready=ready ")
 
         # Closing a stream consumer must not wedge either client or daemon.
         consumer = subprocess.Popen(
@@ -227,7 +233,7 @@ with temporary_runtime_root() as temp:
         sock.close()
 
         research_instance = "partial-request"
-        research_socket = runtime / "asicen-userland" / research_instance / "control.sock"
+        research_socket = runtime / "asicen-userland" / "v1" / research_instance / "control.sock"
         research_log = open(root / "research.log", "wb")
         research = subprocess.Popen(
             [str(DAEMON), "--runtime-dir", str(runtime), "--instance", research_instance],
@@ -247,7 +253,7 @@ with temporary_runtime_root() as temp:
         assert not research_socket.exists()
 
         research_instance = "blocked-output"
-        research_socket = runtime / "asicen-userland" / research_instance / "control.sock"
+        research_socket = runtime / "asicen-userland" / "v1" / research_instance / "control.sock"
         research_log = open(root / "research-slow.log", "wb")
         research = subprocess.Popen(
             [str(DAEMON), "--runtime-dir", str(runtime), "--instance", research_instance],
@@ -281,7 +287,7 @@ with temporary_runtime_root() as temp:
         # of the model-specific hardware paths.
         for model in ("s3u", "s3u2", "w3u2", "w3u3", "w3u3-v2"):
             model_instance = "lnb-" + model
-            model_endpoint = runtime / "asicen-userland" / model_instance / "control.sock"
+            model_endpoint = runtime / "asicen-userland" / "v1" / model_instance / "control.sock"
             model_log = open(root / (model + ".log"), "wb")
             logs.append(model_log)
             model_daemon = subprocess.Popen(
@@ -306,7 +312,7 @@ with temporary_runtime_root() as temp:
         # Without --allow-lnb-power the mock daemon refuses the 15 V request,
         # matching px4's default-off safety gate. Zero volts stays accepted.
         denied_instance = "lnb-denied"
-        denied_endpoint = runtime / "asicen-userland" / denied_instance / "control.sock"
+        denied_endpoint = runtime / "asicen-userland" / "v1" / denied_instance / "control.sock"
         denied_log = open(root / "lnb-denied.log", "wb")
         logs.append(denied_log)
         denied_daemon = subprocess.Popen(

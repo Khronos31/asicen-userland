@@ -28,6 +28,12 @@ public:
                                                  std::uint32_t timeout_ms) noexcept override;
     px4::userland::Result<void> tune_satellite(std::uint8_t receiver, std::uint32_t frequency_khz,
                                                std::uint32_t timeout_ms) noexcept override;
+    px4::userland::TunerStrictProfile strict_profile(std::uint8_t receiver,
+        px4::userland::ipc::System system) const noexcept override;
+    px4::userland::Result<px4::userland::TunerHzProgramming> tune_terrestrial_hz(
+        std::uint8_t receiver, std::uint64_t hz, std::uint32_t timeout_ms) noexcept override;
+    px4::userland::Result<px4::userland::TunerHzProgramming> tune_satellite_hz(
+        std::uint8_t receiver, std::uint64_t hz, std::uint32_t timeout_ms) noexcept override;
     px4::userland::Result<bool> is_locked(std::uint8_t receiver,
                                           px4::userland::ipc::System system) noexcept override;
     px4::userland::Result<void> select_satellite_slot(std::uint8_t receiver, std::uint8_t slot,

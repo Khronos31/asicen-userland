@@ -62,7 +62,7 @@ bool arguments_match_reference()
     CHECK(!parse({"--instance", "test", "--model", "s3u", "--model", "s3u"}, true).valid);
     CHECK(!parse({"--instance", "test", "--group", "--group"}, true).valid);
     CHECK(!parse({"--instance", "test", "--runtime-dir", "x", "--runtime-dir", "x"}, true).valid);
-    CHECK(!parse({"--instance", "12345678901234"}, true).valid);
+    CHECK(!parse({"--instance", "12345678901234567890123456789012345678901234567890123456789012345"}, true).valid);
     return true;
 }
 
@@ -115,7 +115,13 @@ bool list_formats_share_observed_identity()
     const std::string shared = asicen::cli::format_discovery_json(nested_pair, "0.1.0");
     CHECK(shared.find("\"name\":\"userland.discovery\"") != std::string::npos);
     CHECK(shared.find("\"model\":\"PX-W3U3\"") != std::string::npos);
-    CHECK(shared.find("\"receiver\":3,\"local\":1,\"systems\":[\"ISDB-T\"]") != std::string::npos);
+    const auto receiver_three = shared.find("\"receiver\":3,");
+    CHECK(receiver_three != std::string::npos);
+    const auto receiver_end = shared.find('}', receiver_three);
+    const auto receiver_fields = shared.substr(receiver_three, receiver_end - receiver_three);
+    CHECK(receiver_fields.find("\"device\":2,") != std::string::npos);
+    CHECK(receiver_fields.find("\"local\":1,") != std::string::npos);
+    CHECK(receiver_fields.find("\"systems\":[\"ISDB-T\"]") != std::string::npos);
     CHECK(shared.find("\"readers\":[{") != std::string::npos);
     CHECK(shared.find("\"enclosures\":[{") != std::string::npos);
     CHECK(shared.find("\"ungrouped_usb_devices\":[]") != std::string::npos);
