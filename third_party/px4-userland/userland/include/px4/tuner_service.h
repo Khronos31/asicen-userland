@@ -172,6 +172,15 @@ public:
         (void)receiver;
         return Result<void>::success();
     }
+    virtual Result<void> set_independent_lnb_power(bool enabled) noexcept
+    {
+        (void)enabled;
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
+    virtual dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept
+    {
+        return {};
+    }
     // Metadata-only transport-loss notification. It must not perform USB or
     // frontend I/O. Production uses it to make per-bridge power authorities
     // terminal before any later rollback/shutdown path can issue a write.
@@ -432,6 +441,8 @@ public:
     // presence) taken under the engine registry lock.  It performs no backend
     // I/O.  Slot order is the legacy receiver order 0..receiver_count()-1.
     Result<dtv::userland::detail::ReceiverEngineStatus> engine_status() const noexcept;
+    Result<void> set_independent_lnb_power(bool enabled) noexcept;
+    dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept;
     // Fixed enclosure shape.  receiver_supports() is the backend's pure
     // metadata predicate (no I/O) for receivers below receiver_count().
     std::uint8_t receiver_count() const noexcept { return receiver_count_; }
@@ -520,6 +531,8 @@ private:
             dtv::userland::detail::ReceiverId receiver) noexcept override;
         Result<void> rollback_tune_power(
             dtv::userland::detail::ReceiverId receiver) noexcept override;
+        Result<void> set_independent_lnb_power(bool enabled) noexcept;
+        dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept;
         void mark_disconnected(dtv::userland::detail::ReceiverId receiver) noexcept override;
         Result<void> shutdown() noexcept override;
         Result<void> start_capture(dtv::userland::detail::ReceiverId receiver,

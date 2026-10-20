@@ -180,6 +180,14 @@ public:
     {
         return hardware_.commit_tune_power(receiver);
     }
+    Result<void> set_independent_lnb_power(bool enabled) noexcept override
+    {
+        return hardware_.set_independent_lnb_power(enabled);
+    }
+    dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept override
+    {
+        return hardware_.independent_lnb_power_state();
+    }
     Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override
     {
         return hardware_.rollback_tune_power(receiver);

@@ -1,5 +1,9 @@
 # Vendored px4-userland source manifest
 
+## 2026-10-20: 独立LNBのlocal delta
+
+`tuner_service.h/.cpp`、`control_server.cpp`、`control_workers.h/.cpp` にCoreのtyped独立LNB要求とSTATUS状態を接続するlocal deltaを追加。GPIO/safetyとdaemon wrapperはASICEN固有backendへ転送する。通常TUNEの電圧省略と明示指定を区別し、独立設定はreceiver closeで解除せずdaemon shutdownでOFFにする。共通server/hostのCore集約は後続作業であり、このvendored deltaを最終共通化完了とは扱わない。
+
 ## 2026-10-20: 公開ctlの共有Core frontendへの移行
 
 `userland/tools/asicenctl.cpp` は製品profileとinstance名の大文字保持だけを扱う薄い入口とし、parser・runtime探索・LIST整形・STATUS・CARD lifecycleはCoreの `dtv::host_ctl` 静的targetをPX4と共有する。Core revisionは `cmake/dtv-userland-core.revision` に固定する。PX4のfrontend sourceをASICENへ複製・includeする方式は使わない。

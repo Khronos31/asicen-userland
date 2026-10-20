@@ -1730,9 +1730,9 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
     }
     flush_startup_trace();
     post_gain_readiness_.reset();
-    // Independent LNB cleanup is still attempted after another cleanup stage
-    // quarantines the receiver. Never release its lease with uncertain power.
-    const auto off = clear_lnb_power();
+    // Preserve an explicitly selected independent feed across receiver close.
+    const auto off = lnb_independent_override_ ? Result<void>::success()
+                                              : clear_lnb_power();
     if (!off) {
         return off;
     }
@@ -1980,6 +1980,40 @@ Result<void> LibusbW3u3Hardware::clear_lnb_power() noexcept
     return Result<void>::success();
 }
 
+Result<void> LibusbW3u3Hardware::set_independent_lnb_power(bool enabled) noexcept
+{
+    if (enabled && !allow_lnb_power_) return Result<void>::failure(Error::UNSUPPORTED);
+    if (!supports_lnb_control()) return Result<void>::failure(Error::UNSUPPORTED);
+    const auto until = steady_now() + std::chrono::seconds(3);
+    if (!acquire_control_gate(until)) {
+        return Result<void>::failure(disconnected_.load()     ? Error::DISCONNECTED
+                                     : cleanup_failed_.load() ? Error::USB_IO
+                                     : stop_requested_.load() ? Error::NOT_READY
+                                                              : Error::TIMEOUT);
+    }
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    if (!initialized_ || !claimed_) return Result<void>::failure(Error::NOT_READY);
+    const auto result = set_lnb_power(enabled, false);
+    if (result) {
+        lnb_independent_override_ = true;
+        lnb_transaction_active_ = false;
+        lnb_transaction_receiver_ = kNoActiveReceiver;
+    }
+    return result;
+}
+
+dtv::userland::wire::Optional<bool>
+LibusbW3u3Hardware::independent_lnb_power_state() noexcept
+{
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::try_to_lock);
+    dtv::userland::wire::Optional<bool> result{};
+    if (gate.owns_lock() && lnb_state_known_ && !lnb_fault_latched_ && !disconnected_.load()) {
+        result.present = true;
+        result.value = lnb_on_;
+    }
+    return result;
+}
+
 Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System system,
                                                   std::uint8_t lnb_voltage) noexcept
 {
@@ -2014,6 +2048,8 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
     }
     DeadlineScope deadline(deadline_, deadline_active_, until);
     lnb_previous_on_ = lnb_state_known_ && lnb_on_;
+    lnb_previous_independent_ = lnb_independent_override_;
+    lnb_independent_override_ = false;
     lnb_requested_on_ = lnb_voltage == 15U;
     lnb_transaction_active_ = true;
     lnb_transaction_receiver_ = receiver;
@@ -2033,6 +2069,7 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
         if (lnb_fault_latched_) {
             mark_cleanup_failed(primary);
         }
+        lnb_independent_override_ = lnb_previous_independent_;
         lnb_transaction_active_ = false;
         lnb_transaction_receiver_ = kNoActiveReceiver;
         return Result<void>::failure(primary);
@@ -2062,6 +2099,7 @@ Result<void> LibusbW3u3Hardware::commit_tune_power(std::uint8_t receiver) noexce
         }
     }
     lnb_transaction_active_ = false;
+    lnb_independent_override_ = false;
     lnb_transaction_receiver_ = kNoActiveReceiver;
     return Result<void>::success();
 }
@@ -2095,6 +2133,7 @@ Result<void> LibusbW3u3Hardware::rollback_tune_power(std::uint8_t receiver) noex
         }
     }
     lnb_transaction_active_ = false;
+    lnb_independent_override_ = lnb_previous_independent_;
     lnb_transaction_receiver_ = kNoActiveReceiver;
     return Result<void>::success();
 }
@@ -2249,6 +2288,7 @@ Result<void> LibusbW3u3Hardware::shutdown() noexcept
     // OFF is independent of controller/CF restoration and receives its own
     // cleanup budget even when a previous step has quarantined the backend.
     (void)clear_lnb_power();
+    lnb_independent_override_ = false;
     if (!attempt_hardware_shutdown_cleanup(*this, needs_stop, gpio_snapshot_valid_)) {
         mark_cleanup_failed(Error::USB_IO);
     }

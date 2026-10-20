@@ -257,6 +257,17 @@ Result<void> TunerService::BackendAdapter::shutdown() noexcept
     return backend_.shutdown();
 }
 
+Result<void> TunerService::BackendAdapter::set_independent_lnb_power(bool enabled) noexcept
+{
+    return backend_.set_independent_lnb_power(enabled);
+}
+
+dtv::userland::wire::Optional<bool>
+TunerService::BackendAdapter::independent_lnb_power_state() noexcept
+{
+    return backend_.independent_lnb_power_state();
+}
+
 Result<void> TunerService::BackendAdapter::start_capture(
     engine::ReceiverId receiver, engine::ReceiverSystem system) noexcept
 {
@@ -598,6 +609,7 @@ TunerPreparedTune TunerService::prepare_tune_hz(
     hz.requested_hz = request.frequency_hz;
     hz.timeout_ms = request.timeout_ms;
     hz.lnb_voltage = request.lnb_voltage.present ? request.lnb_voltage.value : 0U;
+    hz.lnb_voltage_present = request.lnb_voltage.present;
     const bool satellite = request.system == ipc::System::ISDB_S;
     if (satellite && request.selection == Selection::tsid) hz.stream_id = request.selection_value;
     if (satellite && request.selection == Selection::slot) hz.slot = request.selection_value;
@@ -707,6 +719,17 @@ Result<engine::TuneMetadata> TunerService::tune_metadata(
 Result<engine::ReceiverEngineStatus> TunerService::engine_status() const noexcept
 {
     return engine_.status();
+}
+
+Result<void> TunerService::set_independent_lnb_power(bool enabled) noexcept
+{
+    return backend_.set_independent_lnb_power(enabled);
+}
+
+dtv::userland::wire::Optional<bool>
+TunerService::independent_lnb_power_state() noexcept
+{
+    return backend_.independent_lnb_power_state();
 }
 
 bool TunerService::receiver_supports(std::uint8_t receiver,

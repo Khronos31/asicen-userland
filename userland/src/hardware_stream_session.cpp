@@ -202,6 +202,17 @@ Result<void> HardwareStreamService::commit_tune_power(std::uint8_t receiver) noe
     return frontend_.commit_tune_power(receiver);
 }
 
+Result<void> HardwareStreamService::set_independent_lnb_power(bool enabled) noexcept
+{
+    return frontend_.set_independent_lnb_power(enabled);
+}
+
+dtv::userland::wire::Optional<bool>
+HardwareStreamService::independent_lnb_power_state() noexcept
+{
+    return frontend_.independent_lnb_power_state();
+}
+
 Result<void> HardwareStreamService::rollback_tune_power(std::uint8_t receiver) noexcept
 {
     if (receiver >= receiver_count()) {

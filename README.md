@@ -233,6 +233,10 @@ DEVICENAME asicen-userland:runtime=/tmp/asicen-example:instance=w3u3:access=user
 
 `asicenctl` のカード操作コマンドは、未実装の操作に対して適切に失敗を返します（ATR を捏造することはありません）。
 
+対応機種では `asicenctl` の `lnb-on` / `lnb-off` で筐体LNB給電を直接ON/OFFできます。対象の選択は `status` と同じ `--device usb:...` / `--instance` / `--runtime-dir` を使います。ONにはデーモン起動時の `--allow-lnb-power` が必要です。TUNER leaseは不要で、receiver close後も設定を保持し、daemon停止時にOFFへ戻します。独立OFFは受信中の別receiverへの給電も変更します。
+
+認識状態は共通STATUSの `enclosure.lnb_15v_enabled`（true/false/null）で表示します。非対応・不明な状態はnullで、端子電圧の実測値ではありません。給電指定を省略したTUNEは独立設定を変えず、明示したTUNE電圧指定は従来の経路を通します。
+
 ## 注意事項
 
 - **同時受信ストリームの制限**: 同時に受信できるストリームは 1 本のみです。4 チューナー機であっても、バックエンドが公開している受信部は primary 側の 2 系統（0: 衛星、1: 地デジ）のみであり、製品カタログにあるような 4 系統同時受信には対応していません。

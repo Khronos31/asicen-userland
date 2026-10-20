@@ -38,6 +38,7 @@ int main(int argc, char** argv)
     profile.product_version = ASICEN_PRODUCT_VERSION;
     profile.product = dtv::userland::identity::Product::asicen;
     profile.card_supported = true;
+    profile.lnb_power_supported = true;
     profile.serial_selector_supported = false;
     profile.normalize_instance = &preserve_instance;
 #if defined(_WIN32)

@@ -62,6 +62,7 @@ enum class ControlWorkerOperation : std::uint8_t {
     tuner_attach_stream,
     tuner_detach_stream,
     tuner_status,
+    tuner_lnb_power,
     tuner_shutdown,
     card_status,
     card_handle_status,
@@ -131,6 +132,7 @@ struct ControlWorkerTask final {
     bool attachment_valid = false;
     // Exact v1 attachment ticket for prepare and the physical cleanup.
     dtv::userland::detail::StreamAttachTicket stream_ticket{};
+    bool lnb_enabled = false;
 };
 
 struct ControlWorkerCompletion final {
@@ -147,6 +149,7 @@ struct ControlWorkerCompletion final {
     TunerAcquireResult tuner_acquire{};
     TunerStatus tuner_status{};
     bool tuner_status_valid = false;
+    bool lnb_enabled = false;
     TuneResponsePayload tune_response{};
     // Admitted TUNE only: the committed tune metadata of task.receiver, read on
     // the worker after execution.  tune_record_valid is set only when its

@@ -137,6 +137,8 @@ public:
                                                  std::uint8_t) noexcept override;
     px4::userland::Result<void> commit_tune_power(std::uint8_t) noexcept override;
     px4::userland::Result<void> rollback_tune_power(std::uint8_t) noexcept override;
+    px4::userland::Result<void> set_independent_lnb_power(bool) noexcept override;
+    dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept override;
     void mark_receiver_disconnected(std::uint8_t) noexcept override;
     void request_stop() noexcept override;
     void request_card_stop() noexcept override { request_stop(); }
@@ -361,6 +363,8 @@ private:
     bool lnb_transaction_active_ = false;
     bool lnb_previous_on_ = false;
     bool lnb_requested_on_ = false;
+    bool lnb_independent_override_ = false;
+    bool lnb_previous_independent_ = false;
     std::uint8_t lnb_transaction_receiver_ = kNoActiveReceiver;
     std::uint32_t tuned_frequency_khz_ = 0;
     std::array<std::uint8_t, 0x45> cf_snapshot_{};
