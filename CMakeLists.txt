@@ -1178,7 +1178,8 @@ if(ASICEN_BUILD_TESTS AND WIN32)
     target_link_libraries(asicen_windows_ts_output_tests PRIVATE px4_portable_reference)
     target_link_libraries(asicen_windows_ts_output_tests PRIVATE dtv::tuning dtv::identity)
     add_executable(asicen_windows_control_tests ${ASICEN_PX4_ROOT}/tests/windows_control_tests.cpp)
-    target_link_libraries(asicen_windows_control_tests PRIVATE px4_portable_reference)
+    target_link_libraries(asicen_windows_control_tests PRIVATE asicen_core)
+    target_include_directories(asicen_windows_control_tests PRIVATE userland/tests)
     add_executable(asicen_windows_stdin_tests
         ${ASICEN_PX4_ROOT}/tests/windows_stdin_monitor_tests.cpp
         ${ASICEN_PX4_ROOT}/tools/px4d_windows_stdin.cpp)

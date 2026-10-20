@@ -17,7 +17,8 @@ struct Reply final {
 };
 class WireClient final : private wire::FrameHandler {
 public:
-    static std::unique_ptr<WireClient> connect(const EndpointConfig& endpoint)
+    static std::unique_ptr<WireClient> connect(const EndpointConfig& endpoint,
+                                              std::uint64_t required_features = 0U)
     {
         auto stream = SocketStream::connect(endpoint, Timeout{2000U});
         if (!stream) return nullptr;
@@ -25,12 +26,14 @@ public:
         wire::HelloRequest hello_request{};
         hello_request.min = wire::Version{1U, 0U};
         hello_request.max = wire::Version{1U, 0U};
+        hello_request.required_features = required_features;
         const auto hello = client->request(wire::kOpcodeHello, hello_request,
                                            wire::encode_hello_request);
         if (!hello) return nullptr;
         const auto decoded = wire::decode_hello_response(
             ByteView{hello.value().payload.data(), hello.value().payload.size()});
-        if (!decoded) return nullptr;
+        if (!decoded || (decoded.value().features & required_features) != required_features)
+            return nullptr;
         client->epoch = decoded.value().epoch;
         return client;
     }
