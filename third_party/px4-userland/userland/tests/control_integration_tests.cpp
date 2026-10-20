@@ -7,8 +7,12 @@
 #include "control_server_test_access.h"
 #include "control_workers.h"
 #include "test_temp_directory.h"
+#include "asicen/control_context_builder.h"
+#include "asicen/device_profile.h"
+#include <dtv/userland/records.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -28,12 +32,14 @@
 #include <utility>
 #include <unistd.h>
 #include <vector>
+#include <map>
 
 namespace {
 
 using namespace px4::userland;
 using namespace px4::userland::ipc;
 using namespace px4::userland::ipc::posix;
+namespace wire = dtv::userland::wire;
 
 #define CHECK(condition)                                                                    \
     do {                                                                                    \
@@ -67,6 +73,163 @@ private:
     bool valid_ = false;
 };
 
+struct WireReply final {
+    wire::Header header{};
+    std::vector<std::uint8_t> payload;
+    ByteView view() const noexcept { return ByteView{payload.data(), payload.size()}; }
+};
+
+class WireCollector final : public wire::FrameHandler {
+public:
+    Result<void> on_frame(const wire::Frame& frame) noexcept override
+    {
+        WireReply reply;
+        reply.header = frame.header;
+        reply.payload.assign(frame.payload.data, frame.payload.data + frame.payload.size);
+        frames.push_back(std::move(reply));
+        return Result<void>::success();
+    }
+    std::vector<WireReply> frames;
+};
+
+class WireClient final {
+public:
+    explicit WireClient(SocketStream stream)
+        : stream_(std::move(stream)),
+          storage_(new std::array<std::uint8_t, wire::kMaxControlPayload>()),
+          receiver_(MutableByteView{storage_->data(), storage_->size()})
+    {
+    }
+
+    static std::unique_ptr<WireClient> connect(const EndpointConfig& endpoint)
+    {
+        auto stream = SocketStream::connect(endpoint, Timeout{2000U});
+        if (!stream) return nullptr;
+        return std::unique_ptr<WireClient>(new WireClient(std::move(stream.value())));
+    }
+
+    bool send_bytes(const std::uint8_t* data, std::size_t size)
+    {
+        std::size_t sent = 0U;
+        while (sent < size) {
+            const ssize_t count = ::send(stream_.native_handle(), data + sent,
+                                         size - sent, MSG_NOSIGNAL);
+            if (count <= 0) return false;
+            sent += static_cast<std::size_t>(count);
+        }
+        return true;
+    }
+
+    static std::vector<std::uint8_t> frame(std::uint16_t opcode,
+                                            std::uint32_t request_id,
+                                            ByteView payload,
+                                            wire::Kind kind = wire::Kind::request)
+    {
+        std::vector<std::uint8_t> bytes(wire::kHeaderSize + payload.size);
+        wire::Header header;
+        header.kind = kind;
+        header.opcode = opcode;
+        header.request_id = request_id;
+        header.payload_length = static_cast<std::uint32_t>(payload.size);
+        const auto written = wire::encode_frame(
+            header, payload, MutableByteView{bytes.data(), bytes.size()});
+        if (!written) bytes.clear();
+        return bytes;
+    }
+
+    template <typename Record>
+    static std::vector<std::uint8_t> encode(
+        const Record& value,
+        Result<std::size_t> (*encoder)(const Record&, MutableByteView) noexcept)
+    {
+        std::vector<std::uint8_t> bytes(wire::kMaxControlPayload);
+        const auto size = encoder(value, MutableByteView{bytes.data(), bytes.size()});
+        bytes.resize(size ? size.value() : 0U);
+        return bytes;
+    }
+
+    bool read_frame(WireReply& out, std::chrono::milliseconds bound =
+                    std::chrono::seconds(5))
+    {
+        const auto deadline = std::chrono::steady_clock::now() + bound;
+        while (collector_.frames.empty()) {
+            if (std::chrono::steady_clock::now() >= deadline || closed_) return false;
+            std::array<std::uint8_t, 4096U> buffer{};
+            const auto read = stream_.read_some(
+                MutableByteView{buffer.data(), buffer.size()}, Timeout{20U});
+            if (!read) {
+                if (read.error() == Error::DISCONNECTED) closed_ = true;
+                continue;
+            }
+            if (!receiver_.feed(ByteView{buffer.data(), read.value()}, collector_))
+                return false;
+        }
+        out = std::move(collector_.frames.front());
+        collector_.frames.erase(collector_.frames.begin());
+        return true;
+    }
+
+    bool closed_without_reply(std::chrono::milliseconds bound =
+                              std::chrono::seconds(5))
+    {
+        WireReply reply;
+        if (read_frame(reply, bound)) return false;
+        return closed_;
+    }
+
+    bool request(std::uint16_t opcode, const std::vector<std::uint8_t>& payload,
+                 WireReply& out)
+    {
+        const auto bytes = frame(opcode, ++request_id_,
+                                 ByteView{payload.data(), payload.size()});
+        if (bytes.empty() || !send_bytes(bytes.data(), bytes.size())) return false;
+        return read_frame(out) && out.header.request_id == request_id_ &&
+               out.header.opcode == opcode;
+    }
+
+    bool hello(std::uint64_t required, std::uint64_t optional,
+               wire::HelloResponse* result = nullptr)
+    {
+        wire::HelloRequest value;
+        value.min = wire::Version{1U, 0U};
+        value.max = wire::Version{1U, 0U};
+        value.required_features = required;
+        value.optional_features = optional;
+        WireReply reply;
+        if (!request(wire::kOpcodeHello,
+                     encode(value, &wire::encode_hello_request), reply) ||
+            reply.header.kind != wire::Kind::response) return false;
+        const auto decoded = wire::decode_hello_response(reply.view());
+        if (!decoded) return false;
+        epoch = decoded.value().epoch;
+        features = decoded.value().features;
+        if (result != nullptr) *result = decoded.value();
+        return true;
+    }
+
+    bool send_request(std::uint16_t opcode, const std::vector<std::uint8_t>& payload)
+    {
+        const auto bytes = frame(opcode, ++request_id_,
+                                 ByteView{payload.data(), payload.size()});
+        return !bytes.empty() && send_bytes(bytes.data(), bytes.size());
+    }
+
+    void close() { stream_.close(); }
+    int fd() const noexcept { return stream_.native_handle(); }
+    std::uint32_t request_id() const noexcept { return request_id_; }
+
+    wire::Uuid epoch{};
+    std::uint64_t features = 0U;
+
+private:
+    SocketStream stream_;
+    std::unique_ptr<std::array<std::uint8_t, wire::kMaxControlPayload>> storage_;
+    wire::FrameReceiver receiver_;
+    WireCollector collector_;
+    std::uint32_t request_id_ = 0U;
+    bool closed_ = false;
+};
+
 class Backend final : public CardServiceBackend {
 public:
     Result<void> set_power(bool on) noexcept override
@@ -92,6 +255,26 @@ public:
 
 class TunerBackend final : public TunerServiceBackend {
 public:
+    std::uint8_t receiver_count() const noexcept override { return kReceiverCount; }
+    bool receiver_supports(std::uint8_t receiver, System system) const noexcept override
+    {
+        return receiver < kReceiverCount &&
+               system == (receiver % 4U < 2U ? System::ISDB_S : System::ISDB_T);
+    }
+    TunerStrictProfile strict_profile(std::uint8_t receiver,
+                                      System system) const noexcept override
+    {
+        if (!receiver_supports(receiver, system)) return {};
+        TunerStrictProfile profile{};
+        profile.native_hz = true;
+        profile.min_hz = system == System::ISDB_T ? 40000000U : 950000000U;
+        profile.max_hz = system == System::ISDB_T ? 900000000U : 2150000000U;
+        if (system == System::ISDB_S) {
+            profile.lnb_voltage_mask = 0x03U;
+            profile.slot_count = 8U;
+        }
+        return profile;
+    }
     Result<void> open_receiver(std::uint8_t receiver) noexcept override
     {
         ++open_calls[receiver];
@@ -136,6 +319,46 @@ public:
         ++tune_calls[receiver];
         return Result<void>::success();
     }
+    Result<TunerHzProgramming> tune_terrestrial_hz(
+        std::uint8_t receiver, std::uint64_t frequency_hz,
+        std::uint32_t) noexcept override
+    {
+        if (receiver == 0U && block_tune_receiver_zero.load()) {
+            {
+                std::lock_guard<std::mutex> lock(tune_receiver_zero_mutex);
+                tune_receiver_zero_started.store(true);
+            }
+            tune_receiver_zero_condition.notify_all();
+            while (block_tune_receiver_zero.load()) std::this_thread::yield();
+        }
+        last_system[receiver] = System::ISDB_T;
+        last_frequency_hz[receiver] = frequency_hz;
+        ++tune_calls[receiver];
+        TunerHzProgramming result{};
+        result.programmed_hz.present = true;
+        result.programmed_hz.value = frequency_hz;
+        return Result<TunerHzProgramming>::success(result);
+    }
+    Result<TunerHzProgramming> tune_satellite_hz(
+        std::uint8_t receiver, std::uint64_t frequency_hz,
+        std::uint32_t) noexcept override
+    {
+        if (receiver == 0U && block_tune_receiver_zero.load()) {
+            {
+                std::lock_guard<std::mutex> lock(tune_receiver_zero_mutex);
+                tune_receiver_zero_started.store(true);
+            }
+            tune_receiver_zero_condition.notify_all();
+            while (block_tune_receiver_zero.load()) std::this_thread::yield();
+        }
+        last_system[receiver] = System::ISDB_S;
+        last_frequency_hz[receiver] = frequency_hz;
+        ++tune_calls[receiver];
+        TunerHzProgramming result{};
+        result.programmed_hz.present = true;
+        result.programmed_hz.value = frequency_hz;
+        return Result<TunerHzProgramming>::success(result);
+    }
     Result<bool> is_locked(std::uint8_t, System) noexcept override
     { return Result<bool>::success(true); }
     Result<void> select_satellite_slot(std::uint8_t, std::uint8_t,
@@ -165,7 +388,7 @@ public:
     {
         ++start_capture_calls[receiver];
         last_capture_system[receiver] = system;
-        if (receiver == 2U && block_start_capture.load()) {
+        if (receiver == 0U && block_start_capture.load()) {
             std::unique_lock<std::mutex> lock(start_capture_mutex);
             start_capture_started.store(true);
             start_capture_condition.notify_all();
@@ -193,6 +416,7 @@ public:
     std::array<std::size_t, kReceiverCount> stop_capture_calls{};
     std::array<System, kReceiverCount> last_system{};
     std::array<System, kReceiverCount> last_capture_system{};
+    std::array<std::uint64_t, kReceiverCount> last_frequency_hz{};
     std::atomic<bool> block_receiver_zero{false};
     std::atomic<bool> receiver_zero_started{false};
     std::mutex receiver_zero_mutex;
@@ -206,6 +430,67 @@ public:
     std::mutex start_capture_mutex;
     std::condition_variable start_capture_condition;
 };
+
+bool make_control_context(TunerService& tuner_service, const char* instance,
+                          std::uint8_t epoch_seed, ControlContext& context)
+{
+    if (!tuner_service.configure_strict_capabilities()) return false;
+    const auto* profile = asicen::find_profile(asicen::ModelId::W3u3);
+    if (profile == nullptr) return false;
+    std::array<asicen::ClaimedUsbFunctionObservation, 2U> observations{};
+    for (std::size_t index = 0U; index < observations.size(); ++index) {
+        observations[index].vendor_id = profile->vid;
+        observations[index].product_id = profile->pid;
+        observations[index].has_bus = true;
+        observations[index].bus = 3U;
+        observations[index].has_address = true;
+        observations[index].address = static_cast<std::uint8_t>(11U + index);
+        observations[index].port_path = {1U, static_cast<std::uint8_t>(index + 1U)};
+    }
+    wire::Uuid epoch{};
+    for (std::size_t index = 0U; index < epoch.size(); ++index)
+        epoch[index] = static_cast<std::uint8_t>(epoch_seed + index * 7U);
+    if (!asicen::build_asicen_control_context(
+        *profile, observations.data(), 2U, 2U, tuner_service, instance, epoch, context))
+        return false;
+    // This portable socket fixture represents its eight-receiver fake, not a
+    // physical W3U3. Preserve the independent bridge lanes and sibling streams.
+    auto& list = context.list;
+    list.enclosure.value.limits.max_concurrent_streams.value = kReceiverCount;
+    list.receivers.value.count = kReceiverCount;
+    for (std::uint8_t i = 0; i < kReceiverCount; ++i) {
+        auto& receiver = list.receivers.value.items[i];
+        receiver = list.receivers.value.items[i % 2U];
+        receiver.id = i;
+        receiver.systems.mask = i % 4U < 2U ? 2U : 1U;
+        receiver.binding.value = wire::Binding{static_cast<std::uint16_t>(i / 4U),
+                                                static_cast<std::uint16_t>(i % 4U)};
+        receiver.capabilities.controls = 0;
+        receiver.capabilities.lnb.values.count = 0;
+        if (i % 4U < 2U) {
+            receiver.capabilities.controls = wire::kControlBitLnb;
+            receiver.capabilities.lnb.values.count = 2;
+            receiver.capabilities.lnb.values.items[0] = 0;
+            receiver.capabilities.lnb.values.items[1] = 15;
+        }
+        context.receiver_index[i] = i;
+    }
+    return wire::validate_list_response(list) == Error::OK;
+}
+
+Result<std::unique_ptr<PosixControlServer>> create_typed_server(
+    const EndpointConfig& endpoint, CardService& card_service,
+    TunerService& tuner_service, const char* instance,
+    TunerStreamControl* stream_control = nullptr)
+{
+    static std::atomic<std::uint8_t> next_epoch_seed{1U};
+    ControlContext context{};
+    if (!make_control_context(tuner_service, instance,
+                              next_epoch_seed.fetch_add(1U), context))
+        return Result<std::unique_ptr<PosixControlServer>>::failure(Error::INTERNAL);
+    return PosixControlServer::create(endpoint, card_service, tuner_service,
+                                      context, stream_control);
+}
 
 class ControlStream final : public TunerStreamControl {
 public:
@@ -574,11 +859,11 @@ private:
     ControlServerTestHooks hooks_{};
 };
 
-class FrameCollector final : public FrameConsumer {
+class FrameCollector final : public wire::FrameHandler {
 public:
     FrameCollector() : payloads(64U) {}
 
-    Result<void> on_frame(const FrameView& frame) noexcept override
+    Result<void> on_frame(const wire::Frame& frame) noexcept override
     {
         if (count >= headers.size() || frame.payload.size > payloads[0U].size()) {
             return Result<void>::failure(Error::BUFFER_TOO_SMALL);
@@ -601,22 +886,28 @@ public:
     // A single nonblocking read can legally contain many small stream frames.
     // Keep enough bounded storage for one maximum transport read.  The payload
     // backing is on the heap because collectors also live on worker threads.
-    std::array<FrameHeader, 64U> headers{};
+    std::array<wire::Header, 64U> headers{};
     std::vector<std::array<std::uint8_t, 1024U>> payloads;
     std::array<std::size_t, 64U> payload_sizes{};
     std::size_t count = 0U;
 };
 
+bool send_socket_bytes(SocketStream& stream, const std::uint8_t* data,
+                       std::size_t size) noexcept;
+
 Result<void> send_raw_request(SocketStream& stream, MessageType type,
                               std::uint32_t request_id, ByteView payload) noexcept
 {
     std::vector<std::uint8_t> frame(kFrameHeaderSize + kMaxControlPayload, 0U);
-    const auto encoded = encode_frame(
-        FrameHeader{kProtocolMajor, kProtocolMinor, type, MessageKind::request,
-                    request_id, static_cast<std::uint32_t>(payload.size)},
-        payload, MutableByteView{frame.data(), frame.size()});
+    wire::Header header;
+    header.opcode = static_cast<std::uint16_t>(type);
+    header.request_id = request_id;
+    header.payload_length = static_cast<std::uint32_t>(payload.size);
+    const auto encoded = wire::encode_frame(header, payload,
+        MutableByteView{frame.data(), frame.size()});
     if (!encoded) return Result<void>::failure(encoded.error());
-    return stream.write_frame(ByteView{frame.data(), encoded.value()}, Timeout{2000U});
+    return send_socket_bytes(stream, frame.data(), encoded.value()) ?
+        Result<void>::success() : Result<void>::failure(Error::DISCONNECTED);
 }
 
 bool send_socket_bytes(SocketStream& stream, const std::uint8_t* data,
@@ -645,31 +936,34 @@ bool send_socket_bytes(SocketStream& stream, const std::uint8_t* data,
     return true;
 }
 
-bool read_raw_frames(SocketStream& stream, StreamFramer& framer,
+bool read_raw_frames(SocketStream& stream, wire::FrameReceiver& framer,
                      FrameCollector& collector, std::size_t count) noexcept
 {
     std::array<std::uint8_t, 8192U> input{};
     for (std::size_t attempt = 0U; attempt < 200U && collector.count < count; ++attempt) {
-        const auto read = stream.read_frames(
-            MutableByteView{input.data(), input.size()}, framer, collector,
-            Timeout{20U});
-        if (!read) return false;
+        const auto read = stream.read_some(
+            MutableByteView{input.data(), input.size()}, Timeout{20U});
+        if (!read) {
+            if (read.error() == Error::TIMEOUT) continue;
+            return false;
+        }
+        if (!framer.feed(ByteView{input.data(), read.value()}, collector)) return false;
     }
     return collector.count >= count;
 }
 
-bool read_until_stream_end(SocketStream& stream, StreamFramer& framer,
-                           StreamEndEventPayload& end) noexcept
+bool read_until_stream_end(SocketStream& stream, wire::FrameReceiver& framer,
+                           wire::StreamEndEvent& end) noexcept
 {
     FrameCollector frames;
     for (std::size_t attempt = 0U; attempt < 500U; ++attempt) {
         frames.clear();
         if (!read_raw_frames(stream, framer, frames, 1U)) return false;
         for (std::size_t index = 0U; index < frames.count; ++index) {
-            if (frames.headers[index].type != MessageType::STREAM_END ||
-                frames.headers[index].kind != MessageKind::event)
+            if (frames.headers[index].opcode != wire::kOpcodeStreamEndEvent ||
+                frames.headers[index].kind != wire::Kind::event)
                 continue;
-            const auto decoded = decode_stream_end_event_payload(
+            const auto decoded = wire::decode_stream_end_event(
                 ByteView{frames.payloads[index].data(), frames.payload_sizes[index]});
             if (!decoded) return false;
             end = decoded.value();
@@ -679,12 +973,30 @@ bool read_until_stream_end(SocketStream& stream, StreamFramer& framer,
     return false;
 }
 
-bool raw_hello(SocketStream& stream, StreamFramer& framer) noexcept
+bool counters_are(const wire::StreamCounters& value, std::uint64_t packets,
+                  std::uint64_t dropped)
 {
-    std::array<std::uint8_t, 12U> payload{};
-    const auto payload_size = encode_payload(
-        HelloRequestPayload{kProtocolMajor, kProtocolMinor, kProtocolMajor,
-                            kProtocolMinor, 0U},
+    return value.entries.count == 2 &&
+        value.entries.items[0].id == wire::kCounterIdTransmittedPackets &&
+        value.entries.items[1].id == wire::kCounterIdQueueDroppedPackets &&
+        value.entries.items[0].counter.measurement.state == wire::MeasureState::valid &&
+        value.entries.items[1].counter.measurement.state == wire::MeasureState::valid &&
+        value.entries.items[0].counter.measurement.value == packets &&
+        value.entries.items[1].counter.measurement.value == dropped;
+}
+
+bool end_error_is(const wire::StreamEndEvent& end, ErrorCode code)
+{
+    return code == ErrorCode::OK ? !end.final.error.present :
+        end.final.error.present && end.final.error.value.code == static_cast<std::uint32_t>(code);
+}
+
+bool raw_hello(SocketStream& stream, wire::FrameReceiver& framer,
+               wire::Uuid& epoch) noexcept
+{
+    std::array<std::uint8_t, 24U> payload{};
+    const auto payload_size = wire::encode_hello_request(
+        wire::HelloRequest{{1, 0}, {1, 0}, 0, wire::kFeatureStateEvent},
         MutableByteView{payload.data(), payload.size()});
     if (!payload_size || !send_raw_request(
             stream, MessageType::HELLO, 1U,
@@ -692,9 +1004,14 @@ bool raw_hello(SocketStream& stream, StreamFramer& framer) noexcept
         return false;
     }
     FrameCollector frames;
-    return read_raw_frames(stream, framer, frames, 1U) &&
-           frames.headers[0U].type == MessageType::HELLO &&
-           frames.headers[0U].kind == MessageKind::response;
+    if (!read_raw_frames(stream, framer, frames, 1U) ||
+        frames.headers[0U].opcode != wire::kOpcodeHello ||
+        frames.headers[0U].kind != wire::Kind::response) return false;
+    const auto hello = wire::decode_hello_response(
+        ByteView{frames.payloads[0].data(), frames.payload_sizes[0]});
+    if (!hello) return false;
+    epoch = hello.value().epoch;
+    return true;
 }
 
 class Session final : public CardProtocolSession {
@@ -742,31 +1059,154 @@ public:
     std::size_t count = 0U;
 };
 
-template <typename Payload>
-Result<ControlResponse> request(PosixControlClient& client, MessageType type,
-                                const Payload& payload,
-                                ControlEventSink* sink = nullptr) noexcept
-{
-    std::array<std::uint8_t, kMaxControlPayload> encoded{};
-    const auto size = encode_payload(payload,
-        MutableByteView{encoded.data(), encoded.size()});
-    if (!size) return Result<ControlResponse>::failure(size.error());
-    return client.request(type, ByteView{encoded.data(), size.value()}, Timeout{2000U}, sink);
-}
+// Private typed test entrance. The small legacy-named input aggregates below
+// describe case intentions only; no legacy codec/client is used on the socket.
+class TypedControl final {
+public:
+    static Result<std::unique_ptr<TypedControl>> connect(
+        const EndpointConfig& endpoint, std::uint32_t capabilities, Timeout)
+    {
+        auto wire_client = WireClient::connect(endpoint);
+        if (!wire_client || !wire_client->hello(
+                capabilities & kCapabilityCard ? wire::kFeatureCardService : 0,
+                wire::kFeatureStateEvent))
+            return Result<std::unique_ptr<TypedControl>>::failure(Error::PROTOCOL_ERROR);
+        return Result<std::unique_ptr<TypedControl>>::success(
+            std::unique_ptr<TypedControl>(new TypedControl(std::move(wire_client))));
+    }
+    Result<WireReply> exchange(std::uint16_t opcode, const std::vector<std::uint8_t>& bytes)
+    {
+        WireReply reply;
+        if (!client->request(opcode, bytes, reply))
+            return Result<WireReply>::failure(Error::DISCONNECTED);
+        if (reply.header.kind == wire::Kind::error_response) {
+            const auto error = wire::decode_error_response(reply.view());
+            return Result<WireReply>::failure(error ?
+                static_cast<Error>(error.value().error.code) : Error::PROTOCOL_ERROR);
+        }
+        return Result<WireReply>::success(std::move(reply));
+    }
+    template<typename Record>
+    Result<WireReply> record(std::uint16_t opcode, const Record& value,
+        Result<std::size_t> (*encoder)(const Record&, MutableByteView) noexcept)
+    { return exchange(opcode, WireClient::encode(value, encoder)); }
+    wire::AttachRequest attachment(std::uint64_t lease) const
+    {
+        const auto& started = starts.at(lease);
+        return {client->epoch, lease, started.stream_id, started.attach_token};
+    }
+    void close() { client->close(); }
+    std::unique_ptr<WireClient> client;
+    std::map<std::uint64_t, std::uint64_t> revisions;
+    std::map<std::uint64_t, wire::StartResponse> starts;
+    std::map<std::uint64_t, wire::CardSessionResult> cards;
+private:
+    explicit TypedControl(std::unique_ptr<WireClient> value) : client(std::move(value)) {}
+};
 
-Result<ControlResponse> empty_request(PosixControlClient& client,
-                                      MessageType type,
-                                      ControlEventSink* sink = nullptr) noexcept
+Result<WireReply> request(TypedControl& client, MessageType,
+                         const AcquireRequestPayload& payload)
 {
-    return client.request(type, ByteView{nullptr, 0U}, Timeout{2000U}, sink);
+    return client.record(wire::kOpcodeAcquire,
+        wire::AcquireRequest{client.client->epoch, payload.receiver_id},
+        &wire::encode_acquire_request);
+}
+Result<WireReply> request(TypedControl& client, MessageType,
+                         const TuneRequestPayload& payload)
+{
+    wire::TuneRequest tune;
+    tune.epoch = client.client->epoch;
+    tune.lease_id = payload.lease_id;
+    tune.system = payload.system == System::ISDB_T ? wire::System::isdb_t : wire::System::isdb_s;
+    tune.frequency_hz = payload.frequency_khz * 1000U;
+    tune.timeout_ms = payload.timeout_ms;
+    if (payload.slot != 0xffffU) {
+        tune.selection = wire::Selection::slot;
+        tune.selection_value = payload.slot;
+    } else if (payload.stream_id != 0xffffU) {
+        tune.selection = wire::Selection::tsid;
+        tune.selection_value = payload.stream_id;
+    }
+    if (tune.system == wire::System::isdb_s) {
+        tune.lnb_voltage.present = true;
+        tune.lnb_voltage.value = payload.lnb_voltage;
+    }
+    auto reply = client.record(wire::kOpcodeTune, tune, &wire::encode_tune_request);
+    if (reply) {
+        auto result = wire::decode_tune_result(reply.value().view());
+        if (!result) return Result<WireReply>::failure(result.error());
+        client.revisions[payload.lease_id] = result.value().tune_revision;
+    }
+    return reply;
+}
+Result<WireReply> request(TypedControl& client, MessageType type,
+                         const LeaseRequestPayload& payload)
+{
+    if (type == MessageType::RELEASE) {
+        auto reply = client.record(wire::kOpcodeRelease,
+            wire::ReleaseRequest{client.client->epoch, payload.lease_id},
+            &wire::encode_release_request);
+        if (reply) {
+            const auto released = wire::decode_release_response(reply.value().view());
+            if (!released) return Result<WireReply>::failure(released.error());
+            if (released.value().error.present)
+                return Result<WireReply>::failure(static_cast<Error>(released.value().error.value.code));
+        }
+        return reply;
+    }
+    if (type == MessageType::START_STREAM) {
+        auto reply = client.record(wire::kOpcodeStartStream,
+            wire::StartRequest{client.client->epoch, payload.lease_id,
+                               client.revisions[payload.lease_id]}, &wire::encode_start_request);
+        if (reply) {
+            auto started = wire::decode_start_response(reply.value().view());
+            if (!started) return Result<WireReply>::failure(started.error());
+            client.starts[payload.lease_id] = started.value();
+        }
+        return reply;
+    }
+    return client.record(wire::kOpcodeStopStream,
+        wire::StopRequest{client.client->epoch, payload.lease_id,
+            client.starts[payload.lease_id].stream_id}, &wire::encode_stop_request);
+}
+Result<WireReply> request(TypedControl& client, MessageType,
+                         const CardConnectRequestPayload&)
+{
+    auto reply = client.record(wire::kOpcodeCardConnect,
+        wire::CardConnectRequest{{client.client->epoch, 0}, wire::Share::shared, 1},
+        &wire::encode_card_connect_request);
+    if (reply) {
+        const auto card = wire::decode_card_session_result(reply.value().view());
+        if (!card) return Result<WireReply>::failure(card.error());
+        client.cards[card.value().card_handle] = card.value();
+    }
+    return reply;
+}
+Result<WireReply> request(TypedControl& client, MessageType,
+                         const CardDispositionRequestPayload& payload)
+{
+    const auto& card = client.cards.at(payload.card_handle);
+    return client.record(wire::kOpcodeCardDisconnect,
+        wire::CardDisconnectRequest{{client.client->epoch, card.reader_id,
+            card.bound_generation, card.card_handle}, wire::Disposition::leave},
+        &wire::encode_card_disconnect_request);
+}
+Result<WireReply> empty_request(TypedControl& client, MessageType type)
+{
+    if (type == MessageType::LIST)
+        return client.record(wire::kOpcodeList, wire::ListRequest{client.client->epoch},
+                             &wire::encode_list_request);
+    return client.record(wire::kOpcodeStatus,
+        wire::StatusRequest{client.client->epoch, {wire::ScopeKind::enclosure, 0}},
+        &wire::encode_status_request);
 }
 
 bool test_control_server_card_flow_and_shutdown()
 {
     TempRuntime runtime;
     CHECK(runtime.valid());
-    constexpr const char* serial = "00001205000960";
-    const EndpointConfig endpoint{runtime.path().c_str(), serial, kControlEndpointName,
+    constexpr const char* instance = "typed-card-flow";
+    const EndpointConfig endpoint{runtime.path().c_str(), instance, kControlEndpointName,
                                   EndpointAccess::private_user};
     Backend backend;
     Session session;
@@ -775,14 +1215,15 @@ bool test_control_server_card_flow_and_shutdown()
     TunerNonce tuner_nonce;
     TunerTime tuner_time;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time);
-    auto server_result = PosixControlServer::create(
-        endpoint, service, tuner_service, serial);
+    auto server_result = create_typed_server(endpoint, service, tuner_service, instance);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     const std::string socket_path = server->endpoint_path();
     const std::string stream_socket_path = server->stream_endpoint_path();
-    const std::string product_path = runtime.path() + "/px4-userland";
-    const std::string instance_path = product_path + "/" + serial;
+    const auto instance_path = std::filesystem::path(socket_path).parent_path();
+    const auto product_path = instance_path.parent_path();
+    CHECK(std::filesystem::is_directory(instance_path));
+    CHECK(std::filesystem::is_directory(product_path));
 
     std::atomic<bool> stop{false};
     std::atomic<bool> server_ok{true};
@@ -795,107 +1236,155 @@ bool test_control_server_card_flow_and_shutdown()
             }
         }
     });
+    ServerThreadGuard server_guard(stop, server_thread, *server);
 
-    auto first_result = PosixControlClient::connect(
-        endpoint, kCapabilityCard | kCapabilityEvents, Timeout{2000U});
-    auto second_result = PosixControlClient::connect(
-        endpoint, kCapabilityCard, Timeout{2000U});
-    CHECK(first_result && second_result);
-    std::unique_ptr<PosixControlClient> first = std::move(first_result.value());
-    std::unique_ptr<PosixControlClient> second = std::move(second_result.value());
-    CHECK((first->negotiated_capabilities() &
-           (kCapabilityCard | kCapabilityEvents)) ==
-          (kCapabilityCard | kCapabilityEvents));
+    auto first = WireClient::connect(endpoint);
+    auto second = WireClient::connect(endpoint);
+    CHECK(first && second);
+    CHECK(first->hello(wire::kFeatureCardService, wire::kFeatureStateEvent));
+    CHECK(second->hello(wire::kFeatureCardService, 0U));
+    CHECK((first->features & wire::kFeatureCardService) != 0U);
+    CHECK((first->features & wire::kFeatureStateEvent) == 0U);
 
-    const auto listed = empty_request(*first, MessageType::LIST);
-    CHECK(listed);
-    const auto list = decode_list_response_payload(
-        ByteView{listed.value().payload.data(), listed.value().payload.size()});
-    CHECK(list && list.value().receivers.size() == 8U && list.value().ready == 1U);
-    CHECK(list.value().receivers[0].system == System::ISDB_S);
-    CHECK(list.value().receivers[7].global_id == 7U);
+    wire::ListRequest list_request;
+    list_request.epoch = first->epoch;
+    WireReply listed;
+    CHECK(first->request(wire::kOpcodeList,
+        WireClient::encode(list_request, &wire::encode_list_request), listed));
+    const auto list = wire::decode_list_response(listed.view());
+    CHECK(list && list.value().receivers.present &&
+          list.value().receivers.value.count == kReceiverCount &&
+          list.value().readers.present && list.value().readers.value.count == 1U);
+    CHECK(list.value().receivers.value.items[0].systems.mask == 0x02U);
+    CHECK(list.value().receivers.value.items[1].systems.mask == 0x02U);
+    CHECK(list.value().receivers.value.items[2].systems.mask == 0x01U);
 
-    const auto daemon_status = empty_request(*first, MessageType::STATUS);
-    CHECK(daemon_status);
-    const auto status = decode_status_response_payload(
-        ByteView{daemon_status.value().payload.data(),
-                 daemon_status.value().payload.size()});
-    CHECK(status && status.value().receiver_states[0] == ReceiverState::free &&
-          status.value().receiver_states[7] == ReceiverState::free);
-    const auto initial_card_status = empty_request(*first, MessageType::CARD_STATUS);
-    CHECK(initial_card_status);
-    const auto card_status_payload = decode_card_status_response_payload(
-        ByteView{initial_card_status.value().payload.data(),
-                 initial_card_status.value().payload.size()});
-    CHECK(card_status_payload && card_status_payload.value().present == 1U &&
-          card_status_payload.value().initialized == 0U);
+    wire::ReaderKey reader{first->epoch, 0U};
+    wire::CardStatusRequest initial_request{reader};
+    WireReply initial_reply;
+    CHECK(first->request(wire::kOpcodeCardStatus,
+        WireClient::encode(initial_request, &wire::encode_card_status_request),
+        initial_reply));
+    const auto initial = wire::decode_card_status_response(initial_reply.view());
+    CHECK(initial && initial.value().present && !initial.value().initialized &&
+          initial.value().current_generation != 0U);
 
-    const auto opened1 = request(*first, MessageType::CARD_CONNECT,
-                                 CardConnectRequestPayload{ShareMode::shared});
-    const auto opened2 = request(*second, MessageType::CARD_CONNECT,
-                                 CardConnectRequestPayload{ShareMode::shared});
-    CHECK(opened1 && opened2);
-    const auto card1 = decode_card_connect_response_payload(
-        ByteView{opened1.value().payload.data(), opened1.value().payload.size()});
-    const auto card2 = decode_card_connect_response_payload(
-        ByteView{opened2.value().payload.data(), opened2.value().payload.size()});
-    CHECK(card1 && card2 && card1.value().card_handle != card2.value().card_handle);
+    wire::CardConnectRequest connect1;
+    connect1.key = reader;
+    connect1.share = wire::Share::shared;
+    connect1.preferred_protocols = 1U;
+    wire::CardConnectRequest connect2 = connect1;
+    connect2.key.epoch = second->epoch;
+    WireReply opened1;
+    WireReply opened2;
+    CHECK(first->request(wire::kOpcodeCardConnect,
+        WireClient::encode(connect1, &wire::encode_card_connect_request), opened1));
+    CHECK(second->request(wire::kOpcodeCardConnect,
+        WireClient::encode(connect2, &wire::encode_card_connect_request), opened2));
+    auto card1 = wire::decode_card_session_result(opened1.view());
+    auto card2 = wire::decode_card_session_result(opened2.view());
+    CHECK(card1 && card2 && card1.value().card_handle != card2.value().card_handle &&
+          card1.value().bound_generation == initial.value().current_generation &&
+          card2.value().bound_generation == initial.value().current_generation);
+    CHECK(card1.value().atr.present && card1.value().atr.value.length == 2U &&
+          card1.value().atr.value.bytes[0] == 0x3bU &&
+          card1.value().atr.value.bytes[1] == 0x00U);
 
-    const auto reconnected = request(
-        *second, MessageType::CARD_RECONNECT,
-        CardReconnectRequestPayload{card2.value().card_handle,
-                                    ShareMode::shared, Disposition::leave});
-    CHECK(reconnected);
-    const auto reconnect_atr = decode_atr_payload(
-        ByteView{reconnected.value().payload.data(), reconnected.value().payload.size()});
-    CHECK(reconnect_atr && reconnect_atr.value().atr.size == 2U);
+    wire::CardHandleKey key2{second->epoch, 0U, card2.value().bound_generation,
+                             card2.value().card_handle};
+    wire::CardReconnectRequest reconnect{key2, wire::Share::shared,
+                                         wire::Disposition::leave, 1U};
+    WireReply reconnect_reply;
+    CHECK(second->request(wire::kOpcodeCardReconnect,
+        WireClient::encode(reconnect, &wire::encode_card_reconnect_request),
+        reconnect_reply));
+    card2 = wire::decode_card_session_result(reconnect_reply.view());
+    CHECK(card2 && card2.value().atr.present && card2.value().atr.value.length == 2U);
+    key2.bound_generation = card2.value().bound_generation;
 
-    const auto reset = request(*first, MessageType::CARD_RESET,
-                               CardHandleRequestPayload{card1.value().card_handle});
-    CHECK(reset);
-    const auto reset_atr = decode_atr_payload(
-        ByteView{reset.value().payload.data(), reset.value().payload.size()});
-    CHECK(reset_atr && reset_atr.value().atr.size == 2U);
+    wire::CardHandleKey key1{first->epoch, 0U, card1.value().bound_generation,
+                             card1.value().card_handle};
+    wire::CardResetRequest reset{key1};
+    WireReply reset_reply;
+    CHECK(first->request(wire::kOpcodeCardReset,
+        WireClient::encode(reset, &wire::encode_card_reset_request), reset_reply));
+    card1 = wire::decode_card_session_result(reset_reply.view());
+    CHECK(card1 && card1.value().atr.present && card1.value().atr.value.length == 2U);
+    key1.bound_generation = card1.value().bound_generation;
 
-    CHECK(request(*first, MessageType::BEGIN_TRANSACTION,
-                  CardHandleRequestPayload{card1.value().card_handle}));
-    const std::array<std::uint8_t, 2U> apdu{0x00U, 0x84U};
-    const auto busy = request(
-        *second, MessageType::CARD_TRANSMIT,
-        CardTransmitRequestPayload{card2.value().card_handle,
-                                   ByteView{apdu.data(), apdu.size()}});
-    CHECK(!busy && busy.error() == Error::BUSY);
-    CHECK(request(*first, MessageType::END_TRANSACTION,
-                  CardDispositionRequestPayload{card1.value().card_handle,
-                                                Disposition::leave}));
+    wire::BeginTransactionRequest begin{key1};
+    WireReply begin_reply;
+    CHECK(first->request(wire::kOpcodeBeginTransaction,
+        WireClient::encode(begin, &wire::encode_begin_transaction_request), begin_reply));
+    CHECK(begin_reply.header.kind == wire::Kind::response);
+    std::array<std::uint8_t, 2U> apdu{0x00U, 0x84U};
+    wire::CardTransmitRequest transmit2;
+    transmit2.key = key2;
+    transmit2.protocol = wire::CardProtocol::t1;
+    transmit2.command.length = apdu.size();
+    std::copy(apdu.begin(), apdu.end(), transmit2.command.bytes.begin());
+    WireReply busy;
+    CHECK(second->request(wire::kOpcodeCardTransmit,
+        WireClient::encode(transmit2, &wire::encode_card_transmit_request), busy));
+    const auto busy_error = wire::decode_error_response(busy.view());
+    CHECK(busy.header.kind == wire::Kind::error_response && busy_error &&
+          busy_error.value().error.code == static_cast<std::uint32_t>(Error::BUSY));
+    wire::EndTransactionRequest end{key1, wire::Disposition::leave};
+    WireReply end_reply;
+    CHECK(first->request(wire::kOpcodeEndTransaction,
+        WireClient::encode(end, &wire::encode_end_transaction_request), end_reply));
+    CHECK(end_reply.header.kind == wire::Kind::response);
 
-    const auto transmitted = request(
-        *first, MessageType::CARD_TRANSMIT,
-        CardTransmitRequestPayload{card1.value().card_handle,
-                                   ByteView{apdu.data(), apdu.size()}});
-    CHECK(transmitted);
-    const auto response = decode_card_transmit_response_payload(
-        ByteView{transmitted.value().payload.data(), transmitted.value().payload.size()});
-    CHECK(response && response.value().response.size == 2U);
+    wire::CardTransmitRequest transmit1;
+    transmit1.key = key1;
+    transmit1.protocol = wire::CardProtocol::t1;
+    transmit1.command.length = apdu.size();
+    std::copy(apdu.begin(), apdu.end(), transmit1.command.bytes.begin());
+    WireReply transmitted;
+    CHECK(first->request(wire::kOpcodeCardTransmit,
+        WireClient::encode(transmit1, &wire::encode_card_transmit_request), transmitted));
+    const auto response = wire::decode_card_transmit_response(transmitted.view());
+    CHECK(response && response.value().response.length == 2U &&
+          response.value().response.bytes[0] == 0x61U &&
+          response.value().response.bytes[1] == 0x00U);
 
-    CHECK(request(*second, MessageType::CARD_DISCONNECT,
-                  CardDispositionRequestPayload{card2.value().card_handle,
-                                                Disposition::leave}));
+    wire::CardDisconnectRequest disconnect2{key2, wire::Disposition::leave};
+    WireReply disconnect_reply;
+    CHECK(second->request(wire::kOpcodeCardDisconnect,
+        WireClient::encode(disconnect2, &wire::encode_card_disconnect_request),
+        disconnect_reply));
+    const auto disconnected = wire::decode_card_disconnect_response(
+        disconnect_reply.view());
+    CHECK(disconnected && disconnected.value().consumed &&
+          disconnected.value().quiesced);
     CHECK(service.handle_count() == 1U && service.powered());
 
-    backend.present = false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(300U));
-    EventSink sink;
-    const auto card_status = empty_request(*first, MessageType::CARD_STATUS, &sink);
-    CHECK(card_status);
-    CHECK(sink.count == 1U && sink.last.kind == DeviceEventKind::card_removed &&
-          sink.last.target_type == EventTargetType::card);
+    backend.present.store(false);
+    WireReply removed_reply;
+    CHECK(first->request(wire::kOpcodeCardStatus,
+        WireClient::encode(initial_request, &wire::encode_card_status_request),
+        removed_reply));
+    const auto removed = wire::decode_card_status_response(removed_reply.view());
+    CHECK(removed && !removed.value().present &&
+          removed.value().current_generation > key1.bound_generation);
+    WireReply stale_reply;
+    CHECK(first->request(wire::kOpcodeCardTransmit,
+        WireClient::encode(transmit1, &wire::encode_card_transmit_request),
+        stale_reply));
+    const auto stale = wire::decode_error_response(stale_reply.view());
+    CHECK(stale_reply.header.kind == wire::Kind::error_response && stale &&
+          stale.value().error.code == static_cast<std::uint32_t>(Error::CARD_REMOVED));
 
     first->close();
     second->close();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100U));
+    const auto cleanup_deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(3);
+    while (service.handle_count() != 0U &&
+           std::chrono::steady_clock::now() < cleanup_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10U));
     stop.store(true);
     server_thread.join();
+    server_guard.dismiss();
     CHECK(server_ok.load());
     CHECK(service.handle_count() == 0U && !service.powered());
     CHECK(server->shutdown());
@@ -919,8 +1408,7 @@ bool test_card_client_ownership_contract()
     TunerNonce tuner_nonce;
     TunerTime tuner_time;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time);
-    auto server = PosixControlServer::create(
-        endpoint, service, tuner_service, "00001205000960");
+    auto server = create_typed_server(endpoint, service, tuner_service, "card-contract");
     CHECK(server);
     std::atomic<bool> stop{false};
     std::atomic<bool> server_ok{true};
@@ -933,8 +1421,245 @@ bool test_card_client_ownership_contract()
         }
     });
     ServerThreadGuard guard(stop, poller, *server.value());
-    CHECK(test::run_card_client_contract(endpoint));
-    CHECK(test::run_card_generation_contract(endpoint, backend.present));
+    auto first = WireClient::connect(endpoint);
+    auto second = WireClient::connect(endpoint);
+    auto third = WireClient::connect(endpoint);
+    CHECK(first && second && third);
+    CHECK(first->hello(wire::kFeatureCardService, 0U));
+    CHECK(second->hello(wire::kFeatureCardService, 0U));
+    CHECK(third->hello(wire::kFeatureCardService, 0U));
+    const auto open = [](WireClient& client, wire::Share share,
+                         wire::CardSessionResult& result) {
+        wire::CardConnectRequest value;
+        value.key = wire::ReaderKey{client.epoch, 0U};
+        value.share = share;
+        value.preferred_protocols = 1U;
+        WireReply reply;
+        if (!client.request(wire::kOpcodeCardConnect,
+                            WireClient::encode(value, &wire::encode_card_connect_request),
+                            reply) || reply.header.kind != wire::Kind::response)
+            return false;
+        const auto decoded = wire::decode_card_session_result(reply.view());
+        if (!decoded) return false;
+        result = decoded.value();
+        return true;
+    };
+    const auto key = [](const WireClient& client, const wire::CardSessionResult& card) {
+        return wire::CardHandleKey{client.epoch, 0U, card.bound_generation,
+                                   card.card_handle};
+    };
+    const auto error_is = [](const WireReply& reply, Error expected) {
+        const auto decoded = wire::decode_error_response(reply.view());
+        return reply.header.kind == wire::Kind::error_response && decoded &&
+               decoded.value().error.code == static_cast<std::uint32_t>(expected);
+    };
+    const auto send = [](WireClient& client, const wire::CardHandleKey& handle,
+                         WireReply& reply) {
+        wire::CardTransmitRequest value;
+        value.key = handle;
+        value.protocol = wire::CardProtocol::t1;
+        value.command.length = 2U;
+        value.command.bytes[0] = 0x00U;
+        value.command.bytes[1] = 0x84U;
+        return client.request(wire::kOpcodeCardTransmit,
+                              WireClient::encode(value, &wire::encode_card_transmit_request),
+                              reply);
+    };
+    wire::CardSessionResult card1;
+    wire::CardSessionResult card2;
+    CHECK(open(*first, wire::Share::shared, card1));
+    CHECK(open(*second, wire::Share::shared, card2));
+    CHECK(card1.card_handle != 0U && card2.card_handle != 0U &&
+          card1.card_handle != card2.card_handle);
+    WireReply reply;
+    wire::CardConnectRequest exclusive;
+    exclusive.key = wire::ReaderKey{third->epoch, 0U};
+    exclusive.share = wire::Share::exclusive;
+    exclusive.preferred_protocols = 1U;
+    CHECK(third->request(wire::kOpcodeCardConnect,
+                         WireClient::encode(exclusive, &wire::encode_card_connect_request),
+                         reply));
+    CHECK(error_is(reply, Error::BUSY));
+
+    wire::CardResetRequest foreign{key(*first, card1)};
+    CHECK(second->request(wire::kOpcodeCardReset,
+                          WireClient::encode(foreign, &wire::encode_card_reset_request),
+                          reply));
+    CHECK(error_is(reply, Error::NOT_FOUND));
+    wire::CardReconnectRequest upgrade{key(*second, card2), wire::Share::exclusive,
+                                        wire::Disposition::leave, 1U};
+    CHECK(second->request(wire::kOpcodeCardReconnect,
+                          WireClient::encode(upgrade, &wire::encode_card_reconnect_request),
+                          reply));
+    CHECK(error_is(reply, Error::BUSY));
+
+    wire::BeginTransactionRequest begin1{key(*first, card1)};
+    CHECK(first->request(wire::kOpcodeBeginTransaction,
+                         WireClient::encode(begin1, &wire::encode_begin_transaction_request),
+                         reply));
+    wire::BeginTransactionRequest begin2{key(*second, card2)};
+    CHECK(second->request(wire::kOpcodeBeginTransaction,
+                          WireClient::encode(begin2, &wire::encode_begin_transaction_request),
+                          reply));
+    CHECK(error_is(reply, Error::BUSY));
+    CHECK(send(*second, key(*second, card2), reply));
+    CHECK(error_is(reply, Error::BUSY));
+    wire::CardResetRequest reset1{key(*first, card1)};
+    CHECK(first->request(wire::kOpcodeCardReset,
+                         WireClient::encode(reset1, &wire::encode_card_reset_request), reply));
+    CHECK(send(*second, key(*second, card2), reply));
+    CHECK(error_is(reply, Error::BUSY));
+    wire::EndTransactionRequest end1{key(*first, card1), wire::Disposition::reset};
+    CHECK(first->request(wire::kOpcodeEndTransaction,
+                         WireClient::encode(end1, &wire::encode_end_transaction_request),
+                         reply));
+    CHECK(reply.header.kind == wire::Kind::response);
+    CHECK(send(*second, key(*second, card2), reply));
+    const auto response = wire::decode_card_transmit_response(reply.view());
+    CHECK(reply.header.kind == wire::Kind::response && response &&
+          response.value().response.length == 2U &&
+          response.value().response.bytes[0] == 0x61U &&
+          response.value().response.bytes[1] == 0x00U);
+
+    CHECK(first->request(wire::kOpcodeBeginTransaction,
+                         WireClient::encode(begin1, &wire::encode_begin_transaction_request),
+                         reply));
+    first->close();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    for (;;) {
+        CHECK(second->request(wire::kOpcodeBeginTransaction,
+                              WireClient::encode(begin2,
+                                  &wire::encode_begin_transaction_request), reply));
+        if (reply.header.kind == wire::Kind::response) break;
+        CHECK(error_is(reply, Error::BUSY) && std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10U));
+    }
+    wire::EndTransactionRequest end2{key(*second, card2), wire::Disposition::leave};
+    CHECK(second->request(wire::kOpcodeEndTransaction,
+                          WireClient::encode(end2, &wire::encode_end_transaction_request),
+                          reply));
+    upgrade = wire::CardReconnectRequest{key(*second, card2), wire::Share::exclusive,
+                                         wire::Disposition::reset, 1U};
+    CHECK(second->request(wire::kOpcodeCardReconnect,
+                          WireClient::encode(upgrade, &wire::encode_card_reconnect_request),
+                          reply));
+    const auto upgraded = wire::decode_card_session_result(reply.view());
+    CHECK(reply.header.kind == wire::Kind::response && upgraded &&
+          upgraded.value().atr.present);
+    exclusive.key = wire::ReaderKey{third->epoch, 0U};
+    exclusive.share = wire::Share::shared;
+    CHECK(third->request(wire::kOpcodeCardConnect,
+                         WireClient::encode(exclusive, &wire::encode_card_connect_request),
+                         reply));
+    CHECK(error_is(reply, Error::BUSY));
+    wire::CardDisconnectRequest disconnect2{key(*second, upgraded.value()),
+                                             wire::Disposition::reset};
+    CHECK(second->request(wire::kOpcodeCardDisconnect,
+                          WireClient::encode(disconnect2,
+                              &wire::encode_card_disconnect_request), reply));
+    CHECK(wire::decode_card_disconnect_response(reply.view()));
+    CHECK(send(*second, key(*second, upgraded.value()), reply));
+    CHECK(error_is(reply, Error::NOT_FOUND));
+    exclusive.share = wire::Share::exclusive;
+    CHECK(third->request(wire::kOpcodeCardConnect,
+                         WireClient::encode(exclusive, &wire::encode_card_connect_request),
+                         reply));
+    const auto final_card = wire::decode_card_session_result(reply.view());
+    CHECK(final_card && final_card.value().card_handle != 0U);
+    wire::CardDisconnectRequest disconnect3{key(*third, final_card.value()),
+                                             wire::Disposition::leave};
+    CHECK(third->request(wire::kOpcodeCardDisconnect,
+                         WireClient::encode(disconnect3,
+                             &wire::encode_card_disconnect_request), reply));
+
+    auto strict = WireClient::connect(endpoint);
+    auto observer = WireClient::connect(endpoint);
+    CHECK(strict && observer);
+    CHECK(strict->hello(wire::kFeatureCardService, 0U));
+    CHECK(observer->hello(wire::kFeatureCardService, 0U));
+    CHECK(strict->features == wire::kFeatureCardService &&
+          observer->features == wire::kFeatureCardService);
+    wire::CardSessionResult strict1;
+    wire::CardSessionResult strict2;
+    wire::CardSessionResult observed;
+    CHECK(open(*strict, wire::Share::shared, strict1));
+    CHECK(open(*strict, wire::Share::shared, strict2));
+    CHECK(open(*observer, wire::Share::shared, observed));
+    wire::CardResetRequest initialize{key(*strict, strict1)};
+    CHECK(strict->request(wire::kOpcodeCardReset,
+        WireClient::encode(initialize, &wire::encode_card_reset_request), reply));
+    const auto initialized = wire::decode_card_session_result(reply.view());
+    CHECK(reply.header.kind == wire::Kind::response && initialized);
+    strict1 = initialized.value();
+    wire::CardHandleStatusRequest handle_status{key(*strict, strict1)};
+    CHECK(strict->request(wire::kOpcodeCardHandleStatus,
+        WireClient::encode(handle_status, &wire::encode_card_handle_status_request), reply));
+    auto snapshot = wire::decode_card_session_result(reply.view());
+    CHECK(reply.header.kind == wire::Kind::response && snapshot &&
+          snapshot.value().present && snapshot.value().initialized &&
+          snapshot.value().atr.present && snapshot.value().atr.value.length > 0U);
+    wire::CardHandleStatusRequest foreign_status{key(*observer, observed)};
+    CHECK(strict->request(wire::kOpcodeCardHandleStatus,
+        WireClient::encode(foreign_status, &wire::encode_card_handle_status_request), reply));
+    CHECK(error_is(reply, Error::NOT_FOUND));
+    const auto observe = [&](bool inserted) {
+        backend.present.store(inserted);
+        wire::CardStatusRequest status{wire::ReaderKey{observer->epoch, 0U}};
+        if (!observer->request(wire::kOpcodeCardStatus,
+            WireClient::encode(status, &wire::encode_card_status_request), reply) ||
+            reply.header.kind != wire::Kind::response)
+            return false;
+        const auto decoded = wire::decode_card_status_response(reply.view());
+        return decoded && decoded.value().present == inserted;
+    };
+    wire::BeginTransactionRequest generation_begin{key(*strict, strict1)};
+    CHECK(strict->request(wire::kOpcodeBeginTransaction,
+        WireClient::encode(generation_begin, &wire::encode_begin_transaction_request), reply));
+    CHECK(observe(false) && observe(true));
+    CHECK(send(*strict, key(*strict, strict1), reply));
+    CHECK(error_is(reply, Error::CARD_REMOVED));
+    handle_status = wire::CardHandleStatusRequest{key(*strict, strict1)};
+    CHECK(strict->request(wire::kOpcodeCardHandleStatus,
+        WireClient::encode(handle_status, &wire::encode_card_handle_status_request), reply));
+    CHECK(error_is(reply, Error::CARD_REMOVED));
+    generation_begin = wire::BeginTransactionRequest{key(*strict, strict2)};
+    CHECK(strict->request(wire::kOpcodeBeginTransaction,
+        WireClient::encode(generation_begin, &wire::encode_begin_transaction_request), reply));
+    CHECK(error_is(reply, Error::CARD_REMOVED));
+    CHECK(send(*observer, key(*observer, observed), reply));
+    CHECK(error_is(reply, Error::CARD_REMOVED));
+    wire::CardReconnectRequest reconnect_observer{key(*observer, observed),
+        wire::Share::shared, wire::Disposition::leave, 1U};
+    CHECK(observer->request(wire::kOpcodeCardReconnect,
+        WireClient::encode(reconnect_observer, &wire::encode_card_reconnect_request), reply));
+    const auto observed_again = wire::decode_card_session_result(reply.view());
+    CHECK(reply.header.kind == wire::Kind::response && observed_again);
+    observed = observed_again.value();
+    CHECK(send(*observer, key(*observer, observed), reply));
+    CHECK(reply.header.kind == wire::Kind::response);
+    wire::CardReconnectRequest reconnect1{key(*strict, strict1), wire::Share::shared,
+                                          wire::Disposition::leave, 1U};
+    CHECK(strict->request(wire::kOpcodeCardReconnect,
+        WireClient::encode(reconnect1, &wire::encode_card_reconnect_request), reply));
+    strict1 = wire::decode_card_session_result(reply.view()).value();
+    CHECK(send(*strict, key(*strict, strict1), reply));
+    CHECK(reply.header.kind == wire::Kind::response);
+    CHECK(send(*strict, key(*strict, strict2), reply));
+    CHECK(error_is(reply, Error::CARD_REMOVED));
+    wire::CardResetRequest reset2{key(*strict, strict2)};
+    CHECK(strict->request(wire::kOpcodeCardReset,
+        WireClient::encode(reset2, &wire::encode_card_reset_request), reply));
+    strict2 = wire::decode_card_session_result(reply.view()).value();
+    CHECK(send(*strict, key(*strict, strict2), reply));
+    CHECK(reply.header.kind == wire::Kind::response);
+    CHECK(observe(false) && observe(true));
+    for (const auto& item : {std::pair<WireClient*, wire::CardSessionResult*>{strict.get(), &strict1},
+                             {strict.get(), &strict2}, {observer.get(), &observed}}) {
+        wire::CardDisconnectRequest disconnect{key(*item.first, *item.second),
+                                                wire::Disposition::leave};
+        CHECK(item.first->request(wire::kOpcodeCardDisconnect,
+            WireClient::encode(disconnect, &wire::encode_card_disconnect_request), reply));
+    }
     stop.store(true);
     poller.join();
     CHECK(server_ok.load());
@@ -960,8 +1685,7 @@ bool test_no_hello_timeout_and_malformed_disconnect()
     ControlStream stream_control;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time,
                                nullptr, nullptr, &stream_control);
-    auto server_result = PosixControlServer::create(
-        endpoint, service, tuner_service, serial);
+    auto server_result = create_typed_server(endpoint, service, tuner_service, serial);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
 
@@ -1009,8 +1733,8 @@ bool test_control_server_tuner_flow()
     ControlStream stream_control;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time,
                                nullptr, nullptr, &stream_control);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service, serial,
+                                             &stream_control);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
 
@@ -1026,18 +1750,19 @@ bool test_control_server_tuner_flow()
         }
     });
 
-    auto first_result = PosixControlClient::connect(
+    ServerThreadGuard server_guard(stop, server_thread, *server);
+    auto first_result = TypedControl::connect(
         endpoint, kCapabilityEvents | kCapabilityStreamStats, Timeout{2000U});
-    auto second_result = PosixControlClient::connect(
+    auto second_result = TypedControl::connect(
         endpoint, kCapabilityEvents | kCapabilityStreamStats, Timeout{2000U});
     CHECK(first_result && second_result);
-    std::unique_ptr<PosixControlClient> first = std::move(first_result.value());
-    std::unique_ptr<PosixControlClient> second = std::move(second_result.value());
+    std::unique_ptr<TypedControl> first = std::move(first_result.value());
+    std::unique_ptr<TypedControl> second = std::move(second_result.value());
 
     const auto terrestrial = request(*first, MessageType::ACQUIRE,
                                       AcquireRequestPayload{2U});
     CHECK(terrestrial);
-    const auto terrestrial_lease = decode_acquire_response_payload(
+    const auto terrestrial_lease = wire::decode_acquire_response(
         ByteView{terrestrial.value().payload.data(), terrestrial.value().payload.size()});
     CHECK(terrestrial_lease && terrestrial_lease.value().lease_id != 0U);
     const auto busy = request(*second, MessageType::ACQUIRE,
@@ -1051,14 +1776,14 @@ bool test_control_server_tuner_flow()
     const auto satellite = request(*first, MessageType::ACQUIRE,
                                    AcquireRequestPayload{0U});
     CHECK(satellite);
-    const auto satellite_lease = decode_acquire_response_payload(
+    const auto satellite_lease = wire::decode_acquire_response(
         ByteView{satellite.value().payload.data(), satellite.value().payload.size()});
     CHECK(satellite_lease);
 
     const auto denied_lnb = request(
         *first, MessageType::TUNE,
         TuneRequestPayload{satellite_lease.value().lease_id, System::ISDB_S,
-                           200000U, 0xffffU, 1U, 0U, 15U, 100U});
+                           1200000U, 0xffffU, 1U, 0U, 15U, 100U});
     CHECK(!denied_lnb && denied_lnb.error() == Error::UNSUPPORTED);
     CHECK(tuner_backend.lnb_gpio_calls.load() == 0U);
 
@@ -1067,50 +1792,90 @@ bool test_control_server_tuner_flow()
         TuneRequestPayload{terrestrial_lease.value().lease_id, System::ISDB_T,
                            500000U, 0xffffU, 0xffffU, 6000000U, 0U, 100U});
     CHECK(terrestrial_tune);
-    const auto terrestrial_response = decode_tune_response_payload(
+    const auto terrestrial_response = wire::decode_tune_result(
         ByteView{terrestrial_tune.value().payload.data(),
                  terrestrial_tune.value().payload.size()});
-    CHECK(terrestrial_response && terrestrial_response.value().locked == 1U);
+    CHECK(terrestrial_response &&
+          terrestrial_response.value().lock.state == wire::MeasureState::valid &&
+          terrestrial_response.value().lock.value);
 
     const auto satellite_tune = request(
         *first, MessageType::TUNE,
         TuneRequestPayload{satellite_lease.value().lease_id, System::ISDB_S,
-                           200000U, 0xffffU, 1U, 0U, 0U, 100U});
+                           1200000U, 0xffffU, 1U, 0U, 0U, 100U});
     CHECK(satellite_tune);
     CHECK(tuner_backend.last_system[2U] == System::ISDB_T &&
-          tuner_backend.last_system[0U] == System::ISDB_S);
+          tuner_backend.last_system[0U] == System::ISDB_S &&
+          tuner_backend.last_frequency_hz[2U] == 500000000U &&
+          tuner_backend.last_frequency_hz[0U] == 1200000000U);
 
     CHECK(request(*first, MessageType::START_STREAM,
                   LeaseRequestPayload{terrestrial_lease.value().lease_id}));
-    const auto attachment = tuner_service.attach_stream(
-        terrestrial_lease.value().lease_id, terrestrial_lease.value().nonce);
-    CHECK(attachment);
-    const auto live_stats = request(
-        *first, MessageType::STATS,
-        LeaseRequestPayload{terrestrial_lease.value().lease_id});
+    const EndpointConfig data_endpoint{runtime.path().c_str(), serial,
+        kStreamEndpointName, EndpointAccess::private_user};
+    auto data_stream = SocketStream::connect(data_endpoint, Timeout{2000});
+    CHECK(data_stream);
+    std::array<std::uint8_t, wire::kMaxControlPayload> data_storage{};
+    wire::FrameReceiver data_framer({data_storage.data(), data_storage.size()});
+    auto attach_bytes = WireClient::encode(first->attachment(terrestrial_lease.value().lease_id),
+                                           &wire::encode_attach_request);
+    CHECK(send_raw_request(data_stream.value(), MessageType::ATTACH_STREAM, 1,
+                           {attach_bytes.data(), attach_bytes.size()}));
+    FrameCollector attached;
+    CHECK(read_raw_frames(data_stream.value(), data_framer, attached, 1) &&
+          attached.headers[0].kind == wire::Kind::response);
+    const auto live_stats = empty_request(*first, MessageType::STATUS);
     CHECK(live_stats);
-    const auto live_counters = decode_counters_payload(
+    const auto live_counters = wire::decode_status_response(
         ByteView{live_stats.value().payload.data(), live_stats.value().payload.size()});
-    CHECK(live_counters && live_counters.value().packets == 17U &&
-          live_counters.value().queue_drops == 4U);
+    CHECK(live_counters && live_counters.value().receivers.present &&
+          live_counters.value().receivers.value.items[2].stream_statistics.present &&
+          counters_are(live_counters.value().receivers.value.items[2].stream_statistics.value,
+                       17U, 4U));
+    const auto stream_stats = first->record(wire::kOpcodeStatus,
+        wire::StatusRequest{first->client->epoch,
+            {wire::ScopeKind::stream, first->starts.at(terrestrial_lease.value().lease_id).stream_id}},
+        &wire::encode_status_request);
+    CHECK(stream_stats);
+    const auto scoped_stats = wire::decode_status_response(stream_stats.value().view());
+    CHECK(scoped_stats && scoped_stats.value().receivers.value.count == 1 &&
+          scoped_stats.value().receivers.value.items[0].descriptor.id == 2 &&
+          counters_are(scoped_stats.value().receivers.value.items[0].stream_statistics.value,
+                       17U, 4U));
     const auto stopped_stream = request(
         *first, MessageType::STOP_STREAM,
         LeaseRequestPayload{terrestrial_lease.value().lease_id});
     CHECK(stopped_stream);
-    const auto final_counters = decode_counters_payload(
+    const auto final_counters = wire::decode_stop_response(
         ByteView{stopped_stream.value().payload.data(),
                  stopped_stream.value().payload.size()});
-    CHECK(final_counters && final_counters.value().bytes == 3196U &&
-          final_counters.value().usb_errors == 5U);
+    CHECK(final_counters && final_counters.value().quiesced &&
+          final_counters.value().final.statistics.entries.items[0].counter.measurement.value == 17U &&
+          final_counters.value().final.statistics.entries.items[1].counter.measurement.value == 4U);
+    const auto native_final = stream_control.final_snapshot(stream_control.final_identity);
+    CHECK(native_final && native_final.value().counters.bytes == 3196U &&
+          native_final.value().counters.usb_errors == 5U);
 
     const auto status_response = empty_request(*first, MessageType::STATUS);
     CHECK(status_response);
-    const auto status = decode_status_response_payload(
+    const auto status = wire::decode_status_response(
         ByteView{status_response.value().payload.data(), status_response.value().payload.size()});
-    CHECK(status && status.value().receiver_states[0U] == ReceiverState::tuned &&
-          status.value().receiver_states[2U] == ReceiverState::tuned &&
-          status.value().generation >= 5U);
-    const std::uint64_t generation_before_retune = status.value().generation;
+    CHECK(status && status.value().receivers.present &&
+          status.value().receivers.value.items[0].state == wire::ReceiverState::tuned &&
+          status.value().receivers.value.items[2].state == wire::ReceiverState::tuned &&
+          status.value().receivers.value.items[2].last_stream.present &&
+          counters_are(status.value().receivers.value.items[2].last_stream.value.statistics,
+                       17U, 4U));
+    const auto retained_stats = first->record(wire::kOpcodeStatus,
+        wire::StatusRequest{first->client->epoch,
+            {wire::ScopeKind::stream, first->starts.at(terrestrial_lease.value().lease_id).stream_id}},
+        &wire::encode_status_request);
+    CHECK(retained_stats);
+    const auto retained = wire::decode_status_response(retained_stats.value().view());
+    CHECK(retained && !retained.value().receivers.value.items[0].stream.present &&
+          counters_are(retained.value().receivers.value.items[0].last_stream.value.statistics,
+                       17U, 4U));
+    const auto revision_before_retune = status.value().receivers.value.items[2].tune_revision;
     const auto retuned = request(
         *first, MessageType::TUNE,
         TuneRequestPayload{terrestrial_lease.value().lease_id, System::ISDB_T,
@@ -1118,79 +1883,97 @@ bool test_control_server_tuner_flow()
     CHECK(retuned);
     const auto retune_status_response = empty_request(*first, MessageType::STATUS);
     CHECK(retune_status_response);
-    const auto retune_status = decode_status_response_payload(
+    const auto retune_status = wire::decode_status_response(
         ByteView{retune_status_response.value().payload.data(),
                  retune_status_response.value().payload.size()});
-    // TunerService may pass through leased while a retune is in progress, but
-    // that internal transition is not externally observable in this
-    // synchronous server and must not create a generation-only jump.
-    CHECK(retune_status && retune_status.value().generation == generation_before_retune);
+    // UDTV makes accepted tune revisions explicit even for an identical retune.
+    CHECK(retune_status && retune_status.value().receivers.value.items[2].tune_revision >
+          revision_before_retune &&
+          retune_status.value().receivers.value.items[2].state == wire::ReceiverState::tuned);
 
     auto raw_result = SocketStream::connect(endpoint, Timeout{2000U});
     CHECK(raw_result);
     SocketStream raw = std::move(raw_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> raw_storage{};
-    StreamFramer raw_framer(MutableByteView{raw_storage.data(), raw_storage.size()});
+    wire::FrameReceiver raw_framer(MutableByteView{raw_storage.data(), raw_storage.size()});
     FrameCollector raw_frames;
-    std::array<std::uint8_t, 12U> hello_payload{};
-    const auto hello_size = encode_payload(
-        HelloRequestPayload{kProtocolMajor, kProtocolMinor, kProtocolMajor,
-                            kProtocolMinor, kCapabilityEvents},
+    std::array<std::uint8_t, 24U> hello_payload{};
+    const auto hello_size = wire::encode_hello_request(
+        wire::HelloRequest{{1, 0}, {1, 0}, 0, wire::kFeatureStateEvent},
         MutableByteView{hello_payload.data(), hello_payload.size()});
     CHECK(hello_size && send_raw_request(
         raw, MessageType::HELLO, 1U,
         ByteView{hello_payload.data(), hello_size.value()}));
     CHECK(read_raw_frames(raw, raw_framer, raw_frames, 1U) &&
-          raw_frames.headers[0U].type == MessageType::HELLO &&
-          raw_frames.headers[0U].kind == MessageKind::response);
+          raw_frames.headers[0U].opcode == wire::kOpcodeHello &&
+          raw_frames.headers[0U].kind == wire::Kind::response);
+    const auto raw_hello_response = wire::decode_hello_response(
+        {raw_frames.payloads[0].data(), raw_frames.payload_sizes[0]});
+    CHECK(raw_hello_response &&
+          (raw_hello_response.value().features & wire::kFeatureStateEvent) == 0);
     raw_frames.clear();
-    std::array<std::uint8_t, 1U> acquire_payload{1U};
-    // request_id zero is valid for an ordinary live request. It must not be
-    // confused with the server's private cleanup tasks.
-    CHECK(send_raw_request(raw, MessageType::ACQUIRE, 0U,
+    const auto acquire_payload = WireClient::encode(
+        wire::AcquireRequest{raw_hello_response.value().epoch, 1}, &wire::encode_acquire_request);
+    // UDTV ordinary requests require a nonzero ID. Send an invalid raw envelope
+    // deliberately, bypassing the encoder's own validation, then reconnect.
+    auto zero_frame = WireClient::frame(wire::kOpcodeAcquire, 2,
+        {acquire_payload.data(), acquire_payload.size()});
+    CHECK(zero_frame.size() >= wire::kHeaderSize);
+    std::fill(zero_frame.begin() + 12, zero_frame.begin() + 16, 0);
+    CHECK(send_socket_bytes(raw, zero_frame.data(), zero_frame.size()));
+    std::array<std::uint8_t, 1> zero_read{};
+    const auto zero_closed = raw.read_some({zero_read.data(), zero_read.size()}, Timeout{2000});
+    CHECK(!zero_closed && zero_closed.error() == Error::DISCONNECTED);
+    raw.close();
+    raw_result = SocketStream::connect(endpoint, Timeout{2000});
+    CHECK(raw_result);
+    raw = std::move(raw_result.value());
+    raw_framer.reset();
+    wire::Uuid raw_epoch{};
+    CHECK(raw_hello(raw, raw_framer, raw_epoch));
+    CHECK(send_raw_request(raw, MessageType::ACQUIRE, 2U,
                            ByteView{acquire_payload.data(), acquire_payload.size()}));
-    CHECK(read_raw_frames(raw, raw_framer, raw_frames, 2U) &&
-          raw_frames.headers[0U].type == MessageType::ACQUIRE &&
-          raw_frames.headers[0U].request_id == 0U &&
-          raw_frames.headers[0U].kind == MessageKind::response &&
-          raw_frames.headers[1U].kind == MessageKind::event);
-    const auto raw_lease = decode_acquire_response_payload(
+    CHECK(read_raw_frames(raw, raw_framer, raw_frames, 1U) &&
+          raw_frames.headers[0U].opcode == wire::kOpcodeAcquire &&
+          raw_frames.headers[0U].request_id == 2U &&
+          raw_frames.headers[0U].kind == wire::Kind::response);
+    const auto raw_lease = wire::decode_acquire_response(
         ByteView{raw_frames.payloads[0U].data(), raw_frames.payload_sizes[0U]});
     CHECK(raw_lease);
+    auto leased_status = empty_request(*first, MessageType::STATUS);
+    CHECK(leased_status);
+    const auto leased_snapshot = wire::decode_status_response(leased_status.value().view());
+    CHECK(leased_snapshot && leased_snapshot.value().receivers.value.items[1].leased);
     raw_frames.clear();
-    std::array<std::uint8_t, 8U> release_payload{};
-    const auto release_size = encode_payload(
-        LeaseRequestPayload{raw_lease.value().lease_id},
+    std::array<std::uint8_t, 24U> release_payload{};
+    const auto release_size = wire::encode_release_request(
+        wire::ReleaseRequest{raw_epoch, raw_lease.value().lease_id},
         MutableByteView{release_payload.data(), release_payload.size()});
     CHECK(release_size && send_raw_request(
         raw, MessageType::RELEASE, 3U,
         ByteView{release_payload.data(), release_size.value()}));
-    CHECK(read_raw_frames(raw, raw_framer, raw_frames, 2U) &&
-          raw_frames.headers[0U].type == MessageType::RELEASE &&
-          raw_frames.headers[0U].kind == MessageKind::response &&
-          raw_frames.headers[0U].request_id == 3U &&
-          raw_frames.headers[1U].type == MessageType::DEVICE_EVENT &&
-          raw_frames.headers[1U].kind == MessageKind::event);
-    const auto raw_event = decode_device_event_payload(
-        ByteView{raw_frames.payloads[1U].data(), raw_frames.payload_sizes[1U]});
-    CHECK(raw_event && raw_event.value().kind == DeviceEventKind::state_changed &&
-          raw_event.value().target_type == EventTargetType::receiver &&
-          raw_event.value().target_id == 1U);
+    CHECK(read_raw_frames(raw, raw_framer, raw_frames, 1U) &&
+          raw_frames.headers[0U].opcode == wire::kOpcodeRelease &&
+          raw_frames.headers[0U].kind == wire::Kind::response &&
+          raw_frames.headers[0U].request_id == 3U);
+    auto released_status = empty_request(*first, MessageType::STATUS);
+    CHECK(released_status);
+    const auto released_snapshot = wire::decode_status_response(released_status.value().view());
+    CHECK(released_snapshot &&
+          !released_snapshot.value().receivers.value.items[1].leased &&
+          released_snapshot.value().receivers.value.items[1].state == wire::ReceiverState::free &&
+          released_snapshot.value().snapshot.sequence > leased_snapshot.value().snapshot.sequence);
     raw.close();
 
-    std::array<std::uint8_t, kMaxControlPayload> invalid_tune{};
-    const auto valid_tune_size = encode_payload(
-        TuneRequestPayload{terrestrial_lease.value().lease_id, System::ISDB_T,
-                           500000U, 0xffffU, 0xffffU, 6000000U, 0U, 100U},
-        MutableByteView{invalid_tune.data(), invalid_tune.size()});
-    CHECK(valid_tune_size && valid_tune_size.value() == 30U);
-    invalid_tune[26U] = 99U;
-    invalid_tune[27U] = 0U;
-    invalid_tune[28U] = 0U;
-    invalid_tune[29U] = 0U;
-    const auto invalid_semantics = first->request(
-        MessageType::TUNE, ByteView{invalid_tune.data(), valid_tune_size.value()},
-        Timeout{2000U});
+    wire::TuneRequest valid_tune;
+    valid_tune.epoch = first->client->epoch;
+    valid_tune.lease_id = terrestrial_lease.value().lease_id;
+    valid_tune.frequency_hz = 500000000;
+    valid_tune.timeout_ms = 100;
+    auto invalid_tune = WireClient::encode(valid_tune, &wire::encode_tune_request);
+    CHECK(invalid_tune.size() > 4);
+    invalid_tune[invalid_tune.size() - 4] = 99;
+    const auto invalid_semantics = first->exchange(wire::kOpcodeTune, invalid_tune);
     CHECK(!invalid_semantics && invalid_semantics.error() == Error::INVALID_ARGUMENT);
     CHECK(empty_request(*first, MessageType::STATUS));
 
@@ -1198,6 +1981,11 @@ bool test_control_server_tuner_flow()
         *first, MessageType::RELEASE,
         LeaseRequestPayload{terrestrial_lease.value().lease_id});
     CHECK(release_result);
+    const auto expired_stats = first->record(wire::kOpcodeStatus,
+        wire::StatusRequest{first->client->epoch,
+            {wire::ScopeKind::stream, first->starts.at(terrestrial_lease.value().lease_id).stream_id}},
+        &wire::encode_status_request);
+    CHECK(!expired_stats && expired_stats.error() == Error::NOT_FOUND);
     const auto release_satellite = request(
         *first, MessageType::RELEASE,
         LeaseRequestPayload{satellite_lease.value().lease_id});
@@ -1208,7 +1996,7 @@ bool test_control_server_tuner_flow()
     const auto reacquired = request(*second, MessageType::ACQUIRE,
                                     AcquireRequestPayload{2U});
     CHECK(reacquired);
-    const auto reacquired_lease = decode_acquire_response_payload(
+    const auto reacquired_lease = wire::decode_acquire_response(
         ByteView{reacquired.value().payload.data(), reacquired.value().payload.size()});
     CHECK(reacquired_lease);
     const auto reacquired_tune = request(
@@ -1226,15 +2014,17 @@ bool test_control_server_tuner_flow()
     const auto stop_stream = request(
         *second, MessageType::STOP_STREAM,
         LeaseRequestPayload{reacquired_lease.value().lease_id});
-    const auto stats = request(
-        *second, MessageType::STATS,
-        LeaseRequestPayload{reacquired_lease.value().lease_id});
-    // START is a real worker-dispatched arm operation.  No ATTACH data
-    // endpoint exists in 3E3a, so the still-armed lease cannot be stopped or
-    // queried as an active stream yet.
-    CHECK(!duplicate_start && duplicate_start.error() == Error::BUSY &&
-          !stop_stream && stop_stream.error() == Error::NOT_READY &&
-          !stats && stats.error() == Error::NOT_READY);
+    CHECK(!duplicate_start && duplicate_start.error() == Error::BUSY && stop_stream);
+    const auto armed_stop = wire::decode_stop_response(stop_stream.value().view());
+    CHECK(armed_stop && armed_stop.value().quiesced);
+    const auto stats = empty_request(*second, MessageType::STATUS);
+    CHECK(stats);
+    const auto stopped_status = wire::decode_status_response(stats.value().view());
+    CHECK(stopped_status &&
+          stopped_status.value().receivers.value.items[2].state == wire::ReceiverState::tuned &&
+          !stopped_status.value().receivers.value.items[2].stream.present);
+    CHECK(request(*second, MessageType::RELEASE,
+                  LeaseRequestPayload{reacquired_lease.value().lease_id}));
 
     stop.store(true);
     server_thread.join();
@@ -1259,8 +2049,7 @@ bool test_control_server_lanes_are_independent()
     TunerNonce tuner_nonce;
     TunerTime tuner_time;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service, serial);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -1275,9 +2064,10 @@ bool test_control_server_lanes_are_independent()
         }
     });
 
-    auto slow_result = PosixControlClient::connect(endpoint, 0U, Timeout{2000U});
+    ServerThreadGuard server_guard(stop, server_thread, *server);
+    auto slow_result = TypedControl::connect(endpoint, 0U, Timeout{2000U});
     CHECK(slow_result);
-    std::unique_ptr<PosixControlClient> slow = std::move(slow_result.value());
+    std::unique_ptr<TypedControl> slow = std::move(slow_result.value());
     tuner_backend.block_receiver_zero.store(true);
     std::atomic<bool> slow_done{false};
     bool slow_ok = false;
@@ -1287,7 +2077,7 @@ bool test_control_server_lanes_are_independent()
                                       AcquireRequestPayload{0U});
         slow_ok = static_cast<bool>(acquired);
         if (acquired) {
-            const auto payload = decode_acquire_response_payload(
+            const auto payload = wire::decode_acquire_response(
                 ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
             if (payload) slow_lease = payload.value().lease_id;
         }
@@ -1307,21 +2097,21 @@ bool test_control_server_lanes_are_independent()
         return false;
     }
 
-    auto fast_result = PosixControlClient::connect(endpoint, kCapabilityCard, Timeout{2000U});
+    auto fast_result = TypedControl::connect(endpoint, kCapabilityCard, Timeout{2000U});
     CHECK(fast_result);
-    std::unique_ptr<PosixControlClient> fast = std::move(fast_result.value());
+    std::unique_ptr<TypedControl> fast = std::move(fast_result.value());
     CHECK(empty_request(*fast, MessageType::LIST));
     const auto dev2 = request(*fast, MessageType::ACQUIRE,
                               AcquireRequestPayload{4U});
     CHECK(dev2);
-    const auto dev2_payload = decode_acquire_response_payload(
+    const auto dev2_payload = wire::decode_acquire_response(
         ByteView{dev2.value().payload.data(), dev2.value().payload.size()});
     CHECK(dev2_payload && request(*fast, MessageType::RELEASE,
                                   LeaseRequestPayload{dev2_payload.value().lease_id}));
     const auto card = request(*fast, MessageType::CARD_CONNECT,
                               CardConnectRequestPayload{ShareMode::shared});
     CHECK(card);
-    const auto card_payload = decode_card_connect_response_payload(
+    const auto card_payload = wire::decode_card_session_result(
         ByteView{card.value().payload.data(), card.value().payload.size()});
     CHECK(card_payload && request(
         *fast, MessageType::CARD_DISCONNECT,
@@ -1356,8 +2146,7 @@ bool test_control_server_disconnect_during_blocked_acquire()
     TunerNonce tuner_nonce;
     TunerTime tuner_time;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service, serial);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -1377,14 +2166,16 @@ bool test_control_server_disconnect_during_blocked_acquire()
     CHECK(raw_result);
     SocketStream raw = std::move(raw_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> raw_storage{};
-    StreamFramer raw_framer(MutableByteView{raw_storage.data(), raw_storage.size()});
-    CHECK(raw_hello(raw, raw_framer));
+    wire::FrameReceiver raw_framer(MutableByteView{raw_storage.data(), raw_storage.size()});
+    wire::Uuid raw_epoch{};
+    CHECK(raw_hello(raw, raw_framer, raw_epoch));
 
     tuner_backend.block_receiver_zero.store(true);
     std::atomic<bool> request_done{false};
     std::atomic<bool> response_seen{false};
     std::thread request_thread([&]() {
-        const std::array<std::uint8_t, 1U> payload{0U};
+        const auto payload = WireClient::encode(wire::AcquireRequest{raw_epoch, 0},
+                                                &wire::encode_acquire_request);
         const auto sent = send_raw_request(
             raw, MessageType::ACQUIRE, 2U, ByteView{payload.data(), payload.size()});
         if (sent) {
@@ -1410,12 +2201,12 @@ bool test_control_server_disconnect_during_blocked_acquire()
     blocked_guard.unblock_and_join();
     CHECK(request_done.load() && !response_seen.load());
 
-    auto replacement_result = PosixControlClient::connect(
+    auto replacement_result = TypedControl::connect(
         endpoint, 0U, Timeout{2000U});
     CHECK(replacement_result);
-    std::unique_ptr<PosixControlClient> replacement =
+    std::unique_ptr<TypedControl> replacement =
         std::move(replacement_result.value());
-    Result<ControlResponse> acquired = Result<ControlResponse>::failure(Error::BUSY);
+    Result<WireReply> acquired = Result<WireReply>::failure(Error::BUSY);
     for (std::size_t attempt = 0U; attempt < 500U; ++attempt) {
         acquired = request(*replacement, MessageType::ACQUIRE,
                            AcquireRequestPayload{0U});
@@ -1424,7 +2215,7 @@ bool test_control_server_disconnect_during_blocked_acquire()
         std::this_thread::sleep_for(std::chrono::milliseconds(10U));
     }
     CHECK(acquired);
-    const auto lease = decode_acquire_response_payload(
+    const auto lease = wire::decode_acquire_response(
         ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
     CHECK(lease && request(*replacement, MessageType::RELEASE,
                            LeaseRequestPayload{lease.value().lease_id}));
@@ -1453,8 +2244,7 @@ bool test_control_server_disconnect_during_blocked_tune()
     TunerNonce tuner_nonce;
     TunerTime tuner_time;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service, serial);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -1474,14 +2264,16 @@ bool test_control_server_disconnect_during_blocked_tune()
     CHECK(raw_result);
     SocketStream raw = std::move(raw_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> raw_storage{};
-    StreamFramer raw_framer(MutableByteView{raw_storage.data(), raw_storage.size()});
-    CHECK(raw_hello(raw, raw_framer));
-    const std::array<std::uint8_t, 1U> acquire_payload{0U};
+    wire::FrameReceiver raw_framer(MutableByteView{raw_storage.data(), raw_storage.size()});
+    wire::Uuid raw_epoch{};
+    CHECK(raw_hello(raw, raw_framer, raw_epoch));
+    const auto acquire_payload = WireClient::encode(wire::AcquireRequest{raw_epoch, 0},
+                                                   &wire::encode_acquire_request);
     CHECK(send_raw_request(raw, MessageType::ACQUIRE, 2U,
                            ByteView{acquire_payload.data(), acquire_payload.size()}));
     FrameCollector acquire_frames;
     CHECK(read_raw_frames(raw, raw_framer, acquire_frames, 1U));
-    const auto lease = decode_acquire_response_payload(
+    const auto lease = wire::decode_acquire_response(
         ByteView{acquire_frames.payloads[0U].data(), acquire_frames.payload_sizes[0U]});
     CHECK(lease);
 
@@ -1490,9 +2282,15 @@ bool test_control_server_disconnect_during_blocked_tune()
     std::atomic<bool> response_seen{false};
     std::thread request_thread([&]() {
         std::array<std::uint8_t, kMaxControlPayload> payload{};
-        const auto payload_size = encode_payload(
-            TuneRequestPayload{lease.value().lease_id, System::ISDB_S, 200000U,
-                               0xffffU, 1U, 0U, 0U, 100U},
+        wire::TuneRequest tune;
+        tune.epoch = raw_epoch;
+        tune.lease_id = lease.value().lease_id;
+        tune.system = wire::System::isdb_s;
+        tune.frequency_hz = 1200000000;
+        tune.selection = wire::Selection::slot;
+        tune.selection_value = 1;
+        tune.timeout_ms = 100;
+        const auto payload_size = wire::encode_tune_request(tune,
             MutableByteView{payload.data(), payload.size()});
         const auto sent = payload_size && send_raw_request(
             raw, MessageType::TUNE, 3U,
@@ -1517,12 +2315,12 @@ bool test_control_server_disconnect_during_blocked_tune()
     blocked_guard.unblock_and_join();
     CHECK(request_done.load() && !response_seen.load());
 
-    auto replacement_result = PosixControlClient::connect(
+    auto replacement_result = TypedControl::connect(
         endpoint, 0U, Timeout{2000U});
     CHECK(replacement_result);
-    std::unique_ptr<PosixControlClient> replacement =
+    std::unique_ptr<TypedControl> replacement =
         std::move(replacement_result.value());
-    Result<ControlResponse> acquired = Result<ControlResponse>::failure(Error::BUSY);
+    Result<WireReply> acquired = Result<WireReply>::failure(Error::BUSY);
     for (std::size_t attempt = 0U; attempt < 500U; ++attempt) {
         acquired = request(*replacement, MessageType::ACQUIRE,
                            AcquireRequestPayload{0U});
@@ -1531,7 +2329,7 @@ bool test_control_server_disconnect_during_blocked_tune()
         std::this_thread::sleep_for(std::chrono::milliseconds(10U));
     }
     CHECK(acquired);
-    const auto replacement_lease = decode_acquire_response_payload(
+    const auto replacement_lease = wire::decode_acquire_response(
         ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
     CHECK(replacement_lease &&
           replacement_lease.value().lease_id != lease.value().lease_id);
@@ -1564,9 +2362,8 @@ bool test_stream_endpoint_attach_and_stream_end()
     ControlStream stream_control;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time,
                                nullptr, nullptr, &stream_control);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial, true, 0x03U,
-        &stream_control);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service,
+                                             serial, &stream_control);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     const std::string stream_path = server->stream_endpoint_path();
@@ -1587,14 +2384,14 @@ bool test_stream_endpoint_attach_and_stream_end()
     });
     ServerThreadGuard server_guard(stop, server_thread, *server);
 
-    auto control_result = PosixControlClient::connect(
+    auto control_result = TypedControl::connect(
         endpoint, kCapabilityStreamStats, Timeout{2000U});
     CHECK(control_result);
-    std::unique_ptr<PosixControlClient> control = std::move(control_result.value());
+    std::unique_ptr<TypedControl> control = std::move(control_result.value());
     const auto acquired = request(*control, MessageType::ACQUIRE,
                                   AcquireRequestPayload{2U});
     CHECK(acquired);
-    const auto lease = decode_acquire_response_payload(
+    const auto lease = wire::decode_acquire_response(
         ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
     CHECK(lease);
     CHECK(request(*control, MessageType::TUNE,
@@ -1611,7 +2408,7 @@ bool test_stream_endpoint_attach_and_stream_end()
     CHECK(stream_result);
     SocketStream stream = std::move(stream_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> storage{};
-    StreamFramer framer(MutableByteView{storage.data(), storage.size()});
+    wire::FrameReceiver framer(MutableByteView{storage.data(), storage.size()});
     std::array<std::uint8_t, kMaxControlPayload> attach_payload{};
     {
         std::lock_guard<std::mutex> lock(stream_control.mutex);
@@ -1619,24 +2416,24 @@ bool test_stream_endpoint_attach_and_stream_end()
         stream_control.data_packet[0U] = 0x47U;
         stream_control.emit_data = true;
     }
-    const auto attach_size = encode_payload(
-        AttachStreamRequestPayload{lease.value().lease_id, lease.value().nonce},
+    const auto attach_size = wire::encode_attach_request(
+        control->attachment(lease.value().lease_id),
         MutableByteView{attach_payload.data(), attach_payload.size()});
     CHECK(attach_size && send_raw_request(
-        stream, MessageType::ATTACH_STREAM, 0U,
+        stream, MessageType::ATTACH_STREAM, 4U,
         ByteView{attach_payload.data(), attach_size.value()}));
     FrameCollector frames;
     CHECK(read_raw_frames(stream, framer, frames, 1U));
     std::size_t attach_index = frames.count;
     std::size_t data_index = frames.count;
     for (std::size_t index = 0U; index < frames.count; ++index) {
-        if (frames.headers[index].type == MessageType::ATTACH_STREAM &&
-            frames.headers[index].kind == MessageKind::response &&
-            frames.headers[index].request_id == 0U) {
+        if (frames.headers[index].opcode == wire::kOpcodeAttachStream &&
+            frames.headers[index].kind == wire::Kind::response &&
+            frames.headers[index].request_id == 4U) {
             attach_index = index;
         }
-        if (frames.headers[index].type == MessageType::TS_DATA &&
-            frames.headers[index].kind == MessageKind::event) {
+        if (frames.headers[index].opcode == wire::kOpcodeTsDataEvent &&
+            frames.headers[index].kind == wire::Kind::event) {
             data_index = index;
         }
     }
@@ -1646,22 +2443,21 @@ bool test_stream_endpoint_attach_and_stream_end()
     CHECK(wrong_result);
     SocketStream wrong = std::move(wrong_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> wrong_storage{};
-    StreamFramer wrong_framer(MutableByteView{wrong_storage.data(), wrong_storage.size()});
-    auto wrong_payload = AttachStreamRequestPayload{
-        lease.value().lease_id, lease.value().nonce};
-    wrong_payload.nonce[0U] ^= 0xffU;
+    wire::FrameReceiver wrong_framer(MutableByteView{wrong_storage.data(), wrong_storage.size()});
+    auto wrong_payload = control->attachment(lease.value().lease_id);
+    wrong_payload.attach_token[0U] ^= 0xffU;
     std::array<std::uint8_t, kMaxControlPayload> wrong_encoded{};
-    const auto wrong_size = encode_payload(
+    const auto wrong_size = wire::encode_attach_request(
         wrong_payload, MutableByteView{wrong_encoded.data(), wrong_encoded.size()});
     CHECK(wrong_size && send_raw_request(
         wrong, MessageType::ATTACH_STREAM, 7U,
         ByteView{wrong_encoded.data(), wrong_size.value()}));
     FrameCollector wrong_frames;
     CHECK(read_raw_frames(wrong, wrong_framer, wrong_frames, 1U));
-    const auto wrong_error = decode_error_response_payload(
+    const auto wrong_error = wire::decode_error_response(
         ByteView{wrong_frames.payloads[0U].data(), wrong_frames.payload_sizes[0U]});
-    CHECK(wrong_frames.headers[0U].kind == MessageKind::error_response &&
-          wrong_error && wrong_error.value().error_code == ErrorCode::NOT_FOUND);
+    CHECK(wrong_frames.headers[0U].kind == wire::Kind::error_response &&
+          wrong_error && wrong_error.value().error.code == static_cast<std::uint32_t>(Error::NOT_FOUND));
     wrong.close();
 
     // The acquire nonce is one-use: a second data connection presenting the
@@ -1670,17 +2466,17 @@ bool test_stream_endpoint_attach_and_stream_end()
     CHECK(reused_result);
     SocketStream reused = std::move(reused_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> reused_storage{};
-    StreamFramer reused_framer(
+    wire::FrameReceiver reused_framer(
         MutableByteView{reused_storage.data(), reused_storage.size()});
     CHECK(send_raw_request(reused, MessageType::ATTACH_STREAM, 8U,
                            ByteView{attach_payload.data(), attach_size.value()}));
     FrameCollector reused_frames;
     CHECK(read_raw_frames(reused, reused_framer, reused_frames, 1U));
-    const auto reused_error = decode_error_response_payload(
+    const auto reused_error = wire::decode_error_response(
         ByteView{reused_frames.payloads[0U].data(),
                  reused_frames.payload_sizes[0U]});
-    CHECK(reused_frames.headers[0U].kind == MessageKind::error_response &&
-          reused_error && reused_error.value().error_code == ErrorCode::NOT_FOUND);
+    CHECK(reused_frames.headers[0U].kind == wire::Kind::error_response &&
+          reused_error && reused_error.value().error.code == static_cast<std::uint32_t>(Error::NOT_FOUND));
     reused.close();
 
     if (data_index == frames.count) {
@@ -1689,26 +2485,27 @@ bool test_stream_endpoint_attach_and_stream_end()
         data_index = 0U;
     }
     CHECK(data_index < frames.count &&
-          frames.headers[data_index].type == MessageType::TS_DATA &&
-          frames.headers[data_index].kind == MessageKind::event);
-    const auto data = decode_ts_data_event_payload(
+          frames.headers[data_index].opcode == wire::kOpcodeTsDataEvent &&
+          frames.headers[data_index].kind == wire::Kind::event);
+    const auto data = wire::decode_ts_data(
         ByteView{frames.payloads[data_index].data(), frames.payload_sizes[data_index]});
     CHECK(data && data.value().sequence == 0U &&
-          data.value().cumulative_drop_count == 0U &&
-          data.value().bytes.size == stream_control.data_packet.size() &&
-          data.value().bytes.data[0U] == 0x47U &&
-          data.value().bytes.data[187U] == 0xa5U);
+          data.value().cumulative_queue_dropped_packets == 4U &&
+          data.value().packets.size == stream_control.data_packet.size() &&
+          data.value().packets.data[0U] == 0x47U &&
+          data.value().packets.data[187U] == 0xa5U);
 
     const auto stopped = request(*control, MessageType::STOP_STREAM,
                                  LeaseRequestPayload{lease.value().lease_id});
     CHECK(stopped);
     frames.clear();
     CHECK(read_raw_frames(stream, framer, frames, 1U) &&
-          frames.headers[0U].type == MessageType::STREAM_END &&
-          frames.headers[0U].kind == MessageKind::event);
-    const auto end = decode_stream_end_event_payload(
+          frames.headers[0U].opcode == wire::kOpcodeStreamEndEvent &&
+          frames.headers[0U].kind == wire::Kind::event);
+    const auto end = wire::decode_stream_end_event(
         ByteView{frames.payloads[0U].data(), frames.payload_sizes[0U]});
-    CHECK(end && end.value().error_code == ErrorCode::OK);
+    CHECK(end && end_error_is(end.value(), ErrorCode::OK) &&
+          end.value().final.reason == wire::StreamEndReason::stopped);
     CHECK(request(*control, MessageType::RELEASE,
                   LeaseRequestPayload{lease.value().lease_id}));
 
@@ -1749,9 +2546,8 @@ bool test_stream_endpoint_terminal_mapping()
         ControlStream stream_control;
         TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time,
                                    nullptr, nullptr, &stream_control);
-        auto server_result = PosixControlServer::create(
-            endpoint, card_service, tuner_service, serial, true, 0x03U,
-            &stream_control);
+        auto server_result = create_typed_server(endpoint, card_service, tuner_service,
+                                                 serial, &stream_control);
         CHECK(server_result);
         std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
         std::atomic<bool> stop{false};
@@ -1767,14 +2563,14 @@ bool test_stream_endpoint_terminal_mapping()
         });
         ServerThreadGuard server_guard(stop, server_thread, *server);
 
-        auto control_result = PosixControlClient::connect(
+        auto control_result = TypedControl::connect(
             endpoint, kCapabilityStreamStats, Timeout{2000U});
         CHECK(control_result);
-        std::unique_ptr<PosixControlClient> control = std::move(control_result.value());
+        std::unique_ptr<TypedControl> control = std::move(control_result.value());
         const auto acquired = request(*control, MessageType::ACQUIRE,
                                       AcquireRequestPayload{2U});
         CHECK(acquired);
-        const auto lease = decode_acquire_response_payload(
+        const auto lease = wire::decode_acquire_response(
             ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
         CHECK(lease);
         CHECK(request(*control, MessageType::TUNE,
@@ -1791,18 +2587,18 @@ bool test_stream_endpoint_terminal_mapping()
         CHECK(stream_result);
         SocketStream stream = std::move(stream_result.value());
         std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> storage{};
-        StreamFramer framer(MutableByteView{storage.data(), storage.size()});
+        wire::FrameReceiver framer(MutableByteView{storage.data(), storage.size()});
         std::array<std::uint8_t, kMaxControlPayload> payload{};
-        const auto payload_size = encode_payload(
-            AttachStreamRequestPayload{lease.value().lease_id, lease.value().nonce},
+        const auto payload_size = wire::encode_attach_request(
+        control->attachment(lease.value().lease_id),
             MutableByteView{payload.data(), payload.size()});
         CHECK(payload_size && send_raw_request(
-            stream, MessageType::ATTACH_STREAM, 0U,
+            stream, MessageType::ATTACH_STREAM, 4U,
             ByteView{payload.data(), payload_size.value()}));
         FrameCollector frames;
         CHECK(read_raw_frames(stream, framer, frames, 1U));
-        CHECK(frames.headers[0U].type == MessageType::ATTACH_STREAM &&
-              frames.headers[0U].kind == MessageKind::response);
+        CHECK(frames.headers[0U].opcode == wire::kOpcodeAttachStream &&
+              frames.headers[0U].kind == wire::Kind::response);
         {
             std::lock_guard<std::mutex> lock(stream_control.mutex);
             stream_control.counters = TunerStreamCounters{31U, 5828U, 7U, 11U,
@@ -1814,27 +2610,41 @@ bool test_stream_endpoint_terminal_mapping()
         CHECK(stopped);
         frames.clear();
         CHECK(read_raw_frames(stream, framer, frames, 1U));
-        CHECK(frames.headers[0U].type == MessageType::STREAM_END &&
-              frames.headers[0U].kind == MessageKind::event);
-        const auto end = decode_stream_end_event_payload(
+        CHECK(frames.headers[0U].opcode == wire::kOpcodeStreamEndEvent &&
+              frames.headers[0U].kind == wire::Kind::event);
+        const auto end = wire::decode_stream_end_event(
             ByteView{frames.payloads[0U].data(), frames.payload_sizes[0U]});
-        CHECK(end && end.value().error_code == terminal_case.second &&
-              end.value().counters.packets == 31U &&
-              end.value().counters.bytes == 5828U &&
-              end.value().counters.sync_errors == 7U &&
-              end.value().counters.tei_packets == 11U &&
-              end.value().counters.continuity_errors == 13U &&
-              end.value().counters.queue_drops == 17U &&
-              end.value().counters.usb_errors == 19U &&
-              end.value().counters.empty_intervals == 23U);
+        CHECK(end && end_error_is(end.value(), terminal_case.second) &&
+              counters_are(end.value().final.statistics, 31U, 17U));
+        const auto expected_reason = terminal_case.first == TunerStreamTerminal::stopped ?
+            wire::StreamEndReason::stopped :
+            terminal_case.first == TunerStreamTerminal::slow_consumer ?
+            wire::StreamEndReason::slow_consumer :
+            (terminal_case.first == TunerStreamTerminal::usb_error ||
+             terminal_case.first == TunerStreamTerminal::disconnected) ?
+            wire::StreamEndReason::device_lost : wire::StreamEndReason::backend_error;
+        CHECK(end.value().final.reason == expected_reason);
+        const auto native_final = stream_control.final_snapshot(stream_control.final_identity);
+        CHECK(native_final && native_final.value().terminal ==
+              static_cast<std::uint8_t>(terminal_case.first) &&
+              native_final.value().counters.packets == 31U &&
+              native_final.value().counters.bytes == 5828U &&
+              native_final.value().counters.sync_errors == 7U &&
+              native_final.value().counters.tei_packets == 11U &&
+              native_final.value().counters.continuity_errors == 13U &&
+              native_final.value().counters.queue_drops == 17U &&
+              native_final.value().counters.usb_errors == 19U &&
+              native_final.value().counters.empty_intervals == 23U);
         const auto released = request(
             *control, MessageType::RELEASE,
             LeaseRequestPayload{lease.value().lease_id});
         if (terminal_case.first == TunerStreamTerminal::disconnected) {
-            // The exact terminal snapshot is transport-loss evidence. Release
-            // performs no later receiver write and reports that cleanup could
-            // not prove a physical close.
-            CHECK(!released && released.error() == Error::DISCONNECTED);
+            // STREAM_END retains transport loss. Typed RELEASE independently
+            // reports the successful physical cleanup performed by this fake.
+            CHECK(released && tuner_backend.close_calls[2U] == 1U);
+            const auto cleanup = wire::decode_release_response(released.value().view());
+            CHECK(cleanup && cleanup.value().released && cleanup.value().quiesced &&
+                  !cleanup.value().error.present);
         } else {
             CHECK(released);
         }
@@ -1869,9 +2679,8 @@ bool test_stream_attach_submit_failure_cleanup()
     ControlWorkerStartupOptions worker_options{};
     worker_options.fail_tuner_attach_submit = true;
     ControlWorkerLanes::set_test_startup_options(&worker_options);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial, true, 0x03U,
-        &stream_control);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service,
+                                             serial, &stream_control);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -1887,14 +2696,14 @@ bool test_stream_attach_submit_failure_cleanup()
     });
     ServerThreadGuard server_guard(stop, server_thread, *server);
 
-    auto control_result = PosixControlClient::connect(
+    auto control_result = TypedControl::connect(
         endpoint, kCapabilityStreamStats, Timeout{2000U});
     CHECK(control_result);
-    std::unique_ptr<PosixControlClient> control = std::move(control_result.value());
+    std::unique_ptr<TypedControl> control = std::move(control_result.value());
     const auto acquired = request(*control, MessageType::ACQUIRE,
                                   AcquireRequestPayload{2U});
     CHECK(acquired);
-    const auto lease = decode_acquire_response_payload(
+    const auto lease = wire::decode_acquire_response(
         ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
     CHECK(lease);
     CHECK(request(*control, MessageType::TUNE,
@@ -1911,20 +2720,20 @@ bool test_stream_attach_submit_failure_cleanup()
     CHECK(stream_result);
     SocketStream stream = std::move(stream_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> storage{};
-    StreamFramer framer(MutableByteView{storage.data(), storage.size()});
+    wire::FrameReceiver framer(MutableByteView{storage.data(), storage.size()});
     std::array<std::uint8_t, kMaxControlPayload> payload{};
-    const auto payload_size = encode_payload(
-        AttachStreamRequestPayload{lease.value().lease_id, lease.value().nonce},
+    const auto payload_size = wire::encode_attach_request(
+        control->attachment(lease.value().lease_id),
         MutableByteView{payload.data(), payload.size()});
     CHECK(payload_size && send_raw_request(
-        stream, MessageType::ATTACH_STREAM, 0U,
+        stream, MessageType::ATTACH_STREAM, 4U,
         ByteView{payload.data(), payload_size.value()}));
     FrameCollector frames;
     CHECK(read_raw_frames(stream, framer, frames, 1U));
-    const auto error = decode_error_response_payload(
+    const auto error = wire::decode_error_response(
         ByteView{frames.payloads[0U].data(), frames.payload_sizes[0U]});
-    CHECK(frames.headers[0U].kind == MessageKind::error_response && error &&
-          error.value().error_code == ErrorCode::BUSY);
+    CHECK(frames.headers[0U].kind == wire::Kind::error_response && error &&
+          error.value().error.code == static_cast<std::uint32_t>(Error::BUSY));
     std::array<std::uint8_t, 1U> closed_buffer{};
     const auto closed = stream.read_some(
         MutableByteView{closed_buffer.data(), closed_buffer.size()}, Timeout{2000U});
@@ -1964,9 +2773,8 @@ bool test_stream_hup_before_attach_completion_cleanup()
         &AttachCompletionBarrier::before_completion;
     worker_options.before_tuner_attach_completion_context = &completion_barrier;
     ControlWorkerLanes::set_test_startup_options(&worker_options);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial, true, 0x03U,
-        &stream_control);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service,
+                                             serial, &stream_control);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -1983,14 +2791,14 @@ bool test_stream_hup_before_attach_completion_cleanup()
     ServerThreadGuard server_guard(stop, server_thread, *server);
     AttachCompletionReleaseGuard completion_guard(completion_barrier);
 
-    auto control_result = PosixControlClient::connect(
+    auto control_result = TypedControl::connect(
         endpoint, kCapabilityStreamStats, Timeout{2000U});
     CHECK(control_result);
-    std::unique_ptr<PosixControlClient> control = std::move(control_result.value());
+    std::unique_ptr<TypedControl> control = std::move(control_result.value());
     const auto acquired = request(*control, MessageType::ACQUIRE,
                                   AcquireRequestPayload{2U});
     CHECK(acquired);
-    const auto lease = decode_acquire_response_payload(
+    const auto lease = wire::decode_acquire_response(
         ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
     CHECK(lease);
     CHECK(request(*control, MessageType::TUNE,
@@ -2007,13 +2815,13 @@ bool test_stream_hup_before_attach_completion_cleanup()
     CHECK(stream_result);
     SocketStream stream = std::move(stream_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> storage{};
-    StreamFramer framer(MutableByteView{storage.data(), storage.size()});
+    wire::FrameReceiver framer(MutableByteView{storage.data(), storage.size()});
     std::array<std::uint8_t, kMaxControlPayload> payload{};
-    const auto payload_size = encode_payload(
-        AttachStreamRequestPayload{lease.value().lease_id, lease.value().nonce},
+    const auto payload_size = wire::encode_attach_request(
+        control->attachment(lease.value().lease_id),
         MutableByteView{payload.data(), payload.size()});
     CHECK(payload_size && send_raw_request(
-        stream, MessageType::ATTACH_STREAM, 0U,
+        stream, MessageType::ATTACH_STREAM, 4U,
         ByteView{payload.data(), payload_size.value()}));
     CHECK(completion_barrier.wait_until_entered());
 
@@ -2058,9 +2866,8 @@ bool test_stream_endpoint_fragmented_and_duplicate()
                                nullptr, nullptr, &stream_control);
     StreamServerObservation observation;
     StreamServerHookGuard hook_guard(observation);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial, true, 0x03U,
-        &stream_control);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service,
+                                             serial, &stream_control);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -2076,14 +2883,14 @@ bool test_stream_endpoint_fragmented_and_duplicate()
     });
     ServerThreadGuard server_guard(stop, server_thread, *server);
 
-    auto control_result = PosixControlClient::connect(
+    auto control_result = TypedControl::connect(
         endpoint, kCapabilityStreamStats, Timeout{2000U});
     CHECK(control_result);
-    std::unique_ptr<PosixControlClient> control = std::move(control_result.value());
+    std::unique_ptr<TypedControl> control = std::move(control_result.value());
     const auto acquired = request(*control, MessageType::ACQUIRE,
                                   AcquireRequestPayload{2U});
     CHECK(acquired);
-    const auto lease = decode_acquire_response_payload(
+    const auto lease = wire::decode_acquire_response(
         ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
     CHECK(lease);
     CHECK(request(*control, MessageType::TUNE,
@@ -2100,17 +2907,18 @@ bool test_stream_endpoint_fragmented_and_duplicate()
     CHECK(stream_result);
     SocketStream stream = std::move(stream_result.value());
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> storage{};
-    StreamFramer framer(MutableByteView{storage.data(), storage.size()});
+    wire::FrameReceiver framer(MutableByteView{storage.data(), storage.size()});
     std::array<std::uint8_t, kMaxControlPayload> payload{};
-    const auto payload_size = encode_payload(
-        AttachStreamRequestPayload{lease.value().lease_id, lease.value().nonce},
+    const auto payload_size = wire::encode_attach_request(
+        control->attachment(lease.value().lease_id),
         MutableByteView{payload.data(), payload.size()});
     CHECK(payload_size);
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> frame{};
-    const auto frame_size = encode_frame(
-        FrameHeader{kProtocolMajor, kProtocolMinor, MessageType::ATTACH_STREAM,
-                    MessageKind::request, 0U,
-                    static_cast<std::uint32_t>(payload_size.value())},
+    wire::Header attach_header;
+    attach_header.opcode = wire::kOpcodeAttachStream;
+    attach_header.request_id = 4;
+    attach_header.payload_length = static_cast<std::uint32_t>(payload_size.value());
+    const auto frame_size = wire::encode_frame(attach_header,
         ByteView{payload.data(), payload_size.value()},
         MutableByteView{frame.data(), frame.size()});
     CHECK(frame_size && frame_size.value() > kFrameHeaderSize);
@@ -2121,8 +2929,8 @@ bool test_stream_endpoint_fragmented_and_duplicate()
                             frame_size.value() - first_bytes));
     FrameCollector frames;
     CHECK(read_raw_frames(stream, framer, frames, 1U));
-    CHECK(frames.headers[0U].type == MessageType::ATTACH_STREAM &&
-          frames.headers[0U].kind == MessageKind::response);
+    CHECK(frames.headers[0U].opcode == wire::kOpcodeAttachStream &&
+          frames.headers[0U].kind == wire::Kind::response);
 
     // A stream connection accepts exactly one inbound frame.  A second
     // ATTACH is a protocol violation and must close the connection while
@@ -2165,9 +2973,8 @@ bool test_stream_endpoint_capacity_and_retired_reaping()
                                nullptr, nullptr, &stream_control);
     StreamServerObservation observation;
     StreamServerHookGuard hook_guard(observation);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial, true, 0x03U,
-        &stream_control);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service,
+                                             serial, &stream_control);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -2183,14 +2990,14 @@ bool test_stream_endpoint_capacity_and_retired_reaping()
     });
     ServerThreadGuard server_guard(stop, server_thread, *server);
 
-    auto control_result = PosixControlClient::connect(
+    auto control_result = TypedControl::connect(
         endpoint, kCapabilityStreamStats, Timeout{2000U});
     CHECK(control_result);
-    std::unique_ptr<PosixControlClient> control = std::move(control_result.value());
+    std::unique_ptr<TypedControl> control = std::move(control_result.value());
     const auto acquired = request(*control, MessageType::ACQUIRE,
                                   AcquireRequestPayload{2U});
     CHECK(acquired);
-    const auto lease = decode_acquire_response_payload(
+    const auto lease = wire::decode_acquire_response(
         ByteView{acquired.value().payload.data(), acquired.value().payload.size()});
     CHECK(lease);
     CHECK(request(*control, MessageType::TUNE,
@@ -2206,18 +3013,18 @@ bool test_stream_endpoint_capacity_and_retired_reaping()
     CHECK(attached_result);
     SocketStream attached = std::move(attached_result.value());
     std::array<std::uint8_t, kMaxControlPayload> payload{};
-    const auto payload_size = encode_payload(
-        AttachStreamRequestPayload{lease.value().lease_id, lease.value().nonce},
+    const auto payload_size = wire::encode_attach_request(
+        control->attachment(lease.value().lease_id),
         MutableByteView{payload.data(), payload.size()});
     CHECK(payload_size && send_raw_request(
-        attached, MessageType::ATTACH_STREAM, 0U,
+        attached, MessageType::ATTACH_STREAM, 4U,
         ByteView{payload.data(), payload_size.value()}));
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> attached_storage{};
-    StreamFramer attached_framer(
+    wire::FrameReceiver attached_framer(
         MutableByteView{attached_storage.data(), attached_storage.size()});
     FrameCollector attached_frames;
     CHECK(read_raw_frames(attached, attached_framer, attached_frames, 1U));
-    CHECK(attached_frames.headers[0U].kind == MessageKind::response);
+    CHECK(attached_frames.headers[0U].kind == wire::Kind::response);
 
     // kMaxStreamConnections is a private production bound; this test mirrors
     // its exact supported value and observes acceptance through the private
@@ -2291,9 +3098,8 @@ bool test_stream_endpoint_nonreading_peer_isolated()
                                nullptr, nullptr, &stream_control);
     StreamServerObservation observation;
     StreamServerHookGuard hook_guard(observation);
-    auto server_result = PosixControlServer::create(
-        endpoint, card_service, tuner_service, serial, true, 0x03U,
-        &stream_control);
+    auto server_result = create_typed_server(endpoint, card_service, tuner_service,
+                                             serial, &stream_control);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     std::atomic<bool> stop{false};
@@ -2309,19 +3115,19 @@ bool test_stream_endpoint_nonreading_peer_isolated()
     });
     ServerThreadGuard server_guard(stop, server_thread, *server);
 
-    auto control_result = PosixControlClient::connect(
+    auto control_result = TypedControl::connect(
         endpoint, kCapabilityStreamStats, Timeout{2000U});
     CHECK(control_result);
-    std::unique_ptr<PosixControlClient> control = std::move(control_result.value());
+    std::unique_ptr<TypedControl> control = std::move(control_result.value());
     const auto first_acquired = request(*control, MessageType::ACQUIRE,
                                         AcquireRequestPayload{2U});
     const auto second_acquired = request(*control, MessageType::ACQUIRE,
                                          AcquireRequestPayload{3U});
     CHECK(first_acquired && second_acquired);
-    const auto first_lease = decode_acquire_response_payload(
+    const auto first_lease = wire::decode_acquire_response(
         ByteView{first_acquired.value().payload.data(),
                  first_acquired.value().payload.size()});
-    const auto second_lease = decode_acquire_response_payload(
+    const auto second_lease = wire::decode_acquire_response(
         ByteView{second_acquired.value().payload.data(),
                  second_acquired.value().payload.size()});
     CHECK(first_lease && second_lease);
@@ -2350,24 +3156,24 @@ bool test_stream_endpoint_nonreading_peer_isolated()
     CHECK(::setsockopt(nonreading.native_handle(), SOL_SOCKET, SO_SNDBUF,
                        &send_buffer, static_cast<socklen_t>(sizeof(send_buffer))) == 0);
 
-    auto attach = [&](SocketStream& stream, const AcquireResponsePayload& lease,
-                      StreamFramer& framer) noexcept {
+    auto attach = [&](SocketStream& stream, const wire::AcquireResponse& lease,
+                      wire::FrameReceiver& framer) noexcept {
         std::array<std::uint8_t, kMaxControlPayload> attach_payload{};
-        const auto size = encode_payload(
-            AttachStreamRequestPayload{lease.lease_id, lease.nonce},
+        const auto size = wire::encode_attach_request(
+        control->attachment(lease.lease_id),
             MutableByteView{attach_payload.data(), attach_payload.size()});
         if (!size || !send_raw_request(
-                stream, MessageType::ATTACH_STREAM, 0U,
+                stream, MessageType::ATTACH_STREAM, 4U,
                 ByteView{attach_payload.data(), size.value()})) return false;
         FrameCollector frames;
         return read_raw_frames(stream, framer, frames, 1U) &&
-               frames.headers[0U].type == MessageType::ATTACH_STREAM &&
-               frames.headers[0U].kind == MessageKind::response;
+               frames.headers[0U].opcode == wire::kOpcodeAttachStream &&
+               frames.headers[0U].kind == wire::Kind::response;
     };
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> first_storage{};
     std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> second_storage{};
-    StreamFramer first_framer(MutableByteView{first_storage.data(), first_storage.size()});
-    StreamFramer second_framer(
+    wire::FrameReceiver first_framer(MutableByteView{first_storage.data(), first_storage.size()});
+    wire::FrameReceiver second_framer(
         MutableByteView{second_storage.data(), second_storage.size()});
     CHECK(attach(nonreading, first_lease.value(), first_framer));
     CHECK(attach(sibling, second_lease.value(), second_framer));
@@ -2389,17 +3195,21 @@ bool test_stream_endpoint_nonreading_peer_isolated()
         FrameCollector frames;
         while (!sibling_stop.load()) {
             frames.clear();
-            const auto read = sibling.read_frames(
-                MutableByteView{input.data(), input.size()}, second_framer, frames,
-                Timeout{20U});
+            const auto read = sibling.read_some(
+                MutableByteView{input.data(), input.size()}, Timeout{20U});
             if (!read) {
                 if (read.error() == Error::TIMEOUT) continue;
                 sibling_ok.store(false);
                 sibling_progress_condition.notify_all();
                 return;
             }
+            if (!second_framer.feed({input.data(), read.value()}, frames)) {
+                sibling_ok.store(false);
+                sibling_progress_condition.notify_all();
+                return;
+            }
             for (std::size_t index = 0U; index < frames.count; ++index) {
-                if (frames.headers[index].type == MessageType::TS_DATA) {
+                if (frames.headers[index].opcode == wire::kOpcodeTsDataEvent) {
                     ++sibling_data;
                     sibling_progress_condition.notify_all();
                 }
@@ -2428,11 +3238,13 @@ bool test_stream_endpoint_nonreading_peer_isolated()
     const auto stopped = request(*control, MessageType::STOP_STREAM,
                                  LeaseRequestPayload{second_lease.value().lease_id});
     CHECK(stopped);
-    StreamEndEventPayload end{};
+    wire::StreamEndEvent end{};
     CHECK(read_until_stream_end(sibling, second_framer, end));
-    CHECK(end.error_code == ErrorCode::OK && end.counters.packets == 17U &&
-          end.counters.bytes == 3196U && end.counters.queue_drops == 4U &&
-          end.counters.usb_errors == 5U);
+    CHECK(end_error_is(end, ErrorCode::OK) &&
+          counters_are(end.final.statistics, 17U, 4U));
+    const auto sibling_final = stream_control.final_snapshot(stream_control.final_identity);
+    CHECK(sibling_final && sibling_final.value().counters.bytes == 3196U &&
+          sibling_final.value().counters.usb_errors == 5U);
     CHECK(request(*control, MessageType::RELEASE,
                   LeaseRequestPayload{second_lease.value().lease_id}));
 
@@ -2442,7 +3254,10 @@ bool test_stream_endpoint_nonreading_peer_isolated()
     stop.store(true);
     server_thread.join();
     CHECK(server_ok.load());
-    CHECK(server->shutdown());
+    const auto shut_down = server->shutdown();
+    if (!shut_down) std::fprintf(stderr, "nonreading shutdown error=%u\n",
+        static_cast<unsigned>(shut_down.error()));
+    CHECK(shut_down);
     CHECK(stream_control.detach_calls == 2U);
     server_guard.dismiss();
     return true;
@@ -2452,18 +3267,29 @@ bool test_stream_endpoint_nonreading_peer_isolated()
 
 bool run_control_integration_tests()
 {
-    return test_control_server_card_flow_and_shutdown() &&
-           test_card_client_ownership_contract() &&
-           test_no_hello_timeout_and_malformed_disconnect() &&
-           test_control_server_tuner_flow() &&
-           test_control_server_lanes_are_independent() &&
-           test_control_server_disconnect_during_blocked_acquire() &&
-           test_control_server_disconnect_during_blocked_tune() &&
-           test_stream_endpoint_attach_and_stream_end() &&
-           test_stream_endpoint_terminal_mapping() &&
-           test_stream_attach_submit_failure_cleanup() &&
-           test_stream_hup_before_attach_completion_cleanup() &&
-           test_stream_endpoint_fragmented_and_duplicate() &&
-           test_stream_endpoint_capacity_and_retired_reaping() &&
-           test_stream_endpoint_nonreading_peer_isolated();
+    bool okay = true;
+    // Preserve all fourteen cases and their failures while letting independent
+    // lanes/data paths report in one bounded run instead of hiding behind the
+    // first contract failure.
+#define RUN_CONTROL_CASE(name) do { \
+    const bool passed = name(); \
+    std::fprintf(stderr, "%s %s\n", passed ? "PASS" : "FAIL", #name); \
+    okay = passed && okay; \
+} while (false)
+    RUN_CONTROL_CASE(test_control_server_card_flow_and_shutdown);
+    RUN_CONTROL_CASE(test_card_client_ownership_contract);
+    RUN_CONTROL_CASE(test_no_hello_timeout_and_malformed_disconnect);
+    RUN_CONTROL_CASE(test_control_server_tuner_flow);
+    RUN_CONTROL_CASE(test_control_server_lanes_are_independent);
+    RUN_CONTROL_CASE(test_control_server_disconnect_during_blocked_acquire);
+    RUN_CONTROL_CASE(test_control_server_disconnect_during_blocked_tune);
+    RUN_CONTROL_CASE(test_stream_endpoint_attach_and_stream_end);
+    RUN_CONTROL_CASE(test_stream_endpoint_terminal_mapping);
+    RUN_CONTROL_CASE(test_stream_attach_submit_failure_cleanup);
+    RUN_CONTROL_CASE(test_stream_hup_before_attach_completion_cleanup);
+    RUN_CONTROL_CASE(test_stream_endpoint_fragmented_and_duplicate);
+    RUN_CONTROL_CASE(test_stream_endpoint_capacity_and_retired_reaping);
+    RUN_CONTROL_CASE(test_stream_endpoint_nonreading_peer_isolated);
+#undef RUN_CONTROL_CASE
+    return okay;
 }

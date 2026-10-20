@@ -90,7 +90,7 @@ and [GCC 10.2.0](https://github.com/gcc-mirror/gcc/tree/releases/gcc-10.2.0).
 
 `dtv-userland-core` is included from the public repository
 `Khronos31/dtv-userland-core` at commit
-`65bf670669d8d2348e85e99f396e5970004f9868`. The MIT-licensed selected library
+`0c136e2b5513524e31ab317945244c599c261e65`. The MIT-licensed selected library
 targets at this pin are `dtv::core`, `dtv::wire`, `dtv::identity`,
 `dtv::tuning`, `dtv::json`, `dtv::control`, `dtv::receiver`, and `dtv::card`.
 The optional `dtv::host_ctl` frontend is a separate GPL-2.0-only adapter and

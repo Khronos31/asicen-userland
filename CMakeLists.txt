@@ -558,12 +558,16 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         ${ASICEN_PX4_ROOT}/tests/px4_ts_tests.cpp
         ${ASICEN_PX4_ROOT}/tests/px4ctl_format_tests.cpp
         ${ASICEN_PX4_ROOT}/tests/px4d_list_format_tests.cpp
+        userland/src/control_context_builder.cpp
+        userland/src/device_profile.cpp
         ${ASICEN_PX4_ROOT}/tests/imported_tests_main.cpp
     )
     target_include_directories(px4-portable-tests PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
-        ${ASICEN_PX4_ROOT}/tools ${ASICEN_PX4_ROOT}/tests)
+        ${ASICEN_PX4_ROOT}/tools ${ASICEN_PX4_ROOT}/tests
+        userland/include)
     target_compile_definitions(px4-portable-tests PRIVATE
+        ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}"
         PX4_CONTROL_WORKERS_TEST_ACCESS=1
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_POSIX_IPC_TEST_ACCESS=1

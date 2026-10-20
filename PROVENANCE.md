@@ -1,7 +1,7 @@
 # Source provenance
 
 The shared `dtv-userland-core` dependency is pinned to commit
-`65bf670669d8d2348e85e99f396e5970004f9868` in
+`0c136e2b5513524e31ab317945244c599c261e65` in
 `cmake/dtv-userland-core.revision`. It is fetched from the public
 `Khronos31/dtv-userland-core` repository for normal builds and included in
 corresponding-source archives from that exact Git commit. The dependency's
@@ -15,7 +15,7 @@ subset. The MIT notice is reproduced in `THIRD_PARTY_NOTICES.md`.
 
 The C1 card ownership increment was reviewed against common commit
 `121071c3458e6a03d69f05794c066b704996b13a`; the active product lock is the
-combined dependency commit `65bf670669d8d2348e85e99f396e5970004f9868` above.
+combined dependency commit `0c136e2b5513524e31ab317945244c599c261e65` above.
 Its optional `dtv::card` target provides the generic card ownership engine.
 The GPL ASICEN facade retains Native-session exclusion, active receiver/profile
 routing, product hardware adapters, the card operation guard, and both stop
