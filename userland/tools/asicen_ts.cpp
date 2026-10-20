@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "px4_ts_core.h"
-#include "px4_ts_posix.h"
+#include <dtv/host_ts/px4_ts_core.h>
+#include <dtv/host_ts/px4_ts_posix.h>
 
 #include <cerrno>
 #include <chrono>
@@ -79,15 +79,18 @@ void print_counters(const char* label, const ipc::CountersPayload& counters) noe
 
 int main(int argc, char** argv)
 {
+    static const TsClientProfile profile{
+        "asicen-ts", "asicen-userland", dtv::userland::identity::Product::asicen,
+        false, true};
     const Px4TsArguments arguments =
-        parse_px4_ts_product_arguments(argc, const_cast<const char* const*>(argv));
+        parse_px4_ts_product_arguments(argc, const_cast<const char* const*>(argv), profile);
     if (!arguments.valid) {
         std::fprintf(stderr, "argument error: %s\n", arguments.error.c_str());
-        print_px4_ts_usage(stderr);
+        print_px4_ts_usage(profile, stderr);
         return 2;
     }
     if (arguments.help) {
-        print_px4_ts_usage(stdout);
+        print_px4_ts_usage(profile, stdout);
         return 0;
     }
     if (arguments.version) {
@@ -116,7 +119,7 @@ int main(int argc, char** argv)
     PosixSignal signal;
     Px4TsFailureKind failure_kind = Px4TsFailureKind::ipc;
     Px4TsRunDiagnostics diagnostics;
-    const auto result = Px4TsRunner::run_wire(arguments, output, clock, signal,
+    const auto result = Px4TsRunner::run_wire(arguments, profile, output, clock, signal,
                                               &failure_kind, &diagnostics);
     if (!result) {
         std::fprintf(stderr, "asicen-ts: %s\n", error_string(result.error()));

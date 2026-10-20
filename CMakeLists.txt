@@ -171,9 +171,18 @@ if(UNIX OR WIN32)
         CACHE STRING
         "Private product facade include directories required by the GPL host runtime adapter"
         FORCE)
+    set(DTV_USERLAND_BUILD_HOST_TS ON CACHE BOOL
+        "Build the optional GPL host TS consumer" FORCE)
+    set(DTV_USERLAND_HOST_TS_FACADE_INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland/include"
+        CACHE STRING
+        "Private product facade include directories required by the GPL host TS consumer"
+        FORCE)
 else()
     set(DTV_USERLAND_BUILD_HOST_RUNTIME OFF CACHE BOOL
         "Build the optional GPL host runtime adapter" FORCE)
+    set(DTV_USERLAND_BUILD_HOST_TS OFF CACHE BOOL
+        "Build the optional GPL host TS consumer" FORCE)
 endif()
 if(WIN32 AND ASICEN_BUILD_WINSCARD)
     set(DTV_USERLAND_BUILD_WINDOWS_WINSCARD ON CACHE BOOL
@@ -200,7 +209,6 @@ asicen_add_dtv_userland_core()
 set(ASICEN_PX4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland)
 set(ASICEN_PX4_COMMON_SOURCES
     ${ASICEN_PX4_ROOT}/src/identity.cpp
-    ${ASICEN_PX4_ROOT}/src/control_client.cpp
     ${ASICEN_PX4_ROOT}/src/control_server.cpp
     ${ASICEN_PX4_ROOT}/src/control_workers.cpp
     ${ASICEN_PX4_ROOT}/src/tuner_service.cpp
@@ -236,7 +244,7 @@ if(ASICEN_BUILD_TESTS)
     target_include_directories(px4_portable_reference PUBLIC
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
         ${ASICEN_DTV_CORE_SOURCE_DIR}/adapters/host_runtime/include)
-    target_link_libraries(px4_portable_reference PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control)
+    target_link_libraries(px4_portable_reference PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control dtv::host_ts)
     target_compile_definitions(px4_portable_reference PUBLIC
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
     asicen_enable_project_warnings(px4_portable_reference)
@@ -271,7 +279,7 @@ target_include_directories(asicen_portable_core PUBLIC
 target_compile_definitions(asicen_portable_core PRIVATE ASICEN_PROFILE_ASICEN=1)
 target_compile_definitions(asicen_portable_core PUBLIC
     PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-target_link_libraries(asicen_portable_core PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control)
+target_link_libraries(asicen_portable_core PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control dtv::host_ts)
 if(UNIX OR WIN32)
     target_link_libraries(asicen_portable_core PUBLIC dtv::host_runtime asicen_px4_ipc)
 else()
@@ -532,23 +540,18 @@ if(UNIX OR WIN32)
 
     if(WIN32)
         add_executable(asicen-ts
-            userland/tools/asicen_ts_windows.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_windows_output.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+            userland/tools/asicen_ts_windows.cpp)
         target_link_options(asicen-ts PRIVATE "LINKER:--stack,8388608")
-        target_link_libraries(asicen-ts PRIVATE dtv::tuning shell32)
+        target_link_libraries(asicen-ts PRIVATE dtv::host_ts shell32)
         target_link_libraries(asicenctl PRIVATE shell32)
     else()
-        add_executable(asicen-ts
-            userland/tools/asicen_ts.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp)
+        add_executable(asicen-ts userland/tools/asicen_ts.cpp)
     endif()
     target_include_directories(asicen-ts PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicen-ts PRIVATE
         ASICEN_PRODUCT_CLI=1 ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(asicen-ts PRIVATE asicen_core asicen_portable_core dtv::tuning dtv::identity)
+    target_link_libraries(asicen-ts PRIVATE asicen_core asicen_portable_core dtv::host_ts dtv::identity)
     asicen_enable_project_warnings(asicen-ts)
 endif()
 
@@ -572,9 +575,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_executable(asicen-runtime-v1-server-tests
         userland/tests/asicen_runtime_v1_server_tests.cpp
         ${ASICEN_PX4_ROOT}/src/control_server.cpp
-        ${ASICEN_PX4_ROOT}/src/control_workers.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp)
+        ${ASICEN_PX4_ROOT}/src/control_workers.cpp)
     if(ASICEN_PCSC_IFD_AVAILABLE)
         target_link_libraries(asicen-runtime-v1-server-tests PRIVATE asicen_pcsc_ifd_core)
         target_compile_definitions(asicen-runtime-v1-server-tests PRIVATE
@@ -591,7 +592,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_CONTROL_WORKERS_TEST_ACCESS=1)
     target_link_libraries(asicen-runtime-v1-server-tests PRIVATE
-        asicen_core asicen_hardware_session asicen_px4_mock dtv::json dtv::tuning dtv::identity)
+        asicen_core asicen_hardware_session asicen_px4_mock dtv::host_ts dtv::json dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-runtime-v1-server-tests)
     add_test(NAME asicen-runtime-v1-server-tests
         COMMAND asicen-runtime-v1-server-tests)
@@ -628,8 +629,6 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_executable(px4-portable-tests
         ${ASICEN_PX4_CORE_SOURCES}
         ${ASICEN_PX4_ROOT}/src/card.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp
         ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp
         ${ASICEN_PX4_ROOT}/tools/px4d_list_format.cpp
         ${ASICEN_PX4_ROOT}/tests/control_integration_tests.cpp
@@ -654,7 +653,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_POSIX_IPC_TEST_ACCESS=1
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity)
+    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity dtv::host_ts)
     asicen_enable_project_warnings(px4-portable-tests)
     add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
 
@@ -705,15 +704,13 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
 
                 add_executable(asicen-real-factory-proof-tests
                     userland/tests/asicen_real_factory_proof_tests.cpp
-                    userland/tests/transport_transform_reference.cpp
-                    third_party/px4-userland/userland/tools/px4_ts_core.cpp
-                    third_party/px4-userland/userland/tools/px4_ts_posix.cpp)
+                    userland/tests/transport_transform_reference.cpp)
                 target_include_directories(asicen-real-factory-proof-tests PRIVATE
                     third_party/px4-userland/userland/include
                     third_party/px4-userland/userland/tools
                     third_party/px4-userland/userland/tests)
                 target_link_libraries(asicen-real-factory-proof-tests PRIVATE
-                    asicen_hardware_session asicen_libusb asicen_pcsc_ifd_core dtv::tuning dtv::identity)
+                    asicen_hardware_session asicen_libusb asicen_pcsc_ifd_core dtv::host_ts dtv::tuning dtv::identity)
                 target_compile_definitions(asicen-real-factory-proof-tests PRIVATE
                     ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
                 asicen_enable_project_warnings(asicen-real-factory-proof-tests)
@@ -801,12 +798,11 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_test(NAME asicen-model-ipc-tests COMMAND asicen-model-ipc-tests)
 
     add_executable(asicen-product-lnb-tests
-        userland/tests/product_lnb_tests.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+        userland/tests/product_lnb_tests.cpp)
     target_include_directories(asicen-product-lnb-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicen-product-lnb-tests PRIVATE ASICEN_PRODUCT_CLI=1)
     target_link_libraries(asicen-product-lnb-tests PRIVATE
-        asicen_core asicen_px4_mock dtv::tuning dtv::identity)
+        asicen_core asicen_px4_mock dtv::host_ts dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-product-lnb-tests)
     add_test(NAME asicen-product-lnb-tests COMMAND asicen-product-lnb-tests)
 
@@ -1255,10 +1251,8 @@ if(ASICEN_BUILD_TESTS AND WIN32)
     target_compile_definitions(asicen_windows_workers_tests PRIVATE PX4_CONTROL_WORKERS_TEST_ACCESS=1)
     target_link_libraries(asicen_windows_workers_tests PRIVATE px4_portable_reference)
     add_executable(asicen_windows_ts_output_tests
-        ${ASICEN_PX4_ROOT}/tests/windows_ts_output_tests.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_windows_output.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
-    target_link_libraries(asicen_windows_ts_output_tests PRIVATE px4_portable_reference)
+        ${ASICEN_PX4_ROOT}/tests/windows_ts_output_tests.cpp)
+    target_link_libraries(asicen_windows_ts_output_tests PRIVATE px4_portable_reference dtv::host_ts)
     target_link_libraries(asicen_windows_ts_output_tests PRIVATE dtv::tuning dtv::identity)
     add_executable(asicen_windows_control_tests ${ASICEN_PX4_ROOT}/tests/windows_control_tests.cpp)
     target_link_libraries(asicen_windows_control_tests PRIVATE px4_portable_reference)
@@ -1421,21 +1415,18 @@ endif()
 
 if(ASICEN_BUILD_TESTS)
     add_executable(asicen-ts-argument-tests
-        ${ASICEN_PX4_ROOT}/tests/asicen_ts_argument_tests.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+        ${ASICEN_PX4_ROOT}/tests/asicen_ts_argument_tests.cpp)
     target_compile_definitions(asicen-ts-argument-tests PRIVATE ASICEN_PRODUCT_CLI=1)
     target_include_directories(asicen-ts-argument-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
-    target_link_libraries(asicen-ts-argument-tests PRIVATE asicen_px4_mock dtv::tuning dtv::identity)
+    target_link_libraries(asicen-ts-argument-tests PRIVATE asicen_px4_mock dtv::host_ts dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-ts-argument-tests)
     add_test(NAME asicen-ts-argument-tests COMMAND asicen-ts-argument-tests)
 
-    add_executable(asicen-ts-product-cli-tests
-        userland/tests/asicen_ts_product_cli_tests.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+    add_executable(asicen-ts-product-cli-tests userland/tests/asicen_ts_product_cli_tests.cpp)
     target_include_directories(asicen-ts-product-cli-tests PRIVATE
         ${ASICEN_PX4_ROOT}/tools)
     target_link_libraries(asicen-ts-product-cli-tests PRIVATE
-        asicen_core asicen_portable_core dtv::tuning dtv::identity)
+        asicen_core asicen_portable_core dtv::host_ts dtv::tuning dtv::identity)
     asicen_enable_project_warnings(asicen-ts-product-cli-tests)
     add_test(NAME asicen-ts-product-cli-tests COMMAND asicen-ts-product-cli-tests)
 endif()
