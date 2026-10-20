@@ -88,16 +88,18 @@ and [GCC 10.2.0](https://github.com/gcc-mirror/gcc/tree/releases/gcc-10.2.0).
 
 ## Common foundation
 
-`dtv-userland-core` is included from the private repository
+`dtv-userland-core` is included from the public repository
 `Khronos31/dtv-userland-core` at commit
-`b385ce8768259f8c2d69ce148d8a5d921d581847`. The selected subset is licensed
-under MIT. Its exact `LICENSE` and `PROVENANCE.json` are included in
+`65bf670669d8d2348e85e99f396e5970004f9868`. The MIT-licensed selected library
+targets at this pin are `dtv::core`, `dtv::wire`, `dtv::identity`,
+`dtv::tuning`, `dtv::json`, `dtv::control`, `dtv::receiver`, and `dtv::card`.
+The optional `dtv::host_ctl` frontend is a separate GPL-2.0-only adapter and
+is not covered by this MIT notice; this product enables it for `asicenctl`.
+The dependency's exact `LICENSE` and `PROVENANCE.json` are included in
 corresponding-source archives under
 `repository/third_party/dtv-userland-core/`. Binary archives that link this
-foundation include the MIT terms below. The pinned revision includes the
-optional receiver lifecycle and opaque-ATR card ownership engines, both covered
-by the same MIT license. The product's GPL terms and vendor firmware rights
-policy above are unchanged.
+MIT library subset include the terms below. The product's GPL terms and vendor
+firmware rights policy above are unchanged.
 
 ```text
 MIT License
@@ -192,7 +194,7 @@ are retained. These are local sources, not a build-time network dependency.
 
 | Local path | Upstream path | Upstream SHA-256 | Copy |
 | --- | --- | --- | --- |
-| `scripts/release_verify.py` | `scripts/release_verify.py` | `1c3ebe46b1b7c0d0079c7996a928a7eaefdcec69c01a06e2ff9da143dd34738a` | ASICEN firmware SHA-256 constant |
+| `scripts/release_verify.py` | `scripts/release_verify.py` | `1c3ebe46b1b7c0d0079c7996a928a7eaefdcec69c01a06e2ff9da143dd34738a` | exact |
 | `scripts/release_publish.py` | `scripts/release_publish.py` | `961321ca9a3d8cf4eb762d94961f5edce708a18fbeb49fb9f4126ee8783ab47a` | local HTTP fixes |
 | `tests/test_release_verify.py` | `tests/test_release_verify.py` | `1b8e520655b7d8a02390c611c5d739ea0e3088433cba0fe92a1e7f28b7a4941f` | exact |
 | `tests/test_release_publish.py` | `tests/test_release_publish.py` | `c01ba5cf866920a7da4f616dfd0d27e8d311336ff40dfc827d4e9b2ffb0276e6` | fixture paths and HTTP regression additions |

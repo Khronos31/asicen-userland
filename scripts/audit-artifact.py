@@ -63,9 +63,9 @@ LINUX_TARGETS = {
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 LIBUSB_SHA256 = "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
 LIBUSB_COPYING_SHA256 = "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a"
-# The shared Windows loader image that asicend verifies before any model is
-# known; scripts/extract-windows-loader-firmware.py records the same values.
-FIRMWARE_SHA256 = "5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a"
+# This is the bundled Linux loader hash. The external Windows V2 loader has a
+# separate hash recorded by scripts/extract-windows-loader-firmware.py.
+FIRMWARE_SHA256 = "b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8"
 FIRMWARE_SIZE = 16384
 FIRMWARE_MEMBER = "firmware/asicen-loader.bin"
 FIRMWARE_NOTICE_MEMBER = "licenses/VENDOR-FIRMWARE-NOTICE.txt"

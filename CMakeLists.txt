@@ -154,7 +154,7 @@ function(asicen_enable_project_warnings target)
 endfunction()
 
 include(cmake/DtvUserlandCoreDependency.cmake)
-asicen_add_dtv_userland_core()
+asicen_add_dtv_userland_core(REQUIRE_CONTROL REQUIRE_HOST_CTL)
 
 set(ASICEN_PX4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland)
 set(ASICEN_PX4_CORE_SOURCES
@@ -568,7 +568,7 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_POSIX_IPC_TEST_ACCESS=1
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity)
+    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity dtv::control dtv::tuning)
     asicen_enable_project_warnings(px4-portable-tests)
     add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
 

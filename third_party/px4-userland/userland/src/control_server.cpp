@@ -3387,6 +3387,13 @@ Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
     return Result<std::unique_ptr<PosixControlServer>>::success(std::move(server));
 }
 
+Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
+    const EndpointConfig&, CardService&, TunerService&, std::string_view,
+    bool, std::uint8_t, TunerStreamControl*, std::uint8_t, bool) noexcept
+{
+    return Result<std::unique_ptr<PosixControlServer>>::failure(Error::INVALID_ARGUMENT);
+}
+
 PosixControlServer::PosixControlServer(std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl))
 {

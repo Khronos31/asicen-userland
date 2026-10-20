@@ -46,6 +46,7 @@ function(asicen_dtv_userland_core_revision out_var)
 endfunction()
 
 function(asicen_add_dtv_userland_core)
+    cmake_parse_arguments(ARG "REQUIRE_CONTROL;REQUIRE_HOST_CTL" "" "" ${ARGN})
     set(_bundled "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dtv-userland-core")
 
     if(DTV_USERLAND_CORE_SOURCE_DIR)
@@ -107,12 +108,12 @@ function(asicen_add_dtv_userland_core)
             "dtv-userland-core did not define the dtv::card target; "
             "the pinned commit predates the card ownership engine")
     endif()
-    if(NOT TARGET dtv::control)
+    if(ARG_REQUIRE_CONTROL AND NOT TARGET dtv::control)
         message(FATAL_ERROR
             "dtv-userland-core did not define the dtv::control target; "
             "the pinned commit predates the control connection")
     endif()
-    if(NOT TARGET dtv::host_ctl)
+    if(ARG_REQUIRE_HOST_CTL AND NOT TARGET dtv::host_ctl)
         message(FATAL_ERROR
             "dtv-userland-core did not define the optional GPL host control frontend")
     endif()
