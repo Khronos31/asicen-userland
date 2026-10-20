@@ -154,21 +154,21 @@ function(asicen_enable_project_warnings target)
 endfunction()
 
 include(cmake/DtvUserlandCoreDependency.cmake)
-if(UNIX)
+if(UNIX OR WIN32)
     set(DTV_USERLAND_BUILD_HOST_RUNTIME ON CACHE BOOL
-        "Build the optional GPL POSIX host runtime adapter" FORCE)
+        "Build the optional GPL host runtime adapter" FORCE)
     set(DTV_USERLAND_HOST_RUNTIME_PRODUCT "asicen-userland" CACHE STRING
-        "Product runtime namespace component required by the GPL POSIX host runtime adapter" FORCE)
+        "Product runtime namespace component required by the GPL host runtime adapter" FORCE)
     set(DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY "preserve-case" CACHE STRING
-        "Instance-name policy for the GPL POSIX host runtime adapter" FORCE)
+        "Instance-name policy for the GPL host runtime adapter" FORCE)
     set(DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland/include"
         CACHE STRING
-        "Private product facade include directories required by the GPL POSIX host runtime adapter"
+        "Private product facade include directories required by the GPL host runtime adapter"
         FORCE)
 else()
     set(DTV_USERLAND_BUILD_HOST_RUNTIME OFF CACHE BOOL
-        "Build the optional GPL POSIX host runtime adapter" FORCE)
+        "Build the optional GPL host runtime adapter" FORCE)
 endif()
 asicen_add_dtv_userland_core()
 
@@ -202,8 +202,6 @@ endif()
 set(ASICEN_PX4_PRODUCT_PLATFORM_SOURCES)
 if(WIN32)
     list(APPEND ASICEN_PX4_PRODUCT_PLATFORM_SOURCES
-        ${ASICEN_PX4_ROOT}/src/windows/windows_ipc.cpp
-        ${ASICEN_PX4_ROOT}/src/windows/windows_tuner_nonce.cpp
         ${ASICEN_PX4_ROOT}/src/windows/windows_sleep.cpp)
 endif()
 
@@ -239,7 +237,7 @@ target_compile_definitions(asicen_portable_core PRIVATE ASICEN_PROFILE_ASICEN=1)
 target_compile_definitions(asicen_portable_core PUBLIC
     PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
 target_link_libraries(asicen_portable_core PUBLIC Threads::Threads dtv::core dtv::receiver dtv::card dtv::control)
-if(UNIX)
+if(UNIX OR WIN32)
     target_link_libraries(asicen_portable_core PUBLIC dtv::host_runtime asicen_px4_ipc)
 else()
     target_link_libraries(asicen_portable_core PUBLIC asicen_px4_ipc)
@@ -1194,6 +1192,12 @@ if(ASICEN_BUILD_TESTS)
 endif()
 
 if(ASICEN_BUILD_TESTS AND WIN32)
+    add_executable(asicen_windows_host_runtime_proof EXCLUDE_FROM_ALL
+        userland/tests/windows_host_runtime_proof.cpp)
+    target_link_libraries(asicen_windows_host_runtime_proof PRIVATE
+        asicen_portable_core)
+    asicen_enable_project_warnings(asicen_windows_host_runtime_proof)
+
     add_executable(asicen_windows_tests
         ${ASICEN_PX4_ROOT}/tests/windows_imported_tests_main.cpp
         ${ASICEN_PX4_ROOT}/tests/card_tests.cpp
