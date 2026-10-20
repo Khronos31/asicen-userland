@@ -63,9 +63,9 @@ LINUX_TARGETS = {
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 LIBUSB_SHA256 = "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
 LIBUSB_COPYING_SHA256 = "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a"
-# The shared Windows loader image that asicend verifies before any model is
-# known; scripts/extract-windows-loader-firmware.py records the same values.
-FIRMWARE_SHA256 = "5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a"
+# The bundled Linux loader image; the separately supplied Windows V2 loader
+# has its own hash and is not this archive member.
+FIRMWARE_SHA256 = "b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8"
 FIRMWARE_SIZE = 16384
 FIRMWARE_MEMBER = "firmware/asicen-loader.bin"
 FIRMWARE_NOTICE_MEMBER = "licenses/VENDOR-FIRMWARE-NOTICE.txt"
@@ -82,6 +82,11 @@ FIRMWARE_NOTICE = (
 COMMON_CORE_LICENSE = "repository/third_party/dtv-userland-core/LICENSE"
 COMMON_CORE_PROVENANCE = "repository/third_party/dtv-userland-core/PROVENANCE.json"
 COMMON_CORE_PREFIX = "repository/third_party/dtv-userland-core/"
+HOST_DAEMON_PREFIX = COMMON_CORE_PREFIX + "adapters/host_daemon/"
+HOST_FACADE_PREFIX = COMMON_CORE_PREFIX + "adapters/host_facade/"
+HOST_RUNTIME_PREFIX = COMMON_CORE_PREFIX + "adapters/host_runtime/"
+HOST_TS_PREFIX = COMMON_CORE_PREFIX + "adapters/host_ts/"
+WINSCARD_PREFIX = COMMON_CORE_PREFIX + "adapters/windows_winscard/"
 COMMON_CORE_BUILD_FILES = {
     COMMON_CORE_PREFIX + "CMakeLists.txt",
     COMMON_CORE_PREFIX + "cmake/dtv_userland_coreConfig.cmake.in",
@@ -102,6 +107,61 @@ COMMON_CORE_RECEIVER_BUILD_FILES = {
 COMMON_CORE_CARD_BUILD_FILES = {
     COMMON_CORE_PREFIX + "include/dtv/userland/detail/card_ownership_engine.h",
     COMMON_CORE_PREFIX + "include/dtv/userland/detail/card_ownership_engine.tpp",
+}
+HOST_DAEMON_REQUIRED = {
+    HOST_DAEMON_PREFIX + path for path in (
+        "COPYING", "PROVENANCE.json", "README.md",
+        "include/dtv/userland/host_daemon/card_service.h",
+        "include/dtv/userland/host_daemon/control_server_test_access.h",
+        "include/dtv/userland/host_daemon/control_workers.h",
+        "include/px4/card_service.h", "include/px4/control_execution_layout.h",
+        "include/px4/control_server.h", "include/px4/enclosure_context.h",
+        "include/px4/tuner_service.h", "src/card_service.cpp",
+        "src/control_server.cpp", "src/control_workers.cpp",
+        "src/enclosure_context.cpp", "src/tuner_service.cpp",
+        "src/windows_pthread_compat.h",
+    )
+}
+HOST_FACADE_REQUIRED = {
+    HOST_FACADE_PREFIX + path for path in (
+        "COPYING", "PROVENANCE.json", "README.md",
+        "include/dtv/userland/host_facade/identity.h",
+        "include/dtv/userland/host_facade/px4d_signals.h",
+        "include/dtv/userland/host_facade/px4d_windows_stdin.h",
+        "include/px4/card_atr_bytes.h", "include/px4/error.h",
+        "include/px4/ipc.h", "include/px4/platform_sleep.h",
+        "include/px4/posix_ipc.h", "include/px4/transport.h",
+        "src/identity.cpp", "src/ipc.cpp", "src/px4d_signals.cpp",
+        "src/px4d_windows_stdin.cpp", "src/windows_sleep.cpp",
+    )
+}
+HOST_RUNTIME_REQUIRED = {
+    HOST_RUNTIME_PREFIX + path for path in (
+        "COPYING", "README.md", "include/px4/posix_ipc_contract.h",
+        "include/px4/posix_tuner_nonce_internal.h",
+        "include/windows/windows_security.h", "posix_ipc.cpp",
+        "posix_tuner_nonce.cpp", "windows/windows_ipc.cpp",
+        "windows/windows_tuner_nonce.cpp",
+    )
+}
+HOST_TS_REQUIRED = {
+    HOST_TS_PREFIX + path for path in (
+        "COPYING", "README.md", "control_client.cpp",
+        "include/dtv/host_ts/control_client.h",
+        "include/dtv/host_ts/px4_ts_core.h",
+        "include/dtv/host_ts/px4_ts_posix.h",
+        "include/dtv/host_ts/px4_ts_windows_output.h",
+        "include/px4/control_client.h", "px4_ts_core.cpp",
+        "posix/px4_ts_posix.cpp", "windows/px4_ts_windows_output.cpp",
+    )
+}
+WINSCARD_REQUIRED = {
+    WINSCARD_PREFIX + path for path in (
+        "COPYING", "README.md", "CMakeLists.txt", "winscard.def",
+        "windows/winscard_card_client.cpp", "windows/winscard_card_client.h",
+        "windows/winscard_native.h", "windows/winscard_product.h.in",
+        "windows/winscard_proxy.cpp",
+    )
 }
 LINUX_RUNTIME_LICENSE_SHA256 = {
     "toolchain/gcc-COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
@@ -193,13 +253,16 @@ SOURCE_FORBIDDEN = re.compile(
     r"|(?:\.o$|\.a$|\.so(?:\.|$)|\.dylib$|\.apk$|\.ko$|\.sys$|\.inf$|\.dll$|\.exe$|\.bin$|\.py[co]$|\.pyd$)"
     r"|(?:asicen-ts-probe|asicen-.*-probe)", re.IGNORECASE
 )
-# Windows Phase 1 source lives only in the narrow adapter/test/build/doc paths.
-# Any other windows/win32-segment member is legacy or vendor material and is
-# rejected, so this is not a blanket allow for old Windows trees.
+# Windows source lives only in the narrow product, shared adapter, test, build,
+# and documentation paths. Any other windows/win32-segment member is rejected.
 SOURCE_WINDOWS_TOKEN = re.compile(r"(^|/)(?:windows|win32)(?:/|$)", re.IGNORECASE)
 WINDOWS_SOURCE_ALLOWED = re.compile(
     r"^repository/(?:"
     r"third_party/px4-userland/userland/src/windows/[\w./+-]+"
+    r"|third_party/dtv-userland-core/adapters/host_runtime/include/windows/[\w.+-]+"
+    r"|third_party/dtv-userland-core/adapters/host_runtime/windows/[\w.+-]+"
+    r"|third_party/dtv-userland-core/adapters/host_ts/windows/[\w.+-]+"
+    r"|third_party/dtv-userland-core/adapters/windows_winscard/windows/[\w.+-]+"
     r"|userland/src/windows/libusb_stream_policy\.(?:h|cpp)"
     r"|userland/tools/[\w.+-]*windows[\w.+-]*"
     r"|userland/tests/windows_[\w./+-]+"
@@ -219,6 +282,15 @@ WINDOWS_SOURCE_REQUIRED = {
     "repository/third_party/px4-userland/userland/tests/windows_platform_tests.cpp",
     "repository/third_party/px4-userland/userland/tests/windows_worker_tests_main.cpp",
     "repository/third_party/px4-userland/userland/include/px4/windows_tuner_nonce.h",
+    "repository/third_party/dtv-userland-core/adapters/host_runtime/include/windows/windows_security.h",
+    "repository/third_party/dtv-userland-core/adapters/host_runtime/windows/windows_ipc.cpp",
+    "repository/third_party/dtv-userland-core/adapters/host_runtime/windows/windows_tuner_nonce.cpp",
+    "repository/third_party/dtv-userland-core/adapters/host_ts/windows/px4_ts_windows_output.cpp",
+    "repository/third_party/dtv-userland-core/adapters/windows_winscard/windows/winscard_card_client.cpp",
+    "repository/third_party/dtv-userland-core/adapters/windows_winscard/windows/winscard_card_client.h",
+    "repository/third_party/dtv-userland-core/adapters/windows_winscard/windows/winscard_native.h",
+    "repository/third_party/dtv-userland-core/adapters/windows_winscard/windows/winscard_product.h.in",
+    "repository/third_party/dtv-userland-core/adapters/windows_winscard/windows/winscard_proxy.cpp",
     "repository/userland/src/windows/libusb_stream_policy.h",
     "repository/userland/src/windows/libusb_stream_policy.cpp",
     "repository/userland/tests/windows_libusb_stream_policy_tests.cpp",
@@ -1755,6 +1827,8 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
                      "repository/PROVENANCE.md",
                      "repository/cmake/DtvUserlandCoreDependency.cmake"}
         required |= COMMON_CORE_BUILD_FILES
+        required |= (HOST_DAEMON_REQUIRED | HOST_FACADE_REQUIRED |
+                     HOST_RUNTIME_REQUIRED | HOST_TS_REQUIRED | WINSCARD_REQUIRED)
         product_cmake = read_archive_file(args.archive.resolve(), "repository/CMakeLists.txt")
         if b"dtv::receiver" in product_cmake:
             required |= COMMON_CORE_RECEIVER_BUILD_FILES
