@@ -3,6 +3,8 @@
 #include "px4/control_server.h"
 #include "px4/pcsc_ifd_adapter.h"
 #include "px4/tuner_service.h"
+#include "asicen/control_context_builder.h"
+#include "asicen/device_profile.h"
 #include "test_temp_directory.h"
 
 extern "C" {
@@ -182,6 +184,12 @@ private:
 
 class NoopTunerBackend final : public TunerServiceBackend {
 public:
+    std::uint8_t receiver_count() const noexcept override { return 2U; }
+    bool receiver_supports(std::uint8_t receiver, System system) const noexcept override
+    {
+        return receiver == 0U ? system == System::ISDB_S
+                              : receiver == 1U && system == System::ISDB_T;
+    }
     Result<void> open_receiver(std::uint8_t) noexcept override
     { return Result<void>::success(); }
     Result<void> tune_terrestrial(std::uint8_t, std::uint32_t,
@@ -695,8 +703,26 @@ bool test_exported_abi_over_real_ipc()
     NoopTunerNonce tuner_nonce;
     NoopTunerTime tuner_time;
     TunerService tuner_service(tuner_backend, tuner_nonce, tuner_time);
+    const auto* profile = asicen::find_profile(asicen::ModelId::W3u3);
+    CHECK(profile != nullptr);
+    std::array<asicen::ClaimedUsbFunctionObservation, 2U> observations{};
+    for (std::size_t index = 0U; index < observations.size(); ++index) {
+        observations[index].vendor_id = profile->vid;
+        observations[index].product_id = profile->pid;
+        observations[index].has_bus = true;
+        observations[index].bus = 3U;
+        observations[index].has_address = true;
+        observations[index].address = static_cast<std::uint8_t>(11U + index);
+        observations[index].port_path = {1U, static_cast<std::uint8_t>(index + 1U)};
+    }
+    const std::array<std::uint8_t, 16U> epoch{
+        0x10U, 0x17U, 0x1eU, 0x25U, 0x2cU, 0x33U, 0x3aU, 0x41U,
+        0x48U, 0x4fU, 0x56U, 0x5dU, 0x64U, 0x6bU, 0x72U, 0x79U};
+    ControlContext context{};
+    CHECK(asicen::build_asicen_control_context(*profile, observations.data(), 2U, 2U,
+                                               tuner_service, serial, epoch, context));
     auto server_result = PosixControlServer::create(
-        endpoint, service, tuner_service, serial);
+        endpoint, service, tuner_service, context);
     CHECK(server_result);
     std::unique_ptr<PosixControlServer> server = std::move(server_result.value());
     const std::string socket_path = server->endpoint_path();

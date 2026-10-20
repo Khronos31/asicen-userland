@@ -2,6 +2,7 @@
 #ifndef PX4_USERLAND_POSIX_IPC_TEST_ACCESS_H
 #define PX4_USERLAND_POSIX_IPC_TEST_ACCESS_H
 
+#include "px4/posix_ipc_contract.h"
 #include <sys/types.h>
 
 namespace px4::userland::ipc::posix {
@@ -16,6 +17,9 @@ public:
                                   uid_t effective_uid, gid_t effective_gid,
                                   bool group_access,
                                   PosixIpcGetGroups getgroups) noexcept;
+    static Result<std::array<char, kStoredPathCapacity>>
+    select_publish_runtime_root_with_default_temp_for_test(
+        const char* default_temp_root) noexcept;
 };
 
 }  // namespace px4::userland::ipc::posix

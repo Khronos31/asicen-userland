@@ -1802,6 +1802,21 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
         if SOURCE_WINDOWS_TOKEN.search(name) and not WINDOWS_SOURCE_ALLOWED.fullmatch(name):
             fail(f"forbidden source archive member: {name}")
     common_lock = "repository/cmake/dtv-userland-core.revision"
+    manifest = read_json_archive_file(args.archive.resolve(), "source-manifest.json")
+    product_cmake_path = "repository/CMakeLists.txt"
+    helper_path = "repository/cmake/DtvUserlandCoreDependency.cmake"
+    product_cmake = (read_archive_file(args.archive.resolve(), product_cmake_path)
+                     if product_cmake_path in members else b"")
+    # Historical non-Core envelopes predate the product CMake graph. Positive
+    # Core evidence accumulates the full current closure; hiding just the lock
+    # must not turn a declared/bundled/consuming Core tree into that envelope.
+    core_claimed = (
+        common_lock in members or helper_path in members or
+        any(name.startswith(COMMON_CORE_PREFIX) for name in members) or
+        manifest.get("dtv_userland_core_commit") is not None or
+        manifest.get("dtv_userland_core_license") is not None or
+        any(token in product_cmake for token in
+            (b"DtvUserlandCoreDependency", b"dtv_userland_core", b"dtv::")))
     required = {
         "BUILD-RELINK.md",
         "source-manifest.json",
@@ -1815,21 +1830,20 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
         "repository/VERSION",
         "repository/README.md",
         "repository/THIRD_PARTY_NOTICES.md",
-        "repository/CMakeLists.txt",
         "repository/scripts/build-linux-static.sh",
         "repository/scripts/build-linux-ifd.sh",
         "repository/scripts/build-macos-static.sh",
         "repository/scripts/test-static-relink.sh",
         "repository/packaging/REBUILD.md.in",
     }
-    if common_lock in members:
-        required |= {common_lock, COMMON_CORE_LICENSE, COMMON_CORE_PROVENANCE,
+    if core_claimed:
+        required |= {common_lock, product_cmake_path,
+                     COMMON_CORE_LICENSE, COMMON_CORE_PROVENANCE,
                      "repository/PROVENANCE.md",
-                     "repository/cmake/DtvUserlandCoreDependency.cmake"}
+                     helper_path}
         required |= COMMON_CORE_BUILD_FILES
         required |= (HOST_DAEMON_REQUIRED | HOST_FACADE_REQUIRED |
                      HOST_RUNTIME_REQUIRED | HOST_TS_REQUIRED | WINSCARD_REQUIRED)
-        product_cmake = read_archive_file(args.archive.resolve(), "repository/CMakeLists.txt")
         if b"dtv::receiver" in product_cmake:
             required |= COMMON_CORE_RECEIVER_BUILD_FILES
         if b"dtv::card" in product_cmake:
@@ -1844,7 +1858,6 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
     for name in members:
         if name not in required and not name.startswith("repository/") and not name.startswith("third_party/libusb-1.0.30/"):
             fail(f"unexpected source archive member: {name}")
-    manifest = read_json_archive_file(args.archive.resolve(), "source-manifest.json")
     if manifest.get("schema") != 1 or manifest.get("libusb_version") != "1.0.30":
         fail("invalid source manifest")
     if manifest.get("kind") != "corresponding-source":

@@ -107,9 +107,26 @@ bool test_ownership_group_authorization()
 
 class TemporaryDirectory final {
 public:
-    explicit TemporaryDirectory(mode_t mode)
+    explicit TemporaryDirectory(mode_t mode, bool shared_success_fixture = false)
     {
         std::string pattern = test::temporary_directory_template("px4-posix-ipc-");
+        if (shared_success_fixture) {
+            // Only the two shared-root success fixtures use this protected
+            // parent. A sticky /tmp ancestor is deliberately not trusted by
+            // the canonical runtime; private and rejection fixtures stay put.
+            const char* home = std::getenv("HOME");
+            struct stat parent {};
+            if (home == nullptr || home[0] != '/' ||
+                ::lstat(home, &parent) != 0 || !S_ISDIR(parent.st_mode) ||
+                S_ISLNK(parent.st_mode) || parent.st_uid != ::geteuid() ||
+                (parent.st_mode & 0022) != 0)
+                return;
+            std::string root(home);
+            while (root.size() > 1 && root.back() == '/') root.pop_back();
+            pattern = root + "/px4-posix-ipc-XXXXXX";
+            // The real listener/lease subsequently validates every ancestor,
+            // including identity and permissions; HOME is not a trust bypass.
+        }
         char* created = ::mkdtemp(pattern.data());
         if (created != nullptr) {
             path_ = created;
@@ -282,7 +299,7 @@ bool test_private_endpoint_and_framing()
     const EndpointConfig config{runtime.path().c_str(), "private", kControlEndpointName,
                                 EndpointAccess::private_user};
     const std::string product = runtime.path() + "/px4-userland";
-    const std::string instance = product + "/private";
+    const std::string instance = product + "/v1/private";
     const std::string endpoint = instance + "/control.sock";
 
     {
@@ -381,7 +398,7 @@ bool test_xdg_runtime_default()
     auto listener = SocketListener::listen(config);
     CHECK(listener);
     const std::string expected =
-        runtime.path() + "/px4-userland/xdg-default/control.sock";
+        runtime.path() + "/px4-userland/v1/xdg-default/control.sock";
     CHECK(std::strcmp(listener.value().endpoint_path(), expected.c_str()) == 0);
     return true;
 }
@@ -511,9 +528,12 @@ bool make_endpoint_directories(const std::string& runtime, mode_t mode,
                                std::string& instance)
 {
     const std::string product = runtime + "/px4-userland";
-    instance = product + "/security";
+    const std::string version = product + "/v1";
+    instance = version + "/security";
     return ::mkdir(product.c_str(), mode) == 0 &&
            ::chmod(product.c_str(), mode) == 0 &&
+           ::mkdir(version.c_str(), mode) == 0 &&
+           ::chmod(version.c_str(), mode) == 0 &&
            ::mkdir(instance.c_str(), mode) == 0 &&
            ::chmod(instance.c_str(), mode) == 0;
 }
@@ -521,14 +541,14 @@ bool make_endpoint_directories(const std::string& runtime, mode_t mode,
 bool test_permissions_and_unsafe_paths()
 {
     {
-        TemporaryDirectory runtime(0750);
+        TemporaryDirectory runtime(0750, true);
         CHECK(runtime.valid());
         const EndpointConfig config{runtime.path().c_str(), "group", kControlEndpointName,
                                     EndpointAccess::shared_group};
         auto listener = SocketListener::listen(config);
         CHECK(listener);
         const std::string product = runtime.path() + "/px4-userland";
-        const std::string instance = product + "/group";
+        const std::string instance = product + "/v1/group";
         CHECK(permissions(product) == 0750);
         CHECK(permissions(instance) == 0750);
         CHECK(permissions(listener.value().endpoint_path()) == 0660);
@@ -707,7 +727,7 @@ bool test_stale_active_and_cleanup_identity()
         auto listener_result = SocketListener::listen(config);
         CHECK(listener_result);
         SocketListener listener = std::move(listener_result.value());
-        const std::string instance = runtime.path() + "/px4-userland/contents";
+        const std::string instance = runtime.path() + "/px4-userland/v1/contents";
         const std::string unrelated = instance + "/keep";
         const int file = ::open(unrelated.c_str(), O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
         CHECK(file >= 0);
@@ -787,7 +807,7 @@ bool test_serial_endpoint_interlock_and_cleanup()
     CHECK(std::filesystem::is_empty(runtime.path()));
     CHECK(::rmdir(runtime.path().c_str()) == 0);
 
-    TemporaryDirectory group_runtime(0750);
+    TemporaryDirectory group_runtime(0750, true);
     CHECK(group_runtime.valid());
     const EndpointConfig group_endpoint{group_runtime.path().c_str(), "q3-port1",
                                         kControlEndpointName, EndpointAccess::shared_group};
@@ -835,13 +855,21 @@ bool test_serial_endpoint_interlock_and_cleanup()
 
 bool run_posix_ipc_tests()
 {
-    return test_ownership_group_authorization() &&
-           test_private_endpoint_and_framing() &&
-           test_xdg_runtime_default() &&
-           test_rejects_overlong_unix_endpoint() &&
-           test_partial_write_and_write_timeout() &&
-           test_permissions_and_unsafe_paths() &&
-           test_stale_active_and_cleanup_identity() &&
-           test_argument_and_peer_failures() &&
-           test_serial_endpoint_interlock_and_cleanup();
+    bool okay = true;
+#define RUN_POSIX_CASE(name) do { \
+    const bool passed = name(); \
+    std::fprintf(stderr, "%s %s\n", passed ? "PASS" : "FAIL", #name); \
+    okay = passed && okay; \
+} while (false)
+    RUN_POSIX_CASE(test_ownership_group_authorization);
+    RUN_POSIX_CASE(test_private_endpoint_and_framing);
+    RUN_POSIX_CASE(test_xdg_runtime_default);
+    RUN_POSIX_CASE(test_rejects_overlong_unix_endpoint);
+    RUN_POSIX_CASE(test_partial_write_and_write_timeout);
+    RUN_POSIX_CASE(test_permissions_and_unsafe_paths);
+    RUN_POSIX_CASE(test_stale_active_and_cleanup_identity);
+    RUN_POSIX_CASE(test_argument_and_peer_failures);
+    RUN_POSIX_CASE(test_serial_endpoint_interlock_and_cleanup);
+#undef RUN_POSIX_CASE
+    return okay;
 }

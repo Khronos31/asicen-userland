@@ -621,12 +621,16 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         ${ASICEN_PX4_ROOT}/tests)
     target_compile_definitions(asicen-endpoint-discovery-tests PRIVATE
         ASICEN_PROFILE_ASICEN=1)
-    target_link_libraries(asicen-endpoint-discovery-tests PRIVATE Threads::Threads dtv::core)
+    target_link_libraries(asicen-endpoint-discovery-tests PRIVATE
+        Threads::Threads dtv::core dtv::host_facade dtv::host_runtime)
     asicen_enable_project_warnings(asicen-endpoint-discovery-tests)
     add_test(NAME asicen-endpoint-discovery-tests COMMAND asicen-endpoint-discovery-tests)
 
     add_executable(px4-portable-tests
         ${ASICEN_PX4_CORE_SOURCES}
+        ${ASICEN_DTV_CORE_SOURCE_DIR}/adapters/host_daemon/src/control_server.cpp
+        ${ASICEN_DTV_CORE_SOURCE_DIR}/adapters/host_daemon/src/control_workers.cpp
+        ${ASICEN_DTV_CORE_SOURCE_DIR}/adapters/host_runtime/posix_ipc.cpp
         ${ASICEN_PX4_ROOT}/src/card.cpp
         ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp
         ${ASICEN_PX4_ROOT}/tools/px4d_list_format.cpp
@@ -642,17 +646,25 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         ${ASICEN_PX4_ROOT}/tests/px4_ts_tests.cpp
         ${ASICEN_PX4_ROOT}/tests/px4ctl_format_tests.cpp
         ${ASICEN_PX4_ROOT}/tests/px4d_list_format_tests.cpp
+        userland/src/control_context_builder.cpp
+        userland/src/device_profile.cpp
         ${ASICEN_PX4_ROOT}/tests/imported_tests_main.cpp
     )
     target_include_directories(px4-portable-tests PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src
-        ${ASICEN_PX4_ROOT}/tools ${ASICEN_PX4_ROOT}/tests)
+        ${ASICEN_PX4_ROOT}/tools ${ASICEN_PX4_ROOT}/tests
+        userland/include)
     target_compile_definitions(px4-portable-tests PRIVATE
+        ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}"
+        # Keep this existing reference-profile suite in its original runtime
+        # namespace while compiling the canonical runtime's test access seam.
+        PX4_USERLAND_RUNTIME_PRODUCT="px4-userland"
+        PX4_USERLAND_RUNTIME_INSTANCE_PRESERVE_CASE=1
         PX4_CONTROL_WORKERS_TEST_ACCESS=1
         PX4_CONTROL_SERVER_TEST_ACCESS=1
         PX4_POSIX_IPC_TEST_ACCESS=1
         PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION=1)
-    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity dtv::host_ts dtv::control dtv::tuning)
+    target_link_libraries(px4-portable-tests PRIVATE Threads::Threads dtv::core dtv::receiver dtv::card dtv::identity dtv::host_ts dtv::control dtv::tuning dtv::host_daemon)
     asicen_enable_project_warnings(px4-portable-tests)
     add_test(NAME px4-portable-tests COMMAND px4-portable-tests)
 
@@ -675,11 +687,16 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
             add_executable(px4-pcsc-ifd-tests
                 third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp
                 third_party/px4-userland/userland/src/pcsc_ifd.cpp
+                userland/src/control_context_builder.cpp
+                userland/src/device_profile.cpp
                 third_party/px4-userland/userland/tests/pcsc_ifd_tests.cpp)
             target_include_directories(px4-pcsc-ifd-tests PRIVATE
                 third_party/px4-userland/userland/include
                 third_party/px4-userland/userland/tests
+                userland/include
                 ${ASICEN_PCSC_IFD_INCLUDE_DIR})
+            target_compile_definitions(px4-pcsc-ifd-tests PRIVATE
+                ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
             target_link_libraries(px4-pcsc-ifd-tests PRIVATE
                 px4_portable_reference Threads::Threads)
             asicen_enable_project_warnings(px4-pcsc-ifd-tests)
@@ -1461,6 +1478,7 @@ if(ASICEN_BUILD_TESTS)
             ${ASICEN_PX4_ROOT}/tests/px4d_signal_tests.cpp
             ${ASICEN_DTV_CORE_SOURCE_DIR}/adapters/host_facade/src/px4d_signals.cpp)
         target_include_directories(asicen-signals-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
+        target_link_libraries(asicen-signals-tests PRIVATE dtv::host_facade)
         asicen_enable_project_warnings(asicen-signals-tests)
         add_test(NAME asicen-signals-tests COMMAND asicen-signals-tests)
     endif()
