@@ -14,7 +14,7 @@ include_guard(GLOBAL)
 include(FetchContent)
 
 set(DTV_USERLAND_CORE_REPOSITORY
-    "git@github.com:Khronos31/dtv-userland-core.git"
+    "https://github.com/Khronos31/dtv-userland-core.git"
     CACHE STRING "Git repository for the dtv-userland-core dependency")
 set(DTV_USERLAND_CORE_SOURCE_DIR "" CACHE PATH
     "Explicit local dtv-userland-core source tree (local/modified override)")
