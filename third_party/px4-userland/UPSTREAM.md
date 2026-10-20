@@ -1,5 +1,11 @@
 # Vendored px4-userland source manifest
 
+## 2026-10-20: 公開ctlの共有Core frontendへの移行
+
+`userland/tools/asicenctl.cpp` は製品profileとinstance名の大文字保持だけを扱う薄い入口とし、parser・runtime探索・LIST整形・STATUS・CARD lifecycleはCoreの `dtv::host_ctl` 静的targetをPX4と共有する。Core revisionは `cmake/dtv-userland-core.revision` に固定する。PX4のfrontend sourceをASICENへ複製・includeする方式は使わない。
+
+共通LISTはPX4側と同じ状態名（例 `ready=ready`）と、不明なserialの `serial=unknown` を使う。ASICENのserial selector非対応、既存instance名の大文字小文字、固有USB/loader/backendは製品側に保持する。既存host transportは引き続き `asicen_portable_core` が供給する。共有frontendはCoreの専用GPL adapterとして分離され、portable MIT targetsへGPLや製品依存を入れない。通常公開CARD操作は既存Core typed clientで送受信する。
+
 Source repository: `Khronos31/px4-userland`
 Source release: [v0.2.1](https://github.com/Khronos31/px4-userland/releases/tag/v0.2.1)
 Source revision: `dd1c1bea16a5871085d5f2a42c009364c1ec7345`

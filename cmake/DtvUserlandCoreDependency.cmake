@@ -84,6 +84,13 @@ function(asicen_add_dtv_userland_core)
     set(BUILD_TESTING OFF)
     set(DTV_USERLAND_BUILD_RECEIVER ON)
     set(DTV_USERLAND_BUILD_CARD ON)
+    set(DTV_USERLAND_BUILD_HOST_CTL ON CACHE BOOL
+        "Build the optional GPL host control frontend" FORCE)
+    set(DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/px4-userland/userland/include"
+        CACHE STRING
+        "Private host facade include directories required by the GPL host control frontend"
+        FORCE)
     FetchContent_MakeAvailable(dtv_userland_core)
     set(BUILD_TESTING "${_saved_build_testing}")
 
@@ -104,5 +111,9 @@ function(asicen_add_dtv_userland_core)
         message(FATAL_ERROR
             "dtv-userland-core did not define the dtv::control target; "
             "the pinned commit predates the control connection")
+    endif()
+    if(NOT TARGET dtv::host_ctl)
+        message(FATAL_ERROR
+            "dtv-userland-core did not define the optional GPL host control frontend")
     endif()
 endfunction()

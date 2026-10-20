@@ -436,13 +436,12 @@ if(UNIX OR WIN32)
     endif()
 
     add_executable(asicenctl
-        userland/tools/asicenctl.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp)
+        userland/tools/asicenctl.cpp)
     target_include_directories(asicenctl PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicenctl PRIVATE
-        ASICEN_PRODUCT_CLI=1 ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(asicenctl PRIVATE asicen_portable_core)
+        ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(asicenctl PRIVATE dtv::host_ctl asicen_portable_core)
     asicen_enable_project_warnings(asicenctl)
 
     if(WIN32)
@@ -511,6 +510,21 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_test(NAME asicen-runtime-v1-server-tests
         COMMAND asicen-runtime-v1-server-tests)
     set_tests_properties(asicen-runtime-v1-server-tests PROPERTIES TIMEOUT 120)
+
+    add_executable(asicen-public-cli-tests
+        userland/tests/asicen_public_cli_tests.cpp)
+    target_include_directories(asicen-public-cli-tests PRIVATE
+        userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src)
+    target_compile_definitions(asicen-public-cli-tests PRIVATE
+        ASICEN_PROFILE_ASICEN=1
+        ASICEN_PRODUCT_VERSION="${PROJECT_VERSION}"
+        ASICENCTL_EXECUTABLE="$<TARGET_FILE:asicenctl>")
+    add_dependencies(asicen-public-cli-tests asicenctl)
+    target_link_libraries(asicen-public-cli-tests PRIVATE
+        asicen_core asicen_px4_mock dtv::json dtv::identity)
+    asicen_enable_project_warnings(asicen-public-cli-tests)
+    add_test(NAME asicen-public-cli-tests COMMAND asicen-public-cli-tests)
+    set_tests_properties(asicen-public-cli-tests PROPERTIES TIMEOUT 60)
 
     add_executable(asicen-endpoint-discovery-tests
         userland/tests/endpoint_discovery_tests.cpp
