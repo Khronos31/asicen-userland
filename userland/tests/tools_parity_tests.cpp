@@ -31,11 +31,15 @@ asicen::cli::DaemonArguments parse(std::initializer_list<const char*> options, b
 
 bool arguments_match_reference()
 {
-    for (const char* option : {"--help", "--list", "--list-json", "--models"}) {
+    for (const char* option : {"--help", "--list-json", "--models"}) {
         CHECK(parse({option}).valid);
         CHECK(!parse({option, option}).valid);
         CHECK(!parse({option, "--group"}).valid);
     }
+    CHECK(!parse({"--list"}).valid &&
+          parse({"--list"}).error == "unknown argument");
+    CHECK(!parse({"--list", "--group"}).valid);
+    CHECK(!parse({"--list"}, true).valid);
     CHECK(!parse({"-h"}).valid);
     CHECK(!parse({"--socket", "/unused"}, true).valid &&
           !parse({"--socket", "/unused"}).valid);

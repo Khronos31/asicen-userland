@@ -33,7 +33,7 @@ void usage(FILE* output)
 {
 #ifdef ASICEN_ENABLE_LIBUSB
     std::fprintf(output,
-        "usage: asicend --list | --list-json\n"
+        "usage: asicend --list-json\n"
         "       asicend --models\n"
         "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
         "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
@@ -52,8 +52,7 @@ void usage(FILE* output)
         "  --probe-card  bounded legacy card diagnostic\n"
         "  --card-only   serve the card reader without tuner operations\n"
         "  --models     list supported source-backed models and exit\n"
-        "  --list       print connected supported enclosures and exit;\n"
-        "  --list-json  print the same data as compact JSON and exit;\n"
+        "  --list-json  print connected supported enclosures as compact JSON and exit;\n"
         "               read-only, needs neither firmware nor a daemon\n"
 #if defined(_WIN32)
         "  --exit-on-stdin-eof  exit with cleanup when stdin reaches EOF\n"
@@ -61,7 +60,7 @@ void usage(FILE* output)
     );
 #else
     std::fprintf(output,
-        "usage: asicend --models | --list | --list-json\n"
+        "usage: asicend --models | --list-json\n"
         "The hardware backend is unavailable in this libusb-OFF build.\n");
 #endif
 }
@@ -168,11 +167,11 @@ int main(int argc, char** argv)
         return 0;
     }
     if (arguments.models) return list_models();
-    if (arguments.list || arguments.list_json) {
+    if (arguments.list_json) {
 #ifdef ASICEN_ENABLE_LIBUSB
-        return list_devices(arguments.list_json);
+        return list_devices(true);
 #else
-        const std::string output = asicen::cli::format_device_list({}, arguments.list_json);
+        const std::string output = asicen::cli::format_device_list({}, true);
         if ((!output.empty() &&
              std::fwrite(output.data(), 1U, output.size(), stdout) != output.size()) ||
             std::fflush(stdout) != 0) {

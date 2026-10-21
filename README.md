@@ -239,7 +239,7 @@ DEVICENAME asicen-userland:runtime=/tmp/asicen-example:instance=w3u3:access=user
 - **公開される受信部**: 機種ごとの割り当ては上の表のとおりです。4 チューナー機で公開しているのは primary の 2 系統だけです。
 - **対応ハードウェア revision**: 実行時に対応している内部経路はブリッジ revision 11 / ASIC type 0f / version 7 のみです。revision 16 は未実装のため起動前に失敗します。すべての個体がこの revision に該当するとは限りません。
 - **TS 品質カウンタ**: デーモンは受信 TS の TEI・continuity・同期の統計を計数します。取得パケット数と終了状態も確認してください。値が 0 だけでは「無誤りで受信できた証明」にはなりません。
-- **ハードウェアの列挙**: 接続機器の確認は `asicend --list` または `asicend --list-json` を使います。ASICEN は USB serial を持たないため、JSON の `serial` は null、識別は観測した USB topology です。
+- **ハードウェアの列挙**: 接続機器の確認は `asicend --list-json` を使います。ASICEN は USB serial を持たないため、JSON の `serial` は null、識別は観測した USB topology です。
 - **過去の受信記録と本配布物の位置づけ**: 過去の開発ビルドにおいて、PX-W3U3 の primary 受信部（receiver 1 の T27、receiver 0 の BS01_0）を受信し、内蔵カード経由の B25 復号まで成功した記録があります。ただし、これは過去の開発ビルドでの記録であり、今回の 0.1.0 配布候補バイナリの実機検証を証明するものではありません。
 
 ## ソースからのビルド

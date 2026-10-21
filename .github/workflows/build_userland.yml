@@ -1035,7 +1035,7 @@ jobs:
             & (Join-Path $extract "$program.exe") --help
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          & (Join-Path $extract 'asicend.exe') --list
+          & (Join-Path $extract 'asicend.exe') --list-json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Clean up isolated owned LOCALAPPDATA (always)
         if: always()

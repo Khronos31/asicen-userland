@@ -23,7 +23,6 @@ namespace asicen::cli {
 struct DaemonArguments final {
     bool valid = false;
     bool help = false;
-    bool list = false;
     bool list_json = false;
     bool models = false;
     std::string_view error;
@@ -217,13 +216,6 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             if (argc != 2) return invalid("--help cannot be combined");
             result.valid = true;
             result.help = true;
-            return result;
-        }
-        if (option == "--list") {
-            if (argc != 2) return invalid("--list cannot be combined");
-            if (mock) return invalid("unknown argument");
-            result.valid = true;
-            result.list = true;
             return result;
         }
         if (option == "--list-json") {
