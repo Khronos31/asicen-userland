@@ -581,6 +581,55 @@ jobs:
             "$linux_musl_aarch64_archive" "$macos_archive" "$android_aarch64_archive" \
             "$android_armv7a_archive" "$android_x86_64_archive" "$source_archive" > SHA256SUMS
           sha256sum -c SHA256SUMS
+      - name: Assemble beta manifest and archive
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import tarfile
+
+          root = Path('release-candidate')
+          version = Path('VERSION').read_text(encoding='ascii').strip()
+          archives = sorted(root.glob(f'asicen-userland-{version}-*.tar.gz'))
+          if len(archives) != 9:
+              raise SystemExit(f'expected eight platform archives and source, got {len(archives)}')
+          manifest = {
+              'schema': 1,
+              'candidate': f'{version}-beta.1',
+              'product': 'asicen-userland',
+              'internal_version': version,
+              'source_sha': os.environ['GITHUB_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'platforms': [
+                  p.name.removeprefix(f'asicen-userland-{version}-').removesuffix('.tar.gz')
+                  for p in archives if not p.name.endswith('-source.tar.gz')
+              ],
+              'source_archive': f'asicen-userland-{version}-source.tar.gz',
+              'archives': [
+                  {'filename': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+                  for p in archives
+              ],
+          }
+          output = Path('beta-candidate')
+          output.mkdir()
+          manifest_path = output / f'asicen-userland-{version}-beta.1-candidate.json'
+          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          archive_path = output / f'asicen-userland-{version}-beta.1-candidate.tar.gz'
+          with tarfile.open(archive_path, 'w:gz') as archive:
+              for path in sorted(archives):
+                  archive.add(path, arcname=path.name, recursive=False)
+              archive.add(root / 'SHA256SUMS', arcname='SHA256SUMS', recursive=False)
+              archive.add(manifest_path, arcname=manifest_path.name, recursive=False)
+          PY
+      - name: Upload beta candidate manifest and archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: asicen-userland-0.1.0-beta.1-candidate
+          path: beta-candidate/*
+          if-no-files-found: error
+          retention-days: 90
       - name: Upload single release-candidate artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
