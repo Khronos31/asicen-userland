@@ -25,7 +25,7 @@ set(DTV_USERLAND_BUILD_HOST_TS ON)
 set(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT ON)
 
 FetchContent_Declare(dtv_userland_core
-    GIT_REPOSITORY git@github.com:Khronos31/dtv-userland-core.git
+    GIT_REPOSITORY https://github.com/Khronos31/dtv-userland-core.git
     GIT_TAG "${DTV_USERLAND_CORE_REVISION}"
     GIT_SHALLOW FALSE)
 FetchContent_MakeAvailable(dtv_userland_core)
