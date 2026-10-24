@@ -15,7 +15,7 @@
 namespace {
 
 using namespace asicen;
-using px4::userland::kMaxStreamTransfer;
+constexpr std::size_t kMaxStreamTransfer = 1048576U;
 
 int failures = 0;
 

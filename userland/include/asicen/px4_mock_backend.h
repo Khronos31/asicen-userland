@@ -113,11 +113,19 @@ public:
     transmit(px4::userland::ByteView apdu,
              px4::userland::MutableByteView response) noexcept override;
     bool initialized() const noexcept override;
+#if defined(ASICEN_USE_DTV_CORE)
+    const px4::userland::CardAtrBytes& atr() const noexcept override;
+#else
     const px4::userland::CardAtr& atr() const noexcept override;
+#endif
     void invalidate() noexcept override;
 
 private:
+#if defined(ASICEN_USE_DTV_CORE)
+    px4::userland::CardAtrBytes atr_{};
+#else
     px4::userland::CardAtr atr_{};
+#endif
 };
 
 }  // namespace asicen

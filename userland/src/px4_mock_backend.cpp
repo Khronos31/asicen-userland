@@ -14,6 +14,7 @@ using namespace px4::userland;
 namespace {
 
 using namespace px4::userland;
+constexpr std::size_t kMaxStreamTransfer = 1048576U;
 
 bool same_attachment(const TunerAttachment& left,
                      const TunerAttachment& right) noexcept
@@ -371,14 +372,22 @@ bool UnsupportedCardSession::initialized() const noexcept
     return false;
 }
 
+#if defined(ASICEN_USE_DTV_CORE)
+const CardAtrBytes& UnsupportedCardSession::atr() const noexcept
+#else
 const CardAtr& UnsupportedCardSession::atr() const noexcept
+#endif
 {
     return atr_;
 }
 
 void UnsupportedCardSession::invalidate() noexcept
 {
+#if defined(ASICEN_USE_DTV_CORE)
+    atr_ = CardAtrBytes{};
+#else
     atr_ = CardAtr{};
+#endif
 }
 
 }  // namespace asicen
