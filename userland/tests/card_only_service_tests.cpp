@@ -370,10 +370,12 @@ private:
 
 bool test_card_service_through_core_ipc()
 {
+    std::fprintf(stderr, "card-core: start\n");
     std::string directory_template =
         px4::userland::test::temporary_directory_template("asicen-card-only-");
     char* directory = ::mkdtemp(directory_template.data());
     CHECK(directory != nullptr);
+    std::fprintf(stderr, "card-core: directory\n");
     CHECK(::chmod(directory, 0700) == 0);
 
     MailboxFixture transport;
@@ -438,6 +440,7 @@ bool test_card_service_through_core_ipc()
     config.stream_arm_budget_ms = 5000U;
     auto created = EnclosureContext::assemble(std::move(family),
         std::unique_ptr<TunerNonceSource>(new Nonce()), config);
+    std::fprintf(stderr, "card-core: assembled=%d\n", static_cast<bool>(created));
     if (!created) {
         std::fprintf(stderr, "card Context assemble error=%u\n",
                      static_cast<unsigned>(created.error()));
@@ -450,6 +453,7 @@ bool test_card_service_through_core_ipc()
         return false;
     }
     const auto published = created.value()->publish();
+    std::fprintf(stderr, "card-core: published=%d\n", static_cast<bool>(published));
     if (!published) {
         std::fprintf(stderr, "card Context publish error=%u\n",
                      static_cast<unsigned>(published.error()));
@@ -458,6 +462,7 @@ bool test_card_service_through_core_ipc()
     auto context = std::move(created.value());
     std::atomic<bool> done{false};
     std::thread pump([&] {
+        std::fprintf(stderr, "card-core: poll-start\n");
         while (!done.load()) {
             (void)context->poll_once(Timeout{5U});
         }
@@ -465,12 +470,15 @@ bool test_card_service_through_core_ipc()
     JoinOnExit join_on_exit(done, pump);
 
     const EndpointConfig endpoint{directory, "asicen-userland", "card-test"};
+    std::fprintf(stderr, "card-core: connect\n");
     auto connected = connect_control(endpoint, Timeout{2000U});
+    std::fprintf(stderr, "card-core: connected=%d\n", static_cast<bool>(connected));
     CHECK(connected);
     auto control = std::move(connected.value());
     w::CardClientOptions card_options;
     card_options.reader_id = 0U;
     auto opened = w::begin_card(*control, card_options, Timeout{5000U});
+    std::fprintf(stderr, "card-core: begin-card=%d\n", static_cast<bool>(opened));
     CHECK(opened && opened.reader_status.present && opened.connection.usable &&
           opened.connection.atr.present && opened.connection.atr.value.length == 13U);
     auto card = opened.session;
@@ -487,6 +495,7 @@ bool test_card_service_through_core_ipc()
     std::array<std::uint8_t, 5U> apdu{{0x90U, 0x30U, 0U, 0U, 0U}};
     const auto response = w::card_transmit(*control, card, w::CardProtocol::t1,
                                             {apdu.data(), apdu.size()}, Timeout{5000U});
+    std::fprintf(stderr, "card-core: transmit=%d\n", static_cast<bool>(response));
     CHECK(response && response.response.response.length == 61U &&
           response.response.response.bytes[59U] == 0x90U &&
           response.response.response.bytes[60U] == 0x00U);
@@ -494,6 +503,7 @@ bool test_card_service_through_core_ipc()
 
     const auto disconnected = w::card_disconnect(*control, card, w::Disposition::leave,
                                                   Timeout{5000U});
+    std::fprintf(stderr, "card-core: disconnect=%d\n", static_cast<bool>(disconnected));
     CHECK(disconnected && disconnected.response.consumed && disconnected.response.quiesced);
     control->close();
 
@@ -506,6 +516,7 @@ bool test_card_service_through_core_ipc()
     recording.tune.frequency_hz = 557142000U;
     recording.tune.timeout_ms = 1000U;
     const auto rejected = w::begin_recording(*tuner_control.value(), recording, Timeout{2000U});
+    std::fprintf(stderr, "card-core: tuner-rejected=%d\n", !rejected);
     if (rejected || (rejected.error != dtv::userland::Error::NOT_FOUND &&
                      rejected.error != dtv::userland::Error::UNSUPPORTED)) {
         std::fprintf(stderr, "card-only tuner result=%u remote=%u\n",
@@ -517,6 +528,7 @@ bool test_card_service_through_core_ipc()
     done.store(true);
     pump.join();
     CHECK(context->close(Timeout{2000U}));
+    std::fprintf(stderr, "card-core: closed\n");
     CHECK(guard.cleanups != 0U && guard.last_cleanup_timeout == 2000U);
     context.reset();
     std::error_code fs_error;
@@ -566,11 +578,14 @@ bool test_card_operation_entry_preserves_error_class()
 
 int main()
 {
-    if (!test_protocol_timeouts_survive_presence_poll() ||
-        !test_card_operation_entry_preserves_error_class() ||
-        !test_card_service_through_core_ipc() || !test_card_cleanup_failure_is_reported()) {
-        return 1;
-    }
+    std::fprintf(stderr, "card-only: protocol-timeout\n");
+    if (!test_protocol_timeouts_survive_presence_poll()) return 1;
+    std::fprintf(stderr, "card-only: operation-error\n");
+    if (!test_card_operation_entry_preserves_error_class()) return 1;
+    std::fprintf(stderr, "card-only: core-ipc\n");
+    if (!test_card_service_through_core_ipc()) return 1;
+    std::fprintf(stderr, "card-only: cleanup-error\n");
+    if (!test_card_cleanup_failure_is_reported()) return 1;
     std::puts("PASS asicen card-only service");
     return 0;
 }

@@ -219,10 +219,12 @@ bool counter_value(const w::StreamCounters& counters, std::uint8_t id,
 
 bool run(bool hold_detach = false)
 {
+    std::fprintf(stderr, "hw-ipc: start hold=%d\n", hold_detach);
     std::string pattern = test::temporary_directory_template("asicen-hw-ipc-");
     char* made = ::mkdtemp(pattern.data());
     if (made == nullptr) return false;
     const std::string root(made);
+    std::fprintf(stderr, "hw-ipc: directory\n");
     std::error_code fs_error;
     if (::chmod(root.c_str(), 0700) != 0) {
         std::filesystem::remove_all(root, fs_error);
@@ -247,6 +249,7 @@ bool run(bool hold_detach = false)
     std::unique_ptr<EnclosureFamily> owned_family(family.release());
     auto assembled = EnclosureContext::assemble(std::move(owned_family),
         std::unique_ptr<TunerNonceSource>(new Nonce()), config);
+    std::fprintf(stderr, "hw-ipc: assembled=%d\n", static_cast<bool>(assembled));
     if (!assembled || !assembled.value()->reserve_namespace() || !assembled.value()->publish()) {
         std::filesystem::remove_all(root, fs_error);
         return false;
@@ -254,13 +257,16 @@ bool run(bool hold_detach = false)
     auto context = std::move(assembled.value());
     std::atomic<bool> serving{true};
     std::thread poller([&] {
+        std::fprintf(stderr, "hw-ipc: poll-start\n");
         while (serving.load(std::memory_order_acquire)) (void)context->poll_once(Timeout{10U});
     });
 
     const EndpointConfig control_endpoint{root, "asicen-userland", "receiver1"};
     const char* stage = "control-connect";
     const bool passed = [&]() {
+        std::fprintf(stderr, "hw-ipc: control-connect\n");
         auto control_result = connect_control(control_endpoint, Timeout{2000U});
+        std::fprintf(stderr, "hw-ipc: control-connected=%d\n", static_cast<bool>(control_result));
         if (!control_result) return false;
         auto control = std::move(control_result.value());
         w::RecordingOptions options;
@@ -271,12 +277,14 @@ bool run(bool hold_detach = false)
         options.tune.timeout_ms = 1000U;
         stage = "begin-recording";
         auto recording = w::begin_recording(*control, options, Timeout{5000U});
+        std::fprintf(stderr, "hw-ipc: recording=%d\n", static_cast<bool>(recording));
         if (!recording) return false;
 
         const EndpointConfig data_endpoint{root, "asicen-userland", "receiver1",
                                            EndpointAccess::private_user, -1, "stream.sock"};
         stage = "connect-stream-socket";
         auto data_result = connect_endpoint(data_endpoint, Timeout{2000U});
+        std::fprintf(stderr, "hw-ipc: stream-connected=%d\n", static_cast<bool>(data_result));
         if (!data_result) return false;
         auto data = std::move(data_result.value());
         w::AttachRequest attach;
@@ -297,9 +305,11 @@ bool run(bool hold_detach = false)
         if (!read_frame(*data, frame) || frame.header.kind != w::Kind::response ||
             frame.header.opcode != w::kOpcodeAttachStream ||
             !w::decode_attach_response(frame.payload)) return false;
+        std::fprintf(stderr, "hw-ipc: attach-response\n");
         stage = "ts-data";
         if (!read_frame(*data, frame) || frame.header.kind != w::Kind::event ||
             frame.header.opcode != w::kOpcodeTsDataEvent) return false;
+        std::fprintf(stderr, "hw-ipc: ts-data\n");
         const auto ts = w::decode_ts_data(frame.payload);
         if (!ts || ts.value().packets.size != 188U || ts.value().packets.data[0U] != 0x47U)
             return false;
@@ -332,8 +342,10 @@ bool run(bool hold_detach = false)
             }
             if (!stop_done.load(std::memory_order_acquire)) return false;
         } else {
+            std::fprintf(stderr, "hw-ipc: stopping\n");
             stop = w::stop_recording(*control, recording.session, Timeout{5000U});
         }
+        std::fprintf(stderr, "hw-ipc: stopped=%d\n", static_cast<bool>(stop));
         if (!stop) {
             std::fprintf(stderr, "STOP error=%u remote=%u\n",
                          static_cast<unsigned>(stop.error), stop.remote_error_code);
