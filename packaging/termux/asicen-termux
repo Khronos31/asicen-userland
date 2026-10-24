@@ -10,6 +10,8 @@ usage()
         'usage: asicen-termux --usb-device PATH [--usb-device PATH] [--firmware PATH]' \
         '                    [--model MODEL] [--instance TOKEN] [--runtime-dir PATH]' \
         '                    [--group] [--allow-lnb-power]' \
+        '       asicen-termux --version' \
+        '       asicen-termux --help' \
         '' \
         'Pass --usb-device once for a single-function model or twice (primary first) for a paired model.'
 }
@@ -86,6 +88,11 @@ valid_fd()
 stage=${ASICEN_TERMUX_STAGE-0}
 case "$stage" in
 0)
+    for argument do
+        if [ "$argument" = --version ] && [ "$#" -ne 1 ]; then
+            fail '--version cannot be combined with other arguments'
+        fi
+    done
     usb_device_count=0
     usb_device_1=
     usb_device_2=
@@ -100,6 +107,20 @@ case "$stage" in
             --help)
                 [ "$#" -eq 1 ] || fail '--help cannot be combined with other arguments'
                 usage
+                exit 0
+                ;;
+            --version)
+                product_version='@ASICEN_PROJECT_VERSION@'
+                case "$product_version" in
+                @*)
+                    # A source checkout uses VERSION; builds and archives embed it.
+                    source_root=$(CDPATH='' cd -- "$(dirname -- "$script_path")/../.." && pwd -P) ||
+                        fail 'cannot resolve source VERSION'
+                    IFS= read -r product_version < "$source_root/VERSION" ||
+                        fail 'cannot read source VERSION'
+                    ;;
+                esac
+                printf 'asicen-termux %s\n' "$product_version"
                 exit 0
                 ;;
             --usb-device)

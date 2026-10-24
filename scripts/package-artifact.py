@@ -16,6 +16,7 @@ import re
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -87,6 +88,14 @@ def write_text(path: Path, text: str) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as stream:
         stream.write(text)
     path.chmod(0o644)
+
+
+def render_termux_launcher(repo_root: Path) -> str:
+    source = repo_root / "packaging" / "termux" / TERMUX_LAUNCHER
+    if source.is_symlink() or not source.is_file():
+        fail(f"input must be an ordinary file: {source}")
+    return source.read_text(encoding="utf-8").replace(
+        "@ASICEN_PROJECT_VERSION@", source_version(repo_root))
 
 
 def validate_libusb_member(member: tarfile.TarInfo) -> bool:
@@ -369,9 +378,17 @@ def self_test_android_notice_and_archive(repo_root: Path, platform: str = "andro
         stage.mkdir()
         for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
             copy_regular(repo_root / name, stage / name)
-        copy_regular(repo_root / "packaging" / "termux" / TERMUX_LAUNCHER,
-                     stage / TERMUX_LAUNCHER)
+        write_text(stage / TERMUX_LAUNCHER, render_termux_launcher(repo_root))
         (stage / TERMUX_LAUNCHER).chmod(0o755)
+        shell = shutil.which("sh")
+        if shell is None:
+            fail("Android generated launcher self-test requires sh")
+        launcher_version = subprocess.run(
+            [shell, str(stage / TERMUX_LAUNCHER), "--version"],
+            env={"PATH": "/nonexistent"}, capture_output=True, text=True, check=False)
+        if (launcher_version.returncode != 0 or launcher_version.stderr or
+                launcher_version.stdout != f"asicen-termux {version}\n"):
+            fail("Android generated launcher version does not match VERSION")
         for program in PROGRAMS:
             write_text(stage / program, "synthetic Android ELF\n")
             (stage / program).chmod(0o755)
@@ -910,8 +927,7 @@ def main() -> int:
         else:
             if not args.libusb_source_archive or not args.ndk_root or not args.link_map_dir:
                 fail("Android requires --libusb-source-archive, --ndk-root, and --link-map-dir")
-            copy_regular(args.repo_root / "packaging" / "termux" / TERMUX_LAUNCHER,
-                         stage / TERMUX_LAUNCHER)
+            write_text(stage / TERMUX_LAUNCHER, render_termux_launcher(args.repo_root))
             (stage / TERMUX_LAUNCHER).chmod(0o755)
             verify_pinned_libusb(args.libusb_source_archive.resolve())
             ndk = args.ndk_root.resolve()

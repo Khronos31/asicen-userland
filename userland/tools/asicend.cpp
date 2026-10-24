@@ -35,6 +35,7 @@ void usage(FILE* output)
     std::fprintf(output,
         "usage: asicend --list-json\n"
         "       asicend --models\n"
+        "       asicend --version\n"
         "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
         "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
         "                 [--runtime-dir PATH] --instance TOKEN "
@@ -52,6 +53,8 @@ void usage(FILE* output)
         "  --probe-card  bounded legacy card diagnostic\n"
         "  --card-only   serve the card reader without tuner operations\n"
         "  --models     list supported source-backed models and exit\n"
+        "  --version    print version and exit\n"
+        "  -h, --help   print this help and exit\n"
         "  --list-json  print connected supported enclosures as compact JSON and exit;\n"
         "               read-only, needs neither firmware nor a daemon\n"
 #if defined(_WIN32)
@@ -60,7 +63,7 @@ void usage(FILE* output)
     );
 #else
     std::fprintf(output,
-        "usage: asicend --models | --list-json\n"
+        "usage: asicend --models | --list-json | --version | -h | --help\n"
         "The hardware backend is unavailable in this libusb-OFF build.\n");
 #endif
 }
@@ -69,21 +72,7 @@ int list_models()
 {
     for (std::size_t i = 0; i < asicen::profile_count(); ++i) {
         const auto& p = asicen::profiles()[i];
-        // These are source capabilities, independent of this build's USB
-        // support. The legacy S3 setters provide no verified power control;
-        // mock ON/OFF simulation must not advertise physical S3 support.
-        const bool lnb_control = p.model_id == asicen::ModelId::W3u2 ||
-                                 p.model_id == asicen::ModelId::W3u3 ||
-                                 p.model_id == asicen::ModelId::W3u3V2;
-        std::printf("%s vid_pid=%04x:%04x model=\"%s\" capacity=%u functions=%u family=%s runtime=%s "
-                    "lnb_control=%s lnb_15v_request=%s lnb_validation=pending\n",
-            p.model_key, p.vid, p.pid, p.model,
-            static_cast<unsigned>(p.enclosure_receiver_count),
-            static_cast<unsigned>(p.expected_runtime_functions),
-            asicen::frontend_family_name(p.frontend_family),
-            asicen::profile_runtime_supported(p) ? "source-backed-experimental" : "not-enabled",
-            lnb_control ? "source-backed-software" : "external-unconfirmed",
-            lnb_control ? "supported" : "unsupported");
+        std::printf("%s %04x:%04x\n", p.model, p.vid, p.pid);
     }
     if (std::ferror(stdout) != 0 || std::fflush(stdout) != 0) {
         std::fprintf(stderr, "list: write to stdout failed\n");
@@ -164,6 +153,10 @@ int main(int argc, char** argv)
     }
     if (arguments.help) {
         usage(stdout);
+        return 0;
+    }
+    if (arguments.version) {
+        std::printf("asicend %s\n", ASICEN_PROJECT_VERSION);
         return 0;
     }
     if (arguments.models) return list_models();
