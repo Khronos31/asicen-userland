@@ -6,7 +6,9 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 archive=
 baseline=
+baseline_winscard=
 cache=
+core_source_dir=
 while [ "$#" -gt 0 ]; do
     case "$1" in
     --libusb-source-archive)
@@ -19,13 +21,23 @@ while [ "$#" -gt 0 ]; do
         baseline=$2
         shift 2
         ;;
+    --baseline-winscard)
+        [ "$#" -ge 2 ] || exit 2
+        baseline_winscard=$2
+        shift 2
+        ;;
     --cache)
         [ "$#" -ge 2 ] || exit 2
         cache=$2
         shift 2
         ;;
+    --core-source-dir)
+        [ "$#" -ge 2 ] || exit 2
+        core_source_dir=$2
+        shift 2
+        ;;
     --help)
-        printf '%s\n' "usage: $0 --libusb-source-archive FILE --baseline-asicend FILE [--cache DIR]"
+        printf '%s\n' "usage: $0 --libusb-source-archive FILE --baseline-asicend FILE [--baseline-winscard FILE] [--cache DIR] [--core-source-dir DIR]"
         exit 0
         ;;
     *)
@@ -36,6 +48,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ -f "$archive" ] || { printf '%s\n' '--libusb-source-archive is required' >&2; exit 2; }
 [ -f "$baseline" ] || { printf '%s\n' '--baseline-asicend is required' >&2; exit 2; }
+[ -z "$baseline_winscard" ] || [ -f "$baseline_winscard" ] || { printf '%s\n' '--baseline-winscard must name a file' >&2; exit 2; }
 command -v python3 >/dev/null || { printf '%s\n' 'python3 is required' >&2; exit 1; }
 command -v strings >/dev/null || { printf '%s\n' 'strings is required' >&2; exit 1; }
 work=$(mktemp -d /tmp/asicen-windows-static-relink.XXXXXX)
@@ -62,6 +75,9 @@ set -- --output "$work/modified" --libusb-source-dir "$work/modified-source"
 if [ -n "$cache" ]; then
     set -- "$@" --cache "$cache"
 fi
+if [ -n "$core_source_dir" ]; then
+    set -- "$@" --core-source-dir "$core_source_dir"
+fi
 "$root/scripts/build-windows.sh" "$@"
 if [ -e "$work/modified/libusb-1.0.dll" ]; then
     printf '%s\n' 'relink staged libusb-1.0.dll' >&2
@@ -83,5 +99,17 @@ fi
 if ! strings "$baseline" | grep -F 'https://libusb.info' >/dev/null; then
     printf '%s\n' 'baseline asicend.exe does not contain the static libusb version URL' >&2
     exit 1
+fi
+if [ -n "$core_source_dir" ]; then
+    [ -n "$baseline_winscard" ] || {
+        printf '%s\n' '--baseline-winscard is required with --core-source-dir' >&2
+        exit 2
+    }
+    baseline_winscard_sha=$(sha256sum "$baseline_winscard" | awk '{print $1}')
+    relinked_winscard_sha=$(sha256sum "$work/modified/WinSCard.dll" | awk '{print $1}')
+    [ "$baseline_winscard_sha" = "$relinked_winscard_sha" ] || {
+        printf '%s\n' "Core WinSCard relink differs: $baseline_winscard_sha != $relinked_winscard_sha" >&2
+        exit 1
+    }
 fi
 printf '%s\n' 'Windows static libusb relink incorporated modified source: PASS'

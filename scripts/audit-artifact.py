@@ -135,6 +135,12 @@ WINDOWS_TOOLCHAIN_LICENSE_MEMBERS = frozenset(WINDOWS_TOOLCHAIN_LICENSE_SHA256)
 WINDOWS_TOOLCHAIN_LICENSE_NOTICE = ",".join(sorted(WINDOWS_TOOLCHAIN_LICENSE_MEMBERS))
 WINDOWS_ARCHIVE_MEMBERS = (set(COMMON) | set(WINDOWS_PROGRAM_ARTIFACTS)
                            | set(WINDOWS_TOOLCHAIN_LICENSE_MEMBERS))
+WINDOWS_WINSCARD_EXPORTS = {
+    "SCardConnectA", "SCardConnectW", "SCardDisconnect", "SCardEstablishContext",
+    "SCardFreeMemory", "SCardGetStatusChangeW", "SCardIsValidContext",
+    "SCardListReadersA", "SCardListReadersW", "SCardReleaseContext", "SCardStatusW",
+    "SCardTransmit", "g_rgSCardT1Pci",
+}
 DARWIN_IFD_ARTIFACT = "ifd/asicen-userland-ifd.bundle/Contents/MacOS/libasicen-userland-ifd.dylib"
 BINARY_EXECUTABLE_MEMBERS = set(PROGRAMS) | set(WINDOWS_PROGRAM_ARTIFACTS) | {
     TERMUX_LAUNCHER, "ifd/asicen-userland-ifd.so", DARWIN_IFD_ARTIFACT,
@@ -179,6 +185,15 @@ WINDOWS_SOURCE_ALLOWED = re.compile(
     r"|scripts/build-windows\.sh"
     r"|docs/[\w./+-]*windows[\w./+-]*"
     r")$", re.IGNORECASE
+)
+CORE_WINDOWS_SOURCE_ALLOWED = re.compile(
+    r"^third_party/dtv-userland-core/repository/(?:"
+    r"adapters/windows_winscard/(?:windows/[^/]+|COPYING|README\.md|CMakeLists\.txt|winscard\.def)"
+    r"|adapters/host_listener_context/src/windows/[^/]+"
+    r"|adapters/host_ts/windows/[^/]+"
+    r"|adapters/host_runtime/include/windows/[^/]+"
+    r")$",
+    re.IGNORECASE,
 )
 WINDOWS_SOURCE_REQUIRED = {
     "repository/scripts/build-windows.sh",
@@ -394,7 +409,11 @@ def audit_windows_pe(path: Path, logical_name: str, *, is_dll: bool,
             fail(f"{logical_name} does not contain the static libusb version URL")
     elif logical_name in WINDOWS_PROGRAM_ARTIFACTS and WINDOWS_LIBUSB_MARKER in data:
         fail(f"{logical_name} contains the libusb version URL without linking libusb")
-    if is_dll:
+    if logical_name == "WinSCard.dll":
+        exports = sorted(set(pe["exports"]))
+        if set(exports) != WINDOWS_WINSCARD_EXPORTS:
+            fail(f"{logical_name} does not export the approved WinSCard API set")
+    elif is_dll:
         exports = sorted(set(pe["exports"]))
         if not any(symbol.startswith("libusb_") for symbol in exports):
             fail(f"{logical_name} does not export the libusb ABI")
@@ -558,6 +577,23 @@ def verify_windows_manifest(archive: Path, members: dict[str, zipfile.ZipInfo], 
         fail("manifest libusb linkage metadata mismatch")
     if "libusb_dll" in manifest:
         fail("manifest names a packaged libusb DLL")
+    if "WinSCard.dll" in members:
+        shared_winscard = manifest.get("shared_winscard")
+        if (not isinstance(shared_winscard, dict) or
+                set(shared_winscard) != {"core_revision", "sha256", "source_archive", "source_archive_sha256"} or
+                not isinstance(shared_winscard["core_revision"], str) or
+                not re.fullmatch(r"[0-9a-f]{40}", shared_winscard["core_revision"]) or
+                not isinstance(shared_winscard["sha256"], str) or
+                not re.fullmatch(r"[0-9a-f]{64}", shared_winscard["sha256"]) or
+                shared_winscard["source_archive"] !=
+                f"asicen-userland-{version}-windows-source.tar.gz" or
+                not isinstance(shared_winscard["source_archive_sha256"], str) or
+                not re.fullmatch(r"[0-9a-f]{64}", shared_winscard["source_archive_sha256"])):
+            fail("manifest shared WinSCard metadata is missing or invalid")
+        if shared_winscard["sha256"] != hashlib.sha256(read_zip_file(archive, "WinSCard.dll")).hexdigest():
+            fail("manifest shared WinSCard checksum mismatch")
+    elif "shared_winscard" in manifest:
+        fail("manifest names shared WinSCard without a packaged DLL")
     if not isinstance(manifest.get("source_ref"), str) or not manifest["source_ref"]:
         fail("manifest source_ref metadata is missing")
     validate_version(str(manifest.get("version", "")))
@@ -588,10 +624,13 @@ def verify_windows_manifest(archive: Path, members: dict[str, zipfile.ZipInfo], 
 def audit_windows_archive(args: argparse.Namespace) -> dict:
     archive = args.archive.resolve()
     members = zip_members(archive)
-    if set(members) != WINDOWS_ARCHIVE_MEMBERS:
+    expected_members = set(WINDOWS_ARCHIVE_MEMBERS)
+    if "WinSCard.dll" in members:
+        expected_members.add("WinSCard.dll")
+    if set(members) != expected_members:
         fail("Windows archive member allowlist mismatch; unexpected="
-             f"{sorted(set(members) - WINDOWS_ARCHIVE_MEMBERS)}, "
-             f"missing={sorted(WINDOWS_ARCHIVE_MEMBERS - set(members))}")
+             f"{sorted(set(members) - expected_members)}, "
+             f"missing={sorted(expected_members - set(members))}")
     verify_firmware(read_zip_file(archive, FIRMWARE_MEMBER),
                     read_zip_file(archive, FIRMWARE_NOTICE_MEMBER),
                     {name: member.external_attr >> 16 & 0o777 for name, member in members.items()})
@@ -619,11 +658,31 @@ def audit_windows_archive(args: argparse.Namespace) -> dict:
         "dependency.libusb.license": "LGPL-2.1-or-later",
         "dependency.toolchain": "llvm-mingw-20250910-ucrt-x86_64",
         "dependency.toolchain.licenses": WINDOWS_TOOLCHAIN_LICENSE_NOTICE,
-        "corresponding-source-archive": f"asicen-userland-{version}-source.tar.gz",
     }
     for key, value in required_fields.items():
         if fields.get(key) != value:
             fail(f"Windows dependency notice field mismatch: {key}={value}")
+    if "WinSCard.dll" in members:
+        if members["WinSCard.dll"].external_attr >> 16 & 0o777 != 0o644:
+            fail("Windows shared WinSCard DLL must have mode 644")
+        if fields.get("dependency.core.repository") != "https://github.com/Khronos31/dtv-userland-core":
+            fail("Windows dependency notice has no Core repository for WinSCard")
+        core_revision = fields.get("dependency.core.commit", "")
+        if not re.fullmatch(r"[0-9a-f]{40}", core_revision):
+            fail("Windows dependency notice has no valid Core commit for WinSCard")
+        if fields.get("dependency.core.winscard.license") != "GPL-2.0-only":
+            fail("Windows dependency notice has no WinSCard license for Core")
+        source_archive_name = f"asicen-userland-{version}-windows-source.tar.gz"
+        source_archive_sha256 = fields.get("dependency.core.source-archive.sha256", "")
+        if (fields.get("corresponding-source-archive") != source_archive_name or
+                fields.get("dependency.core.source-archive") != source_archive_name or
+                not re.fullmatch(r"[0-9a-f]{64}", source_archive_sha256)):
+            fail("Windows dependency notice has no valid matching Core source archive")
+    else:
+        if any(key.startswith("dependency.core.") for key in fields):
+            fail("Windows dependency notice names Core without a packaged WinSCard DLL")
+        if fields.get("corresponding-source-archive") != f"asicen-userland-{version}-source.tar.gz":
+            fail("Windows dependency notice must point to the generic source archive")
     if "dependency.libusb.dll" in fields:
         fail("Windows dependency notice still names a libusb DLL")
     source_root = args.repo_root.resolve() if getattr(args, "repo_root", None) else None
@@ -633,6 +692,11 @@ def audit_windows_archive(args: argparse.Namespace) -> dict:
             path = Path(temporary) / name
             path.write_bytes(read_zip_file(archive, name))
             records[name] = audit_windows_pe(path, name, is_dll=False, source_root=source_root)
+        if "WinSCard.dll" in members:
+            path = Path(temporary) / "WinSCard.dll"
+            path.write_bytes(read_zip_file(archive, "WinSCard.dll"))
+            records["WinSCard.dll"] = audit_windows_pe(
+                path, "WinSCard.dll", is_dll=True, source_root=source_root)
     for name in WINDOWS_PROGRAM_ARTIFACTS:
         if members[name].external_attr >> 16 & 0o777 not in (0o755, 0o644):
             fail(f"Windows archive program has an unexpected mode: {name}")
@@ -659,7 +723,16 @@ def audit_windows_archive(args: argparse.Namespace) -> dict:
     if set(program_names) != set(WINDOWS_PROGRAM_ARTIFACTS) or len(set(program_names)) != len(PROGRAMS):
         fail("Windows binary evidence must contain each executable exactly once")
     extra = evidence.get("extra")
-    if not isinstance(extra, list) or extra:
+    if not isinstance(extra, list):
+        fail("Windows binary evidence extra must be a list")
+    if "WinSCard.dll" in members:
+        if len(extra) != 1 or not isinstance(extra[0], dict) or extra[0].get("artifact") != "WinSCard.dll":
+            fail("Windows binary evidence must contain the packaged WinSCard DLL exactly once")
+        if (extra[0].get("sha256") != records["WinSCard.dll"]["sha256"] or
+                sorted(extra[0].get("imports", [])) != records["WinSCard.dll"]["imports"] or
+                sorted(extra[0].get("exports", [])) != records["WinSCard.dll"]["exports"]):
+            fail("Windows binary evidence mismatch: WinSCard.dll")
+    elif extra:
         fail("Windows binary evidence must not contain extra artifacts")
     for record in programs:
         name = record["artifact"]
@@ -668,6 +741,11 @@ def audit_windows_archive(args: argparse.Namespace) -> dict:
         if sorted(record.get("imports", [])) != records[name]["imports"]:
             fail(f"Windows binary evidence import mismatch: {name}")
     manifest = verify_windows_manifest(archive, members, version)
+    if "WinSCard.dll" in members:
+        shared_winscard = manifest["shared_winscard"]
+        if (shared_winscard["core_revision"] != core_revision or
+                shared_winscard["source_archive_sha256"] != source_archive_sha256):
+            fail("Windows manifest and dependency notice Core source metadata do not match")
     verify_windows_checksums(archive, members)
     return {"archive": str(archive), "platform": WINDOWS_PLATFORM,
             "members": sorted(members), "manifest": manifest}
@@ -1696,11 +1774,14 @@ def audit_binary_archive(args: argparse.Namespace) -> dict:
 def audit_source_archive(args: argparse.Namespace) -> dict:
     members = archive_members(args.archive.resolve(), forbidden=None)
     for name in members:
-        if not name.startswith(("repository/", "third_party/libusb-1.0.30/")):
+        if not name.startswith(("repository/", "third_party/libusb-1.0.30/",
+                                "third_party/dtv-userland-core/repository/")):
             continue
         if SOURCE_FORBIDDEN.search(name):
             fail(f"forbidden source archive member: {name}")
-        if SOURCE_WINDOWS_TOKEN.search(name) and not WINDOWS_SOURCE_ALLOWED.fullmatch(name):
+        if (SOURCE_WINDOWS_TOKEN.search(name) and
+                not WINDOWS_SOURCE_ALLOWED.fullmatch(name) and
+                not CORE_WINDOWS_SOURCE_ALLOWED.fullmatch(name)):
             fail(f"forbidden source archive member: {name}")
     required = {
         "BUILD-RELINK.md",
@@ -1728,9 +1809,6 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
         required |= WINDOWS_SOURCE_REQUIRED
     if not required.issubset(members):
         fail(f"source archive is missing: {sorted(required-set(members))}")
-    for name in members:
-        if name not in required and not name.startswith("repository/") and not name.startswith("third_party/libusb-1.0.30/"):
-            fail(f"unexpected source archive member: {name}")
     manifest = read_json_archive_file(args.archive.resolve(), "source-manifest.json")
     if manifest.get("schema") != 1 or manifest.get("libusb_version") != "1.0.30":
         fail("invalid source manifest")
@@ -1741,9 +1819,54 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
             fail(f"invalid source manifest {field}")
     version = str(manifest.get("version", ""))
     validate_version(version)
+    core_dependency = manifest.get("core_dependency")
+    windows_source = core_dependency is not None
+    core_prefix = "third_party/dtv-userland-core/repository/"
+    if windows_source:
+        if (not isinstance(core_dependency, dict) or
+                set(core_dependency) != {"repository", "commit", "tree", "license", "source_member_prefix"} or
+                core_dependency.get("repository") != "https://github.com/Khronos31/dtv-userland-core" or
+                core_dependency.get("license") != "GPL-2.0-only" or
+                core_dependency.get("source_member_prefix") != core_prefix or
+                not isinstance(core_dependency.get("commit"), str) or
+                not re.fullmatch(r"[0-9a-f]{40}", core_dependency["commit"]) or
+                not isinstance(core_dependency.get("tree"), str) or
+                not re.fullmatch(r"[0-9a-f]{40}", core_dependency["tree"])):
+            fail("invalid Windows source Core dependency manifest")
+        required |= {
+            "third_party/dtv-userland-core/SOURCE-REVISION",
+            f"{core_prefix}CMakeLists.txt",
+            f"{core_prefix}LICENSE",
+            f"{core_prefix}adapters/windows_winscard/COPYING",
+            f"{core_prefix}adapters/windows_winscard/README.md",
+            f"{core_prefix}adapters/windows_winscard/CMakeLists.txt",
+            f"{core_prefix}adapters/windows_winscard/winscard.def",
+        }
+        if not required.issubset(members):
+            fail(f"Windows source archive is missing Core files: {sorted(required-set(members))}")
+        pin = read_archive_file(args.archive.resolve(), "repository/cmake/dtv-userland-core.revision")
+        marker = read_archive_file(args.archive.resolve(), "third_party/dtv-userland-core/SOURCE-REVISION")
+        if pin != (core_dependency["commit"] + "\n").encode("ascii"):
+            fail("Windows source Core commit differs from the product pin")
+        if marker != (core_dependency["commit"] + "\n" + core_dependency["tree"] + "\n").encode("ascii"):
+            fail("Windows source Core revision marker differs from the manifest")
+        if "GNU GENERAL PUBLIC LICENSE" not in read_archive_file(
+                args.archive.resolve(), f"{core_prefix}adapters/windows_winscard/COPYING").decode("utf-8"):
+            fail("Windows source Core WinSCard COPYING is not a GPL license text")
+        if not any(name.startswith(core_prefix) for name in members):
+            fail("Windows source Core tree is missing")
+    elif any(name.startswith((core_prefix, "third_party/dtv-userland-core/")) for name in members):
+        fail("Core source is only allowed in a Windows WinSCard source archive")
+    for name in members:
+        if (name not in required and not name.startswith("repository/") and
+                not name.startswith("third_party/libusb-1.0.30/") and
+                not (windows_source and name.startswith("third_party/dtv-userland-core/"))):
+            fail(f"unexpected source archive member: {name}")
     if read_archive_file(args.archive.resolve(), "repository/VERSION") != (version + "\n").encode("ascii"):
         fail("source manifest version differs from the repository VERSION")
-    if args.archive.name != f"asicen-userland-{version}-source.tar.gz":
+    expected_source_name = (f"asicen-userland-{version}-windows-source.tar.gz" if windows_source else
+                            f"asicen-userland-{version}-source.tar.gz")
+    if args.archive.name != expected_source_name:
         fail(f"source archive name does not match manifest version: {args.archive.name}")
     inventory = manifest.get("files")
     if not isinstance(inventory, dict):
@@ -1814,6 +1937,15 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
     if source_fields.get("dependency.libusb.version") != "1.0.30" or \
             source_fields.get("corresponding-source-archive") != "present":
         fail("source dependency notice is missing stable dependency fields")
+    if windows_source:
+        if (source_fields.get("dependency.core.repository") != core_dependency["repository"] or
+                source_fields.get("dependency.core.commit") != core_dependency["commit"] or
+                source_fields.get("dependency.core.winscard.license") != core_dependency["license"] or
+                source_fields.get("dependency.core.source-path") !=
+                "third_party/dtv-userland-core/repository/adapters/windows_winscard"):
+            fail("Windows source dependency notice does not match the Core manifest")
+    elif any(key.startswith("dependency.core.") for key in source_fields):
+        fail("generic source archive must not include WinSCard Core license metadata")
     verify_checksums(args.archive.resolve(), members)
     return {"archive": str(args.archive.resolve()), "kind": "source", "members": sorted(members), "manifest": manifest}
 

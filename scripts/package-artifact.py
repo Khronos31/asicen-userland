@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
@@ -424,6 +425,7 @@ def self_test_android_notice_and_archive(repo_root: Path, platform: str = "andro
                 }
         write_text(stage / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         write_checksums(stage)
+        normalize_stage_modes(stage)
         archive = Path(temporary) / f"asicen-userland-{version}-{platform}.tar.gz"
         deterministic_tar(stage, archive)
         testdata = repo_root / "scripts" / "testdata"
@@ -478,8 +480,10 @@ def self_test_windows_archive(repo_root: Path) -> None:
     version = source_version(repo_root)
     platform = WINDOWS_PLATFORM
     notice = render_dependency_notice(repo_root, version, platform)
+    source_archive_name = f"asicen-userland-{version}-windows-source.tar.gz"
+    source_archive_sha256 = "a" * 64
 
-    def contents() -> dict[str, bytes]:
+    def contents(include_winscard: bool = False) -> dict[str, bytes]:
         files = {
             "LICENSE": (repo_root / "LICENSE").read_bytes(),
             "README.md": (repo_root / "README.md").read_bytes(),
@@ -494,6 +498,9 @@ def self_test_windows_archive(repo_root: Path) -> None:
         for program in PROGRAMS:
             poison = WINDOWS_LIBUSB_MARKER if program == "asicend" else b""
             files[f"{program}.exe"] = synthetic_pe(imports=("KERNEL32.dll",), poison=poison)
+        if include_winscard:
+            files["WinSCard.dll"] = synthetic_pe(
+                imports=("KERNEL32.dll",), exports=tuple(sorted(_audit.WINDOWS_WINSCARD_EXPORTS)), dll=True)
         return files
 
     def evidence_for(files: dict[str, bytes]) -> dict:
@@ -501,7 +508,11 @@ def self_test_windows_archive(repo_root: Path) -> None:
         for name in sorted(f"{program}.exe" for program in PROGRAMS):
             records.append(_audit.audit_windows_pe(_stage_file(name, files[name]), name,
                                                    is_dll=False, source_root=None))
-        return {"platform": platform, "programs": records, "extra": []}
+        extra = []
+        if "WinSCard.dll" in files:
+            extra.append(_audit.audit_windows_pe(_stage_file("WinSCard.dll", files["WinSCard.dll"]),
+                                                 "WinSCard.dll", is_dll=True, source_root=None))
+        return {"platform": platform, "programs": records, "extra": extra}
 
     import atexit
     scratch = Path(tempfile.mkdtemp(prefix="asicen-windows-selftest-"))
@@ -514,13 +525,25 @@ def self_test_windows_archive(repo_root: Path) -> None:
 
     def build(directory: Path, files: dict[str, bytes], evidence: dict,
               *, manifest_files: dict | None = None, checksum_lines: list[str] | None = None,
-              zip_writer=None, notice_text: str | None = None) -> Path:
+              zip_writer=None, notice_text: str | None = None,
+              core_revision: str | None = None) -> Path:
         stage = directory / "stage"
         stage.mkdir(parents=True)
         for name, payload in files.items():
             _write_bytes(stage / name, payload)
             (stage / name).chmod(0o755 if name.endswith(".exe") else 0o644)
-        write_text(stage / "DEPENDENCY-NOTICE.txt", notice if notice_text is None else notice_text)
+        current_notice = notice
+        if core_revision:
+            current_notice = current_notice.replace(
+                f"corresponding-source-archive=asicen-userland-{version}-source.tar.gz",
+                f"corresponding-source-archive={source_archive_name}")
+            current_notice += (
+            "dependency.core.repository=https://github.com/Khronos31/dtv-userland-core\n"
+            f"dependency.core.commit={core_revision}\n"
+            "dependency.core.winscard.license=GPL-2.0-only\n"
+            f"dependency.core.source-archive={source_archive_name}\n"
+            f"dependency.core.source-archive.sha256={source_archive_sha256}\n")
+        write_text(stage / "DEPENDENCY-NOTICE.txt", current_notice if notice_text is None else notice_text)
         write_text(stage / "evidence" / "binary-audit.json",
                    json.dumps(evidence, indent=2, sort_keys=True) + "\n")
         manifest = {
@@ -529,6 +552,13 @@ def self_test_windows_archive(repo_root: Path) -> None:
             "libusb_archive_sha256": LIBUSB_SHA256,
             "source_ref": "self-test", "programs": list(PROGRAMS), "production_only": True, "files": {},
         }
+        if "WinSCard.dll" in files:
+            manifest["shared_winscard"] = {
+                "core_revision": core_revision,
+                "sha256": hashlib.sha256(files["WinSCard.dll"]).hexdigest(),
+                "source_archive": source_archive_name,
+                "source_archive_sha256": source_archive_sha256,
+            }
         for path in sorted(stage.rglob("*")):
             if path.is_file():
                 manifest["files"][path.relative_to(stage).as_posix()] = {
@@ -571,6 +601,20 @@ def self_test_windows_archive(repo_root: Path) -> None:
     valid_dir.mkdir()
     valid = build(valid_dir, valid_files, valid_evidence)
     audit_binary_archive(argparse.Namespace(archive=valid, platform=platform, repo_root=repo_root))
+    winscard_files = contents(include_winscard=True)
+    winscard_dir = scratch / "winscard"
+    winscard_dir.mkdir()
+    winscard = build(winscard_dir, winscard_files, evidence_for(winscard_files),
+                     core_revision="c8fe1a1364c7368dcc366cf975eeea9db236b09e")
+    audit_binary_archive(argparse.Namespace(archive=winscard, platform=platform, repo_root=repo_root))
+    invalid_winscard = dict(winscard_files)
+    invalid_winscard["WinSCard.dll"] = synthetic_pe(
+        imports=("KERNEL32.dll",), exports=("SCardConnectA",), dll=True)
+    invalid_winscard_dir = scratch / "invalid-winscard-exports"
+    invalid_winscard_dir.mkdir()
+    expect_rejected(build(invalid_winscard_dir, invalid_winscard, evidence_for(winscard_files),
+                          core_revision="c8fe1a1364c7368dcc366cf975eeea9db236b09e"),
+                    "WinSCard with an incomplete export set", "approved WinSCard API set")
     wrong_name = valid.with_name(f"unexpected-{valid.name}")
     copy_regular(valid, wrong_name)
     expect_rejected(wrong_name, "noncanonical Windows archive name", "platform/version pattern")
@@ -698,6 +742,10 @@ def main() -> int:
     parser.add_argument("--ifd-library", type=Path)
     parser.add_argument("--ifd-bundle", type=Path)
     parser.add_argument("--libusb-source-archive", type=Path)
+    parser.add_argument("--winscard-dll", type=Path,
+                        help="optional Core WinSCard DLL for a product Windows candidate archive")
+    parser.add_argument("--winscard-source-archive", type=Path,
+                        help="Windows-specific corresponding-source archive for a packaged WinSCard DLL")
     parser.add_argument("--ndk-root", type=Path)
     parser.add_argument("--link-map-dir", type=Path)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -768,6 +816,15 @@ def main() -> int:
             fail(f"input must be an ordinary directory: {directory}")
     if args.ifd_library is not None and (args.ifd_library.is_symlink() or not args.ifd_library.is_file()):
         fail(f"input must be an ordinary file: {args.ifd_library}")
+    if args.winscard_dll is not None and (args.winscard_dll.is_symlink() or not args.winscard_dll.is_file()):
+        fail(f"input must be an ordinary file: {args.winscard_dll}")
+    if args.winscard_dll is not None and args.platform != WINDOWS_PLATFORM:
+        fail("--winscard-dll is only supported for Windows archives")
+    if args.winscard_source_archive is not None and (args.winscard_source_archive.is_symlink() or
+                                                     not args.winscard_source_archive.is_file()):
+        fail(f"input must be an ordinary file: {args.winscard_source_archive}")
+    if (args.winscard_dll is None) != (args.winscard_source_archive is None):
+        fail("--winscard-dll and --winscard-source-archive must be provided together")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     extension = "zip" if args.platform == WINDOWS_PLATFORM else "tar.gz"
     output = args.output_dir.resolve() / f"asicen-userland-{args.version}-{args.platform}.{extension}"
@@ -829,6 +886,27 @@ def main() -> int:
             if not args.libusb_source_archive:
                 fail("Windows Phase 1 requires --libusb-source-archive")
             verify_pinned_libusb(args.libusb_source_archive.resolve())
+            core_revision = None
+            if args.winscard_dll:
+                revision_path = args.repo_root / "cmake" / "dtv-userland-core.revision"
+                if not revision_path.is_file():
+                    fail(f"pinned Core revision is missing: {revision_path}")
+                core_revision = revision_path.read_text(encoding="ascii").strip()
+                if not re.fullmatch(r"[0-9a-f]{40}", core_revision):
+                    fail("pinned Core revision is invalid for WinSCard packaging")
+                if not re.fullmatch(r"[0-9a-f]{40}", args.source_ref):
+                    fail("WinSCard packaging requires a fixed product source commit")
+                source_audit = _audit.audit_source_archive(
+                    argparse.Namespace(archive=args.winscard_source_archive.resolve()))
+                source_manifest = source_audit["manifest"]
+                if (source_manifest.get("repository_commit") != args.source_ref or
+                        not isinstance(source_manifest.get("core_dependency"), dict) or
+                        source_manifest["core_dependency"].get("commit") != core_revision or
+                        args.winscard_source_archive.name !=
+                        f"asicen-userland-{args.version}-windows-source.tar.gz"):
+                    fail("WinSCard source archive does not match the product/Core source pins")
+                source_archive_sha256 = sha256(args.winscard_source_archive.resolve())
+                copy_regular(args.winscard_dll.resolve(), stage / "WinSCard.dll")
         else:
             if not args.libusb_source_archive or not args.ndk_root or not args.link_map_dir:
                 fail("Android requires --libusb-source-archive, --ndk-root, and --link-map-dir")
@@ -849,8 +927,19 @@ def main() -> int:
             # for diagnostics and is never used as the release evidence input.
             strip_darwin_stage(stage)
             verify_darwin_stage_runtime(stage)
-        write_text(stage / "DEPENDENCY-NOTICE.txt",
-                   render_dependency_notice(args.repo_root, args.version, args.platform, revision))
+        dependency_notice = render_dependency_notice(args.repo_root, args.version, args.platform, revision)
+        if args.platform == WINDOWS_PLATFORM and args.winscard_dll:
+            windows_source_name = args.winscard_source_archive.name
+            dependency_notice = dependency_notice.replace(
+                f"corresponding-source-archive=asicen-userland-{args.version}-source.tar.gz",
+                f"corresponding-source-archive={windows_source_name}")
+            dependency_notice += (
+                "dependency.core.repository=https://github.com/Khronos31/dtv-userland-core\n"
+                f"dependency.core.commit={core_revision}\n"
+                "dependency.core.winscard.license=GPL-2.0-only\n"
+                f"dependency.core.source-archive={windows_source_name}\n"
+                f"dependency.core.source-archive.sha256={source_archive_sha256}\n")
+        write_text(stage / "DEPENDENCY-NOTICE.txt", dependency_notice)
         darwin_stage = stage / "ifd" / "asicen-userland-ifd.bundle"
         audit_args = argparse.Namespace(
             platform=args.platform,
@@ -864,6 +953,11 @@ def main() -> int:
             inventory_dir=stage / "evidence" / "inventory",
         )
         evidence = audit_binaries(audit_args)
+        if args.platform == WINDOWS_PLATFORM and args.winscard_dll:
+            dll_evidence = _audit.audit_windows_pe(stage / "WinSCard.dll", "WinSCard.dll",
+                                                   is_dll=True, source_root=None)
+            dll_evidence["sha256"] = sha256(stage / "WinSCard.dll")
+            evidence["extra"].append(dll_evidence)
         (stage / "evidence").mkdir(exist_ok=True)
         write_text(stage / "evidence" / "binary-audit.json", json.dumps(evidence, indent=2, sort_keys=True) + "\n")
         manifest = {
@@ -883,6 +977,13 @@ def main() -> int:
         }
         if args.platform == WINDOWS_PLATFORM:
             manifest["libusb_archive_sha256"] = LIBUSB_SHA256
+            if args.winscard_dll:
+                manifest["shared_winscard"] = {
+                    "core_revision": core_revision,
+                    "sha256": sha256(stage / "WinSCard.dll"),
+                    "source_archive": args.winscard_source_archive.name,
+                    "source_archive_sha256": source_archive_sha256,
+                }
         for path in sorted(stage.rglob("*")):
             if path.is_file():
                 manifest["files"][path.relative_to(stage).as_posix()] = {"size": path.stat().st_size, "sha256": sha256(path)}
