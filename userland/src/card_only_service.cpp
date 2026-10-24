@@ -5,6 +5,7 @@
 #include "asicen/hardware_stream_session.h"
 #include "asicen/enclosure.h"
 #include "asicen/product_profile.h"
+#include "asicen/usb_location_record.h"
 #include "dtv/userland/host_listener_context/enclosure_context.h"
 #include "dtv/userland/host_runtime/control_socket.h"
 #include "dtv/userland/host_runtime/family.h"
@@ -266,6 +267,9 @@ private:
 };
 
 bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
+               UsbLocation primary_location, UsbLocation sibling_location,
+               const std::vector<std::uint8_t>& primary_path,
+               const std::vector<std::uint8_t>& sibling_path,
                const char* version, bool lnb_power,
                dtv::userland::wire::ListResponse& list) noexcept
 {
@@ -292,6 +296,9 @@ bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
         function.mode = Mode::runtime;
         function.model.present = true;
         if (!set_text(function.model.value.name, profile.model)) return false;
+        if (!set_usb_location_record(function.location,
+                index == 0U ? primary_location : sibling_location,
+                index == 0U ? primary_path : sibling_path)) return false;
         function.present = true;
     }
     list.receivers.present = true;
@@ -328,6 +335,9 @@ bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
 int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailbox,
                     const char* runtime_directory,
                     const char* instance, bool group, bool card_only,
+                    UsbLocation primary_location, UsbLocation sibling_location,
+                    const std::vector<std::uint8_t>& primary_path,
+                    const std::vector<std::uint8_t>& sibling_path,
                     const volatile std::sig_atomic_t* stop_requested,
                     bool (*stop_callback)() noexcept) noexcept
 {
@@ -376,7 +386,9 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
               config.server.epoch.begin());
     config.server.features = wire::kFeatureStateEvent | wire::kFeatureCardService;
     ListResponse list;
-    if (!make_list(*profile, hardware.receiver_count(), ASICEN_PROJECT_VERSION,
+    if (!make_list(*profile, hardware.receiver_count(), primary_location,
+                   sibling_location, primary_path, sibling_path,
+                   ASICEN_PROJECT_VERSION,
                    !card_only && hardware.supports_lnb_control(), list)) return 70;
     list.epoch = config.server.epoch;
     config.server.producer = list.producer;
@@ -578,7 +590,9 @@ int run_card_only_server(LibusbW3u3Hardware& hardware, const char* runtime_direc
     W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware),
                                     device_profile->model_id);
     const int result = run_core_server(hardware, mailbox, runtime_directory, instance, group,
-                                       true, stop_requested, stop_callback);
+                                       true, hardware.primary_location_,
+                                       hardware.sibling_location_, hardware.primary_path_,
+                                       hardware.sibling_path_, stop_requested, stop_callback);
     hardware.diagnostic_stop_flag_ = nullptr;
     return result;
 }
@@ -596,7 +610,9 @@ int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtim
     W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware),
                                     device_profile->model_id);
     const int result = run_core_server(hardware, mailbox, runtime_directory, instance, group,
-                                       false, stop_requested, stop_callback);
+                                       false, hardware.primary_location_,
+                                       hardware.sibling_location_, hardware.primary_path_,
+                                       hardware.sibling_path_, stop_requested, stop_callback);
     hardware.diagnostic_stop_flag_ = nullptr;
     return result;
 }

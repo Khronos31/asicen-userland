@@ -2,6 +2,7 @@
 // Injectable acquisition tests: no native libusb operation is executed.
 #include "asicen/libusb_transport.h"
 #include "asicen/libusb_hardware_backend.h"
+#include "asicen/usb_location_record.h"
 
 #include <algorithm>
 #include <array>
@@ -679,6 +680,28 @@ bool quarantine_retains_context_and_handle()
     return true;
 }
 
+bool usb_location_record_uses_observed_values()
+{
+    dtv::userland::wire::Location record;
+    const std::vector<std::uint8_t> ports{2U, 2U, 1U};
+    CHECK(asicen::set_usb_location_record(record, asicen::UsbLocation{1U, 113U}, ports),
+          "observed USB location formats");
+    CHECK(record.bus.present && record.bus.value == 1U &&
+              record.address.present && record.address.value == 113U,
+          "observed bus and address are copied");
+    CHECK(record.usb_path.present && record.usb_path.value.length == 7U &&
+              std::string(record.usb_path.value.bytes.data(),
+                          record.usb_path.value.length) == "1-2.2.1",
+          "observed port topology is canonical");
+
+    dtv::userland::wire::Location unknown;
+    CHECK(asicen::set_usb_location_record(unknown, asicen::UsbLocation{}, ports),
+          "unknown location is allowed");
+    CHECK(!unknown.bus.present && !unknown.address.present && !unknown.usb_path.present,
+          "port string alone does not invent a USB location");
+    return true;
+}
+
 } // namespace
 
 int main()
@@ -690,7 +713,7 @@ int main()
         !unattempted_claim_is_not_reported_as_success() ||
         !alternate_failure_releases_once() || !granted_fd_failures_and_success() ||
         !port_accessor_preserves_errors_and_bounds() || !granted_fd_topology_failures() ||
-        !quarantine_retains_context_and_handle()) {
+        !quarantine_retains_context_and_handle() || !usb_location_record_uses_observed_values()) {
         return 1;
     }
     std::puts("libusb acquisition/lifetime tests passed (all USB calls injected)");

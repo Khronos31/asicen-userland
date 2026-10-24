@@ -484,7 +484,7 @@ if(UNIX OR WIN32)
         ${dtv_userland_core_SOURCE_DIR}/include)
     target_compile_definitions(asicend PRIVATE ASICEN_USE_DTV_CORE=1
         ASICEN_PROJECT_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(asicend PRIVATE asicen_core dtv::json dtv::host_listener_context
+    target_link_libraries(asicend PRIVATE asicen_core dtv::identity dtv::json dtv::host_listener_context
         dtv::host_facade Threads::Threads)
     target_include_directories(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools)
     if(WIN32)
@@ -1245,7 +1245,7 @@ if(ASICEN_BUILD_TESTS)
     target_compile_definitions(asicen-tools-parity-tests PRIVATE
         ASICEN_PROJECT_VERSION="${PROJECT_VERSION}")
     target_link_libraries(asicen-tools-parity-tests PRIVATE
-        asicen_core asicen_px4_mock dtv::json)
+        asicen_core asicen_px4_mock dtv::identity dtv::json)
     asicen_enable_project_warnings(asicen-tools-parity-tests)
     add_test(NAME asicen-tools-parity-tests COMMAND asicen-tools-parity-tests)
 

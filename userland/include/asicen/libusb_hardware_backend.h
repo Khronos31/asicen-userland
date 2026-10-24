@@ -260,6 +260,8 @@ private:
     LibusbFunctionClaim primary_claim_;
     LibusbFunctionClaim sibling_claim_;
     EnclosureOwnership ownership_;
+    UsbLocation primary_location_{};
+    UsbLocation sibling_location_{};
     std::vector<std::uint8_t> primary_path_;
     std::vector<std::uint8_t> sibling_path_;
     std::atomic<bool> stop_requested_{false};

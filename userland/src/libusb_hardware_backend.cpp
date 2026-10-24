@@ -534,6 +534,7 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, UsbLocation prim
                                        bool sibling_runtime_required)
     : context_(context), primary_claim_(primary_, "primary"),
       sibling_claim_(sibling_, "sibling"),
+      primary_location_(primary), sibling_location_(sibling),
       primary_path_(std::move(primary_path)), sibling_path_(std::move(sibling_path)),
       sibling_runtime_required_(sibling_runtime_required),
       async_(new (std::nothrow) AsyncState()), decoder_(nullptr, 0U)

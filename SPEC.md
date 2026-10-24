@@ -388,9 +388,10 @@ type 0f and the version 7 link; W3U2 also accepts decoded type 10. Revision
 16/52 is unsupported. V2 uses its customer-information roles and RF-owner
 mapping rather than USB enumeration order; see the existing
 [V2 hardware facts](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/v2-frontend-facts-2026-10-09.md).
-The V2 loader is a separate 16384-byte image (SHA-256
-`5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`,
-start/index `55d6`), not the bundled Linux image (start/index `5399`).
-Require explicit model selection and whole-image verification before USB access;
-loader VID:PID alone does not identify the runtime model. V2 accepts loader
-`1738:5211` and its external image is not redistributed.
+Normal `asicend` startup uses the shared Windows-derived 16384-byte image
+(start/index `55d6`) for all five profiles and verifies the whole image before
+USB access. Cold startup infers the model from the runtime VID:PID that returns
+at the selected bus and port; loader VID:PID alone does not identify the model.
+The older model-specific Linux image (start/index `5399`) remains available to
+the diagnostic firmware interface. Image redistribution rights remain
+unresolved; the shared image is not added to this repository or its archives.

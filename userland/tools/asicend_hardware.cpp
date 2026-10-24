@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicend_args.h"
 #include "asicend_identity.h"
+#include "asicend_selector.h"
 #include "loader_acquisition.h"
 #include "loader_diagnostic.h"
 #include "px4d_signals.h"
@@ -118,6 +119,71 @@ px4::userland::Result<ResolvedDevice> resolve_device(
     return px4::userland::Result<ResolvedDevice>::success(std::move(matched));
 }
 
+px4::userland::Result<std::vector<asicen::UsbFunctionObservation>> enumerate_selector_functions(
+    libusb_context* context)
+{
+    libusb_device** list = nullptr;
+    const ssize_t count = libusb_get_device_list(context, &list);
+    if (count < 0) return px4::userland::Result<std::vector<asicen::UsbFunctionObservation>>::failure(
+        asicen::map_libusb_error(static_cast<int>(count)));
+    std::vector<asicen::UsbFunctionObservation> observations;
+    for (ssize_t i = 0; i < count; ++i) {
+        libusb_device* device = list[i];
+        libusb_device_descriptor descriptor{};
+        if (libusb_get_device_descriptor(device, &descriptor) != 0) continue;
+        const bool loader = descriptor.idVendor == 0x1738U &&
+            (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U);
+        if (!loader && asicen::find_profile(descriptor.idVendor, descriptor.idProduct) == nullptr)
+            continue;
+        asicen::UsbFunctionObservation observation;
+        observation.vid = descriptor.idVendor;
+        observation.pid = descriptor.idProduct;
+        observation.bus = libusb_get_bus_number(device);
+        observation.address = libusb_get_device_address(device);
+        std::uint8_t ports[8]{};
+        const int port_count = libusb_get_port_numbers(device, ports, sizeof(ports));
+        if (port_count > 0 && port_count <= static_cast<int>(sizeof(ports)))
+            observation.port_path.assign(ports, ports + port_count);
+        libusb_device* parent = libusb_get_parent(device);
+        libusb_device_descriptor parent_descriptor{};
+        if (parent != nullptr && libusb_get_device_descriptor(parent, &parent_descriptor) == 0) {
+            observation.parent_hub_vid = parent_descriptor.idVendor;
+            observation.parent_hub_pid = parent_descriptor.idProduct;
+            observation.parent_hub_known = true;
+        }
+        observations.push_back(std::move(observation));
+    }
+    libusb_free_device_list(list, 1);
+    return px4::userland::Result<std::vector<asicen::UsbFunctionObservation>>::success(
+        std::move(observations));
+}
+
+px4::userland::Error resolve_device_selector(libusb_context* context, Options* options)
+{
+    if (options == nullptr || options->device_selector.empty())
+        return px4::userland::Error::INVALID_ARGUMENT;
+    const auto parsed = dtv::userland::identity::parse_device_selector(options->device_selector);
+    if (!parsed) return px4::userland::Error::INVALID_ARGUMENT;
+    const auto observations = enumerate_selector_functions(context);
+    if (!observations) return observations.error();
+    const auto selected = asicen::cli::select_enclosure(
+        parsed.value(), observations.value(), options->expected_model,
+        !options->firmware.empty());
+    if (!selected) return selected.error();
+    if (selected.value().model == nullptr && options->firmware.empty())
+        return px4::userland::Error::NOT_READY;
+    if (selected.value().functions.empty() ||
+        selected.value().functions.size() > options->usb_paths.size())
+        return px4::userland::Error::INVALID_ARGUMENT;
+    if (options->expected_model == nullptr) options->expected_model = selected.value().model;
+    options->usb_path_count = selected.value().functions.size();
+    for (std::size_t i = 0U; i < options->usb_path_count; ++i) {
+        options->usb_paths[i] = asicen::cli::port_string(selected.value().functions[i]);
+        if (options->usb_paths[i].empty()) return px4::userland::Error::NOT_READY;
+    }
+    return px4::userland::Error::OK;
+}
+
 px4::userland::Result<std::string> observed_identity(
     libusb_context* context, const Options& options, std::size_t index = 0U)
 {
@@ -140,7 +206,8 @@ px4::userland::Result<std::string> observed_identity(
     const bool loader = descriptor.idVendor == 0x1738U &&
         (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U);
     if (profile == nullptr && loader) profile = options.expected_model;
-    if (profile == nullptr || (options.expected_model != nullptr &&
+    if ((!loader && profile == nullptr) || (loader && options.expected_model == nullptr &&
+        options.firmware.empty()) || (options.expected_model != nullptr &&
         profile->model_id != options.expected_model->model_id))
         return px4::userland::Result<std::string>::failure(px4::userland::Error::UNSUPPORTED);
     asicen::UsbFunctionObservation observation;
@@ -159,11 +226,42 @@ px4::userland::Result<std::string> observed_identity(
         return px4::userland::Result<std::string>::failure(px4::userland::Error::NOT_READY);
     }
     observation.port_path.assign(ports, ports + count);
+    const bool dual = profile != nullptr
+        ? profile->expected_runtime_functions == 2U
+        : options.usb_path_count == 2U;
     const std::string identity = asicen::cli::topology_identity(
-        observation, profile->expected_runtime_functions == 2U);
+        observation, dual);
     if (identity.empty())
         return px4::userland::Result<std::string>::failure(px4::userland::Error::NOT_READY);
     return px4::userland::Result<std::string>::success(identity);
+}
+
+px4::userland::Error infer_file_descriptor_model(libusb_context* context,
+                                                   Options* options)
+{
+    if (context == nullptr || options == nullptr)
+        return px4::userland::Error::INVALID_ARGUMENT;
+    const asicen::DeviceProfile* inferred_model = nullptr;
+    for (std::size_t index = 0U; index < options->file_descriptor_count; ++index) {
+        asicen::LibusbDevice device;
+        const int opened = device.open(context, options->file_descriptors[index]);
+        if (opened != 0) return asicen::map_libusb_acquisition_error(opened);
+        libusb_device_descriptor descriptor{};
+        const int described = device.descriptor(&descriptor);
+        if (described != 0) return asicen::map_libusb_error(described);
+        if (descriptor.idVendor == 0x1738U &&
+            (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U)) {
+            continue;
+        }
+        const auto* profile = asicen::find_profile(descriptor.idVendor, descriptor.idProduct);
+        if (profile == nullptr || !asicen::profile_runtime_supported(*profile) ||
+            (inferred_model != nullptr && inferred_model->model_id != profile->model_id)) {
+            return px4::userland::Error::UNSUPPORTED;
+        }
+        inferred_model = profile;
+    }
+    options->expected_model = inferred_model;
+    return px4::userland::Error::OK;
 }
 
 px4::userland::Result<std::vector<std::uint8_t>> observed_port_path(
@@ -241,7 +339,6 @@ int restore_sibling_loader(asicen::LibusbDevice& device,
 // Pushes the verified loader image to one claimed loader, preserving USB and
 // firmware error classes rather than reporting an internal error for each.
 int transfer_firmware_to_loader(asicen::LibusbDevice& device,
-                                const asicen::DeviceProfile& model,
                                 const asicen::FirmwareImage& firmware,
                                 loader_diag::Trace* trace,
                                 const loader_diag::Target& target) {
@@ -259,9 +356,13 @@ int transfer_firmware_to_loader(asicen::LibusbDevice& device,
     if (trace != nullptr) trace->record(loader_diag::Stage::ClaimResult,
         target, claim, loader_diag::Domain::Libusb, claim < 0);
     if (claim < 0) { std::fprintf(stderr, "firmware: claim interface 0: %s\n", libusb_error_name(claim)); return exit_status(asicen::map_libusb_acquisition_error(claim)); }
+    if (firmware.manifest() == nullptr) {
+        std::fprintf(stderr, "firmware: verified loader manifest unavailable\n");
+        return 10;
+    }
     const std::vector<asicen::LoaderTransfer> plan =
-        asicen::build_loader_transfer_plan(model.model_id);
-    if (plan.empty()) { std::fprintf(stderr, "firmware: no transfer plan for model\n"); return 10; }
+        asicen::build_loader_transfer_plan(*firmware.manifest());
+    if (plan.empty()) { std::fprintf(stderr, "firmware: no transfer plan for image\n"); return 10; }
     if (trace != nullptr) trace->record(loader_diag::Stage::UploadBegin, target);
     for (std::size_t i = 0; i < plan.size(); ++i) {
         if (px4::userland::px4d::stop_requested()) return 3;
@@ -286,15 +387,16 @@ int transfer_firmware_to_loader(asicen::LibusbDevice& device,
     return 0;
 }
 
-// Re-enumeration must preserve the explicitly observed model and port path.
-// Address changes are expected; widening to a different enclosure is not.
+// Re-enumeration must preserve the selected USB path. Address changes are
+// expected; widening to a different enclosure is not.
 px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
     libusb_context* context, std::uint8_t bus,
     const std::vector<std::uint8_t>& loader_port_path,
     const asicen::DeviceProfile* expected_model,
-    loader_diag::Target* diagnostic_target = nullptr)
+    loader_diag::Target* diagnostic_target = nullptr,
+    const asicen::DeviceProfile** observed_model = nullptr)
 {
-    if (expected_model == nullptr || loader_port_path.empty())
+    if (loader_port_path.empty())
         return px4::userland::Result<asicen::UsbLocation>::failure(
             px4::userland::Error::INVALID_ARGUMENT);
     libusb_device** list = nullptr;
@@ -302,6 +404,7 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
     if (count < 0) return px4::userland::Result<asicen::UsbLocation>::failure(
         asicen::map_libusb_error(static_cast<int>(count)));
     asicen::UsbLocation selected{};
+    const asicen::DeviceProfile* selected_model = nullptr;
     loader_diag::Target selected_diagnostic{};
     std::size_t matches = 0U;
     for (ssize_t i = 0; i < count; ++i) {
@@ -316,9 +419,13 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
             descriptor.idVendor, descriptor.idProduct, bus,
             std::vector<std::uint8_t>(ports, ports + port_count),
             libusb_get_device_address(device)};
-        if (!asicen::cli::runtime_matches_loader(
-                observation, *expected_model, bus, loader_port_path)) continue;
+        const auto* profile = asicen::find_profile(descriptor.idVendor, descriptor.idProduct);
+        if (profile == nullptr || !asicen::profile_runtime_supported(*profile) ||
+            observation.bus != bus || observation.port_path != loader_port_path ||
+            (expected_model != nullptr && profile->model_id != expected_model->model_id) ||
+            asicen::loader_firmware_manifest(profile->model_id) == nullptr) continue;
         selected = {bus, libusb_get_device_address(device)};
+        selected_model = profile;
         if (diagnostic_target != nullptr) {
             selected_diagnostic = *diagnostic_target;
             selected_diagnostic.location_known = true;
@@ -335,6 +442,7 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
     libusb_free_device_list(list, 1);
     if (matches == 1U) {
         if (diagnostic_target != nullptr) *diagnostic_target = selected_diagnostic;
+        if (observed_model != nullptr) *observed_model = selected_model;
         return px4::userland::Result<asicen::UsbLocation>::success(selected);
     }
     return px4::userland::Result<asicen::UsbLocation>::failure(
@@ -348,10 +456,12 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
 // topology so the re-enumerated runtime can be matched to it.
 // Returns 0 when at least one loader was transferred, kLoadFirmwareWarm when all
 // addressed devices were already runtime, or the mapped public error class.
-int load_loader_firmware(libusb_context* context, const Options& options,
+int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
                          const asicen::FirmwareImage& firmware,
                          LoaderIdentity* loader_identity,
                          std::vector<asicen::UploadedRuntimeIdentity>* uploaded_identities) {
+    libusb_context* context = owned_context.get();
+    if (context == nullptr) return exit_status(px4::userland::Error::NOT_READY);
     const loader_diag::Mode diagnostic_mode = loader_diag::parse_mode(
         std::getenv("ASICEN_DIAGNOSTIC_LOADER"));
     if (diagnostic_mode == loader_diag::Mode::Invalid) {
@@ -363,8 +473,8 @@ int load_loader_firmware(libusb_context* context, const Options& options,
     loader_diag::Trace diagnostic(diagnostic_mode);
     loader_diag::Trace* trace = diagnostic.enabled() ? &diagnostic : nullptr;
     const asicen::DeviceProfile* model = options.expected_model;
-    if (model == nullptr) {
-        std::fprintf(stderr, "--firmware requires --model to verify the loader image\n");
+    if (firmware.manifest() != &asicen::common_loader_firmware_manifest()) {
+        std::fprintf(stderr, "firmware: verified loader image does not match requested model\n");
         return diagnostic.finish(2);
     }
     const std::size_t target_count = options.file_descriptor_count != 0U
@@ -469,9 +579,16 @@ int load_loader_firmware(libusb_context* context, const Options& options,
         const bool loader = desc.idVendor == 0x1738 &&
             (desc.idProduct == 0x5211U || desc.idProduct == 0x5216U);
         if (!loader) {
-            if (desc.idVendor != model->vid || desc.idProduct != model->pid) {
+            const auto* runtime_model = asicen::find_profile(desc.idVendor, desc.idProduct);
+            if (runtime_model == nullptr ||
+                !asicen::profile_runtime_supported(*runtime_model) ||
+                (model != nullptr && runtime_model->model_id != model->model_id)) {
                 std::fprintf(stderr, "firmware: addressed runtime does not match --model\n");
                 return diagnostic.finish(3);
+            }
+            if (model == nullptr) {
+                model = runtime_model;
+                options.expected_model = model;
             }
             std::fprintf(stderr, "firmware: addressed device is not an ASICEN loader; treating as warm runtime\n");
             any_warm = true;
@@ -520,8 +637,6 @@ int load_loader_firmware(libusb_context* context, const Options& options,
         uploaded.bus = static_cast<std::uint8_t>(libusb_get_bus_number(device.device()));
         if (nports > 0 && nports <= static_cast<int>(sizeof(ports)))
             uploaded.port_path.assign(ports, ports + nports);
-        uploaded.vendor_id = model->vid;
-        uploaded.product_id = model->pid;
         if (trace != nullptr && nports > 0 && nports <= static_cast<int>(sizeof(ports))) {
             target.location_known = true;
             target.bus = uploaded.bus;
@@ -540,8 +655,54 @@ int load_loader_firmware(libusb_context* context, const Options& options,
                 loader_identity->port_path = uploaded.port_path;
             }
         }
-        const int rc = transfer_firmware_to_loader(device, *model, firmware, trace, target);
+        const int rc = transfer_firmware_to_loader(device, firmware, trace, target);
         if (rc != 0) return diagnostic.finish(rc);
+        device.close();
+        if (options.file_descriptor_count == 0U) {
+            owned_context.close();
+            const int initialized = owned_context.initialize(false);
+            if (initialized != 0) {
+                std::fprintf(stderr, "firmware: libusb context refresh failed: %s\n",
+                             libusb_error_name(initialized));
+                return diagnostic.finish(exit_status(asicen::map_libusb_error(initialized)));
+            }
+            context = owned_context.get();
+        }
+        if (model == nullptr) {
+            if (uploaded.port_path.empty()) {
+                if (options.file_descriptor_count != 0U) {
+                    std::fprintf(stderr, "firmware: transfer complete; regrant runtime FD and rerun without --firmware\n");
+                } else {
+                    std::fprintf(stderr, "firmware: runtime topology unavailable for model inference\n");
+                }
+                return diagnostic.finish(exit_status(px4::userland::Error::NOT_READY));
+            }
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            px4::userland::Error runtime_error = px4::userland::Error::NOT_FOUND;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (px4::userland::px4d::stop_requested()) return diagnostic.finish(3);
+                const asicen::DeviceProfile* runtime_model = nullptr;
+                const auto runtime = resolve_runtime_at_parent(
+                    context, uploaded.bus, uploaded.port_path, nullptr, nullptr, &runtime_model);
+                if (runtime && runtime_model != nullptr) {
+                    model = runtime_model;
+                    options.expected_model = model;
+                    break;
+                }
+                runtime_error = runtime.error();
+                if (runtime_error == px4::userland::Error::BUSY) {
+                    std::fprintf(stderr, "firmware: runtime model is ambiguous at selected USB location\n");
+                    return diagnostic.finish(exit_status(runtime_error));
+                }
+                sleep_ms(200U);
+            }
+            if (model == nullptr) {
+                std::fprintf(stderr, "firmware: runtime model did not return at the selected USB location\n");
+                return diagnostic.finish(exit_status(runtime_error));
+            }
+        }
+        uploaded.vendor_id = model->vid;
+        uploaded.product_id = model->pid;
         if (uploaded_identities != nullptr) uploaded_identities->push_back(uploaded);
         any_transferred = true;
         if (!dual_functions) continue;
@@ -646,7 +807,7 @@ int run_asicend_hardware(int argc, char** argv) {
     auto firmware = px4::userland::Result<asicen::FirmwareImage>::failure(
         px4::userland::Error::NOT_READY);
     if (!options.firmware.empty()) {
-        firmware = asicen::FirmwareProvider(options.firmware, options.expected_model->model_id).load();
+        firmware = asicen::FirmwareProvider(options.firmware).load();
         if (!firmware) {
             std::fprintf(stderr, "firmware: %s\n", px4::userland::error_string(firmware.error()));
             return exit_status(firmware.error());
@@ -672,6 +833,26 @@ int run_asicend_hardware(int argc, char** argv) {
         return exit_status(asicen::map_libusb_error(initialized));
     }
     libusb_context* context = owned_context.get();
+    if (!options.device_selector.empty()) {
+        const auto selected = resolve_device_selector(context, &options);
+        if (selected != px4::userland::Error::OK) {
+            std::fprintf(stderr, "device selector: %s\n", px4::userland::error_string(selected));
+            return exit_status(selected);
+        }
+    }
+    if (options.file_descriptor_count != 0U) {
+        const auto inferred = infer_file_descriptor_model(context, &options);
+        if (inferred != px4::userland::Error::OK) {
+            std::fprintf(stderr, "file descriptor model: %s\n",
+                         px4::userland::error_string(inferred));
+            return exit_status(inferred);
+        }
+        if (options.expected_model == nullptr &&
+            options.file_descriptor_count == 2U && !options.firmware.empty()) {
+            std::fprintf(stderr, "firmware: loader FDs without a runtime model must be provisioned one at a time\n");
+            return exit_status(px4::userland::Error::NOT_READY);
+        }
+    }
     if (options.file_descriptor_count == 2U && options.expected_model != nullptr &&
         options.expected_model->expected_runtime_functions == 2U) {
         const auto first_identity = observed_identity(context, options, 0U);
@@ -776,7 +957,7 @@ int run_asicend_hardware(int argc, char** argv) {
                 }
             }
             const int transferred = load_loader_firmware(
-                context, options, firmware.value(), nullptr, nullptr);
+                owned_context, options, firmware.value(), nullptr, nullptr);
             if (transferred != 0) return transferred;
             std::fprintf(stderr, "firmware: loader transfer complete; grant the runtime USB function(s) and rerun without --firmware\n");
             return 3;
@@ -845,12 +1026,15 @@ int run_asicend_hardware(int argc, char** argv) {
         if (!selected) {
             asicen::UsbFunctionObservation pending;
             if (index == 0U || options.firmware.empty() ||
-                options.file_descriptor_count != 0U || options.expected_model == nullptr ||
+                options.file_descriptor_count != 0U ||
+                (options.expected_model == nullptr && options.usb_path_count != 2U) ||
                 (selected.error() != px4::userland::Error::NOT_FOUND &&
                  selected.error() != px4::userland::Error::NOT_READY) ||
                 !parse_bus_port(options.usb_paths[index], &pending.bus, &pending.port_path) ||
                 asicen::cli::topology_identity(pending,
-                    options.expected_model->expected_runtime_functions == 2U) != identity.value()) {
+                    options.expected_model != nullptr
+                        ? options.expected_model->expected_runtime_functions == 2U
+                        : options.usb_path_count == 2U) != identity.value()) {
                 std::fprintf(stderr, "enclosure identity: %s\n",
                              px4::userland::error_string(selected.error()));
                 return exit_status(selected.error());
@@ -940,8 +1124,9 @@ int run_asicend_hardware(int argc, char** argv) {
         // (firmware already present) and claim proceeds without an upload.
         LoaderIdentity loader_identity;
         std::vector<asicen::UploadedRuntimeIdentity> uploaded_identities;
-        const int loaded = load_loader_firmware(context, options, firmware.value(),
+        const int loaded = load_loader_firmware(owned_context, options, firmware.value(),
                                                 &loader_identity, &uploaded_identities);
+        context = owned_context.get();
         if (loaded == kLoadFirmwareWarm) {
             // warm runtime: addressed device is not a loader, firmware is present
             std::fprintf(stderr, "firmware: addressed device is already runtime; skipping upload\n");
@@ -957,6 +1142,11 @@ int run_asicend_hardware(int argc, char** argv) {
 
             return 3;
         } else {
+            if (options.expected_model != nullptr &&
+                options.expected_model->expected_runtime_functions != selected_count) {
+                std::fprintf(stderr, "device selector: selected function count does not match runtime model\n");
+                return exit_status(px4::userland::Error::INVALID_ARGUMENT);
+            }
             sibling_firmware_uploaded = std::any_of(
                 uploaded_identities.begin(), uploaded_identities.end(),
                 [](const asicen::UploadedRuntimeIdentity& identity) {

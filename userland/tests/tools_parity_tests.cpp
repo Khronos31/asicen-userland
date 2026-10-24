@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "asicend_args.h"
 #include "asicend_list_format.h"
+#include "asicend_selector.h"
 #include "asicen/startup_readiness.h"
 
 #include <cstdio>
@@ -46,9 +47,20 @@ bool arguments_match_reference()
     CHECK(!parse({"-l"}).valid);
     CHECK(!parse({"--socket", "/unused"}, true).valid &&
           !parse({"--socket", "/unused"}).valid);
+    CHECK(!parse({"--usb-path", "1:2", "--instance", "test"}).valid);
+    CHECK(parse({"--device", "usb:1-2", "--instance", "test"}).valid);
+    CHECK(parse({"--device", "usb:1-2", "--instance", "test",
+                 "--firmware", "loader.bin"}).valid);
+    CHECK(parse({"--device", "usb:1-2.1,1-2.2", "--instance", "test"}).valid);
+    CHECK(parse({"--device", "serial:abc", "--instance", "test"}).valid);
+    CHECK(!parse({"--device", "usb:01-2", "--instance", "test"}).valid);
+    CHECK(!parse({"--device", "usb:1-2,1-2", "--instance", "test"}).valid);
+    CHECK(!parse({"--device", "usb:1-2.1,1-2.2,1-2.3", "--instance", "test"}).valid);
+    CHECK(!parse({"--device", "usb:1-2", "--device", "usb:1-3",
+                  "--instance", "test"}).valid);
+    CHECK(!parse({"--device", "usb:1-2", "--fd", "3", "--instance", "test"}).valid);
     CHECK(!parse({"--usb-path", "1:2"}).valid &&
-          parse({"--usb-path", "1:2"}).error == "--usb-path requires --instance");
-    CHECK(parse({"--usb-path", "1:2", "--instance", "test"}).valid);
+          parse({"--usb-path", "1:2"}).error == "unknown argument");
     for (const char* option : {"--probe-satellite", "--probe-card", "--card-only",
                                "--slot"}) {
         CHECK(!parse({option}).valid && parse({option}).error == "unknown argument");
@@ -56,11 +68,10 @@ bool arguments_match_reference()
     CHECK(parse({"--fd", "3", "--instance", "test"}).valid);
     CHECK(parse({"--fd", "3"}).valid && parse({"--fd", "3"}).instance.empty());
     CHECK(parse({}, true).valid && parse({}, true).instance == "default");
-    for (const char* selector : {"0:1", "1:0", "256:1", "1:256", "0x1:2", "1:2:3",
-                                 "0-1", "1-0", "1-256", "1-1.", "1-1..2",
-                                 "1-1.2.3.4.5.6.7.8.9"}) {
-        CHECK(!parse({"--usb-path", selector, "--instance", "test"}).valid);
-    }
+    for (const char* selector : {"usb:0-1", "usb:1-0", "usb:256-1",
+                                 "usb:1-256", "usb:1-1.", "usb:1-1..2",
+                                 "usb:1-1.2.3.4.5.6.7.8.9"})
+        CHECK(!parse({"--device", selector, "--instance", "test"}).valid);
     std::uint8_t bus = 0U;
     std::uint8_t address = 0U;
     CHECK(asicen::cli::parse_bus_address("010:008", &bus, &address) &&
@@ -68,13 +79,69 @@ bool arguments_match_reference()
     std::vector<std::uint8_t> ports;
     CHECK(asicen::cli::parse_bus_port("010-008.001", &bus, &ports) &&
           bus == 10U && ports == std::vector<std::uint8_t>({8U, 1U}));
-    CHECK(!parse({"--usb-path", "1:2", "--fd", "3", "--instance", "test"}).valid);
-    CHECK(!parse({"--usb-path", "1:2", "--instance", "test", "--runtime-dir", ""}).valid);
-    CHECK(!parse({"--usb-path", "1:2", "--instance", "test", "--firmware", "--group"}).valid);
-    CHECK(!parse({"--instance", "test", "--model", "s3u", "--model", "s3u"}, true).valid);
+    CHECK(!parse({"--device", "usb:1-2", "--instance", "test", "--runtime-dir", ""}).valid);
+    CHECK(!parse({"--device", "usb:1-2", "--instance", "test", "--firmware", "--group"}).valid);
+    CHECK(!parse({"--instance", "test", "--model", "s3u"}).valid);
+    CHECK(parse({"--instance", "test", "--model", "s3u"}, true).expected_model ==
+          asicen::find_profile_by_model("s3u"));
+    CHECK(!parse({"--instance", "test", "--model", "unknown"}, true).valid);
+    CHECK(parse({"--device", "usb:1-2", "--instance", "test", "--firmware",
+                 "loader.bin"}).expected_model == nullptr);
+    CHECK(parse({"--fd", "3", "--firmware", "loader.bin"}).valid);
     CHECK(!parse({"--instance", "test", "--group", "--group"}, true).valid);
     CHECK(!parse({"--instance", "test", "--runtime-dir", "x", "--runtime-dir", "x"}, true).valid);
     CHECK(!parse({"--instance", "12345678901234"}, true).valid);
+    return true;
+}
+
+bool selector_grouping()
+{
+    using asicen::UsbFunctionObservation;
+    const auto* w3u3 = asicen::find_profile_by_model("w3u3");
+    CHECK(w3u3 != nullptr);
+    const auto parsed = dtv::userland::identity::parse_device_selector(
+        "usb:1-2.2.1,1-2.2.2");
+    CHECK(parsed.has_value());
+    UsbFunctionObservation primary{0x1738U, 0x5211U, 1U, {2U, 2U, 1U}, 9U};
+    primary.parent_hub_vid = 0x05e3U;
+    primary.parent_hub_pid = 0x0608U;
+    primary.parent_hub_known = true;
+    UsbFunctionObservation sibling = primary;
+    sibling.port_path.back() = 2U;
+    sibling.address = 10U;
+    auto selected = asicen::cli::select_enclosure(parsed.value(), {primary, sibling},
+                                                   nullptr, true);
+    CHECK(selected && selected.value().model == nullptr &&
+          selected.value().functions.size() == 2U &&
+          selected.value().functions[0].port_path.back() == 1U &&
+          selected.value().functions[1].port_path.back() == 2U);
+    const auto one = dtv::userland::identity::parse_device_selector("usb:1-2.2.1");
+    CHECK(one.has_value());
+    auto duplicate = primary;
+    duplicate.address = 12U;
+    selected = asicen::cli::select_enclosure(one.value(), {primary, duplicate}, nullptr, true);
+    CHECK(!selected && selected.error() == px4::userland::Error::NOT_READY);
+    selected = asicen::cli::select_enclosure(one.value(), {primary}, nullptr, true);
+    CHECK(selected && selected.value().functions.size() == 2U);
+    auto ungrouped = primary;
+    ungrouped.parent_hub_pid = 0x0610U;
+    selected = asicen::cli::select_enclosure(one.value(), {ungrouped}, nullptr, true);
+    CHECK(selected && selected.value().functions.size() == 1U);
+    const auto runtime = dtv::userland::identity::parse_device_selector("usb:1-2.2.1");
+    CHECK(runtime.has_value());
+    UsbFunctionObservation runtime_primary{w3u3->vid, w3u3->pid, 1U, {2U, 2U, 1U}, 11U};
+    runtime_primary.parent_hub_vid = 0x05e3U;
+    runtime_primary.parent_hub_pid = 0x0608U;
+    runtime_primary.parent_hub_known = true;
+    UsbFunctionObservation runtime_sibling = runtime_primary;
+    runtime_sibling.port_path.back() = 2U;
+    selected = asicen::cli::select_enclosure(runtime.value(),
+        {runtime_primary, runtime_sibling}, nullptr, false);
+    CHECK(selected && selected.value().model == w3u3 &&
+          selected.value().functions.size() == 2U);
+    const auto serial = dtv::userland::identity::parse_device_selector("serial:abc");
+    CHECK(serial.has_value() && !asicen::cli::select_enclosure(
+        serial.value(), {runtime_primary}, nullptr, false));
     return true;
 }
 
@@ -443,7 +510,8 @@ bool readiness_tracks_only_cold_functions_for_single_dual_and_mixed_profiles()
 
 int main()
 {
-    if (!arguments_match_reference() || !list_formats_share_observed_identity() ||
+    if (!arguments_match_reference() || !selector_grouping() ||
+        !list_formats_share_observed_identity() ||
         !readiness_rechecks_first_and_last_probe_boundaries() ||
         !readiness_handles_staggered_reenumeration_and_disappearance() ||
         !readiness_timeout_cancel_error_and_shared_deadline() ||
