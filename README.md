@@ -20,7 +20,9 @@
 
 実行時の内部経路はブリッジ revision 11/52・controller type 0f・version 7 に限定し、W3U2 は type 10 も受理します。未実装の revision 16/52 等は起動時に拒否します。機種名だけで全個体の対応を保証しません。
 
-`asicend --models` は USB にアクセスせず定義プロファイルを表示します。`lnb_validation=pending` はモデル全体の認定状態であり、個別の電圧実測は[検証記録](docs/release-validation.md#現在の候補と検証状況)で区別します。
+`asicend --models` は USB にアクセスせず、対応機種名と VID:PID だけの静的一覧を表示します。機種別の認定状態や個別の電圧実測は[検証記録](docs/release-validation.md#現在の候補と検証状況)で区別します。
+
+`asicend`・`asicen-ts`・`asicenctl`・`asicen-termux` は、それぞれ単独の `--version` で製品の版を表示します。機器やデーモンの起動は不要です。`asicend -h` は `--help` と同じヘルプを表示します。
 
 ## LNB 電源制御
 

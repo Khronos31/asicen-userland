@@ -22,6 +22,18 @@ cleanup()
 }
 trap cleanup EXIT
 
+IFS= read -r version < "$root/VERSION"
+version_output=$(sh "$launcher" --version) || fail_test 'source version failed'
+[ "$version_output" = "asicen-termux $version" ] || fail_test 'source version does not match VERSION'
+for option in --help --group --allow-lnb-power --usb-device --firmware --model --instance --runtime-dir; do
+    status=0
+    sh "$launcher" --version "$option" >/dev/null 2>&1 || status=$?
+    [ "$status" -eq 2 ] || fail_test "version combined with $option was accepted"
+    status=0
+    sh "$launcher" "$option" --version >/dev/null 2>&1 || status=$?
+    [ "$status" -eq 2 ] || fail_test "$option combined with version was accepted"
+done
+
 assert_equal()
 {
     expected=$1

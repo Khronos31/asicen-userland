@@ -281,6 +281,13 @@ IPC, authority and status serialization; neither the vendor subset nor the
 Core pin/API changes. Device-free lifecycle and daemon-to-GPIO tests cover this
 adaptation without claiming measured output voltage.
 
+ASICEN's daemon and TS entry points now report their own VERSION before
+hardware/runtime/output setup. The ctl keeps Core's existing version path.
+The Termux source launcher reads VERSION and generated/package copies embed
+the same value, matching PX4 PR90 without copying its hardware arguments.
+The daemon's -h aliases --help, and --models prints only the existing profile
+name and VID:PID. Discovery, ctl list and backend contracts are unchanged.
+
 ## Updating this subset
 
 Compare every imported file with this pin, preserve each documented value or
