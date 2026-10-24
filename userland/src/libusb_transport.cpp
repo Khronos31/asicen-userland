@@ -413,12 +413,12 @@ int LibusbDevice::connection_info(std::uint8_t* bus, std::uint8_t* ports,
     if (retained_fd_ < 0 || bus == nullptr || ports == nullptr || capacity <= 0)
         return LIBUSB_ERROR_INVALID_PARAM;
     std::uint32_t capabilities = 0U;
-    if (::ioctl(retained_fd_, USBDEVFS_GET_CAPABILITIES, &capabilities) < 0 ||
+    if (::ioctl(retained_fd_, static_cast<int>(USBDEVFS_GET_CAPABILITIES), &capabilities) < 0 ||
         (capabilities & USBDEVFS_CAP_CONNINFO_EX) == 0U)
         return LIBUSB_ERROR_NOT_SUPPORTED;
     usbdevfs_conninfo_ex info{};
     info.size = sizeof(info);
-    if (::ioctl(retained_fd_, USBDEVFS_CONNINFO_EX(sizeof(info)), &info) < 0)
+    if (::ioctl(retained_fd_, static_cast<int>(USBDEVFS_CONNINFO_EX(sizeof(info))), &info) < 0)
         return LIBUSB_ERROR_IO;
     libusb_device* device = libusb_get_device(handle_);
     constexpr std::size_t ports_offset = offsetof(usbdevfs_conninfo_ex, ports);
