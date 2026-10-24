@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Adapted from px4-userland px4d_args.cpp at 1a1485d0c3e972e0a47be907edb67949564aa9a7.
 // ASICEN has no serial descriptor; explicit instances and observed USB topology
-// replace serial selection. Model and diagnostic options describe its adapter.
+// replace serial selection. Diagnostic options describe its adapter.
 #ifndef ASICEN_USERLAND_ASICEND_ARGS_H
 #define ASICEN_USERLAND_ASICEND_ARGS_H
 
@@ -211,7 +211,6 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
 
     DaemonArguments result;
     if (mock) result.instance = "default";
-    bool have_model = false;
     bool have_firmware = false;
     bool have_runtime = false;
     bool have_instance = false;
@@ -299,7 +298,7 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
         if (mock && (option == "--device" || option == "--firmware" ||
                      option == "--fd" || option == "--usb-path"))
             return invalid("unknown argument");
-        if (option != "--device" && option != "--model" && option != "--firmware" &&
+        if (option != "--device" && option != "--firmware" &&
             option != "--runtime-dir" && option != "--fd" && option != "--instance") {
             return invalid("unknown argument");
         }
@@ -325,11 +324,6 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
                 }
             }
             result.device_selector = value;
-        } else if (option == "--model") {
-            if (have_model) return invalid("duplicate --model");
-            have_model = true;
-            result.expected_model = find_profile_by_model(value);
-            if (result.expected_model == nullptr) return invalid("unknown ASICEN model");
         } else if (option == "--instance") {
             if (have_instance) return invalid("duplicate --instance");
             have_instance = true;
@@ -369,9 +363,6 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             return invalid("--device requires --instance");
         if (result.have_satellite_slot && !result.probe_satellite)
             return invalid("--slot requires --probe-satellite");
-        if (!result.firmware.empty() && result.expected_model == nullptr &&
-            result.file_descriptor_count != 0U)
-            return invalid("--firmware with --fd requires --model");
     }
     if (have_runtime && result.runtime_directory.empty()) {
         return invalid("--runtime-dir must not be empty");

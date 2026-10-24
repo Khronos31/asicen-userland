@@ -30,6 +30,10 @@ def rejects(*args):
     check('libusb_init' not in result.stderr,
           f'argument rejection for {args!r} must not reach libusb_init')
 
+help_result = run('--help')
+check(help_result.returncode == 0 and '--model MODEL' not in help_result.stdout,
+      'normal daemon help must not expose a model selector')
+
 
 # --device and --fd cannot be mixed.
 rejects('--device', 'usb:1-2', '--instance', 'test', '--fd', '3')
@@ -57,9 +61,11 @@ with tempfile.TemporaryDirectory() as directory:
     path.write_bytes(bytes(16384))
     for candidate, expected in ((path, 10), (path.with_name('missing.bin'), 3)):
         result = run('--device', 'usb:1-1', '--instance', 'preflight',
-                     '--model', 'w3u3', '--firmware', str(candidate))
+                     '--firmware', str(candidate))
         check(result.returncode == expected, result.stderr)
         check('libusb_init' not in result.stderr and 'enclosure identity' not in result.stderr,
               'rejected product firmware must not reach USB access')
+
+rejects('--device', 'usb:1-1', '--instance', 'preflight', '--model', 'w3u3')
 
 print('fd CLI checks passed (no hardware access)')

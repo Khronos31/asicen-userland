@@ -221,7 +221,8 @@ px4::userland::Result<std::string> observed_identity(
     const bool loader = descriptor.idVendor == 0x1738U &&
         (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U);
     if (profile == nullptr && loader) profile = options.expected_model;
-    if ((!loader && profile == nullptr) || (options.expected_model != nullptr &&
+    if ((!loader && profile == nullptr) || (loader && options.expected_model == nullptr &&
+        options.firmware.empty()) || (options.expected_model != nullptr &&
         profile->model_id != options.expected_model->model_id))
         return px4::userland::Result<std::string>::failure(px4::userland::Error::UNSUPPORTED);
     asicen::UsbFunctionObservation observation;
@@ -248,6 +249,34 @@ px4::userland::Result<std::string> observed_identity(
     if (identity.empty())
         return px4::userland::Result<std::string>::failure(px4::userland::Error::NOT_READY);
     return px4::userland::Result<std::string>::success(identity);
+}
+
+px4::userland::Error infer_file_descriptor_model(libusb_context* context,
+                                                   Options* options)
+{
+    if (context == nullptr || options == nullptr)
+        return px4::userland::Error::INVALID_ARGUMENT;
+    const asicen::DeviceProfile* inferred_model = nullptr;
+    for (std::size_t index = 0U; index < options->file_descriptor_count; ++index) {
+        asicen::LibusbDevice device;
+        const int opened = device.open(context, options->file_descriptors[index]);
+        if (opened != 0) return asicen::map_libusb_acquisition_error(opened);
+        libusb_device_descriptor descriptor{};
+        const int described = device.descriptor(&descriptor);
+        if (described != 0) return asicen::map_libusb_error(described);
+        if (descriptor.idVendor == 0x1738U &&
+            (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U)) {
+            continue;
+        }
+        const auto* profile = asicen::find_profile(descriptor.idVendor, descriptor.idProduct);
+        if (profile == nullptr || !asicen::profile_runtime_supported(*profile) ||
+            (inferred_model != nullptr && inferred_model->model_id != profile->model_id)) {
+            return px4::userland::Error::UNSUPPORTED;
+        }
+        inferred_model = profile;
+    }
+    options->expected_model = inferred_model;
+    return px4::userland::Error::OK;
 }
 
 px4::userland::Result<std::vector<std::uint8_t>> observed_port_path(
@@ -643,7 +672,11 @@ int load_loader_firmware(libusb_context* context, Options& options,
         if (rc != 0) return diagnostic.finish(rc);
         if (model == nullptr) {
             if (uploaded.port_path.empty()) {
-                std::fprintf(stderr, "firmware: runtime topology unavailable for model inference\n");
+                if (options.file_descriptor_count != 0U) {
+                    std::fprintf(stderr, "firmware: transfer complete; regrant runtime FD and rerun without --firmware\n");
+                } else {
+                    std::fprintf(stderr, "firmware: runtime topology unavailable for model inference\n");
+                }
                 return diagnostic.finish(exit_status(px4::userland::Error::NOT_READY));
             }
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
@@ -807,6 +840,19 @@ int run_asicend_hardware(int argc, char** argv) {
         if (selected != px4::userland::Error::OK) {
             std::fprintf(stderr, "device selector: %s\n", px4::userland::error_string(selected));
             return exit_status(selected);
+        }
+    }
+    if (options.file_descriptor_count != 0U) {
+        const auto inferred = infer_file_descriptor_model(context, &options);
+        if (inferred != px4::userland::Error::OK) {
+            std::fprintf(stderr, "file descriptor model: %s\n",
+                         px4::userland::error_string(inferred));
+            return exit_status(inferred);
+        }
+        if (options.expected_model == nullptr &&
+            options.file_descriptor_count == 2U && !options.firmware.empty()) {
+            std::fprintf(stderr, "firmware: loader FDs without a runtime model must be provisioned one at a time\n");
+            return exit_status(px4::userland::Error::NOT_READY);
         }
     }
     if (options.file_descriptor_count == 2U && options.expected_model != nullptr &&
