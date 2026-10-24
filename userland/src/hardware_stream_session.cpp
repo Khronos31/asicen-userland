@@ -505,6 +505,10 @@ HardwareStreamService::read(const TunerAttachment& attachment,
         return Result<px4::userland::TunerStreamReadResult>::failure(Error::INVALID_ARGUMENT);
     }
     std::unique_lock<std::mutex> lock(mutex_);
+    if (draining_ && matches_final_locked(attachment) && !final_snapshot_ready_) {
+        return Result<px4::userland::TunerStreamReadResult>::success(
+            {0U, false, true, TunerStreamTerminal::none});
+    }
     if (!matches_locked(attachment) && !(draining_ && matches_final_locked(attachment))) {
         if (matches_final_locked(attachment) && state_ == State::detached &&
             !final_snapshot_ready_) {
@@ -517,6 +521,10 @@ HardwareStreamService::read(const TunerAttachment& attachment,
         condition_.wait_for(lock, std::chrono::milliseconds(timeout.milliseconds), [&] {
             return queue_bytes_ != 0U || worker_done_ || state_ != State::running;
         });
+    }
+    if (draining_ && matches_final_locked(attachment) && !final_snapshot_ready_) {
+        return Result<px4::userland::TunerStreamReadResult>::success(
+            {0U, false, true, TunerStreamTerminal::none});
     }
     if (!matches_locked(attachment) && !(draining_ && matches_final_locked(attachment))) {
         if (matches_final_locked(attachment) && state_ == State::detached &&
