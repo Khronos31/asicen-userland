@@ -94,7 +94,7 @@ jobs:
                 attempt=$((attempt + 1));
               done
             };
-            apt_install_retry git cmake ninja-build g++ pkg-config libpcsclite-dev binutils python3;
+            apt_install_retry ca-certificates git cmake ninja-build g++ pkg-config libpcsclite-dev binutils python3;
             # The bind mount retains the runner UID; trust only this checkout.
             git config --global --add safe.directory /src;
             scripts/build-linux-ifd.sh --libc glibc --output /src/build-ifd-glibc;
@@ -177,7 +177,7 @@ jobs:
                 attempt=$((attempt + 1));
               done
             };
-            apt_install_retry git cmake ninja-build g++ pkg-config libpcsclite-dev python3 binutils;
+            apt_install_retry ca-certificates git cmake ninja-build g++ pkg-config libpcsclite-dev python3 binutils;
             # The bind mount retains the runner UID; trust only this checkout.
             git config --global --add safe.directory /src;
             scripts/build-linux-ifd.sh --libc glibc --output /src/build-ifd-glibc;
