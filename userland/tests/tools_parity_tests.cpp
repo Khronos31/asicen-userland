@@ -59,6 +59,12 @@ bool arguments_match_reference()
     CHECK(!parse({"--device", "usb:1-2", "--device", "usb:1-3",
                   "--instance", "test"}).valid);
     CHECK(!parse({"--device", "usb:1-2", "--fd", "3", "--instance", "test"}).valid);
+    CHECK(!parse({"--usb-path", "1:2"}).valid &&
+          parse({"--usb-path", "1:2"}).error == "unknown argument");
+    for (const char* option : {"--probe-satellite", "--probe-card", "--card-only",
+                               "--slot"}) {
+        CHECK(!parse({option}).valid && parse({option}).error == "unknown argument");
+    }
     CHECK(parse({"--fd", "3", "--instance", "test"}).valid);
     CHECK(parse({"--fd", "3"}).valid && parse({"--fd", "3"}).instance.empty());
     CHECK(parse({}, true).valid && parse({}, true).instance == "default");
