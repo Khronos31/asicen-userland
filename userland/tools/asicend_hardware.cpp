@@ -471,10 +471,12 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
 // topology so the re-enumerated runtime can be matched to it.
 // Returns 0 when at least one loader was transferred, kLoadFirmwareWarm when all
 // addressed devices were already runtime, or the mapped public error class.
-int load_loader_firmware(libusb_context* context, Options& options,
+int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
                          const asicen::FirmwareImage& firmware,
                          LoaderIdentity* loader_identity,
                          std::vector<asicen::UploadedRuntimeIdentity>* uploaded_identities) {
+    libusb_context* context = owned_context.get();
+    if (context == nullptr) return exit_status(px4::userland::Error::NOT_READY);
     const loader_diag::Mode diagnostic_mode = loader_diag::parse_mode(
         std::getenv("ASICEN_DIAGNOSTIC_LOADER"));
     if (diagnostic_mode == loader_diag::Mode::Invalid) {
@@ -671,6 +673,16 @@ int load_loader_firmware(libusb_context* context, Options& options,
         const int rc = transfer_firmware_to_loader(device, firmware, trace, target);
         if (rc != 0) return diagnostic.finish(rc);
         device.close();
+        if (options.file_descriptor_count == 0U) {
+            owned_context.close();
+            const int initialized = owned_context.initialize(false);
+            if (initialized != 0) {
+                std::fprintf(stderr, "firmware: libusb context refresh failed: %s\n",
+                             libusb_error_name(initialized));
+                return diagnostic.finish(exit_status(asicen::map_libusb_error(initialized)));
+            }
+            context = owned_context.get();
+        }
         if (model == nullptr) {
             if (uploaded.port_path.empty()) {
                 if (options.file_descriptor_count != 0U) {
@@ -960,7 +972,7 @@ int run_asicend_hardware(int argc, char** argv) {
                 }
             }
             const int transferred = load_loader_firmware(
-                context, options, firmware.value(), nullptr, nullptr);
+                owned_context, options, firmware.value(), nullptr, nullptr);
             if (transferred != 0) return transferred;
             std::fprintf(stderr, "firmware: loader transfer complete; grant the runtime USB function(s) and rerun without --firmware\n");
             return 3;
@@ -1127,8 +1139,9 @@ int run_asicend_hardware(int argc, char** argv) {
         // (firmware already present) and claim proceeds without an upload.
         LoaderIdentity loader_identity;
         std::vector<asicen::UploadedRuntimeIdentity> uploaded_identities;
-        const int loaded = load_loader_firmware(context, options, firmware.value(),
+        const int loaded = load_loader_firmware(owned_context, options, firmware.value(),
                                                 &loader_identity, &uploaded_identities);
+        context = owned_context.get();
         if (loaded == kLoadFirmwareWarm) {
             // warm runtime: addressed device is not a loader, firmware is present
             std::fprintf(stderr, "firmware: addressed device is already runtime; skipping upload\n");
