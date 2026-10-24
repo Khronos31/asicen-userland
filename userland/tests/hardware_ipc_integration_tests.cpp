@@ -275,6 +275,7 @@ bool run(bool hold_detach = false)
     auto context = std::move(assembled.value());
     std::atomic<bool> serving{true};
     std::thread poller([&] {
+        report_current_stack("hw-ipc: listener");
         std::fprintf(stderr, "hw-ipc: poll-start\n");
         while (serving.load(std::memory_order_acquire)) (void)context->poll_once(Timeout{10U});
     });

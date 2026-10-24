@@ -481,6 +481,7 @@ bool test_card_service_through_core_ipc()
     auto context = std::move(created.value());
     std::atomic<bool> done{false};
     std::thread pump([&] {
+        report_current_stack("card-core: listener");
         std::fprintf(stderr, "card-core: poll-start\n");
         while (!done.load()) {
             (void)context->poll_once(Timeout{5U});
