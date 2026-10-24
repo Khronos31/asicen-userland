@@ -425,6 +425,7 @@ def self_test_android_notice_and_archive(repo_root: Path, platform: str = "andro
                 }
         write_text(stage / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         write_checksums(stage)
+        normalize_stage_modes(stage)
         archive = Path(temporary) / f"asicen-userland-{version}-{platform}.tar.gz"
         deterministic_tar(stage, archive)
         testdata = repo_root / "scripts" / "testdata"
@@ -531,14 +532,17 @@ def self_test_windows_archive(repo_root: Path) -> None:
         for name, payload in files.items():
             _write_bytes(stage / name, payload)
             (stage / name).chmod(0o755 if name.endswith(".exe") else 0o644)
-        current_notice = notice.replace(
-            f"corresponding-source-archive=asicen-userland-{version}-source.tar.gz",
-            f"corresponding-source-archive={source_archive_name}") + (
+        current_notice = notice
+        if core_revision:
+            current_notice = current_notice.replace(
+                f"corresponding-source-archive=asicen-userland-{version}-source.tar.gz",
+                f"corresponding-source-archive={source_archive_name}")
+            current_notice += (
             "dependency.core.repository=https://github.com/Khronos31/dtv-userland-core\n"
             f"dependency.core.commit={core_revision}\n"
             "dependency.core.winscard.license=GPL-2.0-only\n"
             f"dependency.core.source-archive={source_archive_name}\n"
-            f"dependency.core.source-archive.sha256={source_archive_sha256}\n" if core_revision else "")
+            f"dependency.core.source-archive.sha256={source_archive_sha256}\n")
         write_text(stage / "DEPENDENCY-NOTICE.txt", current_notice if notice_text is None else notice_text)
         write_text(stage / "evidence" / "binary-audit.json",
                    json.dumps(evidence, indent=2, sort_keys=True) + "\n")
