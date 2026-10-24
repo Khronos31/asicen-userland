@@ -16,6 +16,8 @@ namespace {
 using px4::userland::Error;
 using px4::userland::Result;
 using px4::userland::TunerAttachment;
+using px4::userland::TunerHzProgramming;
+using px4::userland::TunerStrictProfile;
 using px4::userland::TunerStreamTerminal;
 using px4::userland::ipc::System;
 
@@ -113,6 +115,52 @@ Result<void> HardwareStreamService::tune_satellite(std::uint8_t receiver,
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     return frontend_.tune_satellite(receiver, frequency_khz, timeout_ms);
+}
+
+Result<TunerHzProgramming> HardwareStreamService::tune_terrestrial_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (frequency_hz < 40000000U || frequency_hz > 1002000000U ||
+        frequency_hz / 1000U > UINT32_MAX)
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    // ASICEN's hardware tune commands use integer kHz; report the floor conversion.
+    const std::uint32_t frequency_khz = static_cast<std::uint32_t>(frequency_hz / 1000U);
+    const auto tuned = tune_terrestrial(receiver, frequency_khz, timeout_ms);
+    if (!tuned) return Result<TunerHzProgramming>::failure(tuned.error());
+    TunerHzProgramming result;
+    result.programmed_hz = static_cast<std::uint64_t>(frequency_khz) * 1000U;
+    return Result<TunerHzProgramming>::success(result);
+}
+
+Result<TunerHzProgramming> HardwareStreamService::tune_satellite_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (frequency_hz < 146875000U || frequency_hz > 2350000000U ||
+        frequency_hz / 1000U > UINT32_MAX)
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    const std::uint32_t frequency_khz = static_cast<std::uint32_t>(frequency_hz / 1000U);
+    const auto tuned = tune_satellite(receiver, frequency_khz, timeout_ms);
+    if (!tuned) return Result<TunerHzProgramming>::failure(tuned.error());
+    TunerHzProgramming result;
+    result.programmed_hz = static_cast<std::uint64_t>(frequency_khz) * 1000U;
+    return Result<TunerHzProgramming>::success(result);
+}
+
+TunerStrictProfile HardwareStreamService::strict_profile(
+    std::uint8_t receiver, System system) const noexcept
+{
+    if (!receiver_supports(receiver, system)) return {};
+    TunerStrictProfile result;
+    result.native_hz = true;
+    if (system == System::ISDB_T) {
+        result.min_hz = 40000000U;
+        result.max_hz = 1002000000U;
+    } else {
+        result.min_hz = 146875000U;
+        result.max_hz = 2350000000U;
+        result.lnb_voltage_mask = 0x03U;
+    }
+    return result;
 }
 
 Result<bool> HardwareStreamService::is_locked(std::uint8_t receiver, System system) noexcept

@@ -13,7 +13,7 @@
 #include "asicen/loader_firmware.h"
 #include "asicen/startup_readiness.h"
 #include "asicen/firmware.h"
-#include "px4/posix_ipc.h"
+#include "asicen/legacy_posix_ipc.h"
 #include "px4/platform_sleep.h"
 
 #include <libusb.h>

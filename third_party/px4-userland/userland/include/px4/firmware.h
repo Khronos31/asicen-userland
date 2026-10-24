@@ -41,8 +41,13 @@ private:
 
     friend class FirmwareProvider;
     friend class FirmwareTestAccess;
+#if defined(ASICEN_USE_DTV_CORE) || defined(DTV_USERLAND_ERROR_H)
+    template <typename T>
+    friend class dtv::userland::Result;
+#else
     template <typename T>
     friend class Result;
+#endif
 
     std::vector<std::uint8_t> data_;
 };

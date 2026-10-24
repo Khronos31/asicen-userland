@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "px4_ts_core.h"
-#include "px4_ts_posix.h"
+#include "dtv/host_ts/px4_ts_core.h"
+#include "dtv/host_ts/px4_ts_posix.h"
 
 #include <cerrno>
 #include <chrono>
@@ -17,6 +17,10 @@ namespace {
 
 using namespace px4::userland;
 using namespace px4::userland::cli;
+
+const TsClientProfile kProfile{
+    "asicen-ts", "asicen-userland", dtv::userland::identity::Product::asicen,
+    false, true, nullptr, false};
 
 volatile std::sig_atomic_t stop_flag = 0;
 
@@ -80,14 +84,14 @@ void print_counters(const char* label, const ipc::CountersPayload& counters) noe
 int main(int argc, char** argv)
 {
     const Px4TsArguments arguments =
-        parse_px4_ts_arguments(argc, const_cast<const char* const*>(argv));
+        parse_px4_ts_product_arguments(argc, const_cast<const char* const*>(argv), kProfile);
     if (!arguments.valid) {
         std::fprintf(stderr, "argument error: %s\n", arguments.error.c_str());
-        print_px4_ts_usage(stderr);
+        print_px4_ts_usage(kProfile, stderr);
         return 2;
     }
     if (arguments.help) {
-        print_px4_ts_usage(stdout);
+        print_px4_ts_usage(kProfile, stdout);
         return 0;
     }
     if (!install_signals()) {
@@ -112,8 +116,8 @@ int main(int argc, char** argv)
     PosixSignal signal;
     Px4TsFailureKind failure_kind = Px4TsFailureKind::ipc;
     Px4TsRunDiagnostics diagnostics;
-    const auto result = Px4TsRunner::run(arguments, output, clock, signal,
-                                         &failure_kind, &diagnostics);
+    const auto result = Px4TsRunner::run_wire(arguments, kProfile, output, clock, signal,
+                                              &failure_kind, &diagnostics);
     if (!result) {
         std::fprintf(stderr, "asicen-ts: %s\n", error_string(result.error()));
         std::fprintf(stderr, "written packets=%llu bytes=%llu\n",
