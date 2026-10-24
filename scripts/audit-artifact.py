@@ -1011,6 +1011,13 @@ def verify_manifest(archive: Path, members: dict[str, tarfile.TarInfo], platform
         fail("manifest source_ref metadata is missing")
     if manifest.get("embedded_libusb") != {"version": "1.0.30", "linkage": "static"}:
         fail("manifest embedded libusb metadata mismatch")
+    if platform == WINDOWS_PLATFORM:
+        monitor = manifest.get("windows_stdin_eof_monitor")
+        if (not isinstance(monitor, dict) or monitor.get("program") != "asicend.exe" or
+                not isinstance(monitor.get("core_revision"), str) or
+                not re.fullmatch(r"[0-9a-f]{40}", monitor["core_revision"]) or
+                monitor.get("license") != "GPL-2.0-only"):
+            fail("Windows stdin EOF monitor manifest metadata mismatch")
     validate_version(str(manifest.get("version", "")))
     if sorted(manifest.get("programs", [])) != sorted(PROGRAMS):
         fail("manifest does not describe exactly the three production programs")
@@ -1767,6 +1774,12 @@ def audit_binary_archive(args: argparse.Namespace) -> dict:
             fail("Linux dependency notice libc mismatch")
         if fields.get("corresponding-source-archive") != f"asicen-userland-{manifest['version']}-source.tar.gz":
             fail("native dependency notice must point to the separately published source archive")
+        if args.platform == WINDOWS_PLATFORM:
+            monitor = manifest["windows_stdin_eof_monitor"]
+            if (fields.get("dependency.windows-stdin-eof-monitor.program") != "asicend.exe" or
+                    fields.get("dependency.windows-stdin-eof-monitor.license") != "GPL-2.0-only" or
+                    fields.get("dependency.windows-stdin-eof-monitor.core-commit") != monitor["core_revision"]):
+                fail("Windows stdin EOF monitor manifest/notice metadata mismatch")
     verify_checksums(args.archive.resolve(), members)
     return {"archive": str(args.archive.resolve()), "platform": args.platform, "members": sorted(members), "manifest": manifest}
 

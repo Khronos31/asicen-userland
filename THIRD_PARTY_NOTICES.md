@@ -50,6 +50,10 @@ The combined CLI executables therefore use GPL version2; existing
 GPL-2.0-or-later source notices remain unchanged. No IT930x hardware backend
 is linked into the ASICEN commands.
 
+The Windows daemon uses the pinned `dtv-userland-core` host-facade stdin EOF
+monitor under GPL-2.0-only. Its source and provenance are included in the
+corresponding-source archive's pinned Core snapshot.
+
 The independently implemented transport transform uses standard DES tables
 and source-inspected protocol permutations, not vendor lookup-table blobs or
 application-license tables. Its synthetic reference oracle requires local

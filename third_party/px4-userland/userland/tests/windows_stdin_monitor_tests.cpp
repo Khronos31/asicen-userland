@@ -2,7 +2,7 @@
 // Windows tests for the cooperative stdin-EOF monitor: already-EOF input,
 // EOF after data, a read failure, and bounded cancel/join when a never-closing
 // pipe is stopped by the main thread. Uses anonymous pipes only.
-#include "px4d_windows_stdin.h"
+#include "dtv/userland/host_facade/windows_stdin.h"
 
 #if defined(_WIN32)
 

@@ -5,7 +5,7 @@
 #include "loader_diagnostic.h"
 #include "px4d_signals.h"
 #if defined(_WIN32)
-#include "px4d_windows_stdin.h"
+#include "dtv/userland/host_facade/windows_stdin.h"
 #endif
 #include "asicen/card_only_service.h"
 #include "asicen/libusb_hardware_backend.h"
