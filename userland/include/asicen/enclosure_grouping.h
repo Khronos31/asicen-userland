@@ -15,6 +15,9 @@ struct UsbFunctionObservation {
     std::uint8_t bus = 0;
     std::vector<std::uint8_t> port_path;
     std::uint8_t address = 0;
+    std::uint16_t parent_hub_vid = 0;
+    std::uint16_t parent_hub_pid = 0;
+    bool parent_hub_known = false;
 };
 
 // Two runtime functions in a W3U3/W3U2 enclosure are expected to be siblings

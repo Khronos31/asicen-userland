@@ -7,6 +7,7 @@
 
 #include "asicen/device_profile.h"
 #include "asicen/enclosure_grouping.h"
+#include "asicend_discovery_json.h"
 #include "asicend_identity.h"
 #include "px4/ipc.h"
 
@@ -98,6 +99,7 @@ inline void append_receivers(std::string& out, const DeviceProfile& profile, boo
 inline std::string format_device_list(const std::vector<UsbFunctionObservation>& observations,
                                        bool json)
 {
+    if (json) return format_discovery_json(observations);
     std::string out = json ? "{\"enclosures\":[" : "";
     bool first_group = true;
     std::vector<bool> used(observations.size(), false);

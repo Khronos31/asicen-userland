@@ -82,7 +82,7 @@ int list_models()
 }
 
 #ifdef ASICEN_ENABLE_LIBUSB
-int list_devices(bool json)
+int list_devices()
 {
     libusb_context* context = nullptr;
     const int initialized = asicen::initialize_libusb_context(&context);
@@ -100,10 +100,14 @@ int list_devices(bool json)
         return asicen::cli::exit_status(asicen::map_libusb_error(static_cast<int>(count)));
     }
     std::vector<asicen::UsbFunctionObservation> observations;
+    bool scan_complete = true;
     for (ssize_t i = 0; i < count; ++i) {
         libusb_device_descriptor descriptor{};
         libusb_device* device = list[i];
-        if (libusb_get_device_descriptor(device, &descriptor) != 0) continue;
+        if (libusb_get_device_descriptor(device, &descriptor) != 0) {
+            scan_complete = false;
+            continue;
+        }
         if (asicen::find_profile(descriptor.idVendor, descriptor.idProduct) == nullptr &&
             !(descriptor.idVendor == 0x1738U &&
               (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U))) continue;
@@ -116,11 +120,20 @@ int list_devices(bool json)
         const int port_count = libusb_get_port_numbers(device, ports, sizeof(ports));
         if (port_count > 0 && port_count <= static_cast<int>(sizeof(ports)))
             observation.port_path.assign(ports, ports + port_count);
+        libusb_device* parent = libusb_get_parent(device);
+        libusb_device_descriptor parent_descriptor{};
+        if (parent != nullptr && libusb_get_device_descriptor(parent, &parent_descriptor) == 0) {
+            observation.parent_hub_vid = parent_descriptor.idVendor;
+            observation.parent_hub_pid = parent_descriptor.idProduct;
+            observation.parent_hub_known = true;
+        } else {
+            scan_complete = false;
+        }
         observations.push_back(std::move(observation));
     }
     libusb_free_device_list(list, 1);
     asicen::release_libusb_context(context);
-    const std::string output = asicen::cli::format_device_list(observations, json);
+    const std::string output = asicen::cli::format_discovery_json(observations, scan_complete);
     if ((!output.empty() &&
          std::fwrite(output.data(), 1U, output.size(), stdout) != output.size()) ||
         std::fflush(stdout) != 0) {
@@ -162,7 +175,7 @@ int main(int argc, char** argv)
     if (arguments.models) return list_models();
     if (arguments.list_json) {
 #ifdef ASICEN_ENABLE_LIBUSB
-        return list_devices(true);
+        return list_devices();
 #else
         const std::string output = asicen::cli::format_device_list({}, true);
         if ((!output.empty() &&
