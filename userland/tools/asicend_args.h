@@ -6,7 +6,6 @@
 #define ASICEN_USERLAND_ASICEND_ARGS_H
 
 #include "asicen/device_profile.h"
-#include "asicen/satellite_tune.h"
 #include "px4/identity.h"
 #include "px4/error.h"
 
@@ -34,12 +33,6 @@ struct DaemonArguments final {
     std::size_t file_descriptor_count = 0U;
     std::string runtime_directory;
     std::string instance;
-    bool probe_satellite = false;
-    bool probe_card = false;
-    bool card_only = false;
-    bool have_satellite_slot = false;
-    std::uint32_t satellite_rf_khz = 0U;
-    std::uint8_t satellite_slot = 0U;
     bool allow_lnb_power = false;
     bool group = false;
     bool exit_on_stdin_eof = false;
@@ -262,38 +255,6 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             continue;
         }
 #endif
-        if (!mock && (option == "--probe-card" || option == "--card-only")) {
-            if (result.probe_card || result.probe_satellite || result.card_only)
-                return invalid("diagnostic modes cannot be combined");
-            result.probe_card = option == "--probe-card";
-            result.card_only = option == "--card-only";
-            continue;
-        }
-        if (!mock && (option == "--probe-satellite" || option == "--slot")) {
-            std::string_view value;
-            if (!take_value(index, argc, argv, value)) {
-                return invalid("option requires a value");
-            }
-            if (option == "--probe-satellite") {
-                if (result.probe_card || result.probe_satellite || result.card_only)
-                    return invalid("diagnostic modes cannot be combined");
-                std::uint64_t frequency = 0U;
-                if (!parse_unsigned_decimal(value, std::numeric_limits<std::uint32_t>::max(),
-                                            &frequency) ||
-                    !is_w3u3_satellite_rf_khz(static_cast<std::uint32_t>(frequency)))
-                    return invalid("--probe-satellite is invalid");
-                result.probe_satellite = true;
-                result.satellite_rf_khz = static_cast<std::uint32_t>(frequency);
-            } else {
-                if (result.have_satellite_slot) return invalid("duplicate --slot");
-                std::uint64_t slot = 0U;
-                if (!parse_unsigned_decimal(value, kW3u3SatelliteTsidSlots - 1U, &slot))
-                    return invalid("--slot must be 0..7");
-                result.have_satellite_slot = true;
-                result.satellite_slot = static_cast<std::uint8_t>(slot);
-            }
-            continue;
-        }
         if (mock && (option == "--firmware" || option == "--fd" || option == "--usb-path"))
             return invalid("unknown argument");
         if (option != "--model" && option != "--firmware" &&
@@ -355,11 +316,8 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             return invalid("--usb-path and --fd cannot be combined");
         if (result.usb_path_count == 0U && result.file_descriptor_count == 0U)
             return invalid("native mode requires --usb-path");
-        if (result.usb_path_count != 0U && !have_instance &&
-            !result.probe_card && !result.probe_satellite)
+        if (result.usb_path_count != 0U && !have_instance)
             return invalid("--usb-path requires --instance");
-        if (result.have_satellite_slot && !result.probe_satellite)
-            return invalid("--slot requires --probe-satellite");
         if (!result.firmware.empty() && result.expected_model == nullptr)
             return invalid("--firmware requires --model");
     }
