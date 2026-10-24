@@ -418,6 +418,11 @@ if(UNIX AND ASICEN_ENABLE_LIBUSB AND (ASICEN_BUILD_TOOLS OR ASICEN_BUILD_TESTS))
         asicen_enable_project_warnings(asicen-${probe}-probe)
     endforeach()
 
+    add_executable(asicen-termux-fd-info-probe
+        userland/tools/termux_fd_info_probe.cpp)
+    target_link_libraries(asicen-termux-fd-info-probe PRIVATE ${ASICEN_LIBUSB_TARGET})
+    asicen_enable_project_warnings(asicen-termux-fd-info-probe)
+
     add_executable(asicen-probe userland/tools/asicen_probe.cpp)
     target_link_libraries(asicen-probe PRIVATE asicen_diagnostic_support)
     asicen_enable_project_warnings(asicen-probe)
