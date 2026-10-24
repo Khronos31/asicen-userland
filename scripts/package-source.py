@@ -129,6 +129,21 @@ def add_libusb(archive: Path, stage: Path) -> None:
         fail("exact libusb source has no COPYING")
 
 
+def resolve_core_source(revision: str, work: Path) -> Path:
+    source = work / "core"
+    try:
+        for command in (
+            ["git", "init", "-q", str(source)],
+            ["git", "-C", str(source), "fetch", "--depth", "1",
+             "https://github.com/Khronos31/dtv-userland-core.git", revision],
+            ["git", "-C", str(source), "checkout", "--detach", "FETCH_HEAD"],
+        ):
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"cannot resolve pinned Core source {revision}: {error}")
+    return source
+
+
 def write_checksums(stage: Path) -> None:
     rows = []
     for path in sorted(stage.rglob("*")):
@@ -187,14 +202,15 @@ def main() -> int:
         commit, tree = add_git_snapshot(root, source_ref, stage)
         add_libusb(args.libusb_source_archive.resolve(), stage)
         core_dependency = None
-        if args.core_source_dir is not None:
-            core_source = args.core_source_dir.resolve()
-            core_revision_path = stage / "repository" / "cmake" / "dtv-userland-core.revision"
-            if not core_revision_path.is_file():
-                fail(f"pinned Core revision is missing from product source: {core_revision_path}")
+        core_revision_path = stage / "repository" / "cmake" / "dtv-userland-core.revision"
+        if args.core_source_dir is not None and not core_revision_path.is_file():
+            fail(f"pinned Core revision is missing from product source: {core_revision_path}")
+        if core_revision_path.is_file():
             core_revision = core_revision_path.read_text(encoding="ascii").strip()
             if not re.fullmatch(r"[0-9a-f]{40}", core_revision):
                 fail("pinned Core revision is invalid")
+            core_source = (args.core_source_dir.resolve() if args.core_source_dir is not None else
+                           resolve_core_source(core_revision, Path(temporary)))
             if git_output(core_source, "rev-parse", "HEAD^{commit}") != core_revision:
                 fail("Core source HEAD does not match the product Core revision pin")
             core_commit, core_tree = add_git_snapshot(
@@ -205,7 +221,7 @@ def main() -> int:
                 "repository": "https://github.com/Khronos31/dtv-userland-core",
                 "commit": core_commit,
                 "tree": core_tree,
-                "license": "GPL-2.0-only",
+                "license": "GPL-2.0-only" if args.core_source_dir is not None else "MIT AND GPL-2.0-only",
                 "source_member_prefix": "third_party/dtv-userland-core/repository/",
             }
         template = stage / "repository" / "packaging" / "REBUILD.md.in"
@@ -214,6 +230,16 @@ def main() -> int:
         rebuild = template.read_text(encoding="utf-8")
         rebuild = rebuild.replace("@VERSION@", args.version).replace("@COMMIT@", commit).replace("@TREE@", tree)
         if core_dependency is not None:
+            rebuild += (
+                "\n## Pinned Core source\n\n"
+                "The fixed Core snapshot is in `third_party/dtv-userland-core/repository`. "
+                "CMake selects it automatically; no Core download is needed. "
+                "The commit/tree are recorded in `source-manifest.json` and "
+                "`third_party/dtv-userland-core/SOURCE-REVISION`. "
+                "The foundation license is in Core `LICENSE` (MIT); GPL-2.0-only adapters "
+                "retain their own `COPYING` and provenance files.\n"
+            )
+        if args.core_source_dir is not None:
             rebuild += (
                 "\n## Windows shared WinSCard source\n\n"
                 "The Windows shared WinSCard adapter is built from the Core source tree under "
@@ -248,9 +274,18 @@ def main() -> int:
             notice += (
                 "dependency.core.repository=https://github.com/Khronos31/dtv-userland-core\n"
                 f"dependency.core.commit={core_dependency['commit']}\n"
-                "dependency.core.winscard.license=GPL-2.0-only\n"
-                "dependency.core.source-path=third_party/dtv-userland-core/repository/adapters/windows_winscard\n"
             )
+            if args.core_source_dir is None:
+                notice += (
+                    f"dependency.core.tree={core_dependency['tree']}\n"
+                    "dependency.core.license=MIT AND GPL-2.0-only\n"
+                    "dependency.core.source-path=third_party/dtv-userland-core/repository\n"
+                )
+            else:
+                notice += (
+                    "dependency.core.winscard.license=GPL-2.0-only\n"
+                    "dependency.core.source-path=third_party/dtv-userland-core/repository/adapters/windows_winscard\n"
+                )
         write_file(stage / "DEPENDENCY-NOTICE.txt", notice.encode())
         manifest = {
             "schema": 1,

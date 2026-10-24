@@ -5,6 +5,26 @@ tree `@TREE@`. The `repository/` directory is the exact tracked source tree;
 `third_party/libusb-1.0.30/` and its original verified source archive are the
 libusb sources used for the static Linux, macOS, and Android binaries.
 
+The pinned Core snapshot is in `third_party/dtv-userland-core/repository/`.
+Its commit and tree are recorded in `source-manifest.json` and
+`third_party/dtv-userland-core/SOURCE-REVISION`; CMake automatically selects
+this bundled source and rejects a revision that differs from the product pin.
+Core is built into feature-specific static libraries for this product, not
+downloaded as prebuilt binaries. Its root MIT license and the separately
+licensed GPL-2.0-only adapters' COPYING/provenance files are retained.
+
+For a device-free host build from the extracted archive, the offline check
+below builds the bundled libusb and all three CLIs, rejects network attempts
+with per-process strace fault injection, and checks the selected Core path
+and product version. Install a C++17 compiler, CMake, Ninja, Make, pkg-config,
+Python 3 and strace first, then run from the archive root:
+
+```sh
+python3 repository/scripts/test-source-rebuild.py \
+  --archive /path/to/asicen-userland-@VERSION@-source.tar.gz \
+  --work-dir /path/to/a-new-build-directory
+```
+
 The existing `firmware/` export-ignore policy excludes vendor firmware from
 this source archive. Building and LGPL relinking do not require firmware.
 To assemble a binary archive, supply the separately obtained, exact
