@@ -222,6 +222,7 @@ target_include_directories(asicen_core_card_session BEFORE PUBLIC
     ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
     ${dtv_userland_core_SOURCE_DIR}/include
     ${ASICEN_PX4_ROOT}/include)
+target_include_directories(asicen_core_card_session PRIVATE ${ASICEN_PX4_ROOT}/src)
 target_compile_definitions(asicen_core_card_session PRIVATE
     ASICEN_USE_DTV_CORE=1 ASICEN_PROFILE_ASICEN=1)
 target_link_libraries(asicen_core_card_session PUBLIC dtv::core Threads::Threads)
