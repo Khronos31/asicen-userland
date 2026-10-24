@@ -755,6 +755,19 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         add_test(NAME asicen-libusb-lnb-lifecycle-tests COMMAND asicen-libusb-lnb-lifecycle-tests)
         set_tests_properties(asicen-libusb-lnb-lifecycle-tests PROPERTIES TIMEOUT 15)
 
+        add_executable(asicen-independent-lnb-daemon-tests
+            userland/tests/independent_lnb_daemon_tests.cpp)
+        target_include_directories(asicen-independent-lnb-daemon-tests PRIVATE
+            ${ASICEN_PX4_ROOT}/tests)
+        target_include_directories(asicen-independent-lnb-daemon-tests BEFORE PRIVATE
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_ctl/include)
+        target_link_libraries(asicen-independent-lnb-daemon-tests PRIVATE
+            asicen_libusb dtv::host_ctl)
+        asicen_enable_project_warnings(asicen-independent-lnb-daemon-tests)
+        add_test(NAME asicen-independent-lnb-daemon-tests
+            COMMAND asicen-independent-lnb-daemon-tests)
+        set_tests_properties(asicen-independent-lnb-daemon-tests PROPERTIES TIMEOUT 60)
+
         add_executable(asicen-libusb-fd-tests
             userland/tests/libusb_fd_tests.cpp)
         target_link_libraries(asicen-libusb-fd-tests PRIVATE asicen_libusb)

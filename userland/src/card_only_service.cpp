@@ -191,6 +191,14 @@ public:
     {
         return hardware_.rollback_tune_power(receiver);
     }
+    Result<void> set_independent_lnb_power(bool enabled) noexcept override
+    {
+        return hardware_.set_independent_lnb_power(enabled);
+    }
+    dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept override
+    {
+        return hardware_.independent_lnb_power_state();
+    }
     void mark_receiver_disconnected(std::uint8_t receiver) noexcept override
     {
         hardware_.mark_receiver_disconnected(receiver);
@@ -258,7 +266,7 @@ private:
 };
 
 bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
-               const char* version,
+               const char* version, bool lnb_power,
                dtv::userland::wire::ListResponse& list) noexcept
 {
     using namespace dtv::userland::wire;
@@ -301,6 +309,12 @@ bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
             static_cast<std::uint16_t>(address.value().function_index + 1U);
         receiver.binding.value.local_id = address.value().local_lane;
         receiver.capabilities.ts_scope = TsScope::multiplex;
+        if (lnb_power && (receiver.systems.mask & 0x02U) != 0U) {
+            receiver.capabilities.controls |= kControlBitLnb;
+            receiver.capabilities.lnb.values.count = 2U;
+            receiver.capabilities.lnb.values.items[0U] = 0U;
+            receiver.capabilities.lnb.values.items[1U] = 15U;
+        }
     }
     list.readers.present = true;
     list.readers.value.count = 1U;
@@ -362,7 +376,8 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
               config.server.epoch.begin());
     config.server.features = wire::kFeatureStateEvent | wire::kFeatureCardService;
     ListResponse list;
-    if (!make_list(*profile, hardware.receiver_count(), ASICEN_PROJECT_VERSION, list)) return 70;
+    if (!make_list(*profile, hardware.receiver_count(), ASICEN_PROJECT_VERSION,
+                   !card_only && hardware.supports_lnb_control(), list)) return 70;
     list.epoch = config.server.epoch;
     config.server.producer = list.producer;
     config.canonical_list = list;

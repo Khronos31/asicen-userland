@@ -37,6 +37,10 @@ struct LibusbW3u3HardwareTestPeer {
         std::uint8_t response = 0U;
         return hw.control(make_gpio_set(value, mask), &response);
     }
+    static void reserve_receiver(LibusbW3u3Hardware& hw, std::uint8_t receiver)
+    {
+        (void)hw.active_receiver_.reserve(receiver);
+    }
     static void stop_monitor(LibusbW3u3Hardware& hw) { hw.stop_lnb_monitor(); }
     static void hold_gate(LibusbW3u3Hardware& hw) { hw.control_gate_.lock(); }
     static void release_gate(LibusbW3u3Hardware& hw) { hw.control_gate_.unlock(); }
@@ -454,6 +458,206 @@ bool test_gate_waiter_rechecks_cancellation()
     CHECK(f.usb.count() == 0U);
     return true;
 }
+
+bool independent_state_is(Fixture& f, bool known, bool value = false)
+{
+    const auto state = f.hw.independent_lnb_power_state();
+    return state.present == known && (!known || state.value == value);
+}
+
+bool test_independent_power_follows_tune_close_and_shutdown()
+{
+    for (const auto model : {ModelId::W3u2, ModelId::W3u3, ModelId::W3u3V2}) {
+        Fixture f(model);
+        CHECK(independent_state_is(f, false));  // Nothing verified yet: null, not false.
+        // No receiver lease is needed for the independent request.
+        CHECK(f.hw.close_receiver(0U));
+        CHECK(f.usb.count() == 0U);
+        CHECK(f.hw.set_independent_lnb_power(true));
+        CHECK(f.usb.on(model) && independent_state_is(f, true, true));
+        LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 0U);
+        // A tune that omits or zeroes the voltage, or fails, does not drop it.
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
+        CHECK(f.usb.on(model));
+        CHECK(f.hw.rollback_tune_power(0U));
+        CHECK(f.usb.on(model));
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
+        CHECK(f.hw.commit_tune_power(0U));
+        CHECK(f.usb.on(model) && independent_state_is(f, true, true));
+        CHECK(f.hw.stop());
+        CHECK(f.hw.close_receiver(0U));  // The receiver's close keeps the independent feed.
+        CHECK(f.usb.on(model) && independent_state_is(f, true, true));
+        CHECK(f.hw.set_independent_lnb_power(false));
+        CHECK(!f.usb.on(model) && independent_state_is(f, true, false));
+        // A receiver's own 15 V request is not cut by independent OFF.
+        LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 0U);
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+        CHECK(f.hw.commit_tune_power(0U));
+        CHECK(f.hw.set_independent_lnb_power(true));
+        CHECK(f.hw.set_independent_lnb_power(false));
+        CHECK(f.usb.on(model) && independent_state_is(f, true, true));
+        CHECK(f.hw.set_independent_lnb_power(true));
+        CHECK(f.hw.close_receiver(0U));  // Receiver gone; the independent request remains.
+        CHECK(f.usb.on(model));
+        CHECK(f.hw.set_independent_lnb_power(false));
+        CHECK(!f.usb.on(model));
+        // A pending tune counts as the receiver's request while independent changes.
+        LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 0U);
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+        CHECK(f.hw.set_independent_lnb_power(true));
+        CHECK(f.hw.rollback_tune_power(0U));  // Failed tune: independent request still holds.
+        CHECK(f.usb.on(model));
+        CHECK(f.hw.shutdown());  // Daemon stop turns everything off.
+        CHECK(!f.usb.on(model) && independent_state_is(f, true, false));
+    }
+    return true;
+}
+
+bool test_independent_power_rejection_does_no_io()
+{
+    for (const auto model : {ModelId::S3u, ModelId::S3u2}) {
+        Fixture f(model);
+        CHECK(f.hw.set_independent_lnb_power(true).error() == Error::UNSUPPORTED);
+        CHECK(f.hw.set_independent_lnb_power(false).error() == Error::UNSUPPORTED);
+        CHECK(f.usb.count() == 0U && independent_state_is(f, false));
+    }
+    Fixture f;
+    f.hw.set_allow_lnb_power(false);
+    CHECK(f.hw.set_independent_lnb_power(true).error() == Error::UNSUPPORTED);
+    CHECK(f.usb.count() == 0U && !f.usb.on(ModelId::W3u3));
+    CHECK(f.hw.set_independent_lnb_power(false));  // OFF stays available.
+    CHECK(independent_state_is(f, true, false));
+    Fixture busy;
+    busy.usb.controller_output = 0xa0U;
+    CHECK(busy.hw.set_independent_lnb_power(true).error() == Error::BUSY);
+    CHECK(!busy.usb.on(ModelId::W3u3));
+    return true;
+}
+
+bool test_independent_changes_during_tune_are_not_rolled_back()
+{
+    Fixture f;
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+    CHECK(f.hw.commit_tune_power(0U));
+    CHECK(f.hw.set_independent_lnb_power(true));
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
+    CHECK(f.hw.set_independent_lnb_power(false));
+    CHECK(!f.usb.on(ModelId::W3u3));
+    CHECK(f.hw.rollback_tune_power(0U));
+    CHECK(f.usb.on(ModelId::W3u3));  // Only the committed receiver request returns.
+    CHECK(f.hw.close_receiver(0U));
+    CHECK(!f.usb.on(ModelId::W3u3) && independent_state_is(f, true, false));
+    // A feed with no receiver still has shutdown cleanup responsibility.
+    CHECK(f.hw.set_independent_lnb_power(true));
+    CHECK(f.hw.shutdown());
+    CHECK(!f.usb.on(ModelId::W3u3) && independent_state_is(f, true, false));
+    return true;
+}
+
+bool test_independent_power_failures_are_not_retained_or_hidden()
+{
+    for (unsigned failure = 0U; failure < 3U; ++failure) {
+        Fixture f;
+        if (failure == 0U) f.usb.short_writes = 1U;
+        if (failure == 1U) f.usb.fail_reads = 1U;
+        if (failure == 2U) f.usb.mismatch_reads = 1U;
+        CHECK(!f.hw.set_independent_lnb_power(true));
+        CHECK(!f.usb.on(ModelId::W3u3) && independent_state_is(f, true, false));
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
+        CHECK(f.hw.commit_tune_power(0U));
+        CHECK(!f.usb.on(ModelId::W3u3));
+    }
+    {
+        Fixture f;
+        f.usb.fail_writes = 1U;
+        CHECK(!f.hw.set_independent_lnb_power(true));
+        CHECK(!f.usb.on(ModelId::W3u3) && !LibusbW3u3HardwareTestPeer::quarantined(f.hw));
+        // The refused request must not come back with a later tune or close.
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
+        CHECK(f.hw.commit_tune_power(0U));
+        CHECK(f.hw.close_receiver(0U));
+        CHECK(!f.usb.on(ModelId::W3u3));
+    }
+    {
+        Fixture f;
+        f.usb.fail_writes = 2U;  // Restoring OFF fails too: quarantined, then forced OFF is verified.
+        CHECK(!f.hw.set_independent_lnb_power(true));
+        CHECK(LibusbW3u3HardwareTestPeer::quarantined(f.hw));
+        CHECK(!f.usb.on(ModelId::W3u3) && independent_state_is(f, true, false));
+        CHECK(!f.hw.shutdown());
+        CHECK(!f.usb.on(ModelId::W3u3));
+    }
+    {
+        Fixture f;
+        f.usb.disconnect_on_write = true;
+        CHECK(f.hw.set_independent_lnb_power(true).error() == Error::DISCONNECTED);
+        CHECK(independent_state_is(f, false));
+        const auto before = f.usb.count();
+        CHECK(f.hw.shutdown());
+        CHECK(f.usb.count() == before);
+    }
+    {
+        Fixture f;  // A failed OFF stays requested, reads null, and is retried on close.
+        CHECK(f.hw.set_independent_lnb_power(true));
+        f.usb.fail_writes = 1U;
+        CHECK(!f.hw.set_independent_lnb_power(false));
+        CHECK(independent_state_is(f, false));
+        CHECK(f.hw.close_receiver(0U));
+        CHECK(!f.usb.on(ModelId::W3u3) && independent_state_is(f, true, false));
+    }
+    {
+        Fixture f;  // A failed tune restores the independent feed rather than turning it off.
+        CHECK(f.hw.set_independent_lnb_power(true));
+        f.usb.fail_writes = 1U;
+        CHECK(!f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+        CHECK(f.usb.on(ModelId::W3u3) && independent_state_is(f, true, true));
+        CHECK(f.hw.close_receiver(0U));
+        CHECK(f.usb.on(ModelId::W3u3));
+    }
+    {
+        Fixture f;  // A quarantined backend does not keep the independent feed over close.
+        CHECK(f.hw.set_independent_lnb_power(true));
+        LibusbW3u3HardwareTestPeer::failed_capture(f.hw);
+        CHECK(!f.hw.close_receiver(0U));
+        CHECK(!f.usb.on(ModelId::W3u3));
+        LibusbW3u3HardwareTestPeer::clear_capture_fixture(f.hw);
+    }
+    {
+        Fixture f(ModelId::W3u3V2);  // Digital protection cutoff drops the request and stays off.
+        CHECK(f.hw.set_independent_lnb_power(true));
+        f.usb.feedback_low();
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!LibusbW3u3HardwareTestPeer::quarantined(f.hw) &&
+               std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        CHECK(LibusbW3u3HardwareTestPeer::quarantined(f.hw));
+        CHECK(!f.usb.on(ModelId::W3u3V2) && independent_state_is(f, true, false));
+        CHECK(!f.hw.set_independent_lnb_power(true));
+        CHECK(!f.usb.on(ModelId::W3u3V2));
+    }
+    return true;
+}
+
+bool test_independent_state_is_readable_while_gate_is_held()
+{
+    Fixture f;
+    CHECK(f.hw.set_independent_lnb_power(true));
+    LibusbW3u3HardwareTestPeer::hold_gate(f.hw);
+    bool known = false;
+    bool value = false;
+    std::thread reader([&] {
+        const auto state = f.hw.independent_lnb_power_state();
+        known = state.present;
+        value = state.value;
+    });
+    reader.join();
+    LibusbW3u3HardwareTestPeer::release_gate(f.hw);
+    CHECK(known && value);
+    f.hw.mark_receiver_disconnected(0U);
+    CHECK(independent_state_is(f, false));
+    return true;
+}
 }  // namespace
 int main()
 {
@@ -466,7 +670,12 @@ int main()
         !test_cancel_and_disconnect_do_not_leave_new_power_owned() ||
         !test_v2_feedback_cutoff_is_terminal() || !test_v2_restoration_failure_forces_off() ||
         !test_v2_cooperative_feedback_during_gate_owned_delay() ||
-        !test_gate_waiter_rechecks_cancellation()) {
+        !test_gate_waiter_rechecks_cancellation() ||
+        !test_independent_power_follows_tune_close_and_shutdown() ||
+        !test_independent_power_rejection_does_no_io() ||
+        !test_independent_changes_during_tune_are_not_rolled_back() ||
+        !test_independent_power_failures_are_not_retained_or_hidden() ||
+        !test_independent_state_is_readable_while_gate_is_held()) {
         return 1;
     }
     return 0;

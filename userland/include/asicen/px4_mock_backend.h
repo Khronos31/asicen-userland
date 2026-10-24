@@ -50,6 +50,10 @@ public:
                                                  std::uint8_t lnb_voltage) noexcept override;
     px4::userland::Result<void> commit_tune_power(std::uint8_t receiver) noexcept override;
     px4::userland::Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override;
+#if defined(ASICEN_USE_DTV_CORE)
+    px4::userland::Result<void> set_independent_lnb_power(bool enabled) noexcept override;
+    dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept override;
+#endif
     // Synthetic state for offline contract checks only. This is neither a
     // hardware capability claim nor a measured output voltage.
     px4::userland::Result<std::uint8_t> simulated_lnb_voltage(std::uint8_t receiver) const noexcept;
@@ -77,6 +81,7 @@ private:
     std::atomic<bool> stopping_{false};
     mutable std::mutex power_mutex_;
     std::array<PowerState, 4U> power_{};
+    bool independent_lnb_ = false;
 };
 
 class MockTunerStream final : public px4::userland::TunerStreamControl {

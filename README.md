@@ -233,6 +233,12 @@ DEVICENAME asicen-userland:runtime=/tmp/asicen-example:instance=w3u3:access=user
 
 `asicenctl` のカード操作コマンドは、未実装の操作に対して適切に失敗を返します（ATR を捏造することはありません）。
 
+LNB 給電に対応する機種（PX-W3U2・PX-W3U3・PX-W3U3 V2）では、`asicenctl` の `lnb-on` / `lnb-off` で筐体の LNB 給電を、TUNER の acquire や選局とは独立に直接 ON/OFF できます。対象の選択は `status` と同じ `--device usb:...` / `--instance` / `--runtime-dir` を使います。ON にはデーモン起動時の `--allow-lnb-power` が必要で、許可がなければ UNSUPPORTED（終了コード 3）を返します。
+
+独立要求は受信部の 15V 要求と合算され、どちらかが要求している間は ON を保ちます。そのため、電圧指定を省略した（または 0V の）選局、選局の失敗によるロールバック、正常な受信部の close では独立要求は解除されず、`lnb-off` も受信中の受信部の給電は切りません。デーモン停止時と、保護動作・後始末の失敗時は独立要求を破棄して OFF を試みます。切断後は GPIO を操作せず、出力状態を不明とします。
+
+認識状態は `status` の `enclosure.lnb_15v_enabled`（true / false / null）で表示します。デーモンが GPIO の読み戻しで確認できた状態だけを true / false とし、未確認・失敗・切断は null です。端子電圧の実測値ではありません（実機での 15V 出力は未検証です）。
+
 ## 注意事項
 
 - **同時受信ストリームの制限**: 同時に受信できるストリームは 1 本のみです。4 チューナー機であっても、バックエンドが公開している受信部は primary 側の 2 系統（0: 衛星、1: 地デジ）のみであり、製品カタログにあるような 4 系統同時受信には対応していません。
