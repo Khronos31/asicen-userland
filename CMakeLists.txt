@@ -15,6 +15,7 @@ if(NOT ASICEN_VERSION_TRAILING STREQUAL "\n" OR
     message(FATAL_ERROR "VERSION must contain exactly N.N.N followed by one newline")
 endif()
 project(asicen_userland VERSION "${ASICEN_PROJECT_VERSION}" LANGUAGES CXX)
+configure_file(packaging/termux/asicen-termux asicen-termux @ONLY)
 
 option(ASICEN_BUILD_TESTS "Build offline portable-core tests" OFF)
 option(ASICEN_ENABLE_LIBUSB "Build the native libusb transport" ON)
@@ -481,7 +482,8 @@ if(UNIX OR WIN32)
         ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
         ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
         ${dtv_userland_core_SOURCE_DIR}/include)
-    target_compile_definitions(asicend PRIVATE ASICEN_USE_DTV_CORE=1)
+    target_compile_definitions(asicend PRIVATE ASICEN_USE_DTV_CORE=1
+        ASICEN_PROJECT_VERSION="${PROJECT_VERSION}")
     target_link_libraries(asicend PRIVATE asicen_core dtv::host_listener_context
         dtv::host_facade Threads::Threads)
     target_include_directories(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools)
@@ -543,7 +545,8 @@ if(UNIX OR WIN32)
         add_executable(asicen-ts
             userland/tools/asicen_ts.cpp)
     endif()
-    target_compile_definitions(asicen-ts PRIVATE ASICEN_PRODUCT_CLI=1)
+    target_compile_definitions(asicen-ts PRIVATE ASICEN_PRODUCT_CLI=1
+        ASICEN_PROJECT_VERSION="${PROJECT_VERSION}")
     target_link_libraries(asicen-ts PRIVATE dtv::host_ts dtv::host_runtime)
     asicen_enable_project_warnings(asicen-ts)
 endif()

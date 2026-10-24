@@ -123,6 +123,10 @@ int main(int argc, char** argv)
         print_px4_ts_usage(kProfile, stdout);
         return 0;
     }
+    if (arguments.version) {
+        std::printf("asicen-ts %s\n", ASICEN_PROJECT_VERSION);
+        return 0;
+    }
     if (!install_handlers()) {
         std::fprintf(stderr, "signal setup failed\n");
         return 70;
