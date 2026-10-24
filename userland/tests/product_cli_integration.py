@@ -306,6 +306,39 @@ with temporary_runtime_root() as temp:
                 assert len(satellite.stdout) == 3 * 188
                 assert all(satellite.stdout[offset:offset + 3] == b"\x47\x1f\xff"
                            for offset in range(0, len(satellite.stdout), 188))
+            # Independent ctl LNB request: only models whose list advertises LNB
+            # control accept it; the others report UNSUPPORTED (exit 3).
+            lnb_on = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
+                         model_instance, "lnb-on", capture_output=True, text=True)
+            if model in ("s3u", "s3u2"):
+                assert lnb_on.returncode == 3 and "unsupported" in lnb_on.stderr, \
+                    (model, lnb_on.returncode, lnb_on.stderr)
+            else:
+                assert lnb_on.returncode == 0 and lnb_on.stdout == "lnb_15v_enabled=true\n", \
+                    (model, lnb_on.returncode, lnb_on.stdout, lnb_on.stderr)
+                on_status = json.loads(run(str(CTL), "--runtime-dir", str(runtime),
+                                           "--instance", model_instance, "status",
+                                           capture_output=True, text=True).stdout)
+                assert on_status["enclosure"]["lnb_15v_enabled"] is True, on_status
+                for lnb_args in ([], ["--lnb-voltage", "0"]):
+                    capture = run(str(TS), "--runtime-dir", str(runtime), "--instance",
+                                  model_instance, "--receiver", "0", "--channel", "BS01_0",
+                                  *lnb_args, "--packet-count", "3", "--output", "-",
+                                  capture_output=True)
+                    assert capture.returncode == 0 and len(capture.stdout) == 3 * 188, \
+                        (model, lnb_args, capture.returncode, capture.stderr)
+                    after_stop = json.loads(run(str(CTL), "--runtime-dir", str(runtime),
+                                                "--instance", model_instance, "status",
+                                                capture_output=True, text=True).stdout)
+                    assert after_stop["enclosure"]["lnb_15v_enabled"] is True, after_stop
+                lnb_off = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
+                              model_instance, "lnb-off", capture_output=True, text=True)
+                assert lnb_off.returncode == 0 and lnb_off.stdout == "lnb_15v_enabled=false\n", \
+                    (model, lnb_off.returncode, lnb_off.stdout, lnb_off.stderr)
+                off_status = json.loads(run(str(CTL), "--runtime-dir", str(runtime),
+                                            "--instance", model_instance, "status",
+                                            capture_output=True, text=True).stdout)
+                assert off_status["enclosure"]["lnb_15v_enabled"] is False, off_status
             model_daemon.send_signal(signal.SIGTERM)
             assert model_daemon.wait(timeout=2) == 0
             assert not model_endpoint.exists()
@@ -331,6 +364,10 @@ with temporary_runtime_root() as temp:
                          "--lnb-voltage", "0", "--packet-count", "3", "--output", "-",
                          capture_output=True)
         assert denied_off.returncode == 0 and len(denied_off.stdout) == 3 * 188
+        denied_ctl_on = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
+                            denied_instance, "lnb-on", capture_output=True, text=True)
+        assert denied_ctl_on.returncode == 3 and "remote=11" in denied_ctl_on.stderr, \
+            (denied_ctl_on.returncode, denied_ctl_on.stderr)
         denied_daemon.send_signal(signal.SIGTERM)
         assert denied_daemon.wait(timeout=2) == 0
         assert not denied_endpoint.exists()

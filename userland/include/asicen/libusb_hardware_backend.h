@@ -121,6 +121,8 @@ public:
                                                  std::uint8_t) noexcept override;
     px4::userland::Result<void> commit_tune_power(std::uint8_t) noexcept override;
     px4::userland::Result<void> rollback_tune_power(std::uint8_t) noexcept override;
+    px4::userland::Result<void> set_independent_lnb_power(bool) noexcept override;
+    dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept override;
     void mark_receiver_disconnected(std::uint8_t) noexcept override;
     void request_stop() noexcept override;
     void request_card_stop() noexcept override { request_stop(); }
@@ -132,6 +134,7 @@ public:
     // The default keeps standalone backend callers (tests, probes) unchanged.
     void set_allow_lnb_power(bool allow) noexcept { allow_lnb_power_ = allow; }
     bool allow_lnb_power() const noexcept { return allow_lnb_power_; }
+    bool supports_lnb_control() const noexcept;
 
     px4::userland::Result<void> prepare(std::uint8_t, px4::userland::ipc::System,
                                         const std::atomic<bool>& cancelled) noexcept override;
@@ -218,7 +221,6 @@ private:
                                 const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>&) noexcept;
     LegacyFrontendProfile legacy_frontend() const noexcept;
     bool snapshot_gpio_state() noexcept;
-    bool supports_lnb_control() const noexcept;
     px4::userland::Result<void> set_lnb_power(bool on, bool cleanup) noexcept;
     px4::userland::Result<void> clear_lnb_power() noexcept;
     px4::userland::Result<void> check_v2_lnb_feedback() noexcept;
@@ -337,8 +339,19 @@ private:
     bool lnb_on_ = false;
     bool lnb_cleanup_required_ = false;
     bool lnb_transaction_active_ = false;
-    bool lnb_previous_on_ = false;
     bool lnb_requested_on_ = false;
+    // The feed is ON while the receiver's committed request or the independent
+    // (ctl) request asks for it. Both are cleared by clear_lnb_power().
+    bool lnb_receiver_on_ = false;
+    bool lnb_independent_on_ = false;
+    // Lock-free mirror of the verified GPIO state for status: 0 unknown, 1 off, 2 on.
+    std::atomic<std::uint8_t> lnb_published_{0U};
+    bool lnb_committed_request() const noexcept { return lnb_receiver_on_ || lnb_independent_on_; }
+    void publish_lnb_state() noexcept
+    {
+        lnb_published_.store(lnb_state_known_ ? (lnb_on_ ? 2U : 1U) : 0U,
+                             std::memory_order_release);
+    }
     std::uint8_t lnb_transaction_receiver_ = kNoActiveReceiver;
     std::uint32_t tuned_frequency_khz_ = 0;
     std::array<std::uint8_t, 0x45> cf_snapshot_{};

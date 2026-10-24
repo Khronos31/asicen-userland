@@ -1618,7 +1618,18 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
     post_gain_readiness_.reset();
     // Independent LNB cleanup is still attempted after another cleanup stage
     // quarantines the receiver. Never release its lease with uncertain power.
-    const auto off = clear_lnb_power();
+    // Only a verified, healthy independent (ctl) feed survives the close.
+    const bool keep_independent = lnb_independent_on_ && lnb_state_known_ && lnb_on_ &&
+                                  !lnb_fault_latched_ && !disconnected_.load() &&
+                                  !cleanup_failed_.load();
+    Result<void> off = Result<void>::success();
+    if (keep_independent) {
+        lnb_receiver_on_ = false;
+        lnb_transaction_active_ = false;
+        lnb_transaction_receiver_ = kNoActiveReceiver;
+    } else {
+        off = clear_lnb_power();
+    }
     if (!off) {
         return off;
     }
@@ -1708,6 +1719,7 @@ Result<void> LibusbW3u3Hardware::set_lnb_power(bool on, bool cleanup) noexcept
     // A failed/short write can already have changed the physical pin.
     lnb_cleanup_required_ = true;
     lnb_state_known_ = false;
+    publish_lnb_state();
     lnb_gpio_io_active_ = true;
     const int written = control(transfer, response.data());
     lnb_gpio_io_active_ = false;
@@ -1741,6 +1753,7 @@ Result<void> LibusbW3u3Hardware::set_lnb_power(bool on, bool cleanup) noexcept
     }
     lnb_on_ = on;
     lnb_state_known_ = true;
+    publish_lnb_state();
     lnb_cleanup_required_ = on;
     lnb_feedback_checked_at_ = steady_now();
     if (!cleanup && cancelled()) {
@@ -1846,9 +1859,12 @@ Result<void> LibusbW3u3Hardware::clear_lnb_power() noexcept
 {
     // Caller holds the control gate; a disconnected bridge is terminal and
     // must never receive a guessed recovery write.
+    lnb_receiver_on_ = false;
+    lnb_independent_on_ = false;
     if (disconnected_.load()) {
         lnb_on_ = false;
         lnb_state_known_ = false;
+        publish_lnb_state();
         lnb_cleanup_required_ = false;
         lnb_transaction_active_ = false;
         lnb_transaction_receiver_ = kNoActiveReceiver;
@@ -1864,6 +1880,59 @@ Result<void> LibusbW3u3Hardware::clear_lnb_power() noexcept
     lnb_transaction_active_ = false;
     lnb_transaction_receiver_ = kNoActiveReceiver;
     return Result<void>::success();
+}
+
+Result<void> LibusbW3u3Hardware::set_independent_lnb_power(bool enabled) noexcept
+{
+    if (!supports_lnb_control() || (enabled && !allow_lnb_power_)) {
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
+    const auto until = steady_now() + std::chrono::seconds(3);
+    if (!acquire_control_gate(until)) {
+        return Result<void>::failure(disconnected_.load()     ? Error::DISCONNECTED
+                                     : cleanup_failed_.load() ? Error::USB_IO
+                                     : stop_requested_.load() ? Error::NOT_READY
+                                                              : Error::TIMEOUT);
+    }
+    std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    DeadlineScope deadline(deadline_, deadline_active_, until);
+    // The independent request needs no receiver lease. It is aggregated with
+    // the receiver's request (a pending tune counts), so neither a tune with
+    // 0 V nor a receiver close drops it, and OFF never cuts a receiver's feed.
+    const bool receiver_on = lnb_transaction_active_ ? lnb_requested_on_ : lnb_receiver_on_;
+    const bool previous = lnb_independent_on_;
+    lnb_independent_on_ = enabled;
+    const auto applied = set_lnb_power(receiver_on || enabled, false);
+    if (applied || !enabled) {
+        // A failed OFF stays requested; the unknown state is reported as null
+        // and the cleanup debt is retried by close/shutdown.
+        return applied;
+    }
+    const Error primary = applied.error();
+    lnb_independent_on_ = previous;
+    if (lnb_cleanup_required_ && !disconnected_.load()) {
+        const auto restored =
+            set_lnb_power(lnb_fault_latched_ ? false : (receiver_on || previous), true);
+        if (!restored) {
+            mark_cleanup_failed(restored.error());
+            (void)clear_lnb_power();
+        }
+    }
+    if (lnb_fault_latched_) {
+        mark_cleanup_failed(primary);
+    }
+    return Result<void>::failure(primary);
+}
+
+dtv::userland::wire::Optional<bool> LibusbW3u3Hardware::independent_lnb_power_state() noexcept
+{
+    dtv::userland::wire::Optional<bool> result{};
+    const std::uint8_t state = lnb_published_.load(std::memory_order_acquire);
+    if (state != 0U && !disconnected_.load()) {
+        result.present = true;
+        result.value = state == 2U;
+    }
+    return result;
 }
 
 Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System system,
@@ -1899,18 +1968,18 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
         return Result<void>::failure(Error::BUSY);
     }
     DeadlineScope deadline(deadline_, deadline_active_, until);
-    lnb_previous_on_ = lnb_state_known_ && lnb_on_;
     lnb_requested_on_ = lnb_voltage == 15U;
     lnb_transaction_active_ = true;
     lnb_transaction_receiver_ = receiver;
     // The pending request determines the feed throughout acquisition, just as
-    // in PX4. A failed tune restores the previous committed request.
-    const Result<void> prepared = set_lnb_power(lnb_requested_on_, false);
+    // in PX4. A failed tune restores the previous committed request. An
+    // independent (ctl) request keeps the feed on regardless of the tune.
+    const Result<void> prepared = set_lnb_power(lnb_requested_on_ || lnb_independent_on_, false);
     if (!prepared) {
         const Error primary = prepared.error();
         if (lnb_cleanup_required_ && !disconnected_.load()) {
             const auto restored =
-                set_lnb_power(lnb_fault_latched_ ? false : lnb_previous_on_, true);
+                set_lnb_power(lnb_fault_latched_ ? false : lnb_committed_request(), true);
             if (!restored) {
                 mark_cleanup_failed(restored.error());
                 (void)clear_lnb_power();
@@ -1941,12 +2010,13 @@ Result<void> LibusbW3u3Hardware::commit_tune_power(std::uint8_t receiver) noexce
         return Result<void>::failure(Error::NOT_READY);
     }
     DeadlineScope deadline(deadline_, deadline_active_, until);
-    if (!lnb_requested_on_ && lnb_on_) {
+    if (!lnb_requested_on_ && !lnb_independent_on_ && lnb_on_) {
         const auto off = set_lnb_power(false, false);
         if (!off) {
             return off;  // The service will pair this with rollback.
         }
     }
+    lnb_receiver_on_ = lnb_requested_on_;
     lnb_transaction_active_ = false;
     lnb_transaction_receiver_ = kNoActiveReceiver;
     return Result<void>::success();
@@ -1972,8 +2042,9 @@ Result<void> LibusbW3u3Hardware::rollback_tune_power(std::uint8_t receiver) noex
     if (disconnected_.load()) {
         return clear_lnb_power();
     }
-    if (!lnb_state_known_ || lnb_on_ != lnb_previous_on_ || lnb_fault_latched_) {
-        const auto restored = set_lnb_power(lnb_fault_latched_ ? false : lnb_previous_on_, true);
+    if (!lnb_state_known_ || lnb_on_ != lnb_committed_request() || lnb_fault_latched_) {
+        const auto restored =
+            set_lnb_power(lnb_fault_latched_ ? false : lnb_committed_request(), true);
         if (!restored) {
             mark_cleanup_failed(restored.error());
             (void)clear_lnb_power();

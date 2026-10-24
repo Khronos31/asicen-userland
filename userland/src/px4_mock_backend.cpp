@@ -237,6 +237,32 @@ Result<void> MockTunerBackend::rollback_tune_power(std::uint8_t receiver) noexce
     return Result<void>::success();
 }
 
+#if defined(ASICEN_USE_DTV_CORE)
+Result<void> MockTunerBackend::set_independent_lnb_power(bool enabled) noexcept
+{
+    if (enabled && !allow_lnb_power_) {
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    if (stopping_.load()) {
+        return Result<void>::failure(Error::NOT_READY);
+    }
+    independent_lnb_ = enabled;
+    return Result<void>::success();
+}
+
+dtv::userland::wire::Optional<bool> MockTunerBackend::independent_lnb_power_state() noexcept
+{
+    std::lock_guard<std::mutex> lock(power_mutex_);
+    bool on = independent_lnb_;
+    for (const auto& power : power_) on = on || power.voltage == 15U;
+    dtv::userland::wire::Optional<bool> result{};
+    result.present = true;
+    result.value = on;
+    return result;
+}
+#endif
+
 Result<std::uint8_t> MockTunerBackend::simulated_lnb_voltage(std::uint8_t receiver) const noexcept
 {
     if (receiver >= receiver_count_) {
@@ -267,6 +293,7 @@ Result<void> MockTunerBackend::shutdown() noexcept
     stopping_.store(true);
     std::lock_guard<std::mutex> lock(power_mutex_);
     power_ = {};
+    independent_lnb_ = false;
     return Result<void>::success();
 }
 

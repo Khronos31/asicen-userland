@@ -271,6 +271,16 @@ their capture and shutdown scenarios use canonical runtime/instance endpoints.
 No legacy raw-path socket API was added to the vendor boundary. The complete
 POSIX `SocketStream` implementation remains byte-identical to the pinned source.
 
+The production ASICEN backend now forwards the pinned Core independent LNB
+setter/status API through both HardwareStreamService and DeferredHardwareShutdown.
+Like PX4's Q3U4 coordinator, it aggregates the independent request with pending
+or committed receiver requests, preserving it across zero-voltage tunes and
+normal receiver close. ASICEN's single active receiver and model-specific GPIO
+polarity/readback/protection remain hardware differences. Core retains CLI,
+IPC, authority and status serialization; neither the vendor subset nor the
+Core pin/API changes. Device-free lifecycle and daemon-to-GPIO tests cover this
+adaptation without claiming measured output voltage.
+
 ## Updating this subset
 
 Compare every imported file with this pin, preserve each documented value or
