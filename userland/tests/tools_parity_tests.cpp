@@ -76,43 +76,107 @@ bool arguments_match_reference()
 bool list_formats_share_observed_identity()
 {
     using asicen::UsbFunctionObservation;
+    UsbFunctionObservation first{0x0b06, 0x0005, 1, {2, 3, 1}, 17};
+    first.parent_hub_vid = 0x05e3;
+    first.parent_hub_pid = 0x0608;
+    first.parent_hub_known = true;
+    UsbFunctionObservation second{0x0b06, 0x0005, 1, {2, 3, 2}, 18};
+    second.parent_hub_vid = 0x05e3;
+    second.parent_hub_pid = 0x0608;
+    second.parent_hub_known = true;
     const std::vector<UsbFunctionObservation> pair{
-        {0x0b06, 0x0005, 1, {2, 2}, 18},
-        {0x0b06, 0x0005, 1, {2, 1}, 17}};
+        first, second};
     const std::string json = asicen::cli::format_device_list(pair, true);
-    CHECK(json.find("\"serial\":null") != std::string::npos &&
-          json.find("\"serial_unique\":false") != std::string::npos);
-    CHECK(json.find("\"identity_kind\":\"usb-topology\",\"identity\":\"usb-1-2\"") != std::string::npos);
-    CHECK(json.find("\"device\":1,\"serial\":null,\"bus\":1,\"address\":17,\"port\":\"1-2.1\"") != std::string::npos);
-    CHECK(json.find("\"receiver\":0,\"device\":1,\"local\":0,\"system\":\"ISDB-S\",\"lnb_15v_supported\":true") != std::string::npos);
-    CHECK(json.find("\"receiver\":1,\"device\":1,\"local\":1,\"system\":\"ISDB-T\",\"lnb_15v_supported\":false") != std::string::npos);
+    CHECK(json.find("\"schema\":{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0}") != std::string::npos);
+    CHECK(json.find("\"serial_unique\":null,\"status\":\"ready\"") != std::string::npos);
+    CHECK(json.find("\"model\":\"PX-W3U3\"") != std::string::npos);
+    CHECK(json.find("\"id\":1,\"usb\":\"0b06:0005\",\"serial\":null,\"bus\":1,\"address\":17,\"port\":\"1-2.3.1\",\"receivers\":[{\"receiver\":0,\"device\":1,\"local\":0,\"systems\":[\"ISDB-S\"]}") != std::string::npos);
+    CHECK(json.find("\"id\":2,\"usb\":\"0b06:0005\",\"serial\":null,\"bus\":1,\"address\":18,\"port\":\"1-2.3.2\",\"receivers\":[{\"receiver\":2,\"device\":2,\"local\":0,\"systems\":[\"ISDB-S\"]}") != std::string::npos);
+    CHECK(json.find("\"lnb_15v_supported\":true,\"readers\":[{\"reader\":0,\"device\":1}]") != std::string::npos);
     const std::string text = asicen::cli::format_device_list(pair, false);
     CHECK(text.find("status=ready receivers=4 serial_unique=false") != std::string::npos &&
-          text.find("dev1_bus=1 dev1_address=17 dev1_port=1-2.1") != std::string::npos);
+          text.find("dev1_bus=1 dev1_address=17 dev1_port=1-2.3.1") != std::string::npos);
     const auto* model = asicen::find_profile(asicen::ModelId::W3u3);
-    CHECK(model != nullptr && asicen::cli::runtime_matches_loader(pair[1], *model, 1U, {2U, 1U}));
-    CHECK(!asicen::cli::runtime_matches_loader(pair[0], *model, 1U, {2U, 1U}) &&
-          !asicen::cli::runtime_matches_loader(pair[1], *model, 2U, {2U, 1U}) &&
+    CHECK(model != nullptr && asicen::cli::runtime_matches_loader(pair[0], *model, 1U, {2U, 3U, 1U}));
+    CHECK(!asicen::cli::runtime_matches_loader(pair[1], *model, 1U, {2U, 3U, 1U}) &&
+          !asicen::cli::runtime_matches_loader(pair[1], *model, 2U, {2U, 3U, 2U}) &&
           !asicen::cli::runtime_matches_loader(pair[1], *model, 1U, {3U, 1U}) &&
           !asicen::cli::runtime_matches_loader(pair[1], *model, 1U, {}));
     auto other_model = pair[1];
     other_model.pid = 0x0006U;
-    CHECK(!asicen::cli::runtime_matches_loader(other_model, *model, 1U, {2U, 1U}));
-    CHECK(asicen::cli::format_device_list({pair[1]}, true).find("\"status\":\"incomplete\"") != std::string::npos);
+    CHECK(!asicen::cli::runtime_matches_loader(other_model, *model, 1U, {2U, 3U, 1U}));
+    const std::string single = asicen::cli::format_device_list({pair[1]}, true);
+    CHECK(single.find("\"status\":\"incomplete\"") != std::string::npos &&
+          single.find("\"receiver\":2,\"device\":2") != std::string::npos &&
+          single.find("\"receiver\":0,\"device\":1") == std::string::npos);
     auto ambiguous = pair;
-    ambiguous.push_back({0x0b06, 0x0005, 1, {2, 3}, 19});
-    const std::string duplicate = asicen::cli::format_device_list(ambiguous, true);
-    CHECK(duplicate.find("\"status\":\"duplicate\"") != std::string::npos &&
-          duplicate.find("\"devices\":[],\"candidates\":[{") != std::string::npos);
+    auto duplicate_observation = first;
+    duplicate_observation.address = 19;
+    ambiguous.push_back(duplicate_observation);
+    const std::string duplicate_json = asicen::cli::format_device_list(ambiguous, true);
+    CHECK(duplicate_json.find("\"status\":\"duplicate\"") != std::string::npos &&
+          duplicate_json.find("\"devices\":[],\"candidates\":[{") != std::string::npos);
+    UsbFunctionObservation loader{0x1738, 0x5211, 1, {2, 3, 1}, 21};
+    loader.parent_hub_vid = 0x05e3;
+    loader.parent_hub_pid = 0x0608;
+    loader.parent_hub_known = true;
+    const std::string mixed = asicen::cli::format_discovery_json({loader, second});
+    CHECK(mixed.find("\"model\":\"PX-W3U3\",\"serial\":null,\"serial_unique\":null,\"status\":\"incomplete\"") != std::string::npos &&
+          mixed.find("\"usb\":\"1738:5211\"") != std::string::npos &&
+          mixed.find("\"receiver\":2,\"device\":2") != std::string::npos);
+    const std::string cold = asicen::cli::format_discovery_json({loader});
+    CHECK(cold.find("\"model\":null") != std::string::npos &&
+          cold.find("\"status\":\"incomplete\"") != std::string::npos &&
+          cold.find("\"usb\":\"1738:5211\"") != std::string::npos &&
+          cold.find("\"receivers\"") == std::string::npos);
+    auto unsupported_port = loader;
+    unsupported_port.port_path.back() = 3U;
+    const std::string loader_on_other_port = asicen::cli::format_discovery_json(
+        {unsupported_port});
+    CHECK(loader_on_other_port.find("\"enclosures\":[]") != std::string::npos &&
+          loader_on_other_port.find("\"ungrouped_usb_devices\":[{\"serial\":null,\"model\":null,\"usb\":\"1738:5211\"") != std::string::npos);
+    UsbFunctionObservation unsupported_hub = first;
+    unsupported_hub.parent_hub_vid = 0x05e3;
+    unsupported_hub.parent_hub_pid = 0x0610;
+    const std::string ungrouped_runtime = asicen::cli::format_discovery_json(
+        {unsupported_hub, second});
+    CHECK(ungrouped_runtime.find("\"model\":\"PX-W3U3\"") != std::string::npos &&
+          ungrouped_runtime.find("\"status\":\"ready\"") == std::string::npos &&
+          ungrouped_runtime.find("\"receiver\":2,\"device\":2") != std::string::npos &&
+          ungrouped_runtime.find("\"receiver\":0,\"device\":1") == std::string::npos);
+    UsbFunctionObservation single_a{0x0b06, 0x0001, 1, {2, 3, 1}, 22};
+    single_a.parent_hub_vid = 0x05e3;
+    single_a.parent_hub_pid = 0x0608;
+    single_a.parent_hub_known = true;
+    UsbFunctionObservation single_b{0x0b06, 0x0001, 1, {2, 3, 2}, 23};
+    single_b.parent_hub_vid = 0x05e3;
+    single_b.parent_hub_pid = 0x0608;
+    single_b.parent_hub_known = true;
+    const std::string ambiguous_models = asicen::cli::format_discovery_json(
+        {single_a, single_b});
+    CHECK(ambiguous_models.find("\"model\":null") != std::string::npos &&
+          ambiguous_models.find("\"id\":1,\"usb\":\"0b06:0001\"") != std::string::npos &&
+          ambiguous_models.find("\"id\":2,\"usb\":\"0b06:0001\"") != std::string::npos &&
+          ambiguous_models.find("\"receivers\"") == std::string::npos);
+    UsbFunctionObservation missing_parent = first;
+    missing_parent.parent_hub_known = false;
+    const std::string unknown_parent = asicen::cli::format_discovery_json(
+        {missing_parent, second});
+    CHECK(unknown_parent.find("\"model\":\"PX-W3U3\"") != std::string::npos &&
+          unknown_parent.find("\"status\":\"ready\"") == std::string::npos &&
+          unknown_parent.find("\"receiver\":2,\"device\":2") != std::string::npos &&
+          unknown_parent.find("\"receiver\":0,\"device\":1") == std::string::npos);
+    const std::string incomplete_scan = asicen::cli::format_discovery_json({loader}, false);
+    CHECK(incomplete_scan.find("\"scan\":{\"complete\":false,\"issues\":[{\"code\":\"usb_observation_incomplete\"") != std::string::npos);
     for (const std::uint16_t pid : {0x0001U, 0x0003U}) {
         const std::string single = asicen::cli::format_device_list({{0x0b06, pid, 2, {4}, 9}}, true);
         CHECK(single.find("\"status\":\"ready\"") != std::string::npos &&
-              single.find("\"identity\":\"usb-2-4\"") != std::string::npos &&
+              single.find("\"port\":\"2-4\"") != std::string::npos &&
               single.find("\"receivers\":[{") != std::string::npos &&
               single.find("\"ungrouped_usb_devices\":[]") != std::string::npos);
     }
     CHECK(asicen::cli::format_device_list({}, true) ==
-          "{\"enclosures\":[],\"ungrouped_usb_devices\":[]}\n");
+          "{\"schema\":{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0},\"producer\":{\"product\":\"asicen\",\"version\":\"0.1.0\"},\"scan\":{\"complete\":true,\"issues\":[]},\"enclosures\":[],\"ungrouped_usb_devices\":[]}\n");
     CHECK(asicen::cli::format_device_list({}, false).empty());
     return true;
 }
