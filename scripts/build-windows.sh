@@ -236,6 +236,7 @@ configure_build() {
 build="$work/build"
 configure_build "$build" OFF ON
 cmake --build "$build" --target asicend asicen-ts asicenctl
+cmake --build "$build" --target dtv_windows_winscard
 
 for program in asicend asicen-ts asicenctl; do
     [ -f "$build/$program.exe" ] || {
@@ -246,6 +247,11 @@ done
 for program in asicend asicen-ts asicenctl; do
     cp "$build/$program.exe" "$output/$program.exe"
 done
+[ -f "$build/_deps/dtv_userland_core-build/WinSCard.dll" ] || {
+    printf '%s\n' 'expected Core WinSCard.dll was not produced' >&2
+    exit 1
+}
+cp "$build/_deps/dtv_userland_core-build/WinSCard.dll" "$output/WinSCard.dll"
 if [ -e "$output/libusb-1.0.dll" ]; then
     printf '%s\n' 'refusing to stage libusb-1.0.dll; libusb is statically linked' >&2
     exit 1

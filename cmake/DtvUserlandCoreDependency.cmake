@@ -23,6 +23,9 @@ set(DTV_USERLAND_BUILD_HOST_RUNTIME ON)
 set(DTV_USERLAND_BUILD_HOST_CTL ON)
 set(DTV_USERLAND_BUILD_HOST_TS ON)
 set(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT ON)
+if(WIN32)
+    set(DTV_USERLAND_BUILD_WINDOWS_WINSCARD ON)
+endif()
 
 FetchContent_Declare(dtv_userland_core
     GIT_REPOSITORY https://github.com/Khronos31/dtv-userland-core.git
