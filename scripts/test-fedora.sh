@@ -64,7 +64,7 @@ grep -F -- '--firmware /opt/asicen-userland/firmware/asicen-loader.bin' "$unit" 
 grep -F -- '--runtime-dir /run/asicen-userland --group' "$unit" >/dev/null
 # SocketListener validates the explicit runtime base as daemon-owned with mode
 # 0750.  The daemon then appends asicen-userland/<instance>, so this unit's actual
-# socket hierarchy is /run/asicen-userland/asicen-userland/<instance>/.  Keep the
+# socket hierarchy is /run/asicen-userland/asicen-userland/v1/<instance>/. Keep the
 # dedicated base and group-mode socket permissions aligned with that contract
 # (0750 directories and 0660 sockets via UMask=0007).
 grep -F 'ReadWritePaths=/run/asicen-userland' "$unit" >/dev/null
