@@ -212,6 +212,10 @@ add_library(asicen_core_card_session STATIC
 if(NOT WIN32)
     target_sources(asicen_core_card_session PRIVATE
         ${ASICEN_PX4_ROOT}/src/posix_ipc.cpp)
+else()
+    target_sources(asicen_core_card_session PRIVATE
+        ${ASICEN_PX4_ROOT}/src/windows/windows_ipc.cpp
+        ${ASICEN_PX4_ROOT}/src/windows/windows_sleep.cpp)
 endif()
 target_include_directories(asicen_core_card_session BEFORE PUBLIC
     userland/include
@@ -231,7 +235,7 @@ if(ASICEN_BUILD_TESTS OR ASICEN_BUILD_TOOLS)
     asicen_enable_project_warnings(asicen_px4_mock)
 endif()
 
-if(ASICEN_BUILD_TESTS)
+if(ASICEN_BUILD_TESTS OR ASICEN_BUILD_TOOLS)
     add_library(asicen_core_test_mock STATIC userland/src/px4_mock_backend.cpp)
     target_include_directories(asicen_core_test_mock PUBLIC userland/include)
     target_include_directories(asicen_core_test_mock BEFORE PUBLIC
@@ -338,9 +342,20 @@ if(ASICEN_BUILD_PCSC_IFD AND UNIX AND NOT ANDROID)
             PUBLIC ${ASICEN_PX4_ROOT}/include
         )
         target_compile_definitions(asicen_pcsc_ifd_core PRIVATE
-            ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:" ASICEN_PROFILE_ASICEN=1)
+            ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:" ASICEN_PROFILE_ASICEN=1
+            ASICEN_USE_DTV_CORE=1)
         target_compile_features(asicen_pcsc_ifd_core PUBLIC cxx_std_17)
-        target_link_libraries(asicen_pcsc_ifd_core PUBLIC asicen_portable_core)
+        foreach(asicen_ifd_core_dependency IN ITEMS
+            dtv_userland_control dtv_userland_wire dtv_userland_host_runtime
+            dtv_userland_host_tuner dtv_userland_host_workers
+            dtv_userland_authority dtv_userland_status_projection
+            dtv_userland_receiver dtv_userland_core)
+            if(TARGET ${asicen_ifd_core_dependency})
+                set_target_properties(${asicen_ifd_core_dependency} PROPERTIES
+                    POSITION_INDEPENDENT_CODE ON)
+            endif()
+        endforeach()
+        target_link_libraries(asicen_pcsc_ifd_core PUBLIC dtv::control dtv::host_runtime)
         set_target_properties(asicen_pcsc_ifd_core PROPERTIES
             POSITION_INDEPENDENT_CODE ON
         )
@@ -486,9 +501,20 @@ if(UNIX OR WIN32)
         # hardware daemon. Not part of the distributed product.
         add_executable(asicend-mock
             userland/tools/asicend_mock.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp)
+            ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp
+            ${ASICEN_PX4_ROOT}/src/identity.cpp)
+        target_include_directories(asicend-mock BEFORE PRIVATE
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+            ${dtv_userland_core_SOURCE_DIR}/include)
         target_include_directories(asicend-mock PRIVATE ${ASICEN_PX4_ROOT}/tools)
-        target_link_libraries(asicend-mock PRIVATE asicen_px4_mock asicen_core Threads::Threads)
+        target_compile_definitions(asicend-mock PRIVATE
+            ASICEN_USE_DTV_CORE=1
+            ASICEN_PROJECT_VERSION="${PROJECT_VERSION}")
+        target_link_libraries(asicend-mock PRIVATE asicen_core_test_mock dtv::host_listener_context
+            dtv::host_facade Threads::Threads)
         asicen_enable_project_warnings(asicend-mock)
 
     endif()
@@ -583,19 +609,27 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
             if(TARGET asicen-ifd-prefix-tests)
                 add_test(NAME asicen-ifd-prefix-tests COMMAND asicen-ifd-prefix-tests)
             endif()
-            if(ASICEN_ENABLE_LIBUSB)
-                add_executable(asicen-card-only-service-tests
-                    userland/tests/card_only_service_tests.cpp)
-                target_include_directories(asicen-card-only-service-tests PRIVATE
-                    third_party/px4-userland/userland/include
-                    third_party/px4-userland/userland/tests)
-                target_link_libraries(asicen-card-only-service-tests PRIVATE
-                    asicen_libusb asicen_pcsc_ifd_core)
-                asicen_enable_project_warnings(asicen-card-only-service-tests)
-                add_test(NAME asicen-card-only-service-tests
-                    COMMAND asicen-card-only-service-tests)
-                set_tests_properties(asicen-card-only-service-tests PROPERTIES TIMEOUT 20)
-            endif()
+        endif()
+        if(ASICEN_ENABLE_LIBUSB)
+            add_executable(asicen-card-only-service-tests
+                userland/tests/card_only_service_tests.cpp)
+            target_include_directories(asicen-card-only-service-tests PRIVATE
+                third_party/px4-userland/userland/include
+                third_party/px4-userland/userland/tests)
+            target_include_directories(asicen-card-only-service-tests BEFORE PRIVATE
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+                ${dtv_userland_core_SOURCE_DIR}/include)
+            target_compile_definitions(asicen-card-only-service-tests PRIVATE
+                ASICEN_USE_DTV_CORE=1)
+            target_link_libraries(asicen-card-only-service-tests PRIVATE
+                asicen_libusb asicen_core_test_mock)
+            asicen_enable_project_warnings(asicen-card-only-service-tests)
+            add_test(NAME asicen-card-only-service-tests
+                COMMAND asicen-card-only-service-tests)
+            set_tests_properties(asicen-card-only-service-tests PROPERTIES TIMEOUT 20)
         endif()
     endif()
     if(APPLE AND TARGET asicen-ifd-prefix-tests)
