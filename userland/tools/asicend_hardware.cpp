@@ -48,21 +48,6 @@ void sleep_ms(std::uint32_t milliseconds) noexcept
 #endif
 }
 
-int satellite_exit_status(asicen::SatelliteOperationResult result) noexcept
-{
-    using asicen::SatelliteOperationResult;
-    switch (result) {
-    case SatelliteOperationResult::Completed: return 0;
-    case SatelliteOperationResult::InvalidArgument: return 2;
-    case SatelliteOperationResult::Cancelled: return 3;
-    case SatelliteOperationResult::DeadlineExceeded: return 5;
-    case SatelliteOperationResult::FailedTransfer:
-    case SatelliteOperationResult::ShortTransfer:
-    case SatelliteOperationResult::VerificationFailed: return 7;
-    }
-    return 70;
-}
-
 class CleanupNotification final {
 public:
     ~CleanupNotification() { px4::userland::px4d::notify_cleanup_complete(); }
@@ -1044,34 +1029,6 @@ int run_asicend_hardware(int argc, char** argv) {
             std::fprintf(stderr, "hardware model/topology/claim refused (dual-function models require sibling paths): %s\n",
                          px4::userland::error_string(claimed.error()));
             result = exit_status(claimed.error());
-        } else if (options.probe_satellite) {
-            const auto probe = hardware->probe_satellite(
-                options.satellite_rf_khz, options.have_satellite_slot,
-                options.satellite_slot, nullptr, &px4::userland::px4d::stop_requested);
-            std::fprintf(stderr,
-                "satellite-probe status=%s rf_khz=%u lock=%u nonempty_slots=%u selected=%u\n",
-                asicen::satellite_operation_result_name(probe.result),
-                options.satellite_rf_khz, probe.locked ? 1U : 0U,
-                static_cast<unsigned>(probe.nonempty_tsid_slots),
-                probe.selected_slot ? 1U : 0U);
-            result = satellite_exit_status(probe.result);
-        } else if (options.probe_card) {
-            const auto probe = hardware->probe_card(nullptr, &px4::userland::px4d::stop_requested);
-            std::fprintf(stderr,
-                "card-probe status=%s atr_valid=%u atr_length=%zu "
-                "response_length=%zu sw=%04x\n",
-                px4::userland::error_string(probe.error),
-                probe.atr_valid ? 1U : 0U, probe.atr_length,
-                probe.response_length, probe.status_word);
-            result = exit_status(probe.error);
-        } else if (options.card_only) {
-            std::fprintf(stderr,
-                "asicend card-only mode: tuner operations are unsupported\n");
-            result = asicen::run_card_only_server(
-                *hardware,
-                options.runtime_directory.empty() ? nullptr : options.runtime_directory.c_str(),
-                options.instance.c_str(),
-                options.group, nullptr, &px4::userland::px4d::stop_requested);
         } else {
             result = asicen::run_live_card_stream_server(
                 *hardware,
