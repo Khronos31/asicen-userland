@@ -28,6 +28,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -547,7 +548,7 @@ int load_loader_firmware(libusb_context* context, const Options& options,
             trace->record(loader_diag::Stage::TopologyResult,
                 target, nports, loader_diag::Domain::Libusb);
         }
-        if (loader_identity != nullptr) {
+        if (loader_identity != nullptr && !uploaded.port_path.empty()) {
             const bool primary = uploaded.port_path.back() == 1U;
             if (loader_identity->port_path.empty() || primary) {
                 loader_identity->bus = uploaded.bus;
@@ -713,84 +714,94 @@ int run_asicend_hardware(int argc, char** argv) {
         std::fprintf(stderr, "enclosure identity: %s\n", px4::userland::error_string(identity.error()));
         return exit_status(identity.error());
     }
-    if (identity.value().empty() && options.file_descriptor_count == 1U &&
-        options.expected_model != nullptr &&
-        options.expected_model->expected_runtime_functions == 1U &&
-        !options.instance.empty()) {
-        identity = px4::userland::Result<std::string>::success(options.instance);
-    }
     if (identity.value().empty()) {
-        if (options.expected_model == nullptr || options.file_descriptor_count == 0U ||
-            options.firmware.empty() || options.file_descriptor_count >
-                options.expected_model->expected_runtime_functions) {
+        const bool pathless_single_runtime = options.expected_model != nullptr &&
+            options.file_descriptor_count == 1U &&
+            options.expected_model->expected_runtime_functions == 1U &&
+            options.firmware.empty();
+        const bool selected_loader_for_transfer = options.expected_model != nullptr &&
+            options.file_descriptor_count != 0U && !options.firmware.empty() &&
+            options.file_descriptor_count <= options.expected_model->expected_runtime_functions;
+        if (!pathless_single_runtime &&
+            (options.expected_model == nullptr || options.file_descriptor_count == 0U ||
+             !selected_loader_for_transfer)) {
             std::fprintf(stderr, "enclosure identity: runtime topology unavailable; loader transfer requires selected model functions\n");
             return exit_status(px4::userland::Error::NOT_READY);
         }
-        if (options.expected_model->expected_runtime_functions == 2U &&
-            options.file_descriptor_count == 2U) {
-            std::fprintf(stderr, "firmware: paired loader FDs require observable sibling topology\n");
-            return exit_status(px4::userland::Error::NOT_READY);
-        }
-        std::array<std::uint8_t, 2U> buses{};
-        std::array<std::uint8_t, 2U> addresses{};
-        for (std::size_t index = 0U; index < options.file_descriptor_count; ++index) {
-            asicen::LibusbDevice device;
-            const int opened = device.open(context, options.file_descriptors[index]);
-            if (opened != 0) {
-                std::fprintf(stderr, "firmware: cannot open selected loader FD: %s\n",
-                             px4::userland::error_string(
-                                 asicen::map_libusb_acquisition_error(opened)));
-                return exit_status(asicen::map_libusb_acquisition_error(opened));
+        if (pathless_single_runtime) {
+            // Keep the selected borrowed FD usable without presenting an
+            // instance token as an observed physical identity.
+        } else {
+            if (options.expected_model->expected_runtime_functions == 2U &&
+                options.file_descriptor_count == 2U) {
+                std::fprintf(stderr, "firmware: paired loader FDs require observable sibling topology\n");
+                return exit_status(px4::userland::Error::NOT_READY);
             }
-            libusb_device_descriptor descriptor{};
-            const int described = device.descriptor(&descriptor);
-            if (described != 0) {
-                std::fprintf(stderr, "firmware: descriptor read failed: %s\n",
-                             libusb_error_name(described));
-                return exit_status(asicen::map_libusb_error(described));
-            }
-            const bool loader = descriptor.idVendor == 0x1738U &&
-                (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U);
-            if (!loader) {
-                std::fprintf(stderr, "firmware: selected pathless FD is not an ASICEN loader\n");
-                return exit_status(px4::userland::Error::UNSUPPORTED);
-            }
-            buses[index] = static_cast<std::uint8_t>(libusb_get_bus_number(device.device()));
-            addresses[index] = static_cast<std::uint8_t>(
-                libusb_get_device_address(device.device()));
-            for (std::size_t previous = 0U; previous < index; ++previous) {
-                if (buses[previous] == buses[index] && addresses[previous] == addresses[index]) {
-                    std::fprintf(stderr, "firmware: selected FDs refer to the same USB function\n");
-                    return exit_status(px4::userland::Error::INVALID_ARGUMENT);
+            std::array<std::uint8_t, 2U> buses{};
+            std::array<std::uint8_t, 2U> addresses{};
+            for (std::size_t index = 0U; index < options.file_descriptor_count; ++index) {
+                asicen::LibusbDevice device;
+                const int opened = device.open(context, options.file_descriptors[index]);
+                if (opened != 0) {
+                    std::fprintf(stderr, "firmware: cannot open selected loader FD: %s\n",
+                                 px4::userland::error_string(
+                                     asicen::map_libusb_acquisition_error(opened)));
+                    return exit_status(asicen::map_libusb_acquisition_error(opened));
+                }
+                libusb_device_descriptor descriptor{};
+                const int described = device.descriptor(&descriptor);
+                if (described != 0) {
+                    std::fprintf(stderr, "firmware: descriptor read failed: %s\n",
+                                 libusb_error_name(described));
+                    return exit_status(asicen::map_libusb_error(described));
+                }
+                const bool loader = descriptor.idVendor == 0x1738U &&
+                    (descriptor.idProduct == 0x5211U || descriptor.idProduct == 0x5216U);
+                if (!loader) {
+                    std::fprintf(stderr, "firmware: selected pathless FD is not an ASICEN loader\n");
+                    return exit_status(px4::userland::Error::UNSUPPORTED);
+                }
+                buses[index] = static_cast<std::uint8_t>(libusb_get_bus_number(device.device()));
+                addresses[index] = static_cast<std::uint8_t>(
+                    libusb_get_device_address(device.device()));
+                for (std::size_t previous = 0U; previous < index; ++previous) {
+                    if (buses[previous] == buses[index] && addresses[previous] == addresses[index]) {
+                        std::fprintf(stderr, "firmware: selected FDs refer to the same USB function\n");
+                        return exit_status(px4::userland::Error::INVALID_ARGUMENT);
+                    }
+                }
+                libusb_config_descriptor* config = nullptr;
+                const int configured = libusb_get_config_descriptor(device.device(), 0U, &config);
+                if (configured != 0 || config == nullptr) {
+                    if (config != nullptr) libusb_free_config_descriptor(config);
+                    std::fprintf(stderr, "firmware: loader configuration read failed: %s\n",
+                                 libusb_error_name(configured));
+                    return exit_status(configured == 0
+                        ? px4::userland::Error::UNSUPPORTED
+                        : asicen::map_libusb_error(configured));
+                }
+                const bool interface0 = config->bNumInterfaces == 1U &&
+                    config->interface[0].num_altsetting == 1 &&
+                    config->interface[0].altsetting[0].bInterfaceNumber == 0U &&
+                    config->interface[0].altsetting[0].bAlternateSetting == 0U;
+                libusb_free_config_descriptor(config);
+                if (!interface0) {
+                    std::fprintf(stderr, "firmware: loader interface profile mismatch\n");
+                    return exit_status(px4::userland::Error::UNSUPPORTED);
                 }
             }
-            libusb_config_descriptor* config = nullptr;
-            const int configured = libusb_get_config_descriptor(device.device(), 0U, &config);
-            if (configured != 0 || config == nullptr) {
-                if (config != nullptr) libusb_free_config_descriptor(config);
-                std::fprintf(stderr, "firmware: loader configuration read failed: %s\n",
-                             libusb_error_name(configured));
-                return exit_status(configured == 0
-                    ? px4::userland::Error::UNSUPPORTED
-                    : asicen::map_libusb_error(configured));
-            }
-            const bool interface0 = config->bNumInterfaces == 1U &&
-                config->interface[0].num_altsetting == 1 &&
-                config->interface[0].altsetting[0].bInterfaceNumber == 0U &&
-                config->interface[0].altsetting[0].bAlternateSetting == 0U;
-            libusb_free_config_descriptor(config);
-            if (!interface0) {
-                std::fprintf(stderr, "firmware: loader interface profile mismatch\n");
-                return exit_status(px4::userland::Error::UNSUPPORTED);
-            }
+            const int transferred = load_loader_firmware(
+                context, options, firmware.value(), nullptr, nullptr);
+            if (transferred != 0) return transferred;
+            std::fprintf(stderr, "firmware: loader transfer complete; grant the runtime USB function(s) and rerun without --firmware\n");
+            return 3;
         }
-        const int transferred = load_loader_firmware(
-            context, options, firmware.value(), nullptr, nullptr);
-        if (transferred != 0) return transferred;
-        std::fprintf(stderr, "firmware: loader transfer complete; grant the runtime USB function(s) and rerun without --firmware\n");
-        return 3;
     }
-    if (options.instance.empty()) options.instance = identity.value();
+    if (options.instance.empty()) {
+        options.instance = identity.value().empty()
+            ? "fd-" + std::to_string(options.file_descriptors[0])
+            : identity.value();
+    }
     if (options.file_descriptor_count == 1U && options.expected_model != nullptr &&
         options.expected_model->expected_runtime_functions == 2U && options.firmware.empty()) {
         const auto primary_path = observed_port_path(context, options, 0U);
@@ -859,10 +870,10 @@ int run_asicend_hardware(int argc, char** argv) {
                              px4::userland::error_string(selected.error()));
                 return exit_status(selected.error());
             }
-        } else if (selected.value().empty() && options.file_descriptor_count != 0U &&
+        } else if (selected.value().empty() && options.file_descriptor_count == 1U &&
                    options.expected_model != nullptr &&
                    options.expected_model->expected_runtime_functions == 1U &&
-                   !options.instance.empty()) {
+                   options.firmware.empty()) {
             // The granted single-function FD remains the selected target;
             // its explicit instance names only the IPC namespace.
         } else if (selected.value() != identity.value()) {
@@ -923,12 +934,16 @@ int run_asicend_hardware(int argc, char** argv) {
         px4::userland::ipc::posix::kControlEndpointName,
         options.group ? px4::userland::ipc::posix::EndpointAccess::shared_group
                       : px4::userland::ipc::posix::EndpointAccess::private_user};
-    auto enclosure_lease = px4::userland::ipc::posix::SerialEndpointLease::acquire_identity(
-        endpoint, identity.value());
-    if (!enclosure_lease) {
-        std::fprintf(stderr, "enclosure endpoint: %s\n",
-                     px4::userland::error_string(enclosure_lease.error()));
-        return exit_status(enclosure_lease.error());
+    std::optional<px4::userland::ipc::posix::SerialEndpointLease> enclosure_lease;
+    if (!identity.value().empty()) {
+        auto acquired = px4::userland::ipc::posix::SerialEndpointLease::acquire_identity(
+            endpoint, identity.value());
+        if (!acquired) {
+            std::fprintf(stderr, "enclosure endpoint: %s\n",
+                         px4::userland::error_string(acquired.error()));
+            return exit_status(acquired.error());
+        }
+        enclosure_lease.emplace(std::move(acquired.value()));
     }
     // Native selectors are now observed port paths, so address changes after
     // firmware transfer cannot redirect the later hardware claim.
@@ -1008,7 +1023,8 @@ int run_asicend_hardware(int argc, char** argv) {
                 }
                 sibling_location = sibling.value().location;
                 sibling_path = sibling.value().port_path;
-                if (primary_location.bus != sibling_location.bus ||
+                if (primary_location.bus != sibling_location.bus || primary_path.empty() ||
+                    sibling_path.empty() ||
                     primary_path == sibling_path ||
                     primary_path.back() != 1U || sibling_path.back() != 2U) {
                     std::fprintf(stderr, "refusing noncanonical primary/sibling port assignment\n");
