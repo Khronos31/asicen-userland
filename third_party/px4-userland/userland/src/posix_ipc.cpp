@@ -670,7 +670,13 @@ void SerialEndpointLease::close() noexcept
 
 SocketStream::~SocketStream() noexcept
 {
+#if defined(ASICEN_USE_DTV_CORE)
+    const int fd = fd_;
+    fd_ = -1;
+    close_fd(fd);
+#else
     close();
+#endif
 }
 
 SocketStream::SocketStream(SocketStream&& other) noexcept : fd_(other.fd_)
@@ -681,13 +687,20 @@ SocketStream::SocketStream(SocketStream&& other) noexcept : fd_(other.fd_)
 SocketStream& SocketStream::operator=(SocketStream&& other) noexcept
 {
     if (this != &other) {
+#if defined(ASICEN_USE_DTV_CORE)
+        const int fd = fd_;
+        fd_ = -1;
+        close_fd(fd);
+#else
         close();
+#endif
         fd_ = other.fd_;
         other.fd_ = -1;
     }
     return *this;
 }
 
+#if !defined(ASICEN_USE_DTV_CORE)
 Result<SocketStream> SocketStream::connect(const EndpointConfig& config,
                                            Timeout timeout) noexcept
 {
@@ -760,14 +773,18 @@ Result<SocketStream> SocketStream::connect(const EndpointConfig& config,
     }
     return Result<SocketStream>::success(SocketStream(fd));
 }
+#endif
 
+#if !defined(ASICEN_USE_DTV_CORE)
 void SocketStream::close() noexcept
 {
     const int fd = fd_;
     fd_ = -1;
     close_fd(fd);
 }
+#endif
 
+#if !defined(ASICEN_USE_DTV_CORE)
 Result<std::size_t> SocketStream::read_some(MutableByteView output,
                                             Timeout timeout) noexcept
 {
@@ -802,7 +819,9 @@ Result<std::size_t> SocketStream::read_some(MutableByteView output,
         }
     }
 }
+#endif
 
+#if !defined(ASICEN_USE_DTV_CORE)
 Result<std::size_t> SocketStream::read_frames(MutableByteView read_buffer,
                                               StreamFramer& framer,
                                               FrameConsumer& consumer,
@@ -814,6 +833,7 @@ Result<std::size_t> SocketStream::read_frames(MutableByteView read_buffer,
     }
     return framer.feed(ByteView{read_buffer.data, received.value()}, consumer);
 }
+#endif
 
 Result<void> SocketStream::write_frame(ByteView frame, Timeout timeout) noexcept
 {
