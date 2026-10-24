@@ -270,15 +270,29 @@ public:
         IfdCardStatus result{};
         if (!card_session_started_) {
             const auto snapshot = dtv::userland::wire::fetch_status(
-                *client_, dtv::userland::Timeout{kRequestTimeoutMs});
+                *client_, dtv::userland::Timeout{kRequestTimeoutMs},
+                dtv::userland::wire::kFeatureCardService);
             if (!snapshot) return Result<IfdCardStatus>::failure(
                 static_cast<Error>(snapshot.error));
-            const auto& readers = snapshot.snapshot.status.readers;
-            if (!readers.present || readers.value.count == 0U)
+            const auto& product = snapshot.snapshot.status.producer.product;
+            const auto& actual_instance = snapshot.snapshot.status.context.instance;
+            const auto& readers = snapshot.snapshot.list.readers;
+            bool reader_found = false;
+            if (readers.present) {
+                for (std::size_t index = 0U; index < readers.value.count; ++index) {
+                    if (readers.value.items[index].id == 0U) reader_found = true;
+                }
+            }
+            if (product.length != kProduct.size() ||
+                std::memcmp(product.bytes.data(), kProduct.data(), kProduct.size()) != 0 ||
+                !actual_instance.present || actual_instance.value.length != instance_.size() ||
+                std::memcmp(actual_instance.value.bytes.data(), instance_.data(),
+                            instance_.size()) != 0 || !reader_found)
                 return Result<IfdCardStatus>::failure(Error::NOT_FOUND);
-            result.present = readers.value.items[0U].card.state ==
-                             dtv::userland::wire::CardState::present;
-            return Result<IfdCardStatus>::success(result);
+            session_.epoch = snapshot.snapshot.status.context.epoch;
+            session_.reader_id = 0U;
+            session_.next_request_id = 4U;
+            card_session_started_ = true;
         }
         const auto status = dtv::userland::wire::card_status(
             *client_, session_, dtv::userland::Timeout{kRequestTimeoutMs});
