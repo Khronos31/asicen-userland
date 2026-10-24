@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// asicend: real-hardware daemon.  Mirrors px4d: native (--usb-path) or fd
+// asicend: real-hardware daemon.  Mirrors px4d: native (--device) or fd
 // modes are selected by their options, and read-only discovery uses
 // --list-json.  The isolated mock service lives in the separate asicend-mock
 // binary; this binary never runs a mock backend.
@@ -36,15 +36,15 @@ void usage(FILE* output)
         "usage: asicend --list-json\n"
         "       asicend --models\n"
         "       asicend --version\n"
-        "       asicend --usb-path BUS:ADDRESS|BUS-PORT "
-        "[--usb-path BUS:ADDRESS|BUS-PORT] [--model MODEL]\n"
+        "       asicend --device serial:...|usb:BUS-PORT[,BUS-PORT...] "
+        "[--model MODEL]\n"
         "                 [--runtime-dir PATH] --instance TOKEN "
         "[--group] [--allow-lnb-power] [--firmware PATH]\n"
         "       asicend --fd FD [--fd FD] [--model MODEL]\n"
         "                 [--runtime-dir PATH] [--instance TOKEN] "
         "[--group] [--allow-lnb-power] [--firmware PATH]\n"
-        "  --usb-path   native topology; up to two values, primary first then\n"
-        "               sibling. Each value is BUS:ADDRESS or BUS-PORT.\n"
+        "  --device     select a device by serial or USB topology; one position\n"
+        "               may resolve an ASICEN sibling when its internal Hub is known.\n"
         "  --fd         granted USB descriptors; up to two, primary first.\n"
         "               Without --instance, use the observed usb-BUS-PORT identity.\n"
         "  --allow-lnb-power  permit explicit ISDB-S 15 V requests; default off\n"

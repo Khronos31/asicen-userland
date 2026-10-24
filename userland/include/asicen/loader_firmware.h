@@ -38,12 +38,12 @@ struct LoaderFirmwareManifest {
     std::array<std::uint8_t, 32> sha256;
 };
 
-// The historical Linux package supplies one image for S3U, S3U2, W3U2 and
-// original W3U3. Its loader IDs do not identify which runtime model is attached.
-// V2 requires the separately verified Windows image and its own start address.
+// Legacy Linux image used by the model-specific diagnostic entry points.
 const LoaderFirmwareManifest& loader_firmware_manifest() noexcept;
-// Returns null for unknown models. The no-argument overload is the legacy image.
+// Returns the diagnostic image assigned to this model, or null if unknown.
 const LoaderFirmwareManifest* loader_firmware_manifest(ModelId model) noexcept;
+// The adopted common startup image is used across all five runtime profiles.
+const LoaderFirmwareManifest& common_loader_firmware_manifest() noexcept;
 bool loader_firmware_supports_model(ModelId model) noexcept;
 
 // Computes SHA-256 without retaining or logging the firmware bytes. A null
@@ -53,8 +53,12 @@ bool loader_firmware_fingerprint(const std::uint8_t* data, std::size_t length,
 
 const std::array<LoaderFirmwareStage, 4>& loader_firmware_stages();
 std::vector<LoaderTransfer> build_loader_transfer_plan();
+// Builds the adopted common startup transfer plan.
+std::vector<LoaderTransfer> build_common_loader_transfer_plan();
 // Uses this model's verified image start address; unknown models return no plan.
 std::vector<LoaderTransfer> build_loader_transfer_plan(ModelId model);
+std::vector<LoaderTransfer> build_loader_transfer_plan(
+    const LoaderFirmwareManifest& manifest);
 
 enum class LoaderFirmwareRead {
     Ok,

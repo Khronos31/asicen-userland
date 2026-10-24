@@ -27,12 +27,22 @@ namespace asicen {
 using px4::userland::Error;
 using detail::Sha256;
 
-bool FirmwareImage::accepted_policy(
-    ModelId model, std::size_t size, const std::array<std::uint8_t, 32U>& digest) noexcept
+namespace {
+
+const LoaderFirmwareManifest* matching_manifest(
+    const std::optional<ModelId>& model, std::size_t size,
+    const std::array<std::uint8_t, 32U>& digest) noexcept
 {
-    const auto* manifest = loader_firmware_manifest(model);
-    return manifest != nullptr && size == manifest->size && digest == manifest->sha256;
+    if (model.has_value()) {
+        const auto* manifest = loader_firmware_manifest(*model);
+        return manifest != nullptr && manifest->size == size && manifest->sha256 == digest
+            ? manifest : nullptr;
+    }
+    const auto& common = common_loader_firmware_manifest();
+    return common.size == size && common.sha256 == digest ? &common : nullptr;
 }
+
+}  // namespace
 
 Result<FirmwareImage> FirmwareProvider::load() const noexcept
 {
@@ -65,13 +75,16 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
         return Result<FirmwareImage>::failure(Error::NOT_FOUND);
     }
 
-    const auto* manifest = loader_firmware_manifest(model_);
-    if (manifest == nullptr) {
+    const auto* expected_manifest = model_.has_value()
+        ? loader_firmware_manifest(*model_) : &common_loader_firmware_manifest();
+    if (model_.has_value() && expected_manifest == nullptr) {
         return Result<FirmwareImage>::failure(Error::FIRMWARE_REJECTED);
     }
 
+    const std::size_t maximum_size = expected_manifest != nullptr
+        ? expected_manifest->size : kLoaderFirmwareBlobSize;
     std::vector<std::uint8_t> data;
-    data.reserve(manifest->size);
+    data.reserve(maximum_size);
     Sha256 sha256;
     std::array<std::uint8_t, 512U> chunk{};
     while (!std::feof(file.get())) {
@@ -82,8 +95,7 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
             return Result<FirmwareImage>::failure(Error::INTERNAL);
         }
         if (count > 0U) {
-            if (data.size() > manifest->size -
-                                  (count > manifest->size ? manifest->size : count)) {
+            if (data.size() > maximum_size || count > maximum_size - data.size()) {
                 return Result<FirmwareImage>::failure(Error::FIRMWARE_REJECTED);
             }
             sha256.update(chunk.data(), count);
@@ -91,10 +103,11 @@ Result<FirmwareImage> FirmwareProvider::load() const noexcept
         }
     }
     const auto digest = sha256.finish();
-    if (!FirmwareImage::accepted_policy(model_, data.size(), digest)) {
+    const auto* manifest = matching_manifest(model_, data.size(), digest);
+    if (manifest == nullptr) {
         return Result<FirmwareImage>::failure(Error::FIRMWARE_REJECTED);
     }
-    return Result<FirmwareImage>::success(FirmwareImage(std::move(data)));
+    return Result<FirmwareImage>::success(FirmwareImage(std::move(data), manifest));
 }
 
 }  // namespace asicen

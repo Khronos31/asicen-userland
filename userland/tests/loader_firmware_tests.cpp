@@ -110,12 +110,25 @@ bool manifest_policy()
     return true;
 }
 
+bool common_manifest_policy()
+{
+    const auto& manifest = asicen::common_loader_firmware_manifest();
+    CHECK(manifest.size == 16384 && manifest.start_address == 0x55d6);
+    CHECK(manifest.sha256[0] == 0x5dU && manifest.sha256[31] == 0x2aU);
+    const auto plan = asicen::build_common_loader_transfer_plan();
+    CHECK(plan.size() == 20U && plan.back().request == 0xacU);
+    for (const auto& transfer : plan)
+        CHECK(transfer.index == manifest.start_address && transfer.length == 512U);
+    return true;
+}
+
 bool external_firmware_images(int argc, char** argv)
 {
     // Generic file/path/error boundaries are covered by firmware_provider_tests.
     // Optional positive verification reads bytes only. Firmware is not executed
     // or uploaded to a device by this test.
     if (argc >= 2) {
+        CHECK(!asicen::FirmwareProvider(argv[1]).load());
         for (const auto model : {asicen::ModelId::S3u, asicen::ModelId::S3u2, asicen::ModelId::W3u2,
                                  asicen::ModelId::W3u3}) {
             const auto loaded = asicen::FirmwareProvider(argv[1], model).load();
@@ -138,6 +151,13 @@ bool external_firmware_images(int argc, char** argv)
         CHECK(asicen::validate_loader_firmware(asicen::ModelId::W3u3, image.data(), image.size()) ==
               asicen::LoaderFirmwareRead::FingerprintMismatch);
     }
+    if (argc >= 4) {
+        const auto loaded = asicen::FirmwareProvider(argv[3]).load();
+        CHECK(loaded.has_value() &&
+              loaded.value().manifest() == &asicen::common_loader_firmware_manifest() &&
+              loaded.value().manifest()->start_address == 0x55d6 &&
+              asicen::build_loader_transfer_plan(*loaded.value().manifest()).size() == 20U);
+    }
 
     return true;
 }
@@ -146,7 +166,8 @@ bool external_firmware_images(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
-    if (!fingerprint_vectors() || !manifest_policy() || !external_firmware_images(argc, argv)) {
+    if (!fingerprint_vectors() || !manifest_policy() || !common_manifest_policy() ||
+        !external_firmware_images(argc, argv)) {
         return 1;
     }
     return 0;
