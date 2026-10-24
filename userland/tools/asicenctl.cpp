@@ -27,7 +27,7 @@ int main(int argc, char** argv)
     const dtv::userland::host_ctl::Profile profile{
         "asicenctl", "asicen-userland", ASICEN_PROJECT_VERSION,
         dtv::userland::identity::Product::asicen, true, false,
-        &normalize_instance, nullptr, false, false};
+        &normalize_instance, nullptr, true, false};
     return dtv::userland::host_ctl::run_control_cli(
         argc, const_cast<const char* const*>(argv), profile);
 }
