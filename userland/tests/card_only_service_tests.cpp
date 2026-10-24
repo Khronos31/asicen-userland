@@ -8,6 +8,9 @@
 #include "dtv/userland/host_runtime/control_socket.h"
 #include "dtv/userland/records.h"
 #include "asicen/product_profile.h"
+#if defined(ASICEN_TEST_CORE_IFD)
+#include "ifd_core_test_bridge.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -455,6 +458,8 @@ bool test_card_service_through_core_ipc()
     config.server.producer = list.producer;
     config.context.epoch = config.server.epoch;
     config.context.state = w::ContextState::ready;
+    config.context.instance.present = true;
+    config.context.instance.value = text<64U>("card-test");
     config.stream_engine_epoch = 0x41534943454eULL;
     config.stream_arm_budget_ms = 5000U;
     auto created = EnclosureContext::assemble(std::move(family),
@@ -522,10 +527,44 @@ bool test_card_service_through_core_ipc()
           response.response.response.bytes[60U] == 0x00U);
     CHECK(observed_session.transmit_timeout == 15000U);
 
+#if defined(ASICEN_TEST_CORE_IFD)
+    const std::string device_name = "asicen-userland:runtime=" + std::string(directory) +
+        ":instance=card-test:access=user";
+    void* ifd = asicen_ifd_test_create(device_name.c_str());
+    CHECK(ifd != nullptr);
+    CHECK(asicen_ifd_test_power(ifd, true) == 0);
+    CHECK(asicen_ifd_test_presence(ifd) == 1);
+    std::uint8_t interface_status = 0U;
+    CHECK(asicen_ifd_test_interface_status(ifd, &interface_status) == 0);
+    CHECK(interface_status == 1U);
+    CHECK(asicen_ifd_test_power(ifd, false) == 0);
+#endif
+
     const auto disconnected = w::card_disconnect(*control, card, w::Disposition::leave,
                                                   Timeout{5000U});
     std::fprintf(stderr, "card-core: disconnect=%d\n", static_cast<bool>(disconnected));
     CHECK(disconnected && disconnected.response.consumed && disconnected.response.quiesced);
+#if defined(ASICEN_TEST_CORE_IFD)
+    CHECK(asicen_ifd_test_interface_status(ifd, &interface_status) == 0);
+    CHECK(interface_status == 0U);
+    const auto generation_before_gap = w::card_status(*control, card, Timeout{2000U});
+    CHECK(generation_before_gap && generation_before_gap.response.present &&
+          !generation_before_gap.response.initialized);
+    transport.card_present = false;
+    transport.registers[0x04U] = 0x80U;
+    const auto absent = w::card_status(*control, card, Timeout{2000U});
+    CHECK(absent && !absent.response.present && !absent.response.initialized &&
+          absent.response.current_generation >
+              generation_before_gap.response.current_generation);
+    transport.card_present = true;
+    transport.registers[0x04U] = 0x81U;
+    const auto reinserted = w::card_status(*control, card, Timeout{2000U});
+    CHECK(reinserted && reinserted.response.present && !reinserted.response.initialized &&
+          reinserted.response.current_generation > absent.response.current_generation);
+    CHECK(asicen_ifd_test_interface_status(ifd, &interface_status) == 0);
+    CHECK(interface_status == 0U);
+    CHECK(asicen_ifd_test_close(ifd) == 0);
+#endif
     control->close();
 
     auto tuner_control = connect_control(endpoint, Timeout{2000U});

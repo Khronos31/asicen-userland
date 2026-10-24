@@ -627,6 +627,23 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
                 ASICEN_USE_DTV_CORE=1)
             target_link_libraries(asicen-card-only-service-tests PRIVATE
                 asicen_libusb asicen_core_test_mock)
+            if(TARGET asicen_pcsc_ifd_core)
+                add_library(asicen_ifd_core_test_bridge STATIC
+                    userland/tests/ifd_core_test_bridge.cpp)
+                target_include_directories(asicen_ifd_core_test_bridge PRIVATE
+                    ${ASICEN_PX4_ROOT}/include)
+                target_compile_definitions(asicen_ifd_core_test_bridge PRIVATE
+                    ASICEN_USE_DTV_CORE=1 ASICEN_PROFILE_ASICEN=1
+                    ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:")
+                target_compile_features(asicen_ifd_core_test_bridge PRIVATE cxx_std_17)
+                target_link_libraries(asicen_ifd_core_test_bridge PRIVATE
+                    asicen_pcsc_ifd_core)
+                asicen_enable_project_warnings(asicen_ifd_core_test_bridge)
+                target_link_libraries(asicen-card-only-service-tests PRIVATE
+                    asicen_ifd_core_test_bridge)
+                target_compile_definitions(asicen-card-only-service-tests PRIVATE
+                    ASICEN_TEST_CORE_IFD=1)
+            endif()
             asicen_enable_project_warnings(asicen-card-only-service-tests)
             add_test(NAME asicen-card-only-service-tests
                 COMMAND asicen-card-only-service-tests)

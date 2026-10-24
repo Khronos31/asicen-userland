@@ -258,8 +258,10 @@ private:
 class PosixIfdCardClient final : public IfdCardClient {
 public:
     PosixIfdCardClient(std::unique_ptr<dtv::userland::wire::TimedClientTransport> client,
-                       std::string instance) noexcept
-        : client_(std::move(client)), instance_(std::move(instance))
+                       std::string instance, std::string runtime_directory,
+                       dtv::userland::host_runtime::EndpointAccess access) noexcept
+        : client_(std::move(client)), instance_(std::move(instance)),
+          runtime_directory_(std::move(runtime_directory)), access_(access)
     {
     }
 
@@ -299,6 +301,13 @@ public:
 
     Result<IfdCardConnectResult> connect_shared() noexcept override
     {
+        using namespace dtv::userland::host_runtime;
+        const EndpointConfig config{runtime_directory_, "asicen-userland", instance_, access_};
+        auto reconnected = connect_control(config, dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!reconnected) return Result<IfdCardConnectResult>::failure(
+            static_cast<Error>(reconnected.error()));
+        if (client_) client_->close();
+        client_ = std::move(reconnected.value());
         dtv::userland::wire::CardClientOptions options;
         options.reader_id = 0U;
         options.share = dtv::userland::wire::Share::shared;
@@ -390,6 +399,8 @@ private:
     std::unique_ptr<dtv::userland::wire::TimedClientTransport> client_;
     dtv::userland::wire::CardClientSession session_{};
     std::string instance_;
+    std::string runtime_directory_;
+    dtv::userland::host_runtime::EndpointAccess access_;
     std::array<std::uint8_t, kIfdAtrMaxLength> atr_{};
     std::size_t atr_length_ = 0U;
     bool card_session_started_ = false;
@@ -519,7 +530,9 @@ Result<std::unique_ptr<IfdCardClient>> PosixIfdCardClientFactory::connect(
     }
     return Result<std::unique_ptr<IfdCardClient>>::success(
         std::unique_ptr<IfdCardClient>(new PosixIfdCardClient(
-            std::move(client.value()), endpoint.device_instance)));
+            std::move(client.value()), endpoint.device_instance,
+            endpoint.runtime_directory, endpoint.group_access ?
+                EndpointAccess::shared_group : EndpointAccess::private_user)));
 #else
     const char* runtime = endpoint.runtime_directory.empty() ?
                               nullptr : endpoint.runtime_directory.c_str();
