@@ -7,6 +7,7 @@
 
 #include "asicen/device_profile.h"
 #include "asicen/satellite_tune.h"
+#include <dtv/userland/identity.h>
 #include "px4/identity.h"
 #include "px4/error.h"
 
@@ -28,6 +29,7 @@ struct DaemonArguments final {
     bool models = false;
     std::string_view error;
     const DeviceProfile* expected_model = nullptr;
+    std::string device_selector;
     std::array<std::string, 2U> usb_paths;
     std::size_t usb_path_count = 0U;
     std::array<int, 2U> file_descriptors{};
@@ -294,11 +296,11 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             }
             continue;
         }
-        if (mock && (option == "--firmware" || option == "--fd" || option == "--usb-path"))
+        if (mock && (option == "--device" || option == "--firmware" ||
+                     option == "--fd" || option == "--usb-path"))
             return invalid("unknown argument");
-        if (option != "--model" && option != "--firmware" &&
-            option != "--runtime-dir" && option != "--fd" &&
-            option != "--usb-path" && option != "--instance") {
+        if (option != "--device" && option != "--model" && option != "--firmware" &&
+            option != "--runtime-dir" && option != "--fd" && option != "--instance") {
             return invalid("unknown argument");
         }
 
@@ -306,7 +308,24 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
         if (!take_value(index, argc, argv, value)) {
             return invalid("option requires a value");
         }
-        if (option == "--model") {
+        if (option == "--device") {
+            if (!result.device_selector.empty()) return invalid("duplicate --device");
+            const auto selector = dtv::userland::identity::parse_device_selector(value);
+            if (!selector || selector.value().topology.count > result.usb_paths.size())
+                return invalid("--device selector is invalid");
+            if (selector.value().kind == dtv::userland::identity::SelectorKind::usb_topology) {
+                for (std::size_t path_index = 0U;
+                     path_index < selector.value().topology.count; ++path_index) {
+                    const auto& path = selector.value().topology.paths[path_index];
+                    std::uint8_t bus = 0U;
+                    std::vector<std::uint8_t> ports;
+                    if (!parse_bus_port(std::string_view(path.bytes.data(), path.length),
+                                        &bus, &ports))
+                        return invalid("--device selector is invalid");
+                }
+            }
+            result.device_selector = value;
+        } else if (option == "--model") {
             if (have_model) return invalid("duplicate --model");
             have_model = true;
             result.expected_model = find_profile_by_model(value);
@@ -315,16 +334,6 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             if (have_instance) return invalid("duplicate --instance");
             have_instance = true;
             result.instance = value;
-        } else if (option == "--usb-path") {
-            if (result.usb_path_count >= result.usb_paths.size())
-                return invalid("at most two --usb-path values are supported");
-            if (!valid_usb_path(value)) return invalid("--usb-path is invalid");
-            for (std::size_t path_index = 0U; path_index < result.usb_path_count;
-                 ++path_index) {
-                if (result.usb_paths[path_index] == value)
-                    return invalid("--usb-path values must be distinct");
-            }
-            result.usb_paths[result.usb_path_count++] = value;
         } else if (option == "--firmware") {
             if (have_firmware) return invalid("duplicate --firmware");
             have_firmware = true;
@@ -351,17 +360,18 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
     if (have_instance && !valid_instance(result.instance))
         return invalid("--instance is invalid");
     if (!mock) {
-        if (result.usb_path_count != 0U && result.file_descriptor_count != 0U)
-            return invalid("--usb-path and --fd cannot be combined");
-        if (result.usb_path_count == 0U && result.file_descriptor_count == 0U)
-            return invalid("native mode requires --usb-path");
-        if (result.usb_path_count != 0U && !have_instance &&
+        if (!result.device_selector.empty() && result.file_descriptor_count != 0U)
+            return invalid("--device and --fd cannot be combined");
+        if (result.device_selector.empty() && result.file_descriptor_count == 0U)
+            return invalid("native mode requires --device");
+        if (!result.device_selector.empty() && !have_instance &&
             !result.probe_card && !result.probe_satellite)
-            return invalid("--usb-path requires --instance");
+            return invalid("--device requires --instance");
         if (result.have_satellite_slot && !result.probe_satellite)
             return invalid("--slot requires --probe-satellite");
-        if (!result.firmware.empty() && result.expected_model == nullptr)
-            return invalid("--firmware requires --model");
+        if (!result.firmware.empty() && result.expected_model == nullptr &&
+            result.file_descriptor_count != 0U)
+            return invalid("--firmware with --fd requires --model");
     }
     if (have_runtime && result.runtime_directory.empty()) {
         return invalid("--runtime-dir must not be empty");

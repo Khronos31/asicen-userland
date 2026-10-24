@@ -7,10 +7,12 @@
 
 #include "px4/transport.h"
 #include "asicen/device_profile.h"
+#include "asicen/loader_firmware.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -28,16 +30,15 @@ public:
     ByteView bytes() const noexcept { return ByteView{data_.data(), data_.size()}; }
     const std::uint8_t* data() const noexcept { return data_.data(); }
     std::size_t size() const noexcept { return data_.size(); }
+    const LoaderFirmwareManifest* manifest() const noexcept { return manifest_; }
 
 private:
     FirmwareImage() noexcept = default;
-    explicit FirmwareImage(std::vector<std::uint8_t>&& data) noexcept
-        : data_(std::move(data))
+    explicit FirmwareImage(std::vector<std::uint8_t>&& data,
+                           const LoaderFirmwareManifest* manifest) noexcept
+        : data_(std::move(data)), manifest_(manifest)
     {
     }
-
-    static bool accepted_policy(ModelId model, std::size_t size,
-                                const std::array<std::uint8_t, 32U>& digest) noexcept;
 
     friend class FirmwareProvider;
     friend class FirmwareTestAccess;
@@ -45,11 +46,13 @@ private:
     friend class px4::userland::Result;
 
     std::vector<std::uint8_t> data_;
+    const LoaderFirmwareManifest* manifest_ = nullptr;
 };
 
 class FirmwareProvider final {
 public:
-    explicit FirmwareProvider(std::string_view path, ModelId model) noexcept
+    explicit FirmwareProvider(std::string_view path) noexcept : path_(path) {}
+    FirmwareProvider(std::string_view path, ModelId model) noexcept
         : path_(path), model_(model) {}
     ~FirmwareProvider() noexcept = default;
 
@@ -63,7 +66,7 @@ public:
 
 private:
     std::string path_;
-    ModelId model_;
+    std::optional<ModelId> model_;
 };
 
 }  // namespace asicen

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hardware-free asicend usb-path/fd argument contract checks.
+"""Hardware-free asicend device/fd argument contract checks.
 
 Every case here fails during argument parsing, before the enclosure lock,
 libusb_init, or any USB access.
@@ -31,19 +31,20 @@ def rejects(*args):
           f'argument rejection for {args!r} must not reach libusb_init')
 
 
-# --usb-path and --fd cannot be mixed.
-rejects('--usb-path', '1:2', '--fd', '3')
-rejects('--fd', '3', '--usb-path', '1:2', '--usb-path', '1:3')
+# --device and --fd cannot be mixed.
+rejects('--device', 'usb:1-2', '--instance', 'test', '--fd', '3')
+rejects('--fd', '3', '--device', 'usb:1-2', '--instance', 'test')
 
 # A selector is required; exactly one selector family.
 rejects('--model', 'w3u3')
 rejects('--fd')
 
-# --usb-path must be a valid BUS:ADDRESS or BUS-PORT value at most two distinct.
-rejects('--usb-path', 'not-a-location')
-rejects('--usb-path', '1:2', '--usb-path', '1:2')
-rejects('--usb-path', '1-2-3')
-rejects('--usb-path', '1:256')
+# --device uses the shared serial:/usb: selector grammar.
+rejects('--device', 'usb:not-a-location', '--instance', 'test')
+rejects('--device', 'usb:1-2,1-2', '--instance', 'test')
+rejects('--device', 'usb:1-2.3', '--device', 'usb:1-2.4', '--instance', 'test')
+rejects('--device', 'serial:', '--instance', 'test')
+rejects('--device', 'usb:1-2')
 
 # --fd values are numeric, distinct, and at most two.
 rejects('--fd', 'not-a-number')
@@ -55,7 +56,7 @@ with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory) / 'invalid-product-firmware.bin'
     path.write_bytes(bytes(16384))
     for candidate, expected in ((path, 10), (path.with_name('missing.bin'), 3)):
-        result = run('--usb-path', '1:1', '--instance', 'preflight',
+        result = run('--device', 'usb:1-1', '--instance', 'preflight',
                      '--model', 'w3u3', '--firmware', str(candidate))
         check(result.returncode == expected, result.stderr)
         check('libusb_init' not in result.stderr and 'enclosure identity' not in result.stderr,

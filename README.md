@@ -60,11 +60,9 @@ Windows 11 x86_64 は Phase 1（製品コマンドと CARD_* を含む同一ホ�
 
 ### ファームウェア
 
-S3U / S3U2 / W3U2 / W3U3 用の Linux ローダは `firmware/asicen-loader.bin`（16,384 バイト、SHA-256 `b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`）としてリポジトリにあります。再配布権は未解決のままです。GitHub Actions のランナーは、このチェックアウトされたファイルを 8 つのバイナリ配布アーカイブへ同梱します。対応ソースのアーカイブには入れません。
+既存の Linux ローダは `firmware/asicen-loader.bin`（16,384 バイト）としてリポジトリにあります。通常の `asicend` 起動は全機種共通の Windows 由来イメージを要求します。固定イメージの抽出・hash検査には既存の `scripts/extract-windows-loader-firmware.py` を使います。イメージの再配布権は未解決であり、新しいイメージは配布物へ追加しません。
 
-PX-W3U3 V2 用の別イメージは同梱しません。互換性と取得後の照合条件は [SPEC.md](SPEC.md#010-source-supported-model-boundary) を参照してください。
-
-ファームウェアの転送は `asicend --usb-path ... --instance TOKEN --model MODEL --firmware PATH` で行います（ローダ状態のデバイスへ転送し、runtime の再列挙を待ってから起動します。既に runtime の場合は転送をスキップします）。`--fd` で与える Termux では再列挙に追随できないため、転送と起動を分けて行います（転送後に runtime の fd を再取得して `--firmware` なしで起動）。`--usb-path` には PX4 と同じく明示の `--instance` が必要です。`--fd` で省略した場合は、serial の代わりに観測した USB topology から instance を決めます。開発用の `asicen-probe load-firmware` も引き続き利用できます。
+通常起動は `asicend --device usb:BUS-PORT[,BUS-PORT...] --instance TOKEN --firmware PATH` です。`--model` は省略でき、cold loader へ共通イメージを転送した後、同じ USB 位置に戻る runtime VID:PID から機種を決めます。既に runtime なら転送を省略します。既知の内部 Hub で相方位置を一意に確認できる機種は1位置で選択でき、確認できない場合は複数位置を指定します。serial がない ASICEN 機器を `serial:` で選択した場合は一致なしになります。Termux の `--fd` は再列挙に追随できないため、転送と起動を分けます（転送後に runtime の fd を再取得して `--firmware` なしで起動）。開発用の `asicen-probe load-firmware` も引き続き利用できます。
 
 ### 実行時ライブラリ
 
@@ -131,7 +129,7 @@ asicen-ts --runtime-dir "$runtime_dir" --instance test \
 
 ### 実機ハードウェアでの実行
 
-接続機器は `asicend --list-json` で確認します（USB 接続を挿し直すとアドレスが変わります。再現には `--usb-path BUS-PORT` 形式を使います）。
+接続機器は `asicend --list-json` で確認します（USB 接続を挿し直すとアドレスが変わります。再現には `--device usb:BUS-PORT` 形式を使います）。
 
 ```sh
 runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/asicen-userland.XXXXXX")
@@ -142,7 +140,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-asicend --usb-path 1-2.1 --usb-path 1-2.2 \
+asicend --device usb:1-2.1,1-2.2 \
   --runtime-dir "$runtime_dir" --instance w3u3 &
 asicend_pid=$!
 ready=0
@@ -163,7 +161,7 @@ asicen-ts --runtime-dir "$runtime_dir" --instance w3u3 \
   --receiver 0 --channel BS01_0 --lnb-voltage 0 --packet-count 30000 --output satellite.ts
 ```
 
-USB 機能が 1 つの PX-S3U と PX-S3U2 では `--usb-path` を 1 つだけ指定します。USB 機能が 2 つの PX-W3U2、PX-W3U3、PX-W3U3 V2 では primary（先）と sibling（後）の 2 つを指定します。Termux ではランチャーが `--fd` を渡します。
+USB 機能が 1 つの PX-S3U と PX-S3U2 では `--device usb:BUS-PORT` を指定します。2機能機種は、既知の内部 Hub 上で相方を一意に確認できるとき1位置で選択できます。それ以外は `--device usb:BUS-PORT1,BUS-PORT2` の形式で両方の位置を指定します。Termux ではランチャーが `--fd` を渡します。
 
 ### Android (Termux) での実行
 
