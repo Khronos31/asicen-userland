@@ -20,6 +20,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#if defined(__linux__)
+#include <sys/resource.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -578,6 +581,13 @@ bool test_card_operation_entry_preserves_error_class()
 
 int main()
 {
+#if defined(__linux__)
+    struct rlimit stack_limit{};
+    if (::getrlimit(RLIMIT_STACK, &stack_limit) == 0) {
+        std::fprintf(stderr, "card-only: stack-limit=%llu\n",
+                     static_cast<unsigned long long>(stack_limit.rlim_cur));
+    }
+#endif
     std::fprintf(stderr, "card-only: protocol-timeout\n");
     if (!test_protocol_timeouts_survive_presence_poll()) return 1;
     std::fprintf(stderr, "card-only: operation-error\n");

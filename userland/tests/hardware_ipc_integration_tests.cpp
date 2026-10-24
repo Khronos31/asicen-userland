@@ -18,6 +18,9 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#if defined(__linux__)
+#include <sys/resource.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -389,6 +392,13 @@ bool run(bool hold_detach = false)
 
 int main()
 {
+#if defined(__linux__)
+    struct rlimit stack_limit{};
+    if (::getrlimit(RLIMIT_STACK, &stack_limit) == 0) {
+        std::fprintf(stderr, "hw-ipc: stack-limit=%llu\n",
+                     static_cast<unsigned long long>(stack_limit.rlim_cur));
+    }
+#endif
     if (!run()) return 1;
     if (!run(true)) return 1;
     return 0;
