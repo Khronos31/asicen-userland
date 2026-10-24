@@ -1820,47 +1820,54 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
     version = str(manifest.get("version", ""))
     validate_version(version)
     core_dependency = manifest.get("core_dependency")
-    windows_source = core_dependency is not None
+    windows_source = args.archive.name == f"asicen-userland-{version}-windows-source.tar.gz"
     core_prefix = "third_party/dtv-userland-core/repository/"
-    if windows_source:
+    if (windows_source or "repository/cmake/dtv-userland-core.revision" in members) and core_dependency is None:
+        fail("pinned Core source is missing from the corresponding-source archive")
+    if core_dependency is not None:
         if (not isinstance(core_dependency, dict) or
                 set(core_dependency) != {"repository", "commit", "tree", "license", "source_member_prefix"} or
                 core_dependency.get("repository") != "https://github.com/Khronos31/dtv-userland-core" or
-                core_dependency.get("license") != "GPL-2.0-only" or
+                core_dependency.get("license") != ("GPL-2.0-only" if windows_source else
+                                                    "MIT AND GPL-2.0-only") or
                 core_dependency.get("source_member_prefix") != core_prefix or
                 not isinstance(core_dependency.get("commit"), str) or
                 not re.fullmatch(r"[0-9a-f]{40}", core_dependency["commit"]) or
                 not isinstance(core_dependency.get("tree"), str) or
                 not re.fullmatch(r"[0-9a-f]{40}", core_dependency["tree"])):
-            fail("invalid Windows source Core dependency manifest")
+            fail("invalid source Core dependency manifest")
         required |= {
             "third_party/dtv-userland-core/SOURCE-REVISION",
             f"{core_prefix}CMakeLists.txt",
             f"{core_prefix}LICENSE",
-            f"{core_prefix}adapters/windows_winscard/COPYING",
-            f"{core_prefix}adapters/windows_winscard/README.md",
-            f"{core_prefix}adapters/windows_winscard/CMakeLists.txt",
-            f"{core_prefix}adapters/windows_winscard/winscard.def",
+            "repository/cmake/dtv-userland-core.revision",
         }
+        if windows_source:
+            required |= {
+                f"{core_prefix}adapters/windows_winscard/COPYING",
+                f"{core_prefix}adapters/windows_winscard/README.md",
+                f"{core_prefix}adapters/windows_winscard/CMakeLists.txt",
+                f"{core_prefix}adapters/windows_winscard/winscard.def",
+            }
         if not required.issubset(members):
-            fail(f"Windows source archive is missing Core files: {sorted(required-set(members))}")
+            fail(f"source archive is missing Core files: {sorted(required-set(members))}")
         pin = read_archive_file(args.archive.resolve(), "repository/cmake/dtv-userland-core.revision")
         marker = read_archive_file(args.archive.resolve(), "third_party/dtv-userland-core/SOURCE-REVISION")
         if pin != (core_dependency["commit"] + "\n").encode("ascii"):
-            fail("Windows source Core commit differs from the product pin")
+            fail("source Core commit differs from the product pin")
         if marker != (core_dependency["commit"] + "\n" + core_dependency["tree"] + "\n").encode("ascii"):
-            fail("Windows source Core revision marker differs from the manifest")
-        if "GNU GENERAL PUBLIC LICENSE" not in read_archive_file(
+            fail("source Core revision marker differs from the manifest")
+        if windows_source and "GNU GENERAL PUBLIC LICENSE" not in read_archive_file(
                 args.archive.resolve(), f"{core_prefix}adapters/windows_winscard/COPYING").decode("utf-8"):
             fail("Windows source Core WinSCard COPYING is not a GPL license text")
         if not any(name.startswith(core_prefix) for name in members):
-            fail("Windows source Core tree is missing")
+            fail("source Core tree is missing")
     elif any(name.startswith((core_prefix, "third_party/dtv-userland-core/")) for name in members):
-        fail("Core source is only allowed in a Windows WinSCard source archive")
+        fail("Core source requires a matching dependency manifest")
     for name in members:
         if (name not in required and not name.startswith("repository/") and
                 not name.startswith("third_party/libusb-1.0.30/") and
-                not (windows_source and name.startswith("third_party/dtv-userland-core/"))):
+                not (core_dependency is not None and name.startswith("third_party/dtv-userland-core/"))):
             fail(f"unexpected source archive member: {name}")
     if read_archive_file(args.archive.resolve(), "repository/VERSION") != (version + "\n").encode("ascii"):
         fail("source manifest version differs from the repository VERSION")
@@ -1944,6 +1951,13 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
                 source_fields.get("dependency.core.source-path") !=
                 "third_party/dtv-userland-core/repository/adapters/windows_winscard"):
             fail("Windows source dependency notice does not match the Core manifest")
+    elif core_dependency is not None:
+        if (source_fields.get("dependency.core.repository") != core_dependency["repository"] or
+                source_fields.get("dependency.core.commit") != core_dependency["commit"] or
+                source_fields.get("dependency.core.tree") != core_dependency["tree"] or
+                source_fields.get("dependency.core.license") != core_dependency["license"] or
+                source_fields.get("dependency.core.source-path") != core_prefix.rstrip("/")):
+            fail("source dependency notice does not match the Core manifest")
     elif any(key.startswith("dependency.core.") for key in source_fields):
         fail("generic source archive must not include WinSCard Core license metadata")
     verify_checksums(args.archive.resolve(), members)
