@@ -17,12 +17,12 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 #include <string>
 #include <thread>
 #include <vector>
-#if defined(__linux__)
-#include <sys/resource.h>
-#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -40,6 +40,22 @@ using namespace px4::userland;
             return false;                                                                          \
         }                                                                                          \
     } while (false)
+
+void report_current_stack(const char* label) noexcept
+{
+#if defined(__linux__)
+    pthread_attr_t attributes{};
+    if (::pthread_getattr_np(::pthread_self(), &attributes) == 0) {
+        void* base = nullptr;
+        std::size_t size = 0U;
+        if (::pthread_attr_getstack(&attributes, &base, &size) == 0)
+            std::fprintf(stderr, "%s stack-size=%zu\n", label, size);
+        (void)::pthread_attr_destroy(&attributes);
+    }
+#else
+    (void)label;
+#endif
+}
 
 std::uint8_t reverse_bits(std::uint8_t value)
 {
@@ -480,6 +496,7 @@ bool test_card_service_through_core_ipc()
     auto control = std::move(connected.value());
     w::CardClientOptions card_options;
     card_options.reader_id = 0U;
+    report_current_stack("card-core: caller");
     auto opened = w::begin_card(*control, card_options, Timeout{5000U});
     std::fprintf(stderr, "card-core: begin-card=%d\n", static_cast<bool>(opened));
     CHECK(opened && opened.reader_status.present && opened.connection.usable &&
@@ -581,13 +598,6 @@ bool test_card_operation_entry_preserves_error_class()
 
 int main()
 {
-#if defined(__linux__)
-    struct rlimit stack_limit{};
-    if (::getrlimit(RLIMIT_STACK, &stack_limit) == 0) {
-        std::fprintf(stderr, "card-only: stack-limit=%llu\n",
-                     static_cast<unsigned long long>(stack_limit.rlim_cur));
-    }
-#endif
     std::fprintf(stderr, "card-only: protocol-timeout\n");
     if (!test_protocol_timeouts_survive_presence_poll()) return 1;
     std::fprintf(stderr, "card-only: operation-error\n");

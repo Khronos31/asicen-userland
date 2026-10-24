@@ -16,15 +16,30 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 #include <string>
 #include <thread>
-#if defined(__linux__)
-#include <sys/resource.h>
-#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
+void report_current_stack(const char* label) noexcept
+{
+#if defined(__linux__)
+    pthread_attr_t attributes{};
+    if (::pthread_getattr_np(::pthread_self(), &attributes) == 0) {
+        void* base = nullptr;
+        std::size_t size = 0U;
+        if (::pthread_attr_getstack(&attributes, &base, &size) == 0)
+            std::fprintf(stderr, "%s stack-size=%zu\n", label, size);
+        (void)::pthread_attr_destroy(&attributes);
+    }
+#else
+    (void)label;
+#endif
+}
 namespace w = dtv::userland::wire;
 using namespace dtv::userland;
 using namespace dtv::userland::host_listener_context;
@@ -278,6 +293,7 @@ bool run(bool hold_detach = false)
         options.tune.system = w::System::isdb_t;
         options.tune.frequency_hz = 557142000U;
         options.tune.timeout_ms = 1000U;
+        report_current_stack("hw-ipc: caller");
         stage = "begin-recording";
         auto recording = w::begin_recording(*control, options, Timeout{5000U});
         std::fprintf(stderr, "hw-ipc: recording=%d\n", static_cast<bool>(recording));
@@ -392,13 +408,6 @@ bool run(bool hold_detach = false)
 
 int main()
 {
-#if defined(__linux__)
-    struct rlimit stack_limit{};
-    if (::getrlimit(RLIMIT_STACK, &stack_limit) == 0) {
-        std::fprintf(stderr, "hw-ipc: stack-limit=%llu\n",
-                     static_cast<unsigned long long>(stack_limit.rlim_cur));
-    }
-#endif
     if (!run()) return 1;
     if (!run(true)) return 1;
     return 0;
