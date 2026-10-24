@@ -256,6 +256,14 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             result.allow_lnb_power = true;
             continue;
         }
+        if (mock && option == "--model") {
+            std::string_view value;
+            if (result.expected_model != nullptr || !take_value(index, argc, argv, value))
+                return invalid("--model is invalid");
+            result.expected_model = find_profile_by_model(value);
+            if (result.expected_model == nullptr) return invalid("--model is invalid");
+            continue;
+        }
 #if defined(_WIN32)
         if (option == "--exit-on-stdin-eof") {
             if (result.exit_on_stdin_eof) return invalid("duplicate --exit-on-stdin-eof");

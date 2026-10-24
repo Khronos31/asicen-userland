@@ -670,6 +670,7 @@ int load_loader_firmware(libusb_context* context, Options& options,
         }
         const int rc = transfer_firmware_to_loader(device, firmware, trace, target);
         if (rc != 0) return diagnostic.finish(rc);
+        device.close();
         if (model == nullptr) {
             if (uploaded.port_path.empty()) {
                 if (options.file_descriptor_count != 0U) {

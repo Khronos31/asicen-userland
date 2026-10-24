@@ -75,7 +75,10 @@ bool arguments_match_reference()
           bus == 10U && ports == std::vector<std::uint8_t>({8U, 1U}));
     CHECK(!parse({"--device", "usb:1-2", "--instance", "test", "--runtime-dir", ""}).valid);
     CHECK(!parse({"--device", "usb:1-2", "--instance", "test", "--firmware", "--group"}).valid);
-    CHECK(!parse({"--instance", "test", "--model", "s3u"}, true).valid);
+    CHECK(!parse({"--instance", "test", "--model", "s3u"}).valid);
+    CHECK(parse({"--instance", "test", "--model", "s3u"}, true).expected_model ==
+          asicen::find_profile_by_model("s3u"));
+    CHECK(!parse({"--instance", "test", "--model", "unknown"}, true).valid);
     CHECK(parse({"--device", "usb:1-2", "--instance", "test", "--firmware",
                  "loader.bin"}).expected_model == nullptr);
     CHECK(parse({"--fd", "3", "--firmware", "loader.bin"}).valid);
