@@ -18,6 +18,7 @@
 
 namespace {
 using namespace px4::userland;
+constexpr std::size_t kMaxStreamTransfer = 1048576U;
 
 bool check(bool ok, const char* message)
 {

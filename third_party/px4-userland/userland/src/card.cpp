@@ -111,6 +111,7 @@ Result<CardAtr> read_atr_once(CardHardware& hardware, CardTime& time) noexcept
 
 }  // namespace
 
+#if !defined(ASICEN_USE_DTV_CORE)
 std::uint64_t SystemCardTime::monotonic_ms() noexcept
 {
     const auto elapsed = std::chrono::steady_clock::now().time_since_epoch();
@@ -126,6 +127,7 @@ void SystemCardTime::sleep_ms(std::uint32_t milliseconds) noexcept
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
 #endif
 }
+#endif
 
 #if !defined(ASICEN_PROFILE_ASICEN) && \
     !defined(PX4_USERLAND_DISABLE_NATIVE_CARD_SESSION)

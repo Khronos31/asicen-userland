@@ -439,6 +439,9 @@ int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
     case Error::CARD_REMOVED:
     case Error::BUFFER_TOO_SMALL: return 9;
     case Error::FIRMWARE_REJECTED: return 10;
+#if defined(ASICEN_USE_DTV_CORE) || defined(DTV_USERLAND_ERROR_H)
+    case Error::RESOURCE_LIMIT: return 70;
+#endif
     case Error::INTERNAL: return 70;
     }
     return 70;

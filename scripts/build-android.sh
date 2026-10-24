@@ -164,6 +164,7 @@ if [ -n "$evidence" ]; then
 fi
 work=$(mktemp -d /tmp/asicen-userland-android-2b2.XXXXXX)
 publish_probe_tmp=
+publish_fd_probe_tmp=
 publish_daemon_tmp=
 publish_control_tmp=
 publish_stream_tmp=
@@ -173,7 +174,7 @@ cleanup()
     if [ -d "$work" ]; then
         find "$work" -depth -delete
     fi
-    for temporary in "$publish_probe_tmp" "$publish_daemon_tmp" "$publish_control_tmp" \
+    for temporary in "$publish_probe_tmp" "$publish_fd_probe_tmp" "$publish_daemon_tmp" "$publish_control_tmp" \
         "$publish_stream_tmp"; do
         if [ -n "$temporary" ] && [ -e "$temporary" ]; then
             find "$temporary" -delete
@@ -190,6 +191,7 @@ libusb_source=$work/libusb-1.0.30
 cmake_build=$work/cmake
 link_map_dir=$work/link-maps
 output_probe=$output/asicen-ts-probe-$abi
+output_fd_probe=$output/asicen-termux-fd-info-probe-$abi
 output_daemon=$output/asicend-$abi
 output_control=$output/asicenctl-$abi
 output_stream=$output/asicen-ts-$abi
@@ -293,7 +295,7 @@ env -i \
     TMPDIR="$work/tmp" \
     LC_ALL=C \
     "$cmake_bin" --build "$cmake_build" \
-        --target asicen-ts-probe asicend asicenctl asicen-ts asicen-android-linkcheck -j"$jobs"
+        --target asicen-ts-probe asicen-termux-fd-info-probe asicend asicenctl asicen-ts asicen-android-linkcheck -j"$jobs"
 
 verify_static_libusb()
 {
@@ -307,16 +309,17 @@ verify_static_libusb()
     done
 }
 verify_static_libusb "$cmake_build/asicen-ts-probe"
+verify_static_libusb "$cmake_build/asicen-termux-fd-info-probe"
 verify_static_libusb "$cmake_build/asicend"
 verify_static_libusb "$cmake_build/asicen-android-linkcheck"
 
 # CMake/NDK can leave DWARF and the regular symbol table in a Release link.
 # Strip only after the static-link checks, then verify the exact files that are
 # copied to the publication directory.
-for binary in asicen-ts-probe asicend asicenctl asicen-ts asicen-android-linkcheck; do
+for binary in asicen-ts-probe asicen-termux-fd-info-probe asicend asicenctl asicen-ts asicen-android-linkcheck; do
     "$strip" --strip-all "$cmake_build/$binary"
 done
-for binary in asicen-ts-probe asicend asicenctl asicen-ts asicen-android-linkcheck; do
+for binary in asicen-ts-probe asicen-termux-fd-info-probe asicend asicenctl asicen-ts asicen-android-linkcheck; do
     "$root/scripts/verify-android-elf.sh" \
         "$cmake_build/$binary" "$expected_interpreter" "$expected_arch"
 done
@@ -371,17 +374,21 @@ fi
 # Copy all verified artifacts to adjacent temporary files first.  Each final
 # rename is atomic and no published artifact is touched before all copies pass.
 publish_probe_tmp=$(mktemp "$output_probe.tmp.XXXXXX")
+publish_fd_probe_tmp=$(mktemp "$output_fd_probe.tmp.XXXXXX")
 publish_daemon_tmp=$(mktemp "$output_daemon.tmp.XXXXXX")
 publish_control_tmp=$(mktemp "$output_control.tmp.XXXXXX")
 publish_stream_tmp=$(mktemp "$output_stream.tmp.XXXXXX")
 cp "$cmake_build/asicen-ts-probe" "$publish_probe_tmp"
+cp "$cmake_build/asicen-termux-fd-info-probe" "$publish_fd_probe_tmp"
 cp "$cmake_build/asicend" "$publish_daemon_tmp"
 cp "$cmake_build/asicenctl" "$publish_control_tmp"
 cp "$cmake_build/asicen-ts" "$publish_stream_tmp"
-chmod 0755 "$publish_probe_tmp" "$publish_daemon_tmp" "$publish_control_tmp" \
+chmod 0755 "$publish_probe_tmp" "$publish_fd_probe_tmp" "$publish_daemon_tmp" "$publish_control_tmp" \
     "$publish_stream_tmp"
 mv -f "$publish_probe_tmp" "$output_probe"
 publish_probe_tmp=
+mv -f "$publish_fd_probe_tmp" "$output_fd_probe"
+publish_fd_probe_tmp=
 mv -f "$publish_daemon_tmp" "$output_daemon"
 publish_daemon_tmp=
 mv -f "$publish_control_tmp" "$output_control"
@@ -393,6 +400,7 @@ if [ -n "$evidence_tmp" ]; then
     evidence_tmp=
 fi
 printf '%s\n' "built $output_probe"
+printf '%s\n' "built $output_fd_probe"
 printf '%s\n' "built $output_daemon"
 printf '%s\n' "built $output_control"
 printf '%s\n' "built $output_stream"

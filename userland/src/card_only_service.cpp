@@ -3,16 +3,26 @@
 
 #include "asicen/libusb_hardware_backend.h"
 #include "asicen/hardware_stream_session.h"
+#include "asicen/enclosure.h"
 #include "asicen/product_profile.h"
-#include "px4/control_server.h"
+#include "dtv/userland/host_listener_context/enclosure_context.h"
+#include "dtv/userland/host_runtime/control_socket.h"
+#include "dtv/userland/host_runtime/family.h"
+#include "dtv/userland/records.h"
 #if defined(_WIN32)
 #include "px4/windows_tuner_nonce.h"
 #else
 #include "px4/posix_tuner_nonce.h"
 #endif
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <thread>
 
 namespace asicen {
@@ -51,6 +61,44 @@ int exit_status(Error error) noexcept
     case Error::FIRMWARE_REJECTED:
         return 10;
     case Error::INTERNAL:
+        return 70;
+    case Error::RESOURCE_LIMIT:
+        return 70;
+    }
+    return 70;
+}
+
+int core_exit_status(dtv::userland::Error error) noexcept
+{
+    switch (error) {
+    case dtv::userland::Error::OK:
+        return 0;
+    case dtv::userland::Error::INVALID_ARGUMENT:
+        return 2;
+    case dtv::userland::Error::NOT_FOUND:
+    case dtv::userland::Error::NOT_READY:
+    case dtv::userland::Error::NO_CARD:
+    case dtv::userland::Error::UNSUPPORTED:
+        return 3;
+    case dtv::userland::Error::BUSY:
+        return 4;
+    case dtv::userland::Error::TIMEOUT:
+        return 5;
+    case dtv::userland::Error::VERSION_MISMATCH:
+    case dtv::userland::Error::PROTOCOL_ERROR:
+        return 6;
+    case dtv::userland::Error::USB_IO:
+    case dtv::userland::Error::DISCONNECTED:
+        return 7;
+    case dtv::userland::Error::SLOW_CONSUMER:
+        return 8;
+    case dtv::userland::Error::CARD_REMOVED:
+    case dtv::userland::Error::BUFFER_TOO_SMALL:
+        return 9;
+    case dtv::userland::Error::FIRMWARE_REJECTED:
+        return 10;
+    case dtv::userland::Error::RESOURCE_LIMIT:
+    case dtv::userland::Error::INTERNAL:
         return 70;
     }
     return 70;
@@ -154,6 +202,218 @@ private:
     LibusbW3u3Hardware& hardware_;
 };
 
+template <std::size_t N>
+bool set_text(dtv::userland::wire::WString<N>& output,
+              std::string_view value) noexcept
+{
+    if (value.size() > N) return false;
+    output.length = static_cast<std::uint16_t>(value.size());
+    std::memcpy(output.bytes.data(), value.data(), value.size());
+    return true;
+}
+
+class AsicenEnclosureFamily final : public dtv::userland::host_runtime::EnclosureFamily {
+public:
+    AsicenEnclosureFamily(LibusbW3u3Hardware& hardware,
+                          W3u3CardMailboxHardware& mailbox,
+                          const volatile std::sig_atomic_t* stop_requested,
+                          bool card_only) noexcept
+        : hardware_(hardware), card_backend_(mailbox, hardware, stop_requested),
+          card_session_(mailbox, mailbox), card_protocol_(card_session_, hardware, stop_requested),
+          card_only_tuner_(hardware.receiver_count()), frontend_(hardware)
+    {
+        if (!card_only)
+            stream_.reset(new (std::nothrow) HardwareStreamService(frontend_, hardware_));
+    }
+
+    bool ready(bool card_only) const noexcept { return card_only || stream_ != nullptr; }
+    px4::userland::TunerServiceBackend& tuner_backend() noexcept override
+    {
+        return stream_ != nullptr ? static_cast<px4::userland::TunerServiceBackend&>(*stream_)
+                                  : static_cast<px4::userland::TunerServiceBackend&>(card_only_tuner_);
+    }
+    px4::userland::CardServiceBackend& card_backend() noexcept override
+    {
+        return card_backend_;
+    }
+    px4::userland::CardProtocolSession& card_protocol() noexcept override
+    {
+        return card_protocol_;
+    }
+    px4::userland::TunerServiceTime& time() noexcept override { return time_; }
+    px4::userland::TunerStreamControl* stream_control() noexcept override
+    {
+        return stream_.get();
+    }
+
+private:
+    LibusbW3u3Hardware& hardware_;
+    W3u3CardServiceBackend card_backend_;
+    px4::userland::CardSession card_session_;
+    W3u3CardProtocolSession card_protocol_;
+    CardOnlyTunerBackend card_only_tuner_;
+    DeferredHardwareShutdown frontend_;
+    std::unique_ptr<HardwareStreamService> stream_;
+    CardOnlyTime time_;
+};
+
+bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
+               const char* version,
+               dtv::userland::wire::ListResponse& list) noexcept
+{
+    using namespace dtv::userland::wire;
+    if (!set_text(list.producer.product, "asicen-userland") ||
+        !set_text(list.producer.version, version)) return false;
+    list.topology.state = TopologyState::complete;
+    list.topology.expected_function_count.present = true;
+    list.topology.expected_function_count.value = profile.expected_runtime_functions;
+    list.enclosure.present = true;
+    list.enclosure.value.id = 0U;
+    list.enclosure.value.model.present = true;
+    if (!set_text(list.enclosure.value.model.value.name, profile.model)) return false;
+    list.enclosure.value.identity.serial_state = IdentitySerialState::unknown;
+    list.enclosure.value.identity.uniqueness = Uniqueness::not_applicable;
+    list.enclosure.value.limits.max_concurrent_streams.present = true;
+    list.enclosure.value.limits.max_concurrent_streams.value = 1U;
+    list.functions.count = profile.expected_runtime_functions;
+    for (std::size_t index = 0U; index < list.functions.count; ++index) {
+        UsbFunction& function = list.functions.items[index];
+        function.id = static_cast<std::uint16_t>(index + 1U);
+        function.vid = profile.vid;
+        function.pid = profile.pid;
+        function.mode = Mode::runtime;
+        function.model.present = true;
+        if (!set_text(function.model.value.name, profile.model)) return false;
+        function.present = true;
+    }
+    list.receivers.present = true;
+    if (receiver_count > profile.enclosure_receiver_count) return false;
+    list.receivers.value.count = receiver_count;
+    for (std::size_t index = 0U; index < profile.enclosure_receiver_count; ++index) {
+        const auto address = receiver_address(profile, index);
+        if (!address) return false;
+        ReceiverDescriptor& receiver = list.receivers.value.items[index];
+        receiver.id = static_cast<std::uint16_t>(index);
+        receiver.systems.mask = profile.combined_isdb_ts ? 0x03U
+            : (address.value().system == BroadcastSystem::IsdbT ? 0x01U : 0x02U);
+        receiver.binding.present = true;
+        receiver.binding.value.function_id =
+            static_cast<std::uint16_t>(address.value().function_index + 1U);
+        receiver.binding.value.local_id = address.value().local_lane;
+        receiver.capabilities.ts_scope = TsScope::multiplex;
+    }
+    list.readers.present = true;
+    list.readers.value.count = 1U;
+    list.readers.value.items[0U].id = 0U;
+    list.readers.value.items[0U].binding.present = true;
+    list.readers.value.items[0U].binding.value.function_id = 1U;
+    list.readers.value.items[0U].binding.value.local_id = 0U;
+    return true;
+}
+
+int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailbox,
+                    const char* runtime_directory,
+                    const char* instance, bool group, bool card_only,
+                    const volatile std::sig_atomic_t* stop_requested,
+                    bool (*stop_callback)() noexcept) noexcept
+{
+    using namespace dtv::userland;
+    using dtv::userland::host_listener_context::CloseState;
+    using dtv::userland::host_listener_context::ContextConfig;
+    using dtv::userland::host_listener_context::EnclosureContext;
+    using dtv::userland::wire::ListResponse;
+
+    const auto* profile = hardware.device_profile();
+    if (profile == nullptr || !profile_runtime_supported(*profile)) return 3;
+    const std::uint8_t initial_receiver = profile->combined_isdb_ts ? 0U : 1U;
+    const auto opened = hardware.open_receiver(initial_receiver);
+    if (!opened) return exit_status(opened.error());
+    if (!card_only) {
+        const auto closed = hardware.close_receiver(initial_receiver);
+        if (!closed) return exit_status(closed.error());
+    }
+
+    std::unique_ptr<AsicenEnclosureFamily> family(new (std::nothrow) AsicenEnclosureFamily(
+        hardware, mailbox, stop_requested, card_only));
+    if (!family || !family->ready(card_only)) return 70;
+
+    std::unique_ptr<PlatformTunerNonceSource> nonce(new (std::nothrow) PlatformTunerNonceSource());
+    if (!nonce) return 70;
+    const auto generated_epoch = nonce->generate();
+    if (!generated_epoch) return exit_status(generated_epoch.error());
+
+    ContextConfig config;
+    if (runtime_directory != nullptr && runtime_directory[0] != '\0') {
+        config.runtime_directory = runtime_directory;
+    } else {
+#if !defined(_WIN32)
+        const char* runtime_root = std::getenv("XDG_RUNTIME_DIR");
+        if (runtime_root == nullptr || runtime_root[0] == '\0') return 2;
+        config.runtime_directory = runtime_root;
+#else
+        return 2;
+#endif
+    }
+    config.product = "asicen-userland";
+    config.instance = instance;
+    config.access = group ? host_runtime::EndpointAccess::shared_group
+                          : host_runtime::EndpointAccess::private_user;
+    std::copy(generated_epoch.value().begin(), generated_epoch.value().end(),
+              config.server.epoch.begin());
+    config.server.features = wire::kFeatureStateEvent | wire::kFeatureCardService;
+    ListResponse list;
+    if (!make_list(*profile, hardware.receiver_count(), ASICEN_PROJECT_VERSION, list)) return 70;
+    list.epoch = config.server.epoch;
+    config.server.producer = list.producer;
+    config.canonical_list = list;
+    config.context.epoch = config.server.epoch;
+    config.context.instance.present = true;
+    if (!set_text(config.context.instance.value, instance)) return 2;
+    config.context.state = wire::ContextState::ready;
+    std::uint64_t engine_epoch = 0U;
+    for (std::size_t index = 0U; index < sizeof(engine_epoch); ++index)
+        engine_epoch = (engine_epoch << 8U) | generated_epoch.value()[index];
+    config.stream_engine_epoch = engine_epoch == 0U ? 1U : engine_epoch;
+    config.stream_arm_budget_ms = 5000U;
+
+    std::unique_ptr<host_runtime::EnclosureFamily> owned_family(family.release());
+    std::unique_ptr<host_runtime::TunerNonceSource> owned_nonce(nonce.release());
+    auto assembled = EnclosureContext::assemble(std::move(owned_family),
+                                                 std::move(owned_nonce), config);
+    if (!assembled) return core_exit_status(assembled.error());
+    std::unique_ptr<EnclosureContext> context = std::move(assembled.value());
+    const auto reserved = context->reserve_namespace();
+    if (!reserved) return core_exit_status(reserved.error());
+    const auto published = context->publish();
+    if (!published) return core_exit_status(published.error());
+
+    const host_runtime::EndpointConfig endpoint{
+        config.runtime_directory, config.product, config.instance, config.access};
+    const auto endpoint_path = host_runtime::control_endpoint_path(endpoint);
+    std::fprintf(stderr, "asicend ready backend=dtv-core model=%s receivers=%u endpoint=%s\n",
+                 profile->model_key, static_cast<unsigned>(hardware.receiver_count()),
+                 endpoint_path ? endpoint_path.value().c_str() : "unknown");
+    dtv::userland::Error loop_error = dtv::userland::Error::OK;
+    while ((stop_requested == nullptr || *stop_requested == 0) &&
+           (stop_callback == nullptr || !stop_callback())) {
+        const auto polled = context->poll_once(Timeout{100U});
+        if (!polled) {
+            loop_error = polled.error();
+            break;
+        }
+    }
+
+    for (;;) {
+        const auto closed = context->close(Timeout{5000U});
+        if (!closed) {
+            if (loop_error == dtv::userland::Error::OK) loop_error = closed.error();
+            break;
+        }
+        if (closed.value() == CloseState::quiesced) break;
+    }
+    return core_exit_status(loop_error);
+}
+
 }  // namespace
 
 Result<void> W3u3CardServiceBackend::set_power(bool on) noexcept
@@ -200,6 +460,10 @@ Result<void> W3u3CardProtocolSession::initialize() noexcept
         return entered;
     }
     const auto result = session_.initialize();
+    if (result) {
+        atr_.bytes = session_.atr().bytes;
+        atr_.length = session_.atr().length;
+    }
     guard_.end_card_operation();
     return result;
 }
@@ -222,14 +486,15 @@ bool W3u3CardProtocolSession::initialized() const noexcept
     return session_.initialized();
 }
 
-const px4::userland::CardAtr& W3u3CardProtocolSession::atr() const noexcept
+const px4::userland::CardAtrBytes& W3u3CardProtocolSession::atr() const noexcept
 {
-    return session_.atr();
+    return atr_;
 }
 
 void W3u3CardProtocolSession::invalidate() noexcept
 {
     session_.invalidate();
+    atr_ = {};
 }
 
 void W3u3CardProtocolSession::request_stop() noexcept
@@ -294,68 +559,13 @@ int run_card_only_server(LibusbW3u3Hardware& hardware, const char* runtime_direc
 {
     hardware.diagnostic_stop_flag_ = stop_requested;
     const auto* device_profile = hardware.device_profile();
-    if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) {
-        return 3;
-    }
-    const std::uint8_t initial_receiver = device_profile->combined_isdb_ts ? 0U : 1U;
-    const auto opened = hardware.open_receiver(initial_receiver);
-    hardware.diagnostic_stop_flag_ = nullptr;
-    if (!opened) {
-        return exit_status(opened.error());
-    }
-
+    if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) return 3;
     W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware),
                                     device_profile->model_id);
-    W3u3CardServiceBackend card_backend(mailbox, hardware, stop_requested);
-    px4::userland::CardSession raw_session(mailbox, mailbox);
-    W3u3CardProtocolSession card_session(raw_session, hardware, stop_requested);
-    px4::userland::CardService card(card_backend, card_session);
-    CardOnlyTunerBackend tuner_backend(hardware.receiver_count());
-    PlatformTunerNonceSource nonce;
-    CardOnlyTime time;
-    px4::userland::TunerService tuner(tuner_backend, nonce, time);
-    const px4::userland::ipc::posix::EndpointConfig endpoint{
-        runtime_directory != nullptr && runtime_directory[0] != '\0' ? runtime_directory : nullptr,
-        instance, px4::userland::ipc::posix::kControlEndpointName,
-        group ? px4::userland::ipc::posix::EndpointAccess::shared_group
-              : px4::userland::ipc::posix::EndpointAccess::private_user};
-    auto created = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
-        nullptr, hardware.receiver_count(), device_profile->combined_isdb_ts);
-    if (!created) {
-        (void)card.shutdown();
-        return exit_status(created.error());
-    }
-
-    auto server = std::move(created.value());
-    std::fprintf(stderr,
-                 "asicend ready backend=asicen-libusb-card-only model=%s "
-#if defined(_WIN32)
-                 "tuner=unsupported endpoint=%ls\n",
-#else
-                 "tuner=unsupported endpoint=%s\n",
-#endif
-                 device_profile->model_key, server->endpoint_path());
-    Error loop_error = Error::OK;
-    while ((stop_requested == nullptr || *stop_requested == 0) &&
-           (stop_callback == nullptr || !stop_callback())) {
-        const auto polled = server->poll_once(px4::userland::Timeout{100U});
-        if (!polled) {
-            loop_error = polled.error();
-            break;
-        }
-    }
-
-    const auto stopped = server->shutdown();
-    server.reset();
-    const auto card_stopped = card.shutdown();
-    if (!stopped && loop_error == Error::OK) {
-        loop_error = stopped.error();
-    }
-    if (!card_stopped && loop_error == Error::OK) {
-        loop_error = card_stopped.error();
-    }
-    return exit_status(loop_error);
+    const int result = run_core_server(hardware, mailbox, runtime_directory, instance, group,
+                                       true, stop_requested, stop_callback);
+    hardware.diagnostic_stop_flag_ = nullptr;
+    return result;
 }
 
 int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtime_directory,
@@ -367,78 +577,13 @@ int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtim
     // frontend lease. Card traffic does not retain receiver 1 ownership.
     hardware.diagnostic_stop_flag_ = stop_requested;
     const auto* device_profile = hardware.device_profile();
-    if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) {
-        return 3;
-    }
-    const std::uint8_t initial_receiver = device_profile->combined_isdb_ts ? 0U : 1U;
-    const auto opened = hardware.open_receiver(initial_receiver);
-    hardware.diagnostic_stop_flag_ = nullptr;
-    if (!opened) {
-        return exit_status(opened.error());
-    }
-    const auto closed = hardware.close_receiver(initial_receiver);
-    if (!closed) {
-        return exit_status(closed.error());
-    }
-
+    if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) return 3;
     W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware),
                                     device_profile->model_id);
-    W3u3CardServiceBackend card_backend(mailbox, hardware, stop_requested);
-    px4::userland::CardSession raw_session(mailbox, mailbox);
-    W3u3CardProtocolSession card_session(raw_session, hardware, stop_requested);
-    px4::userland::CardService card(card_backend, card_session);
-    DeferredHardwareShutdown frontend(hardware);
-
-    HardwareStreamService stream(frontend, hardware);
-    PlatformTunerNonceSource nonce;
-    CardOnlyTime time;
-    px4::userland::TunerService tuner(stream, nonce, time, nullptr, nullptr, &stream);
-    const px4::userland::ipc::posix::EndpointConfig endpoint{
-        runtime_directory != nullptr && runtime_directory[0] != '\0' ? runtime_directory : nullptr,
-        instance, px4::userland::ipc::posix::kControlEndpointName,
-        group ? px4::userland::ipc::posix::EndpointAccess::shared_group
-              : px4::userland::ipc::posix::EndpointAccess::private_user};
-    auto created = px4::userland::ipc::posix::PosixControlServer::create(
-        endpoint, card, tuner, {}, true, profile::usb_present_mask(hardware.receiver_count()),
-        &stream, hardware.receiver_count(), device_profile->combined_isdb_ts);
-    if (!created) {
-        (void)card.shutdown();
-        (void)stream.shutdown();
-        return exit_status(created.error());
-    }
-
-    auto server = std::move(created.value());
-    std::fprintf(stderr,
-                 "asicend ready backend=asicen-libusb-live-card-stream model=%s "
-#if defined(_WIN32)
-                 "receivers=%u endpoint=%ls\n",
-#else
-                 "receivers=%u endpoint=%s\n",
-#endif
-                 device_profile->model_key, static_cast<unsigned>(hardware.receiver_count()),
-                 server->endpoint_path());
-    Error loop_error = Error::OK;
-    while ((stop_requested == nullptr || *stop_requested == 0) &&
-           (stop_callback == nullptr || !stop_callback())) {
-        const auto polled = server->poll_once(px4::userland::Timeout{100U});
-        if (!polled) {
-            std::fprintf(stderr, "asicend poll: %s\n", px4::userland::error_string(polled.error()));
-            loop_error = polled.error();
-            break;
-        }
-    }
-    // The server joins both service workers before returning. The real
-    // frontend.shutdown()/GPIO restore is deliberately left to the caller.
-    const auto stopped = server->shutdown();
-    server.reset();
-    const auto card_stopped = card.shutdown();
-    if (!stopped && loop_error == Error::OK) {
-        loop_error = stopped.error();
-    }
-    if (!card_stopped && loop_error == Error::OK) {
-        loop_error = card_stopped.error();
-    }
-    return exit_status(loop_error);
+    const int result = run_core_server(hardware, mailbox, runtime_directory, instance, group,
+                                       false, stop_requested, stop_callback);
+    hardware.diagnostic_stop_flag_ = nullptr;
+    return result;
 }
 
 }  // namespace asicen

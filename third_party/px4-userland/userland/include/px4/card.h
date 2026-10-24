@@ -23,7 +23,9 @@
 
 namespace px4::userland {
 
+#ifndef PX4_USERLAND_CARD_ATR_BYTES_H
 inline constexpr std::size_t kCardAtrMaxLength = 33U;
+#endif
 
 enum class CardEdc : std::uint8_t {
     lrc = 0,

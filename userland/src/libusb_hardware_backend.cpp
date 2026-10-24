@@ -145,7 +145,12 @@ int device_port_path(const LibusbDevice& device, std::vector<std::uint8_t>* path
     }
     if (count > 0) {
         path->assign(ports, ports + count);
+        return 0;
     }
+    std::uint8_t bus = 0U;
+    const int connected = device.connection_info(&bus, ports, static_cast<int>(sizeof(ports)));
+    if (connected <= 0 || bus != libusb_get_bus_number(device.device())) return 0;
+    path->assign(ports, ports + connected);
     return 0;
 }
 

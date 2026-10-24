@@ -83,6 +83,8 @@ set(ASICEN_LIBUSB_LINK_LIBRARIES "" CACHE STRING
 
 find_package(Threads REQUIRED)
 
+include(cmake/DtvUserlandCoreDependency.cmake)
+
 if(ASICEN_ENABLE_LIBUSB)
     if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         # Preserve the reference discovery exception for FreeBSD's base
@@ -203,6 +205,29 @@ target_link_libraries(asicen_portable_core PUBLIC Threads::Threads)
 asicen_enable_project_warnings(asicen_portable_core)
 set_target_properties(asicen_portable_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+add_library(asicen_core_card_session STATIC
+    ${ASICEN_PX4_ROOT}/src/card.cpp
+    ${ASICEN_PX4_ROOT}/src/identity.cpp
+    ${ASICEN_PX4_ROOT}/src/ipc.cpp)
+if(NOT WIN32)
+    target_sources(asicen_core_card_session PRIVATE
+        ${ASICEN_PX4_ROOT}/src/posix_ipc.cpp)
+else()
+    target_sources(asicen_core_card_session PRIVATE
+        ${ASICEN_PX4_ROOT}/src/windows/windows_ipc.cpp
+        ${ASICEN_PX4_ROOT}/src/windows/windows_sleep.cpp)
+endif()
+target_include_directories(asicen_core_card_session BEFORE PUBLIC
+    userland/include
+    ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+    ${dtv_userland_core_SOURCE_DIR}/include
+    ${ASICEN_PX4_ROOT}/include)
+target_include_directories(asicen_core_card_session PRIVATE ${ASICEN_PX4_ROOT}/src)
+target_compile_definitions(asicen_core_card_session PRIVATE
+    ASICEN_USE_DTV_CORE=1 ASICEN_PROFILE_ASICEN=1)
+target_link_libraries(asicen_core_card_session PUBLIC dtv::core Threads::Threads)
+asicen_enable_project_warnings(asicen_core_card_session)
+
 # Keep synthetic backends out of production archives and build targets.
 if(ASICEN_BUILD_TESTS OR ASICEN_BUILD_TOOLS)
     add_library(asicen_px4_mock STATIC userland/src/px4_mock_backend.cpp)
@@ -211,11 +236,31 @@ if(ASICEN_BUILD_TESTS OR ASICEN_BUILD_TOOLS)
     asicen_enable_project_warnings(asicen_px4_mock)
 endif()
 
+if(ASICEN_BUILD_TESTS OR ASICEN_BUILD_TOOLS)
+    add_library(asicen_core_test_mock STATIC userland/src/px4_mock_backend.cpp)
+    target_include_directories(asicen_core_test_mock PUBLIC userland/include)
+    target_include_directories(asicen_core_test_mock BEFORE PUBLIC
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_compile_definitions(asicen_core_test_mock PUBLIC ASICEN_USE_DTV_CORE=1)
+    target_link_libraries(asicen_core_test_mock PUBLIC asicen_core)
+    asicen_enable_project_warnings(asicen_core_test_mock)
+endif()
+
 add_library(asicen_hardware_session STATIC
     userland/src/hardware_stream_session.cpp)
 target_include_directories(asicen_hardware_session PUBLIC
     userland/include ${ASICEN_PX4_ROOT}/include)
-target_link_libraries(asicen_hardware_session PUBLIC asicen_portable_core Threads::Threads)
+target_include_directories(asicen_hardware_session BEFORE PUBLIC
+    ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+    ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+    ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+    ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+    ${dtv_userland_core_SOURCE_DIR}/include)
+target_link_libraries(asicen_hardware_session PUBLIC dtv::host_listener_context Threads::Threads)
 asicen_enable_project_warnings(asicen_hardware_session)
 
 add_library(asicen_core STATIC
@@ -244,7 +289,10 @@ add_library(asicen_core STATIC
     userland/src/write_protocol.cpp
 )
 target_include_directories(asicen_core PUBLIC userland/include ${ASICEN_PX4_ROOT}/include)
-target_link_libraries(asicen_core PUBLIC Threads::Threads)
+target_include_directories(asicen_core BEFORE PUBLIC
+    ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+    ${dtv_userland_core_SOURCE_DIR}/include)
+target_link_libraries(asicen_core PUBLIC dtv::core Threads::Threads)
 asicen_enable_project_warnings(asicen_core)
 
 if(ASICEN_ENABLE_LIBUSB)
@@ -255,8 +303,17 @@ if(ASICEN_ENABLE_LIBUSB)
         userland/src/card_only_service.cpp
     )
     target_include_directories(asicen_libusb PUBLIC userland/include)
+    target_include_directories(asicen_libusb BEFORE PUBLIC
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
     target_link_libraries(asicen_libusb PUBLIC asicen_core asicen_hardware_session
-        ${ASICEN_LIBUSB_TARGET})
+        dtv::host_listener_context asicen_core_card_session ${ASICEN_LIBUSB_TARGET})
+    target_compile_definitions(asicen_libusb PRIVATE ASICEN_USE_DTV_CORE=1)
+    target_compile_definitions(asicen_libusb PRIVATE
+        "ASICEN_PROJECT_VERSION=\"${PROJECT_VERSION}\"")
     asicen_enable_project_warnings(asicen_libusb)
 endif()
 
@@ -286,9 +343,20 @@ if(ASICEN_BUILD_PCSC_IFD AND UNIX AND NOT ANDROID)
             PUBLIC ${ASICEN_PX4_ROOT}/include
         )
         target_compile_definitions(asicen_pcsc_ifd_core PRIVATE
-            ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:" ASICEN_PROFILE_ASICEN=1)
+            ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:" ASICEN_PROFILE_ASICEN=1
+            ASICEN_USE_DTV_CORE=1)
         target_compile_features(asicen_pcsc_ifd_core PUBLIC cxx_std_17)
-        target_link_libraries(asicen_pcsc_ifd_core PUBLIC asicen_portable_core)
+        foreach(asicen_ifd_core_dependency IN ITEMS
+            dtv_userland_control dtv_userland_wire dtv_userland_host_runtime
+            dtv_userland_host_tuner dtv_userland_host_workers
+            dtv_userland_authority dtv_userland_status_projection
+            dtv_userland_receiver dtv_userland_core)
+            if(TARGET ${asicen_ifd_core_dependency})
+                set_target_properties(${asicen_ifd_core_dependency} PROPERTIES
+                    POSITION_INDEPENDENT_CODE ON)
+            endif()
+        endforeach()
+        target_link_libraries(asicen_pcsc_ifd_core PUBLIC dtv::control dtv::host_runtime)
         set_target_properties(asicen_pcsc_ifd_core PROPERTIES
             POSITION_INDEPENDENT_CODE ON
         )
@@ -383,6 +451,11 @@ if(UNIX AND ASICEN_ENABLE_LIBUSB AND (ASICEN_BUILD_TOOLS OR ASICEN_BUILD_TESTS))
         asicen_enable_project_warnings(asicen-${probe}-probe)
     endforeach()
 
+    add_executable(asicen-termux-fd-info-probe
+        userland/tools/termux_fd_info_probe.cpp)
+    target_link_libraries(asicen-termux-fd-info-probe PRIVATE ${ASICEN_LIBUSB_TARGET})
+    asicen_enable_project_warnings(asicen-termux-fd-info-probe)
+
     add_executable(asicen-probe userland/tools/asicen_probe.cpp)
     target_link_libraries(asicen-probe PRIVATE asicen_diagnostic_support)
     asicen_enable_project_warnings(asicen-probe)
@@ -401,9 +474,16 @@ endif()
 
 if(UNIX OR WIN32)
     add_executable(asicend
-        userland/tools/asicend.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp)
-    target_link_libraries(asicend PRIVATE asicen_core asicen_portable_core Threads::Threads)
+        userland/tools/asicend.cpp)
+    target_include_directories(asicend BEFORE PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_compile_definitions(asicend PRIVATE ASICEN_USE_DTV_CORE=1)
+    target_link_libraries(asicend PRIVATE asicen_core dtv::host_listener_context
+        dtv::host_facade Threads::Threads)
     target_include_directories(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools)
     if(WIN32)
         target_sources(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools/px4d_windows_stdin.cpp)
@@ -422,40 +502,49 @@ if(UNIX OR WIN32)
         # hardware daemon. Not part of the distributed product.
         add_executable(asicend-mock
             userland/tools/asicend_mock.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp)
+            ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp
+            ${ASICEN_PX4_ROOT}/src/identity.cpp)
+        target_include_directories(asicend-mock BEFORE PRIVATE
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+            ${dtv_userland_core_SOURCE_DIR}/include)
         target_include_directories(asicend-mock PRIVATE ${ASICEN_PX4_ROOT}/tools)
-        target_link_libraries(asicend-mock PRIVATE asicen_px4_mock asicen_core Threads::Threads)
+        target_compile_definitions(asicend-mock PRIVATE
+            ASICEN_USE_DTV_CORE=1
+            ASICEN_PROJECT_VERSION="${PROJECT_VERSION}")
+        target_link_libraries(asicend-mock PRIVATE asicen_core_test_mock dtv::host_listener_context
+            dtv::host_facade Threads::Threads)
         asicen_enable_project_warnings(asicend-mock)
 
     endif()
 
     add_executable(asicenctl
-        userland/tools/asicenctl.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4ctl_format.cpp)
-    target_include_directories(asicenctl PRIVATE
-        ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
-    target_compile_definitions(asicenctl PRIVATE ASICEN_PRODUCT_CLI=1)
-    target_link_libraries(asicenctl PRIVATE asicen_portable_core)
+        userland/tools/asicenctl.cpp)
+    target_include_directories(asicenctl BEFORE PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_ctl/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_compile_definitions(asicenctl PRIVATE
+        ASICEN_PROJECT_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(asicenctl PRIVATE dtv::host_ctl)
     asicen_enable_project_warnings(asicenctl)
 
     if(WIN32)
         add_executable(asicen-ts
             userland/tools/asicen_ts_windows.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_windows_output.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+        )
         target_link_options(asicen-ts PRIVATE "LINKER:--stack,8388608")
         target_link_libraries(asicen-ts PRIVATE shell32)
         target_link_libraries(asicenctl PRIVATE shell32)
     else()
         add_executable(asicen-ts
-            userland/tools/asicen_ts.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4_ts_posix.cpp)
+            userland/tools/asicen_ts.cpp)
     endif()
-    target_include_directories(asicen-ts PRIVATE
-        ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicen-ts PRIVATE ASICEN_PRODUCT_CLI=1)
-    target_link_libraries(asicen-ts PRIVATE asicen_core asicen_portable_core)
+    target_link_libraries(asicen-ts PRIVATE dtv::host_ts dtv::host_runtime)
     asicen_enable_project_warnings(asicen-ts)
 endif()
 
@@ -521,19 +610,44 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
             if(TARGET asicen-ifd-prefix-tests)
                 add_test(NAME asicen-ifd-prefix-tests COMMAND asicen-ifd-prefix-tests)
             endif()
-            if(ASICEN_ENABLE_LIBUSB)
-                add_executable(asicen-card-only-service-tests
-                    userland/tests/card_only_service_tests.cpp)
-                target_include_directories(asicen-card-only-service-tests PRIVATE
-                    third_party/px4-userland/userland/include
-                    third_party/px4-userland/userland/tests)
+        endif()
+        if(ASICEN_ENABLE_LIBUSB)
+            add_executable(asicen-card-only-service-tests
+                userland/tests/card_only_service_tests.cpp)
+            target_include_directories(asicen-card-only-service-tests PRIVATE
+                third_party/px4-userland/userland/include
+                third_party/px4-userland/userland/tests)
+            target_include_directories(asicen-card-only-service-tests BEFORE PRIVATE
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+                ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+                ${dtv_userland_core_SOURCE_DIR}/include)
+            target_compile_definitions(asicen-card-only-service-tests PRIVATE
+                ASICEN_USE_DTV_CORE=1)
+            target_link_libraries(asicen-card-only-service-tests PRIVATE
+                asicen_libusb asicen_core_test_mock)
+            if(TARGET asicen_pcsc_ifd_core)
+                add_library(asicen_ifd_core_test_bridge STATIC
+                    userland/tests/ifd_core_test_bridge.cpp)
+                target_include_directories(asicen_ifd_core_test_bridge PRIVATE
+                    ${ASICEN_PX4_ROOT}/include)
+                target_compile_definitions(asicen_ifd_core_test_bridge PRIVATE
+                    ASICEN_USE_DTV_CORE=1 ASICEN_PROFILE_ASICEN=1
+                    ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:")
+                target_compile_features(asicen_ifd_core_test_bridge PRIVATE cxx_std_17)
+                target_link_libraries(asicen_ifd_core_test_bridge PRIVATE
+                    asicen_pcsc_ifd_core)
+                asicen_enable_project_warnings(asicen_ifd_core_test_bridge)
                 target_link_libraries(asicen-card-only-service-tests PRIVATE
-                    asicen_libusb asicen_pcsc_ifd_core)
-                asicen_enable_project_warnings(asicen-card-only-service-tests)
-                add_test(NAME asicen-card-only-service-tests
-                    COMMAND asicen-card-only-service-tests)
-                set_tests_properties(asicen-card-only-service-tests PROPERTIES TIMEOUT 20)
+                    asicen_ifd_core_test_bridge)
+                target_compile_definitions(asicen-card-only-service-tests PRIVATE
+                    ASICEN_TEST_CORE_IFD=1)
             endif()
+            asicen_enable_project_warnings(asicen-card-only-service-tests)
+            add_test(NAME asicen-card-only-service-tests
+                COMMAND asicen-card-only-service-tests)
+            set_tests_properties(asicen-card-only-service-tests PROPERTIES TIMEOUT 20)
         endif()
     endif()
     if(APPLE AND TARGET asicen-ifd-prefix-tests)
@@ -566,16 +680,22 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     endforeach()
 
     add_executable(asicen-model-ipc-tests userland/tests/model_ipc_tests.cpp)
-    target_link_libraries(asicen-model-ipc-tests PRIVATE asicen_core asicen_px4_mock)
+    target_include_directories(asicen-model-ipc-tests BEFORE PRIVATE
+        ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
+    target_link_libraries(asicen-model-ipc-tests PRIVATE
+        asicen_core asicen_portable_core asicen_px4_mock)
     asicen_enable_project_warnings(asicen-model-ipc-tests)
     add_test(NAME asicen-model-ipc-tests COMMAND asicen-model-ipc-tests)
 
     add_executable(asicen-product-lnb-tests
         userland/tests/product_lnb_tests.cpp
         ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+    target_include_directories(asicen-product-lnb-tests BEFORE PRIVATE
+        ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
     target_include_directories(asicen-product-lnb-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicen-product-lnb-tests PRIVATE ASICEN_PRODUCT_CLI=1)
-    target_link_libraries(asicen-product-lnb-tests PRIVATE asicen_core asicen_px4_mock)
+    target_link_libraries(asicen-product-lnb-tests PRIVATE
+        asicen_core asicen_portable_core asicen_px4_mock)
     asicen_enable_project_warnings(asicen-product-lnb-tests)
     add_test(NAME asicen-product-lnb-tests COMMAND asicen-product-lnb-tests)
 
@@ -653,16 +773,39 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         userland/tests/hardware_stream_session_tests.cpp)
     target_include_directories(asicen-hardware-session-tests PRIVATE
         userland/include ${ASICEN_PX4_ROOT}/include)
-    target_link_libraries(asicen-hardware-session-tests PRIVATE asicen_hardware_session asicen_px4_mock)
+    target_include_directories(asicen-hardware-session-tests BEFORE PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_link_libraries(asicen-hardware-session-tests PRIVATE
+        asicen_hardware_session asicen_core_test_mock)
     asicen_enable_project_warnings(asicen-hardware-session-tests)
     add_test(NAME asicen-hardware-session-tests COMMAND asicen-hardware-session-tests)
     set_tests_properties(asicen-hardware-session-tests PROPERTIES TIMEOUT 10)
+
+    add_executable(asicen-hardware-stream-empty-detach-tests
+        userland/tests/hardware_stream_empty_detach_tests.cpp)
+    target_link_libraries(asicen-hardware-stream-empty-detach-tests PRIVATE
+        asicen_hardware_session)
+    asicen_enable_project_warnings(asicen-hardware-stream-empty-detach-tests)
+    add_test(NAME asicen-hardware-stream-empty-detach-tests
+        COMMAND asicen-hardware-stream-empty-detach-tests)
+    set_tests_properties(asicen-hardware-stream-empty-detach-tests PROPERTIES TIMEOUT 10)
 
     add_executable(asicen-hardware-ipc-integration-tests
         userland/tests/hardware_ipc_integration_tests.cpp)
     target_include_directories(asicen-hardware-ipc-integration-tests PRIVATE
         userland/include ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/tests)
-    target_link_libraries(asicen-hardware-ipc-integration-tests PRIVATE asicen_hardware_session asicen_px4_mock)
+    target_include_directories(asicen-hardware-ipc-integration-tests BEFORE PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_link_libraries(asicen-hardware-ipc-integration-tests PRIVATE
+        asicen_hardware_session asicen_core_test_mock)
     asicen_enable_project_warnings(asicen-hardware-ipc-integration-tests)
     add_test(NAME asicen-hardware-ipc-integration-tests
         COMMAND asicen-hardware-ipc-integration-tests)

@@ -477,6 +477,25 @@ bool forged_profiles_and_wrong_single_endpoint_fail_closed()
     return true;
 }
 
+bool unknown_single_function_path_can_claim_selected_fd()
+{
+    const auto profile = *asicen::find_profile(asicen::ModelId::S3u);
+    auto state = primary_snapshot();
+    state.vendor_id = profile.vid;
+    state.product_id = profile.pid;
+    state.port_path.clear();
+    state.endpoint81_in_alt0 = true;
+    state.endpoint81_bulk_in_alt0 = true;
+    std::vector<std::string> events;
+    FakeFunction primary(state, &events, "primary");
+    asicen::EnclosureOwnership owner;
+    CHECK(owner.claim_profile(profile, primary, nullptr, {}) == asicen::OwnershipError::none,
+          "single selected FD can claim when physical topology is unknown");
+    CHECK(owner.release() == asicen::OwnershipError::none,
+          "pathless single-function claim releases cleanly");
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -494,6 +513,9 @@ int main()
         return 1;
     }
     if (!forged_profiles_and_wrong_single_endpoint_fail_closed()) {
+        return 1;
+    }
+    if (!unknown_single_function_path_can_claim_selected_fd()) {
         return 1;
     }
     if (!valid_runtime_claims_and_releases_in_reverse_order()) {

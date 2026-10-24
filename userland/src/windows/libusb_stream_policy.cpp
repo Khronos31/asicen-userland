@@ -9,6 +9,11 @@
 #include <limits>
 
 namespace asicen {
+namespace {
+
+constexpr std::size_t kMaxStreamTransfer = 1048576U;
+
+}  // namespace
 
 int prepare_windows_stream(WindowsRawIoApi& api, std::size_t* transfer_size,
                            bool* raw_io_enabled) noexcept
@@ -16,7 +21,7 @@ int prepare_windows_stream(WindowsRawIoApi& api, std::size_t* transfer_size,
     if (transfer_size == nullptr || raw_io_enabled == nullptr)
         return LIBUSB_ERROR_INVALID_PARAM;
     *raw_io_enabled = false;
-    if (*transfer_size == 0U || *transfer_size > px4::userland::kMaxStreamTransfer)
+    if (*transfer_size == 0U || *transfer_size > kMaxStreamTransfer)
         return LIBUSB_ERROR_INVALID_PARAM;
     const int supported = api.supports_raw_io();
     if (supported <= 0) return supported;
@@ -34,7 +39,7 @@ int prepare_windows_stream(WindowsRawIoApi& api, std::size_t* transfer_size,
     const std::size_t packet = static_cast<std::size_t>(packet_size);
     const std::size_t remainder = *transfer_size % packet;
     const std::size_t padding = remainder == 0U ? 0U : packet - remainder;
-    const std::size_t limit = std::min({px4::userland::kMaxStreamTransfer,
+    const std::size_t limit = std::min({kMaxStreamTransfer,
         static_cast<std::size_t>(std::numeric_limits<int>::max()),
         static_cast<std::size_t>(maximum_size)});
     if (*transfer_size > limit || padding > limit - *transfer_size)

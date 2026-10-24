@@ -3,6 +3,7 @@
 """Process-level acceptance for the ASICEN mock-only command profile."""
 
 import os
+import json
 import signal
 import socket
 import subprocess
@@ -40,7 +41,7 @@ def temporary_runtime_root():
     if not os.path.isabs(configured_root):
         configured_root = "/tmp"
     with tempfile.TemporaryDirectory(prefix="asicen-cli-", dir=configured_root) as temp:
-        longest = Path(temp) / "runtime/asicen-userland/partial-request/control.sock"
+        longest = Path(temp) / "runtime/asicen-userland/v1/partial-request/control.sock"
         if len(os.fsencode(longest)) + 1 < 104:
             yield temp
             return
@@ -53,7 +54,7 @@ with temporary_runtime_root() as temp:
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)
     instance = "acceptance"
-    endpoint_dir = runtime / "asicen-userland" / instance
+    endpoint_dir = runtime / "asicen-userland" / "v1" / instance
     endpoint = endpoint_dir / "control.sock"
     log = open(root / "daemon.log", "wb")
     daemon = subprocess.Popen(
@@ -73,12 +74,12 @@ with temporary_runtime_root() as temp:
             [str(DAEMON), "--runtime-dir", str(runtime), "--instance", "independent"],
             stdout=subprocess.DEVNULL, stderr=independent_log)
         children.append(independent)
-        independent_endpoint = runtime / "asicen-userland" / "independent" / "control.sock"
+        independent_endpoint = runtime / "asicen-userland" / "v1" / "independent" / "control.sock"
         wait_socket(independent_endpoint, independent)
         independent.send_signal(signal.SIGHUP)
         assert independent.wait(timeout=2) == 0
         assert not independent_endpoint.exists()
-        assert daemon.poll() is None
+        assert daemon.poll() is None, (daemon.returncode, (root / "daemon.log").read_text())
 
         # The obsolete 24-byte protocol is no longer a second command mode.
         # Reject its selector even when leading, without creating any path.
@@ -106,26 +107,28 @@ with temporary_runtime_root() as temp:
         listing = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                       instance, "list", capture_output=True, text=True)
         assert listing.returncode == 0, listing.stderr
-        assert listing.stdout.startswith("serial= "), listing.stdout
+        assert listing.stdout.startswith("ready=1 usb-functions=2 receivers=4 readers=1\n"), listing.stdout
         assert "backend=mock-only" not in listing.stdout, listing.stdout
-        expected = ["receiver=0 device=1 local=0 system=ISDB-S",
-                    "receiver=1 device=1 local=1 system=ISDB-T",
-                    "receiver=2 device=2 local=0 system=ISDB-S",
-                    "receiver=3 device=2 local=1 system=ISDB-T"]
+        expected = ["function=1 usb=0b06:0005 present=yes",
+                    "function=2 usb=0b06:0005 present=yes"]
         assert all(line in listing.stdout for line in expected), listing.stdout
 
         status = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                      instance, "status", capture_output=True, text=True)
-        assert status.returncode == 3 and "UNSUPPORTED" in status.stderr
+        assert status.returncode == 0, status.stderr
+        status_json = json.loads(status.stdout)
+        assert status_json["context"]["state"] == "ready"
+        assert len(status_json["receivers"]) == 4
         no_daemon = run(str(CTL), "--runtime-dir", str(root / "missing"),
                         "--instance", instance, "list", capture_output=True, text=True)
-        assert no_daemon.returncode == 3 and "NOT_FOUND" in no_daemon.stderr
+        assert no_daemon.returncode == 3 and "connect failed" in no_daemon.stderr
         card = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                    instance, "card-status", capture_output=True, text=True)
-        assert card.returncode == 3 and "UNSUPPORTED" in card.stderr
+        assert card.returncode == 3 and "remote=11" in card.stderr
         unsupported = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                           instance, "card-atr", capture_output=True, text=True)
-        assert unsupported.returncode == 3, (unsupported.returncode, unsupported.stderr)
+        assert unsupported.returncode == 3 and "remote=11" in unsupported.stderr, \
+            (unsupported.returncode, unsupported.stderr)
 
         invalid = run(str(TS), "--runtime-dir", str(runtime), "--instance",
                       instance, "--receiver", "1", "--channel", "T27",
@@ -183,7 +186,7 @@ with temporary_runtime_root() as temp:
         assert endpoint.is_socket(), "rejected legacy selector unlinked product endpoint"
         still_live = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                          instance, "list", capture_output=True, text=True)
-        assert still_live.returncode == 0 and still_live.stdout.startswith("serial= ")
+        assert still_live.returncode == 0 and still_live.stdout.startswith("ready=1 ")
 
         # Closing a stream consumer must not wedge either client or daemon.
         consumer = subprocess.Popen(
@@ -227,7 +230,7 @@ with temporary_runtime_root() as temp:
         sock.close()
 
         research_instance = "partial-request"
-        research_socket = runtime / "asicen-userland" / research_instance / "control.sock"
+        research_socket = runtime / "asicen-userland" / "v1" / research_instance / "control.sock"
         research_log = open(root / "research.log", "wb")
         research = subprocess.Popen(
             [str(DAEMON), "--runtime-dir", str(runtime), "--instance", research_instance],
@@ -247,7 +250,7 @@ with temporary_runtime_root() as temp:
         assert not research_socket.exists()
 
         research_instance = "blocked-output"
-        research_socket = runtime / "asicen-userland" / research_instance / "control.sock"
+        research_socket = runtime / "asicen-userland" / "v1" / research_instance / "control.sock"
         research_log = open(root / "research-slow.log", "wb")
         research = subprocess.Popen(
             [str(DAEMON), "--runtime-dir", str(runtime), "--instance", research_instance],
@@ -275,13 +278,12 @@ with temporary_runtime_root() as temp:
             slow_research_client.wait()
         research_log.close()
 
-        # The same upstream LNB contract is simulated for every model when the
-        # daemon grants --allow-lnb-power. These are synthetic null-packet
-        # captures, not evidence of physical output voltage or reception on any
-        # of the model-specific hardware paths.
+        # Mock LNB control follows the source-backed product capability.
+        # These are synthetic null-packet captures, not evidence of physical
+        # output voltage or reception on any model-specific hardware path.
         for model in ("s3u", "s3u2", "w3u2", "w3u3", "w3u3-v2"):
             model_instance = "lnb-" + model
-            model_endpoint = runtime / "asicen-userland" / model_instance / "control.sock"
+            model_endpoint = runtime / "asicen-userland" / "v1" / model_instance / "control.sock"
             model_log = open(root / (model + ".log"), "wb")
             logs.append(model_log)
             model_daemon = subprocess.Popen(
@@ -295,6 +297,11 @@ with temporary_runtime_root() as temp:
                                 model_instance, "--receiver", "0", "--channel", "BS01_0",
                                 *lnb_args, "--packet-count", "3", "--output", "-",
                                 capture_output=True)
+                if model in ("s3u", "s3u2") and lnb_args == ["--lnb-voltage", "15"]:
+                    assert satellite.returncode == 3 and b"UNSUPPORTED" in satellite.stderr, \
+                        (model, lnb_args, satellite.stderr)
+                    assert satellite.stdout == b""
+                    continue
                 assert satellite.returncode == 0, (model, lnb_args, satellite.stderr)
                 assert len(satellite.stdout) == 3 * 188
                 assert all(satellite.stdout[offset:offset + 3] == b"\x47\x1f\xff"
@@ -306,7 +313,7 @@ with temporary_runtime_root() as temp:
         # Without --allow-lnb-power the mock daemon refuses the 15 V request,
         # matching px4's default-off safety gate. Zero volts stays accepted.
         denied_instance = "lnb-denied"
-        denied_endpoint = runtime / "asicen-userland" / denied_instance / "control.sock"
+        denied_endpoint = runtime / "asicen-userland" / "v1" / denied_instance / "control.sock"
         denied_log = open(root / "lnb-denied.log", "wb")
         logs.append(denied_log)
         denied_daemon = subprocess.Popen(

@@ -1247,14 +1247,15 @@ def audit_ifd_proxy(plugin: Path, daemon_binary: Path) -> int:
         runtime = root / "r"
         runtime.mkdir(mode=0o700)
         instance = "ifdsmoke"
-        daemon_endpoint = runtime / "asicen-userland" / instance / "control.sock"
+        daemon_endpoint = runtime / "asicen-userland" / "v1" / instance / "control.sock"
         proxy_runtime = root / "p"
         proxy_instance = "proxy"
-        proxy_endpoint = proxy_runtime / "asicen-userland" / proxy_instance / "control.sock"
+        proxy_endpoint = proxy_runtime / "asicen-userland" / "v1" / proxy_instance / "control.sock"
         proxy_runtime.mkdir(mode=0o700)
-        (proxy_runtime / "asicen-userland").mkdir(mode=0o700)
+        (proxy_runtime / "asicen-userland" / "v1").mkdir(parents=True, mode=0o700)
         proxy_endpoint.parent.mkdir(parents=True, mode=0o700)
         for directory in (proxy_runtime, proxy_runtime / "asicen-userland",
+                          proxy_runtime / "asicen-userland" / "v1",
                           proxy_endpoint.parent):
             directory.chmod(0o700)
         byte_counts = {"to-daemon": 0, "from-daemon": 0}

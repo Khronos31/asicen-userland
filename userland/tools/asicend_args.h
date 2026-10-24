@@ -65,7 +65,11 @@ inline int exit_status(px4::userland::Error error) noexcept
     case Error::CARD_REMOVED:
     case Error::BUFFER_TOO_SMALL: return 9;
     case Error::FIRMWARE_REJECTED: return 10;
+#if defined(ASICEN_USE_DTV_CORE)
+    case Error::RESOURCE_LIMIT:
+#endif
     case Error::INTERNAL: return 70;
+    default: return 70;
     }
     return 70;
 }

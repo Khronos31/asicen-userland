@@ -4,9 +4,14 @@
 // The original license notice is unchanged.
 #include "px4/pcsc_ifd_adapter.h"
 
+#if defined(ASICEN_USE_DTV_CORE)
+#include "dtv/userland/control_client.h"
+#include "dtv/userland/host_runtime/control_socket.h"
+#else
 #include "px4/control_client.h"
 #include "px4/ipc.h"
 #include "px4/posix_ipc.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -17,8 +22,10 @@
 namespace px4::userland::pcsc {
 namespace {
 
+#if !defined(ASICEN_USE_DTV_CORE)
 using namespace ipc;
 using namespace ipc::posix;
+#endif
 
 constexpr std::uint32_t kRequestTimeoutMs = 4000U;
 #if defined(ASICEN_PCSC_DEVICE_PREFIX)
@@ -121,6 +128,7 @@ IfdResult copy_u32(std::uint32_t value, MutableByteView output,
     return copy_value(ByteView{bytes.data(), bytes.size()}, output, length);
 }
 
+#if !defined(ASICEN_USE_DTV_CORE)
 template <typename Payload>
 Result<ControlResponse> typed_request(PosixControlClient& client,
                                       MessageType type,
@@ -246,6 +254,158 @@ public:
 private:
     std::unique_ptr<PosixControlClient> client_;
 };
+#else
+class PosixIfdCardClient final : public IfdCardClient {
+public:
+    PosixIfdCardClient(std::unique_ptr<dtv::userland::wire::TimedClientTransport> client,
+                       std::string instance, std::string runtime_directory,
+                       dtv::userland::host_runtime::EndpointAccess access) noexcept
+        : client_(std::move(client)), instance_(std::move(instance)),
+          runtime_directory_(std::move(runtime_directory)), access_(access)
+    {
+    }
+
+    Result<IfdCardStatus> status() noexcept override
+    {
+        IfdCardStatus result{};
+        if (!card_session_started_) {
+            const auto snapshot = dtv::userland::wire::fetch_status(
+                *client_, dtv::userland::Timeout{kRequestTimeoutMs});
+            if (!snapshot) return Result<IfdCardStatus>::failure(
+                static_cast<Error>(snapshot.error));
+            const auto& readers = snapshot.snapshot.status.readers;
+            if (!readers.present || readers.value.count == 0U)
+                return Result<IfdCardStatus>::failure(Error::NOT_FOUND);
+            result.present = readers.value.items[0U].card.state ==
+                             dtv::userland::wire::CardState::present;
+            return Result<IfdCardStatus>::success(result);
+        }
+        const auto status = dtv::userland::wire::card_status(
+            *client_, session_, dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!status) return Result<IfdCardStatus>::failure(
+            static_cast<Error>(status.error));
+        const auto& reader = status.response;
+        result.present = reader.present;
+        result.initialized = reader.initialized;
+        result.reader_generation = reader.current_generation;
+        if (result.present && result.initialized && reader.atr.present) {
+            result.atr_length = reader.atr.value.length;
+            if (result.atr_length > result.atr.size())
+                return Result<IfdCardStatus>::failure(Error::BUFFER_TOO_SMALL);
+            if (result.atr_length != 0U)
+                std::memcpy(result.atr.data(), reader.atr.value.bytes.data(),
+                            result.atr_length);
+        }
+        return Result<IfdCardStatus>::success(result);
+    }
+
+    Result<IfdCardConnectResult> connect_shared() noexcept override
+    {
+        using namespace dtv::userland::host_runtime;
+        const EndpointConfig config{runtime_directory_, "asicen-userland", instance_, access_};
+        auto reconnected = connect_control(config, dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!reconnected) return Result<IfdCardConnectResult>::failure(
+            static_cast<Error>(reconnected.error()));
+        if (client_) client_->close();
+        client_ = std::move(reconnected.value());
+        dtv::userland::wire::CardClientOptions options;
+        options.reader_id = 0U;
+        options.share = dtv::userland::wire::Share::shared;
+        options.expected_product = {reinterpret_cast<const std::uint8_t*>(kProduct.data()),
+                                    kProduct.size()};
+        options.expected_instance = {
+            reinterpret_cast<const std::uint8_t*>(instance_.data()), instance_.size()};
+        const auto opened = dtv::userland::wire::begin_card(
+            *client_, options, dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!opened) return Result<IfdCardConnectResult>::failure(
+            static_cast<Error>(opened.error));
+        session_ = opened.session;
+        const auto& atr = opened.connection.atr;
+        atr_length_ = atr.present ? atr.value.length : 0U;
+        if (atr_length_ > atr_.size())
+            return Result<IfdCardConnectResult>::failure(Error::BUFFER_TOO_SMALL);
+        if (atr_length_ != 0U)
+            std::memcpy(atr_.data(), atr.value.bytes.data(), atr_length_);
+        card_session_started_ = true;
+        IfdCardConnectResult result{};
+        result.handle = session_.card_handle;
+        result.atr_length = atr_length_;
+        std::copy_n(atr_.begin(), atr_length_, result.atr.begin());
+        return Result<IfdCardConnectResult>::success(result);
+    }
+
+    Result<void> disconnect(std::uint64_t handle) noexcept override
+    {
+        if (handle == 0U || handle != session_.card_handle)
+            return Result<void>::failure(Error::NOT_FOUND);
+        const auto disconnected = dtv::userland::wire::card_disconnect(
+            *client_, session_, dtv::userland::wire::Disposition::leave,
+            dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!disconnected) return Result<void>::failure(
+            static_cast<Error>(disconnected.error));
+        session_.card_handle = 0U;
+        session_.bound_generation = 0U;
+        atr_length_ = 0U;
+        atr_.fill(0U);
+        return Result<void>::success();
+    }
+
+    Result<IfdCardConnectResult> reset(std::uint64_t handle) noexcept override
+    {
+        if (handle == 0U || handle != session_.card_handle)
+            return Result<IfdCardConnectResult>::failure(Error::NOT_FOUND);
+        const auto reset = dtv::userland::wire::card_reset(
+            *client_, session_, dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!reset) return Result<IfdCardConnectResult>::failure(
+            static_cast<Error>(reset.error));
+        const auto& atr = reset.response.atr;
+        atr_length_ = atr.present ? atr.value.length : 0U;
+        if (atr_length_ > atr_.size())
+            return Result<IfdCardConnectResult>::failure(Error::BUFFER_TOO_SMALL);
+        if (atr_length_ != 0U)
+            std::memcpy(atr_.data(), atr.value.bytes.data(), atr_length_);
+        IfdCardConnectResult result{};
+        result.handle = handle;
+        result.atr_length = atr_length_;
+        std::copy_n(atr_.begin(), atr_length_, result.atr.begin());
+        return Result<IfdCardConnectResult>::success(result);
+    }
+
+    Result<std::size_t> transmit(std::uint64_t handle, ByteView apdu,
+                                 MutableByteView response) noexcept override
+    {
+        if (handle == 0U || handle != session_.card_handle)
+            return Result<std::size_t>::failure(Error::NOT_FOUND);
+        const auto transmitted = dtv::userland::wire::card_transmit(
+            *client_, session_, dtv::userland::wire::CardProtocol::t1,
+            {apdu.data, apdu.size}, dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!transmitted) return Result<std::size_t>::failure(
+            static_cast<Error>(transmitted.error));
+        const auto& bytes = transmitted.response.response;
+        if (bytes.length > response.size || (bytes.length != 0U && response.data == nullptr))
+            return Result<std::size_t>::failure(Error::BUFFER_TOO_SMALL);
+        if (bytes.length != 0U)
+            std::memcpy(response.data, bytes.bytes.data(), bytes.length);
+        return Result<std::size_t>::success(bytes.length);
+    }
+
+    void close() noexcept override
+    {
+        if (client_) client_->close();
+    }
+
+private:
+    static constexpr std::string_view kProduct = "asicen-userland";
+    std::unique_ptr<dtv::userland::wire::TimedClientTransport> client_;
+    dtv::userland::wire::CardClientSession session_{};
+    std::string instance_;
+    std::string runtime_directory_;
+    dtv::userland::host_runtime::EndpointAccess access_;
+    std::array<std::uint8_t, kIfdAtrMaxLength> atr_{};
+    std::size_t atr_length_ = 0U;
+    bool card_session_started_ = false;
+};
+#endif
 
 }  // namespace
 
@@ -358,6 +518,22 @@ IfdResult map_ifd_error(Error error, IfdOperation operation) noexcept
 Result<std::unique_ptr<IfdCardClient>> PosixIfdCardClientFactory::connect(
     const IfdEndpoint& endpoint) noexcept
 {
+#if defined(ASICEN_USE_DTV_CORE)
+    using namespace dtv::userland::host_runtime;
+    const EndpointConfig config{
+        endpoint.runtime_directory, "asicen-userland", endpoint.device_instance,
+        endpoint.group_access ? EndpointAccess::shared_group : EndpointAccess::private_user};
+    auto client = connect_control(config, dtv::userland::Timeout{kRequestTimeoutMs});
+    if (!client) {
+        return Result<std::unique_ptr<IfdCardClient>>::failure(
+            static_cast<Error>(client.error()));
+    }
+    return Result<std::unique_ptr<IfdCardClient>>::success(
+        std::unique_ptr<IfdCardClient>(new PosixIfdCardClient(
+            std::move(client.value()), endpoint.device_instance,
+            endpoint.runtime_directory, endpoint.group_access ?
+                EndpointAccess::shared_group : EndpointAccess::private_user)));
+#else
     const char* runtime = endpoint.runtime_directory.empty() ?
                               nullptr : endpoint.runtime_directory.c_str();
     const EndpointConfig config{
@@ -372,6 +548,7 @@ Result<std::unique_ptr<IfdCardClient>> PosixIfdCardClientFactory::connect(
     return Result<std::unique_ptr<IfdCardClient>>::success(
         std::unique_ptr<IfdCardClient>(
             new PosixIfdCardClient(std::move(client.value()))));
+#endif
 }
 
 void IfdAdapter::clear_card_state() noexcept

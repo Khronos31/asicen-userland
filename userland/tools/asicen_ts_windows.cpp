@@ -2,8 +2,8 @@
 // Windows px4-ts front end. The binary sink lives in px4_ts_windows_output so
 // it can be exercised by isolated tests; the portable protocol runner in
 // px4_ts_core.cpp is shared with the POSIX front end.
-#include "px4_ts_core.h"
-#include "px4_ts_windows_output.h"
+#include "dtv/host_ts/px4_ts_core.h"
+#include "dtv/host_ts/px4_ts_windows_output.h"
 #include "px4_windows_args.h"
 
 #if defined(_WIN32)
@@ -26,6 +26,10 @@ namespace {
 
 using namespace px4::userland;
 using namespace px4::userland::cli;
+
+const TsClientProfile kProfile{
+    "asicen-ts", "asicen-userland", dtv::userland::identity::Product::asicen,
+    false, true, nullptr, false};
 
 std::atomic<bool> stop_flag{false};
 HANDLE cleanup_event = nullptr;
@@ -109,14 +113,14 @@ int main(int argc, char** argv)
         views.push_back(value.c_str());
     }
     const Px4TsArguments arguments =
-        parse_px4_ts_arguments(static_cast<int>(views.size()), views.data());
+        parse_px4_ts_product_arguments(static_cast<int>(views.size()), views.data(), kProfile);
     if (!arguments.valid) {
         std::fprintf(stderr, "argument error: %s\n", arguments.error.c_str());
-        print_px4_ts_usage(stderr);
+        print_px4_ts_usage(kProfile, stderr);
         return 2;
     }
     if (arguments.help) {
-        print_px4_ts_usage(stdout);
+        print_px4_ts_usage(kProfile, stdout);
         return 0;
     }
     if (!install_handlers()) {
@@ -154,8 +158,8 @@ int main(int argc, char** argv)
     WindowsSignal signal;
     Px4TsFailureKind failure_kind = Px4TsFailureKind::ipc;
     Px4TsRunDiagnostics diagnostics;
-    const auto result = Px4TsRunner::run(arguments, *output, clock, signal,
-                                         &failure_kind, &diagnostics);
+    const auto result = Px4TsRunner::run_wire(arguments, kProfile, *output, clock, signal,
+                                              &failure_kind, &diagnostics);
     const auto finished = output->finish();
     const std::uint64_t completed = output->completed_packets();
     // Release a blocked console/termination handler only when the worker has

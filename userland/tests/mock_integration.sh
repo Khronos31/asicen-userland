@@ -12,12 +12,12 @@ done
 work="$(mktemp -d "${temporary_root%/}/asicen-mock.XXXXXX")"
 # Match the pinned fixture policy, including the complete endpoint suffix.
 # macOS has the smallest supported sun_path (104 bytes, including its NUL).
-endpoint="$work/asicen-userland/$instance/control.sock"
+endpoint="$work/asicen-userland/v1/$instance/control.sock"
 if [[ "$(printf '%s' "$endpoint" | LC_ALL=C wc -c)" -ge 103 ]]; then
   rmdir "$work"
   work="$(mktemp -d /tmp/asicen-mock.XXXXXX)"
 fi
-sock="$work/asicen-userland/$instance/control.sock"
+sock="$work/asicen-userland/v1/$instance/control.sock"
 out="$work/out.ts"
 log="$work/daemon.log"
 

@@ -2,10 +2,11 @@
 #ifndef ASICEN_USERLAND_CARD_ONLY_SERVICE_H
 #define ASICEN_USERLAND_CARD_ONLY_SERVICE_H
 
-#include "asicen/card_mailbox_hardware.h"
-#include "asicen/card_operation_guard.h"
 #include "px4/card_service.h"
 #include "px4/tuner_service.h"
+
+#include "asicen/card_mailbox_hardware.h"
+#include "asicen/card_operation_guard.h"
 
 #include <csignal>
 
@@ -43,7 +44,7 @@ public:
     transmit(px4::userland::ByteView apdu,
              px4::userland::MutableByteView response) noexcept override;
     bool initialized() const noexcept override;
-    const px4::userland::CardAtr& atr() const noexcept override;
+    const px4::userland::CardAtrBytes& atr() const noexcept override;
     void invalidate() noexcept override;
     void request_stop() noexcept override;
 
@@ -51,6 +52,7 @@ private:
     px4::userland::CardSession& session_;
     CardOperationGuard& guard_;
     const volatile std::sig_atomic_t* stop_requested_;
+    px4::userland::CardAtrBytes atr_{};
 };
 
 class CardOnlyTunerBackend final : public px4::userland::TunerServiceBackend {

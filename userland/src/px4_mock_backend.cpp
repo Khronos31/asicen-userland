@@ -14,6 +14,7 @@ using namespace px4::userland;
 namespace {
 
 using namespace px4::userland;
+constexpr std::size_t kMaxStreamTransfer = 1048576U;
 
 bool same_attachment(const TunerAttachment& left,
                      const TunerAttachment& right) noexcept
@@ -91,6 +92,53 @@ Result<void> MockTunerBackend::tune_satellite(std::uint8_t receiver, std::uint32
     }
     return available(stopping_);
 }
+
+#if defined(ASICEN_USE_DTV_CORE)
+Result<TunerHzProgramming> MockTunerBackend::tune_terrestrial_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (frequency_hz < 40000000U || frequency_hz > 1002000000U ||
+        frequency_hz / 1000U > UINT32_MAX)
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    const auto tuned = tune_terrestrial(receiver, static_cast<std::uint32_t>(frequency_hz / 1000U),
+                                        timeout_ms);
+    if (!tuned) return Result<TunerHzProgramming>::failure(tuned.error());
+    TunerHzProgramming result;
+    result.programmed_hz = (frequency_hz / 1000U) * 1000U;
+    return Result<TunerHzProgramming>::success(result);
+}
+
+Result<TunerHzProgramming> MockTunerBackend::tune_satellite_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (frequency_hz < 146875000U || frequency_hz > 2350000000U ||
+        frequency_hz / 1000U > UINT32_MAX)
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    const auto tuned = tune_satellite(receiver, static_cast<std::uint32_t>(frequency_hz / 1000U),
+                                      timeout_ms);
+    if (!tuned) return Result<TunerHzProgramming>::failure(tuned.error());
+    TunerHzProgramming result;
+    result.programmed_hz = (frequency_hz / 1000U) * 1000U;
+    return Result<TunerHzProgramming>::success(result);
+}
+
+TunerStrictProfile MockTunerBackend::strict_profile(std::uint8_t receiver,
+                                                    ipc::System system) const noexcept
+{
+    if (!receiver_supports(receiver, system)) return {};
+    TunerStrictProfile result;
+    result.native_hz = true;
+    if (system == ipc::System::ISDB_T) {
+        result.min_hz = 40000000U;
+        result.max_hz = 1002000000U;
+    } else {
+        result.min_hz = 146875000U;
+        result.max_hz = 2350000000U;
+        result.lnb_voltage_mask = 0x03U;
+    }
+    return result;
+}
+#endif
 
 Result<bool> MockTunerBackend::is_locked(std::uint8_t receiver, ipc::System system) noexcept
 {
@@ -371,14 +419,22 @@ bool UnsupportedCardSession::initialized() const noexcept
     return false;
 }
 
+#if defined(ASICEN_USE_DTV_CORE)
+const CardAtrBytes& UnsupportedCardSession::atr() const noexcept
+#else
 const CardAtr& UnsupportedCardSession::atr() const noexcept
+#endif
 {
     return atr_;
 }
 
 void UnsupportedCardSession::invalidate() noexcept
 {
+#if defined(ASICEN_USE_DTV_CORE)
+    atr_ = CardAtrBytes{};
+#else
     atr_ = CardAtr{};
+#endif
 }
 
 }  // namespace asicen

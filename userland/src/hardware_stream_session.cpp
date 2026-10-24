@@ -16,6 +16,8 @@ namespace {
 using px4::userland::Error;
 using px4::userland::Result;
 using px4::userland::TunerAttachment;
+using px4::userland::TunerHzProgramming;
+using px4::userland::TunerStrictProfile;
 using px4::userland::TunerStreamTerminal;
 using px4::userland::ipc::System;
 
@@ -113,6 +115,52 @@ Result<void> HardwareStreamService::tune_satellite(std::uint8_t receiver,
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     return frontend_.tune_satellite(receiver, frequency_khz, timeout_ms);
+}
+
+Result<TunerHzProgramming> HardwareStreamService::tune_terrestrial_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (frequency_hz < 40000000U || frequency_hz > 1002000000U ||
+        frequency_hz / 1000U > UINT32_MAX)
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    // ASICEN's hardware tune commands use integer kHz; report the floor conversion.
+    const std::uint32_t frequency_khz = static_cast<std::uint32_t>(frequency_hz / 1000U);
+    const auto tuned = tune_terrestrial(receiver, frequency_khz, timeout_ms);
+    if (!tuned) return Result<TunerHzProgramming>::failure(tuned.error());
+    TunerHzProgramming result;
+    result.programmed_hz = static_cast<std::uint64_t>(frequency_khz) * 1000U;
+    return Result<TunerHzProgramming>::success(result);
+}
+
+Result<TunerHzProgramming> HardwareStreamService::tune_satellite_hz(
+    std::uint8_t receiver, std::uint64_t frequency_hz, std::uint32_t timeout_ms) noexcept
+{
+    if (frequency_hz < 146875000U || frequency_hz > 2350000000U ||
+        frequency_hz / 1000U > UINT32_MAX)
+        return Result<TunerHzProgramming>::failure(Error::UNSUPPORTED);
+    const std::uint32_t frequency_khz = static_cast<std::uint32_t>(frequency_hz / 1000U);
+    const auto tuned = tune_satellite(receiver, frequency_khz, timeout_ms);
+    if (!tuned) return Result<TunerHzProgramming>::failure(tuned.error());
+    TunerHzProgramming result;
+    result.programmed_hz = static_cast<std::uint64_t>(frequency_khz) * 1000U;
+    return Result<TunerHzProgramming>::success(result);
+}
+
+TunerStrictProfile HardwareStreamService::strict_profile(
+    std::uint8_t receiver, System system) const noexcept
+{
+    if (!receiver_supports(receiver, system)) return {};
+    TunerStrictProfile result;
+    result.native_hz = true;
+    if (system == System::ISDB_T) {
+        result.min_hz = 40000000U;
+        result.max_hz = 1002000000U;
+    } else {
+        result.min_hz = 146875000U;
+        result.max_hz = 2350000000U;
+        result.lnb_voltage_mask = 0x03U;
+    }
+    return result;
 }
 
 Result<bool> HardwareStreamService::is_locked(std::uint8_t receiver, System system) noexcept
@@ -388,7 +436,7 @@ Result<void> HardwareStreamService::detach(const TunerAttachment& attachment) no
         have_final_attachment_ = true;
         final_snapshot_ready_ = false;
         have_attachment_ = false;
-        draining_ = queue_bytes_ != 0U;
+        draining_ = true;
         attachment_ = {};
         state_ = State::detached;
         cancelled_.store(true);
@@ -457,6 +505,10 @@ HardwareStreamService::read(const TunerAttachment& attachment,
         return Result<px4::userland::TunerStreamReadResult>::failure(Error::INVALID_ARGUMENT);
     }
     std::unique_lock<std::mutex> lock(mutex_);
+    if (draining_ && matches_final_locked(attachment) && !final_snapshot_ready_) {
+        return Result<px4::userland::TunerStreamReadResult>::success(
+            {0U, false, true, TunerStreamTerminal::none});
+    }
     if (!matches_locked(attachment) && !(draining_ && matches_final_locked(attachment))) {
         if (matches_final_locked(attachment) && state_ == State::detached &&
             !final_snapshot_ready_) {
@@ -469,6 +521,10 @@ HardwareStreamService::read(const TunerAttachment& attachment,
         condition_.wait_for(lock, std::chrono::milliseconds(timeout.milliseconds), [&] {
             return queue_bytes_ != 0U || worker_done_ || state_ != State::running;
         });
+    }
+    if (draining_ && matches_final_locked(attachment) && !final_snapshot_ready_) {
+        return Result<px4::userland::TunerStreamReadResult>::success(
+            {0U, false, true, TunerStreamTerminal::none});
     }
     if (!matches_locked(attachment) && !(draining_ && matches_final_locked(attachment))) {
         if (matches_final_locked(attachment) && state_ == State::detached &&
