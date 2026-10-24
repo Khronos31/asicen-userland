@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
 import tarfile
@@ -73,7 +74,8 @@ def ref_version(root: Path, ref: str) -> str:
     return value
 
 
-def add_git_snapshot(root: Path, ref: str, stage: Path) -> tuple[str, str]:
+def add_git_snapshot(root: Path, ref: str, stage: Path,
+                     destination_prefix: str = "repository") -> tuple[str, str]:
     commit = git_output(root, "rev-parse", f"{ref}^{{commit}}")
     tree = git_output(root, "rev-parse", f"{commit}^{{tree}}")
     try:
@@ -100,7 +102,7 @@ def add_git_snapshot(root: Path, ref: str, stage: Path) -> tuple[str, str]:
         member, data = extracted[name]
         if data is None:
             fail(f"git archive member has no regular data: {name}")
-        destination = stage / "repository" / name
+        destination = stage / destination_prefix / name
         write_file(destination, data, member.mode & 0o7777)
     return commit, tree
 
@@ -160,6 +162,8 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source-ref", required=True)
     parser.add_argument("--libusb-source-archive", type=Path, required=True)
+    parser.add_argument("--core-source-dir", type=Path,
+                        help="pinned Core source for a Windows WinSCard corresponding-source archive")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if not VERSION_RE.fullmatch(args.version):
@@ -170,7 +174,11 @@ def main() -> int:
         fail(f"--version {args.version} does not match VERSION in source snapshot {args.source_ref}")
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / f"asicen-userland-{args.version}-source.tar.gz"
+    if args.core_source_dir is not None and (args.core_source_dir.is_symlink() or
+                                             not args.core_source_dir.is_dir()):
+        fail(f"Core source input must be an ordinary directory: {args.core_source_dir}")
+    output_suffix = "-windows-source" if args.core_source_dir is not None else "-source"
+    output = output_dir / f"asicen-userland-{args.version}{output_suffix}.tar.gz"
     if output.exists() or output.is_symlink():
         fail(f"refusing to overwrite existing archive: {output}")
     with tempfile.TemporaryDirectory(prefix="asicen-source-") as temporary:
@@ -178,11 +186,43 @@ def main() -> int:
         stage.mkdir()
         commit, tree = add_git_snapshot(root, source_ref, stage)
         add_libusb(args.libusb_source_archive.resolve(), stage)
+        core_dependency = None
+        if args.core_source_dir is not None:
+            core_source = args.core_source_dir.resolve()
+            core_revision_path = stage / "repository" / "cmake" / "dtv-userland-core.revision"
+            if not core_revision_path.is_file():
+                fail(f"pinned Core revision is missing from product source: {core_revision_path}")
+            core_revision = core_revision_path.read_text(encoding="ascii").strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", core_revision):
+                fail("pinned Core revision is invalid")
+            if git_output(core_source, "rev-parse", "HEAD^{commit}") != core_revision:
+                fail("Core source HEAD does not match the product Core revision pin")
+            core_commit, core_tree = add_git_snapshot(
+                core_source, core_revision, stage, "third_party/dtv-userland-core/repository")
+            core_marker = f"{core_commit}\n{core_tree}\n"
+            write_file(stage / "third_party/dtv-userland-core/SOURCE-REVISION", core_marker.encode("ascii"))
+            core_dependency = {
+                "repository": "https://github.com/Khronos31/dtv-userland-core",
+                "commit": core_commit,
+                "tree": core_tree,
+                "license": "GPL-2.0-only",
+                "source_member_prefix": "third_party/dtv-userland-core/repository/",
+            }
         template = stage / "repository" / "packaging" / "REBUILD.md.in"
         if not template.is_file():
             fail(f"missing rebuild template: {template}")
         rebuild = template.read_text(encoding="utf-8")
         rebuild = rebuild.replace("@VERSION@", args.version).replace("@COMMIT@", commit).replace("@TREE@", tree)
+        if core_dependency is not None:
+            rebuild += (
+                "\n## Windows shared WinSCard source\n\n"
+                "The Windows shared WinSCard adapter is built from the Core source tree under "
+                "`third_party/dtv-userland-core/repository`. Its commit and tree are recorded in "
+                "`source-manifest.json` and `third_party/dtv-userland-core/SOURCE-REVISION`. "
+                "Pass this repository directory as `--core-source-dir` to `scripts/build-windows.sh`. "
+                "The adapter-specific GPL-2.0-only license is in "
+                "`third_party/dtv-userland-core/repository/adapters/windows_winscard/COPYING`.\n"
+            )
         write_file(stage / "BUILD-RELINK.md", rebuild.encode())
         for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
             write_file(stage / name, (stage / "repository" / name).read_bytes())
@@ -204,6 +244,13 @@ def main() -> int:
             "scripts/build-windows.sh; pass a modified copy with --libusb-source-dir. "
             "See BUILD-RELINK.md, THIRD_PARTY_NOTICES.md, and third_party/libusb-1.0.30/COPYING.\n",
         )
+        if core_dependency is not None:
+            notice += (
+                "dependency.core.repository=https://github.com/Khronos31/dtv-userland-core\n"
+                f"dependency.core.commit={core_dependency['commit']}\n"
+                "dependency.core.winscard.license=GPL-2.0-only\n"
+                "dependency.core.source-path=third_party/dtv-userland-core/repository/adapters/windows_winscard\n"
+            )
         write_file(stage / "DEPENDENCY-NOTICE.txt", notice.encode())
         manifest = {
             "schema": 1,
@@ -216,6 +263,8 @@ def main() -> int:
             "forbidden_materials_excluded": [".git", "build outputs", "firmware", "APK/add-on", "vendor drivers"],
             "files": {},
         }
+        if core_dependency is not None:
+            manifest["core_dependency"] = core_dependency
         for path in sorted(stage.rglob("*")):
             if path.is_file():
                 manifest["files"][path.relative_to(stage).as_posix()] = {"size": path.stat().st_size, "sha256": sha256(path)}

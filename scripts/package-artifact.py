@@ -479,6 +479,8 @@ def self_test_windows_archive(repo_root: Path) -> None:
     version = source_version(repo_root)
     platform = WINDOWS_PLATFORM
     notice = render_dependency_notice(repo_root, version, platform)
+    source_archive_name = f"asicen-userland-{version}-windows-source.tar.gz"
+    source_archive_sha256 = "a" * 64
 
     def contents(include_winscard: bool = False) -> dict[str, bytes]:
         files = {
@@ -529,10 +531,14 @@ def self_test_windows_archive(repo_root: Path) -> None:
         for name, payload in files.items():
             _write_bytes(stage / name, payload)
             (stage / name).chmod(0o755 if name.endswith(".exe") else 0o644)
-        current_notice = notice + (
+        current_notice = notice.replace(
+            f"corresponding-source-archive=asicen-userland-{version}-source.tar.gz",
+            f"corresponding-source-archive={source_archive_name}") + (
             "dependency.core.repository=https://github.com/Khronos31/dtv-userland-core\n"
             f"dependency.core.commit={core_revision}\n"
-            "dependency.core.winscard.license=GPL-2.0-only\n" if core_revision else "")
+            "dependency.core.winscard.license=GPL-2.0-only\n"
+            f"dependency.core.source-archive={source_archive_name}\n"
+            f"dependency.core.source-archive.sha256={source_archive_sha256}\n" if core_revision else "")
         write_text(stage / "DEPENDENCY-NOTICE.txt", current_notice if notice_text is None else notice_text)
         write_text(stage / "evidence" / "binary-audit.json",
                    json.dumps(evidence, indent=2, sort_keys=True) + "\n")
@@ -546,6 +552,8 @@ def self_test_windows_archive(repo_root: Path) -> None:
             manifest["shared_winscard"] = {
                 "core_revision": core_revision,
                 "sha256": hashlib.sha256(files["WinSCard.dll"]).hexdigest(),
+                "source_archive": source_archive_name,
+                "source_archive_sha256": source_archive_sha256,
             }
         for path in sorted(stage.rglob("*")):
             if path.is_file():
@@ -732,6 +740,8 @@ def main() -> int:
     parser.add_argument("--libusb-source-archive", type=Path)
     parser.add_argument("--winscard-dll", type=Path,
                         help="optional Core WinSCard DLL for a product Windows candidate archive")
+    parser.add_argument("--winscard-source-archive", type=Path,
+                        help="Windows-specific corresponding-source archive for a packaged WinSCard DLL")
     parser.add_argument("--ndk-root", type=Path)
     parser.add_argument("--link-map-dir", type=Path)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -806,6 +816,11 @@ def main() -> int:
         fail(f"input must be an ordinary file: {args.winscard_dll}")
     if args.winscard_dll is not None and args.platform != WINDOWS_PLATFORM:
         fail("--winscard-dll is only supported for Windows archives")
+    if args.winscard_source_archive is not None and (args.winscard_source_archive.is_symlink() or
+                                                     not args.winscard_source_archive.is_file()):
+        fail(f"input must be an ordinary file: {args.winscard_source_archive}")
+    if (args.winscard_dll is None) != (args.winscard_source_archive is None):
+        fail("--winscard-dll and --winscard-source-archive must be provided together")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     extension = "zip" if args.platform == WINDOWS_PLATFORM else "tar.gz"
     output = args.output_dir.resolve() / f"asicen-userland-{args.version}-{args.platform}.{extension}"
@@ -875,6 +890,18 @@ def main() -> int:
                 core_revision = revision_path.read_text(encoding="ascii").strip()
                 if not re.fullmatch(r"[0-9a-f]{40}", core_revision):
                     fail("pinned Core revision is invalid for WinSCard packaging")
+                if not re.fullmatch(r"[0-9a-f]{40}", args.source_ref):
+                    fail("WinSCard packaging requires a fixed product source commit")
+                source_audit = _audit.audit_source_archive(
+                    argparse.Namespace(archive=args.winscard_source_archive.resolve()))
+                source_manifest = source_audit["manifest"]
+                if (source_manifest.get("repository_commit") != args.source_ref or
+                        not isinstance(source_manifest.get("core_dependency"), dict) or
+                        source_manifest["core_dependency"].get("commit") != core_revision or
+                        args.winscard_source_archive.name !=
+                        f"asicen-userland-{args.version}-windows-source.tar.gz"):
+                    fail("WinSCard source archive does not match the product/Core source pins")
+                source_archive_sha256 = sha256(args.winscard_source_archive.resolve())
                 copy_regular(args.winscard_dll.resolve(), stage / "WinSCard.dll")
         else:
             if not args.libusb_source_archive or not args.ndk_root or not args.link_map_dir:
@@ -898,10 +925,16 @@ def main() -> int:
             verify_darwin_stage_runtime(stage)
         dependency_notice = render_dependency_notice(args.repo_root, args.version, args.platform, revision)
         if args.platform == WINDOWS_PLATFORM and args.winscard_dll:
+            windows_source_name = args.winscard_source_archive.name
+            dependency_notice = dependency_notice.replace(
+                f"corresponding-source-archive=asicen-userland-{args.version}-source.tar.gz",
+                f"corresponding-source-archive={windows_source_name}")
             dependency_notice += (
                 "dependency.core.repository=https://github.com/Khronos31/dtv-userland-core\n"
                 f"dependency.core.commit={core_revision}\n"
-                "dependency.core.winscard.license=GPL-2.0-only\n")
+                "dependency.core.winscard.license=GPL-2.0-only\n"
+                f"dependency.core.source-archive={windows_source_name}\n"
+                f"dependency.core.source-archive.sha256={source_archive_sha256}\n")
         write_text(stage / "DEPENDENCY-NOTICE.txt", dependency_notice)
         darwin_stage = stage / "ifd" / "asicen-userland-ifd.bundle"
         audit_args = argparse.Namespace(
@@ -944,6 +977,8 @@ def main() -> int:
                 manifest["shared_winscard"] = {
                     "core_revision": core_revision,
                     "sha256": sha256(stage / "WinSCard.dll"),
+                    "source_archive": args.winscard_source_archive.name,
+                    "source_archive_sha256": source_archive_sha256,
                 }
         for path in sorted(stage.rglob("*")):
             if path.is_file():

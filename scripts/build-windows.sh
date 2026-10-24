@@ -16,10 +16,11 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 output=
 test_output=
 libusb_source_dir=
+core_source_dir=
 cache=${ASICEN_WINDOWS_CACHE:-"$root/.windows-toolchain"}
 skip_toolchain_download=0
 usage() {
-    printf '%s\n' "usage: $0 --output DIR [--test-output DIR] [--cache DIR] [--skip-toolchain-download] [--libusb-source-dir DIR]"
+    printf '%s\n' "usage: $0 --output DIR [--test-output DIR] [--cache DIR] [--skip-toolchain-download] [--libusb-source-dir DIR] [--core-source-dir DIR]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -28,6 +29,7 @@ while [ "$#" -gt 0 ]; do
     --test-output) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; test_output=$2; shift 2 ;;
     --cache) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; cache=$2; shift 2 ;;
     --libusb-source-dir) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; libusb_source_dir=$2; shift 2 ;;
+    --core-source-dir) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; core_source_dir=$2; shift 2 ;;
     --skip-toolchain-download) skip_toolchain_download=1; shift ;;
     --help) usage; exit 0 ;;
     *) printf '%s\n' "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -40,6 +42,22 @@ if [ -n "$libusb_source_dir" ]; then
         printf '%s\n' "invalid libusb source directory: $libusb_source_dir" >&2
         exit 1
     fi
+fi
+if [ -n "$core_source_dir" ]; then
+    core_source_dir=$(CDPATH='' cd -- "$core_source_dir" && pwd)
+    core_revision=$(tr -d '\r\n' < "$root/cmake/dtv-userland-core.revision")
+    if [ -e "$core_source_dir/.git" ]; then
+        actual_core_revision=$(git -C "$core_source_dir" rev-parse 'HEAD^{commit}')
+    elif [ -f "$(dirname -- "$core_source_dir")/SOURCE-REVISION" ]; then
+        actual_core_revision=$(awk 'NR == 1 { print; exit }' "$(dirname -- "$core_source_dir")/SOURCE-REVISION")
+    else
+        printf '%s\n' '--core-source-dir must be a Core git checkout or extracted Windows source archive tree' >&2
+        exit 1
+    fi
+    [ "$actual_core_revision" = "$core_revision" ] || {
+        printf '%s\n' "Core source revision mismatch: expected $core_revision, got $actual_core_revision" >&2
+        exit 1
+    }
 fi
 
 # Pinned inputs. Update together with the release record.
@@ -220,6 +238,10 @@ configure_build() {
     if [ "$libusb" = ON ] && [ -n "$libusb_private" ]; then
         link_arg="-DASICEN_LIBUSB_LINK_LIBRARIES=${libusb_private}"
     fi
+    core_source_arg=
+    if [ -n "$core_source_dir" ]; then
+        core_source_arg="-DFETCHCONTENT_SOURCE_DIR_DTV_USERLAND_CORE=$core_source_dir"
+    fi
     cmake -S "$root" -B "$build_dir" -G Ninja -DCMAKE_MAKE_PROGRAM="$make_program" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
@@ -230,6 +252,7 @@ configure_build() {
         -DASICEN_BUILD_TESTS="$tests" -DASICEN_BUILD_PCSC_IFD=OFF -DASICEN_ENABLE_LIBUSB="$libusb" \
         -DASICEN_LIBUSB_INCLUDE_DIR="$libusb_include" \
         -DASICEN_LIBUSB_LIBRARY="$libusb_a" \
+        ${core_source_arg:+"$core_source_arg"} \
         ${link_arg:+"$link_arg"}
 }
 

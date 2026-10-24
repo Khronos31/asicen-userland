@@ -738,6 +738,23 @@ jobs:
             https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
           echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$LIBUSB_ARCHIVE" | sha256sum -c -
           cp "$LIBUSB_ARCHIVE" "$RUNNER_TEMP/asicen-windows-toolchain/libusb-1.0.30.tar.bz2"
+      - name: Build and audit Windows WinSCard corresponding-source archive
+        env:
+          LIBUSB_ARCHIVE: ${{ runner.temp }}/libusb-1.0.30.tar.bz2
+        run: |
+          set -eu
+          version="$(tr -d '\n' < VERSION)"
+          core_revision="$(tr -d '\r\n' < cmake/dtv-userland-core.revision)"
+          core_source="$RUNNER_TEMP/dtv-userland-core"
+          mkdir -p "$core_source"
+          git -C "$core_source" init -q
+          git -C "$core_source" remote add origin https://github.com/Khronos31/dtv-userland-core.git
+          git -C "$core_source" fetch --depth 1 origin "$core_revision"
+          git -C "$core_source" checkout --detach FETCH_HEAD
+          [ "$(git -C "$core_source" rev-parse HEAD)" = "$core_revision" ]
+          scripts/package-source.sh --version "$version" --source-root "$GITHUB_WORKSPACE" \
+            --source-ref "$GITHUB_SHA" --libusb-source-archive "$LIBUSB_ARCHIVE" \
+            --core-source-dir "$core_source" --output-dir "$RUNNER_TEMP/win/source"
       - name: Check Windows scripts and offline packaging/audit tests
         env:
           LIBUSB_ARCHIVE: ${{ runner.temp }}/libusb-1.0.30.tar.bz2
@@ -758,7 +775,10 @@ jobs:
           for run in 1 2; do
             scripts/package-artifact.sh --platform windows-x86_64 --version "$version" \
               --build-dir "$RUNNER_TEMP/win/bin-$run" \
-              --libusb-source-archive "$LIBUSB_ARCHIVE" --source-ref "$GITHUB_SHA" \
+              --libusb-source-archive "$LIBUSB_ARCHIVE" \
+              --winscard-dll "$RUNNER_TEMP/win/bin-$run/WinSCard.dll" \
+              --winscard-source-archive "$RUNNER_TEMP/win/source/asicen-userland-$version-windows-source.tar.gz" \
+              --source-ref "$GITHUB_SHA" \
               --output-dir "$RUNNER_TEMP/win/release-$run"
             cp "$RUNNER_TEMP/win/release-$run/asicen-userland-$version-windows-x86_64.zip" \
               "$RUNNER_TEMP/win/zip-$run/"
@@ -775,10 +795,12 @@ jobs:
         run: |
           source_root="$RUNNER_TEMP/windows-relink-source"
           mkdir -p "$source_root"
-          tar -xzf "$RUNNER_TEMP"/source-archive/*.tar.gz -C "$source_root"
+          tar -xzf "$RUNNER_TEMP/win/source"/*-windows-source.tar.gz -C "$source_root"
           "$source_root/repository/scripts/test-windows-static-relink.sh" \
             --libusb-source-archive "$source_root/third_party/libusb-1.0.30.tar.bz2" \
             --baseline-asicend "$RUNNER_TEMP/win/bin-1/asicend.exe" \
+            --baseline-winscard "$RUNNER_TEMP/win/bin-1/WinSCard.dll" \
+            --core-source-dir "$source_root/third_party/dtv-userland-core/repository" \
             --cache "$RUNNER_TEMP/asicen-windows-toolchain"
           find "$source_root" -depth -delete
       - name: Upload Windows CI-only candidate archive (not release distribution)
@@ -786,6 +808,12 @@ jobs:
         with:
           name: win-candidate
           path: ${{ runner.temp }}/win/zip-1/*.zip
+          if-no-files-found: error
+      - name: Upload Windows corresponding-source candidate archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: win-source-candidate
+          path: ${{ runner.temp }}/win/source/*-windows-source.tar.gz
           if-no-files-found: error
       - name: Upload Windows offline test executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
