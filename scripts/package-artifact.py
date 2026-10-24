@@ -316,17 +316,28 @@ def render_dependency_notice(repo_root: Path, version: str, platform: str,
             "corresponding-source archive.\n"
         )
     elif platform == "windows-x86_64":
+        core_revision_path = repo_root / "cmake" / "dtv-userland-core.revision"
+        if not core_revision_path.is_file():
+            fail(f"pinned Core revision is missing: {core_revision_path}")
+        core_revision = core_revision_path.read_text(encoding="ascii").strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", core_revision):
+            fail("pinned Core revision is invalid for Windows stdin EOF monitor packaging")
         dependency_text = (
             "dependency.libusb.version=1.0.30\n"
             "dependency.libusb.linkage=static\n"
             "dependency.libusb.license=LGPL-2.1-or-later\n"
             "dependency.toolchain=llvm-mingw-20250910-ucrt-x86_64\n"
             f"dependency.toolchain.licenses={WINDOWS_TOOLCHAIN_LICENSE_NOTICE}\n"
+            "dependency.windows-stdin-eof-monitor.program=asicend.exe\n"
+            "dependency.windows-stdin-eof-monitor.license=GPL-2.0-only\n"
+            f"dependency.windows-stdin-eof-monitor.core-commit={core_revision}\n"
             f"corresponding-source-archive=asicen-userland-{version}-source.tar.gz\n\n"
             "asicend statically includes libusb 1.0.30 under LGPL-2.1-or-later. asicen-ts and asicenctl do not link "
             "libusb. The executables dynamically load only Windows system libraries, including the UCRT and the "
             "WinUSB, SetupAPI, Cfgmgr32, AdvAPI32, and hid libraries that libusb loads at runtime. The "
-            "C++/unwinder/winpthread/MinGW-w64 runtimes are statically linked. The exact narrow llvm-mingw "
+            "C++/unwinder/winpthread/MinGW-w64 runtimes are statically linked. asicend also links the shared Core "
+            "stdin EOF monitor under GPL-2.0-only; its exact source and provenance are in the corresponding-source "
+            "archive. The exact narrow llvm-mingw "
             "toolchain license texts are included under toolchain/ (see the license paths above). The exact "
             "libusb source and relink recipe are in "
             f"asicen-userland-{version}-source.tar.gz from the same candidate handoff.\n"
@@ -569,6 +580,12 @@ def self_test_windows_archive(repo_root: Path) -> None:
             "libusb_archive_sha256": LIBUSB_SHA256,
             "source_ref": "self-test", "programs": list(PROGRAMS), "production_only": True, "files": {},
         }
+        monitor_revision = (repo_root / "cmake" / "dtv-userland-core.revision").read_text().strip()
+        manifest["windows_stdin_eof_monitor"] = {
+            "program": "asicend.exe",
+            "core_revision": monitor_revision,
+            "license": "GPL-2.0-only",
+        }
         if "WinSCard.dll" in files:
             manifest["shared_winscard"] = {
                 "core_revision": core_revision,
@@ -622,7 +639,7 @@ def self_test_windows_archive(repo_root: Path) -> None:
     winscard_dir = scratch / "winscard"
     winscard_dir.mkdir()
     winscard = build(winscard_dir, winscard_files, evidence_for(winscard_files),
-                     core_revision="c8fe1a1364c7368dcc366cf975eeea9db236b09e")
+                     core_revision=(repo_root / "cmake" / "dtv-userland-core.revision").read_text().strip())
     audit_binary_archive(argparse.Namespace(archive=winscard, platform=platform, repo_root=repo_root))
     invalid_winscard = dict(winscard_files)
     invalid_winscard["WinSCard.dll"] = synthetic_pe(
@@ -630,7 +647,7 @@ def self_test_windows_archive(repo_root: Path) -> None:
     invalid_winscard_dir = scratch / "invalid-winscard-exports"
     invalid_winscard_dir.mkdir()
     expect_rejected(build(invalid_winscard_dir, invalid_winscard, evidence_for(winscard_files),
-                          core_revision="c8fe1a1364c7368dcc366cf975eeea9db236b09e"),
+                          core_revision=(repo_root / "cmake" / "dtv-userland-core.revision").read_text().strip()),
                     "WinSCard with an incomplete export set", "approved WinSCard API set")
     wrong_name = valid.with_name(f"unexpected-{valid.name}")
     copy_regular(valid, wrong_name)
@@ -993,6 +1010,17 @@ def main() -> int:
         }
         if args.platform == WINDOWS_PLATFORM:
             manifest["libusb_archive_sha256"] = LIBUSB_SHA256
+            revision_path = args.repo_root / "cmake" / "dtv-userland-core.revision"
+            if not revision_path.is_file():
+                fail(f"pinned Core revision is missing: {revision_path}")
+            core_revision = revision_path.read_text(encoding="ascii").strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", core_revision):
+                fail("pinned Core revision is invalid for Windows stdin EOF monitor packaging")
+            manifest["windows_stdin_eof_monitor"] = {
+                "program": "asicend.exe",
+                "core_revision": core_revision,
+                "license": "GPL-2.0-only",
+            }
             if args.winscard_dll:
                 manifest["shared_winscard"] = {
                     "core_revision": core_revision,

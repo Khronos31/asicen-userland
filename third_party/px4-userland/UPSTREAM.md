@@ -113,7 +113,7 @@ byte-identical. Seven changed files are refreshed exactly; five retain their
 existing ASICEN delta. The two new CARD_HANDLE_STATUS golden frames select
 the existing product-magic macro just like all other frames. The shared
 checker, its complete standalone fixtures and the shared card-client contract
-fixtures are added exactly, giving 87 imported files (70 exact and 17 with the
+fixtures are added exactly, giving 87 imported files (69 exact and 18 with the
 local deltas below). The imported-file list and necessary local deltas in this
 manifest are the current source-reuse record.
 
@@ -146,6 +146,11 @@ userland/tests/windows_imported_tests_main.cpp
 
 ## Necessary local deltas
 
+- `userland/tests/windows_stdin_monitor_tests.cpp`: include the adopted Core
+  host-facade monitor header. The test cases remain unchanged and link the
+  shared `dtv::host_facade` target. The pinned `userland/tools/px4d_windows_stdin`
+  files remain byte-identical in this read-only upstream snapshot as source
+  provenance, but are excluded from ASICEN daemon and test targets.
 - `userland/include/px4/card.h` and `userland/src/card.cpp`: retain the existing
   probe-only `initialize_with_atr()` entry. The ASICEN probe must classify the
   acquired ATR before protocol negotiation (LRC/19200 only), without resetting
@@ -212,13 +217,16 @@ userland/tests/windows_imported_tests_main.cpp
 
 `NativeHandle`, `PathChar` and worker `WakeHandle` follow the pin end to end.
 The imported Windows IPC/security/nonce/sleep, socket wake, TS sink, UTF-8 argv,
-console shutdown and stdin helpers are portable OS adapters, not IT930x device
-implementations. Their existing LOCALAPPDATA/USERPROFILE policy, private DACL,
-random names, bounded socket waits, noninheritance and identity-safe cleanup are
-retained. Product path literals differ only where documented above. The official v0.2.1 worker fix now forwards an explicit UTF-8 runtime parent
+and console shutdown helpers are portable OS adapters, not IT930x device
+implementations. The pinned `px4d_windows_stdin` files are retained only in
+this read-only source snapshot; ASICEN daemon and test targets use the pinned
+Core host-facade monitor. The existing LOCALAPPDATA/USERPROFILE policy,
+private DACL, random names, bounded socket waits, noninheritance and
+identity-safe cleanup are retained. Product path literals differ only where
+documented above. The official v0.2.1 worker fix now forwards an explicit UTF-8 runtime parent
 through the server into wake-socket creation; only a null parent selects
 LOCALAPPDATA. Trust, encoding and length validation remain fail-closed. The
-upstream native Windows regression is imported unchanged.
+upstream native Windows regression assertions are imported unchanged.
 
 Windows build/offline testing and physical-device validation remain separate;
 importing these files does not establish native Windows hardware support.

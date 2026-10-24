@@ -488,7 +488,6 @@ if(UNIX OR WIN32)
         dtv::host_facade Threads::Threads)
     target_include_directories(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools)
     if(WIN32)
-        target_sources(asicend PRIVATE ${ASICEN_PX4_ROOT}/tools/px4d_windows_stdin.cpp)
         target_link_libraries(asicend PRIVATE shell32)
     endif()
     asicen_enable_project_warnings(asicend)
@@ -1173,8 +1172,8 @@ if(ASICEN_BUILD_TESTS AND WIN32)
     add_executable(asicen_windows_control_tests ${ASICEN_PX4_ROOT}/tests/windows_control_tests.cpp)
     target_link_libraries(asicen_windows_control_tests PRIVATE px4_portable_reference)
     add_executable(asicen_windows_stdin_tests
-        ${ASICEN_PX4_ROOT}/tests/windows_stdin_monitor_tests.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4d_windows_stdin.cpp)
+        ${ASICEN_PX4_ROOT}/tests/windows_stdin_monitor_tests.cpp)
+    target_link_libraries(asicen_windows_stdin_tests PRIVATE dtv::host_facade)
     foreach(target asicen_windows_tests asicen_windows_platform_tests asicen_windows_workers_tests
         asicen_windows_ts_output_tests asicen_windows_control_tests asicen_windows_stdin_tests)
         target_include_directories(${target} PRIVATE
