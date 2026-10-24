@@ -494,6 +494,18 @@ bool test_card_service_through_core_ipc()
     });
     JoinOnExit join_on_exit(done, pump);
 
+#if defined(ASICEN_TEST_CORE_IFD)
+    const std::string device_name = "asicen-userland:runtime=" + std::string(directory) +
+        ":instance=card-test:access=user";
+    void* ifd = asicen_ifd_test_create(device_name.c_str());
+    CHECK(ifd != nullptr);
+    CHECK(asicen_ifd_test_presence(ifd) == 1);
+    CHECK(asicen_ifd_test_presence(ifd) == 1);
+    std::uint8_t interface_status = 1U;
+    CHECK(asicen_ifd_test_interface_status(ifd, &interface_status) == 0);
+    CHECK(interface_status == 0U);
+#endif
+
     const EndpointConfig endpoint{directory, "asicen-userland", "card-test"};
     std::fprintf(stderr, "card-core: connect\n");
     auto connected = connect_control(endpoint, Timeout{2000U});
@@ -528,16 +540,13 @@ bool test_card_service_through_core_ipc()
     CHECK(observed_session.transmit_timeout == 15000U);
 
 #if defined(ASICEN_TEST_CORE_IFD)
-    const std::string device_name = "asicen-userland:runtime=" + std::string(directory) +
-        ":instance=card-test:access=user";
-    void* ifd = asicen_ifd_test_create(device_name.c_str());
-    CHECK(ifd != nullptr);
     CHECK(asicen_ifd_test_power(ifd, true) == 0);
     CHECK(asicen_ifd_test_presence(ifd) == 1);
-    std::uint8_t interface_status = 0U;
     CHECK(asicen_ifd_test_interface_status(ifd, &interface_status) == 0);
     CHECK(interface_status == 1U);
     CHECK(asicen_ifd_test_power(ifd, false) == 0);
+    CHECK(asicen_ifd_test_presence(ifd) == 1);
+    CHECK(asicen_ifd_test_close(ifd) == 0);
 #endif
 
     const auto disconnected = w::card_disconnect(*control, card, w::Disposition::leave,
@@ -545,8 +554,6 @@ bool test_card_service_through_core_ipc()
     std::fprintf(stderr, "card-core: disconnect=%d\n", static_cast<bool>(disconnected));
     CHECK(disconnected && disconnected.response.consumed && disconnected.response.quiesced);
 #if defined(ASICEN_TEST_CORE_IFD)
-    CHECK(asicen_ifd_test_interface_status(ifd, &interface_status) == 0);
-    CHECK(interface_status == 0U);
     const auto generation_before_gap = w::card_status(*control, card, Timeout{2000U});
     CHECK(generation_before_gap && generation_before_gap.response.present &&
           !generation_before_gap.response.initialized);
@@ -561,9 +568,6 @@ bool test_card_service_through_core_ipc()
     const auto reinserted = w::card_status(*control, card, Timeout{2000U});
     CHECK(reinserted && reinserted.response.present && !reinserted.response.initialized &&
           reinserted.response.current_generation > absent.response.current_generation);
-    CHECK(asicen_ifd_test_interface_status(ifd, &interface_status) == 0);
-    CHECK(interface_status == 0U);
-    CHECK(asicen_ifd_test_close(ifd) == 0);
 #endif
     control->close();
 
