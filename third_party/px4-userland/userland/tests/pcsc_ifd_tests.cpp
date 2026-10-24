@@ -467,6 +467,24 @@ bool test_adapter_state_and_recovery()
                         MutableByteView{atr.data(), atr.size()}, atr_length) ==
           IfdResult::success);
     CHECK(atr_length == 0U && state.disconnects == 1U);
+    atr_length = atr.size();
+    CHECK(adapter.power(0U, IfdPowerAction::power_up,
+                        MutableByteView{atr.data(), atr.size()}, atr_length) ==
+          IfdResult::success);
+    CHECK(adapter.presence(0U) == IfdResult::icc_present);
+    state.present = false;
+    state.initialized = false;
+    ++state.generation;
+    state.present = true;
+    ++state.generation;
+    CHECK(adapter.presence(0U) == IfdResult::icc_present);
+    std::size_t interface_status_length = 1U;
+    std::uint8_t interface_status = 1U;
+    CHECK(adapter.get_capability(
+              0U, kAttrIccInterfaceStatus,
+              MutableByteView{&interface_status, sizeof(interface_status)},
+              interface_status_length) == IfdResult::success);
+    CHECK(interface_status_length == 1U && interface_status == 0U);
     CHECK(adapter.close_channel(0U) == IfdResult::success);
     CHECK(state.closes == 1U);
 
@@ -776,6 +794,11 @@ bool test_exported_abi_over_real_ipc()
     CHECK(atr_length == 0U);
     for (const UCHAR value : atr) CHECK(value == 0U);
     CHECK(IFDHICCPresence(0U) == IFD_ICC_PRESENT);
+    std::uint8_t interface_status = 1U;
+    DWORD interface_status_length = sizeof(interface_status);
+    CHECK(IFDHGetCapabilities(0U, kAttrIccInterfaceStatus,
+                              &interface_status_length, &interface_status) == IFD_SUCCESS);
+    CHECK(interface_status_length == sizeof(interface_status) && interface_status == 0U);
     atr_length = static_cast<DWORD>(atr.size());
     CHECK(IFDHPowerICC(0U, IFD_POWER_UP, atr.data(), &atr_length) == IFD_SUCCESS);
 

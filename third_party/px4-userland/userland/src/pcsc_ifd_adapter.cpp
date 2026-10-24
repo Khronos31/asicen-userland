@@ -265,26 +265,35 @@ public:
 
     Result<IfdCardStatus> status() noexcept override
     {
-        const auto snapshot = dtv::userland::wire::fetch_status(
-            *client_, dtv::userland::Timeout{kRequestTimeoutMs});
-        if (!snapshot) return Result<IfdCardStatus>::failure(
-            static_cast<Error>(snapshot.error));
-        const auto& readers = snapshot.snapshot.status.readers;
-        if (!readers.present || readers.value.count == 0U)
-            return Result<IfdCardStatus>::failure(Error::NOT_FOUND);
-        const auto& reader = readers.value.items[0U];
-        const bool present = reader.card.state == dtv::userland::wire::CardState::present;
-        if (observed_presence_ != present) {
-            ++reader_generation_;
-            observed_presence_ = present;
-        }
         IfdCardStatus result{};
-        result.present = present;
-        result.initialized = present && session_.card_handle != 0U;
-        result.reader_generation = reader_generation_;
-        result.atr_length = result.initialized ? atr_length_ : 0U;
-        if (result.atr_length != 0U)
-            std::memcpy(result.atr.data(), atr_.data(), result.atr_length);
+        if (!card_session_started_) {
+            const auto snapshot = dtv::userland::wire::fetch_status(
+                *client_, dtv::userland::Timeout{kRequestTimeoutMs});
+            if (!snapshot) return Result<IfdCardStatus>::failure(
+                static_cast<Error>(snapshot.error));
+            const auto& readers = snapshot.snapshot.status.readers;
+            if (!readers.present || readers.value.count == 0U)
+                return Result<IfdCardStatus>::failure(Error::NOT_FOUND);
+            result.present = readers.value.items[0U].card.state ==
+                             dtv::userland::wire::CardState::present;
+            return Result<IfdCardStatus>::success(result);
+        }
+        const auto status = dtv::userland::wire::card_status(
+            *client_, session_, dtv::userland::Timeout{kRequestTimeoutMs});
+        if (!status) return Result<IfdCardStatus>::failure(
+            static_cast<Error>(status.error));
+        const auto& reader = status.response;
+        result.present = reader.present;
+        result.initialized = reader.initialized;
+        result.reader_generation = reader.current_generation;
+        if (result.present && result.initialized && reader.atr.present) {
+            result.atr_length = reader.atr.value.length;
+            if (result.atr_length > result.atr.size())
+                return Result<IfdCardStatus>::failure(Error::BUFFER_TOO_SMALL);
+            if (result.atr_length != 0U)
+                std::memcpy(result.atr.data(), reader.atr.value.bytes.data(),
+                            result.atr_length);
+        }
         return Result<IfdCardStatus>::success(result);
     }
 
@@ -308,6 +317,7 @@ public:
             return Result<IfdCardConnectResult>::failure(Error::BUFFER_TOO_SMALL);
         if (atr_length_ != 0U)
             std::memcpy(atr_.data(), atr.value.bytes.data(), atr_length_);
+        card_session_started_ = true;
         IfdCardConnectResult result{};
         result.handle = session_.card_handle;
         result.atr_length = atr_length_;
@@ -324,7 +334,10 @@ public:
             dtv::userland::Timeout{kRequestTimeoutMs});
         if (!disconnected) return Result<void>::failure(
             static_cast<Error>(disconnected.error));
+        session_.card_handle = 0U;
+        session_.bound_generation = 0U;
         atr_length_ = 0U;
+        atr_.fill(0U);
         return Result<void>::success();
     }
 
@@ -379,8 +392,7 @@ private:
     std::string instance_;
     std::array<std::uint8_t, kIfdAtrMaxLength> atr_{};
     std::size_t atr_length_ = 0U;
-    std::uint64_t reader_generation_ = 0U;
-    bool observed_presence_ = false;
+    bool card_session_started_ = false;
 };
 #endif
 
