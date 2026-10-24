@@ -436,7 +436,7 @@ Result<void> HardwareStreamService::detach(const TunerAttachment& attachment) no
         have_final_attachment_ = true;
         final_snapshot_ready_ = false;
         have_attachment_ = false;
-        draining_ = queue_bytes_ != 0U;
+        draining_ = true;
         attachment_ = {};
         state_ = State::detached;
         cancelled_.store(true);

@@ -709,6 +709,15 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_test(NAME asicen-hardware-session-tests COMMAND asicen-hardware-session-tests)
     set_tests_properties(asicen-hardware-session-tests PROPERTIES TIMEOUT 10)
 
+    add_executable(asicen-hardware-stream-empty-detach-tests
+        userland/tests/hardware_stream_empty_detach_tests.cpp)
+    target_link_libraries(asicen-hardware-stream-empty-detach-tests PRIVATE
+        asicen_hardware_session)
+    asicen_enable_project_warnings(asicen-hardware-stream-empty-detach-tests)
+    add_test(NAME asicen-hardware-stream-empty-detach-tests
+        COMMAND asicen-hardware-stream-empty-detach-tests)
+    set_tests_properties(asicen-hardware-stream-empty-detach-tests PROPERTIES TIMEOUT 10)
+
     add_executable(asicen-hardware-ipc-integration-tests
         userland/tests/hardware_ipc_integration_tests.cpp)
     target_include_directories(asicen-hardware-ipc-integration-tests PRIVATE
