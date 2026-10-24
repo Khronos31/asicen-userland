@@ -115,6 +115,7 @@ class LibusbDevice final {
     libusb_device* device() const;
     int descriptor(libusb_device_descriptor* output) const noexcept;
     int port_numbers(std::uint8_t* ports, int capacity) const noexcept;
+    int connection_info(std::uint8_t* bus, std::uint8_t* ports, int capacity) const noexcept;
 
     int control(const ControlTransfer& transfer, unsigned char* data);
 

@@ -5,8 +5,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+#if defined(__linux__) || defined(__ANDROID__)
+#include <linux/usbdevice_fs.h>
+#include <sys/ioctl.h>
+#endif
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <mutex>
 #include <new>
@@ -401,6 +406,41 @@ int LibusbDevice::port_numbers(std::uint8_t* ports, int capacity) const noexcept
     return count > capacity ? LIBUSB_ERROR_OVERFLOW : count;
 }
 
+int LibusbDevice::connection_info(std::uint8_t* bus, std::uint8_t* ports,
+                                  int capacity) const noexcept
+{
+#if defined(__linux__) || defined(__ANDROID__)
+    if (retained_fd_ < 0 || bus == nullptr || ports == nullptr || capacity <= 0)
+        return LIBUSB_ERROR_INVALID_PARAM;
+    std::uint32_t capabilities = 0U;
+    if (::ioctl(retained_fd_, USBDEVFS_GET_CAPABILITIES, &capabilities) < 0 ||
+        (capabilities & USBDEVFS_CAP_CONNINFO_EX) == 0U)
+        return LIBUSB_ERROR_NOT_SUPPORTED;
+    usbdevfs_conninfo_ex info{};
+    info.size = sizeof(info);
+    if (::ioctl(retained_fd_, USBDEVFS_CONNINFO_EX(sizeof(info)), &info) < 0)
+        return LIBUSB_ERROR_IO;
+    libusb_device* device = libusb_get_device(handle_);
+    constexpr std::size_t ports_offset = offsetof(usbdevfs_conninfo_ex, ports);
+    if (device == nullptr || info.size < ports_offset || info.size > sizeof(info) ||
+        info.busnum != libusb_get_bus_number(device) ||
+        info.devnum != libusb_get_device_address(device) ||
+        info.num_ports == 0U || info.num_ports > sizeof(info.ports) ||
+        info.num_ports > info.size - ports_offset ||
+        info.num_ports > static_cast<std::uint32_t>(capacity))
+        return LIBUSB_ERROR_NOT_FOUND;
+    *bus = static_cast<std::uint8_t>(info.busnum);
+    for (std::uint32_t i = 0U; i < info.num_ports; ++i)
+        ports[i] = info.ports[i];
+    return static_cast<int>(info.num_ports);
+#else
+    (void)bus;
+    (void)ports;
+    (void)capacity;
+    return LIBUSB_ERROR_NOT_SUPPORTED;
+#endif
+}
+
 int LibusbDevice::control(const ControlTransfer& transfer, unsigned char* data)
 {
     if (!transfer.valid || (transfer.length != 0U && data == nullptr)) {
@@ -585,11 +625,17 @@ UsbFunctionSnapshot LibusbFunctionClaim::snapshot() const
     ids_valid_ = true;
 
     std::uint8_t ports[8]{};
-    const int port_count = device_.api_.get_port_numbers(
+    int port_count = device_.api_.get_port_numbers(
         dev, ports, static_cast<int>(sizeof(ports)));
     if (port_count < 0 || port_count > static_cast<int>(sizeof(ports))) {
         result.transport_error = port_count < 0 ? port_count : LIBUSB_ERROR_OVERFLOW;
         return result;
+    }
+    if (port_count == 0) {
+        std::uint8_t connection_bus = 0U;
+        const int connected = device_.connection_info(
+            &connection_bus, ports, static_cast<int>(sizeof(ports)));
+        if (connected > 0 && connection_bus == result.bus) port_count = connected;
     }
     if (port_count > 0 && port_count <= static_cast<int>(sizeof(ports))) {
         result.port_path.assign(ports, ports + port_count);

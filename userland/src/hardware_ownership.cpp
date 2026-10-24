@@ -86,8 +86,8 @@ OwnershipError EnclosureOwnership::claim_profile(const DeviceProfile& profile,
         return OwnershipError::unsupported_profile;
     }
     const bool paired = profile.expected_runtime_functions == 2U;
-    if (primary_path.empty() ||
-        (paired && (sibling == nullptr || sibling_path.empty() || primary_path == sibling_path)) ||
+    if ((paired && (primary_path.empty() || sibling == nullptr || sibling_path.empty() ||
+                    primary_path == sibling_path)) ||
         (!paired && (sibling != nullptr || !sibling_path.empty()))) {
         return OwnershipError::invalid_path;
     }
