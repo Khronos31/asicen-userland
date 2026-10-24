@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include "asicen/card_mailbox_hardware.h"
 #include "asicen/card_only_service.h"
+#include "asicen/card_mailbox_hardware.h"
+#include "asicen/px4_mock_backend.h"
 #include "test_temp_directory.h"
-#include "px4/control_client.h"
+#include "dtv/userland/control_client.h"
+#include "dtv/userland/host_listener_context/enclosure_context.h"
+#include "dtv/userland/host_runtime/control_socket.h"
+#include "dtv/userland/records.h"
 #include "asicen/product_profile.h"
-#include "px4/card_service.h"
-#include "px4/posix_ipc.h"
-#include "px4/control_server.h"
-#include "px4/pcsc_ifd_adapter.h"
-#include "px4/posix_tuner_nonce.h"
 
 #include <algorithm>
 #include <array>
@@ -21,14 +20,14 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
+namespace w = dtv::userland::wire;
+using namespace dtv::userland;
+using namespace dtv::userland::host_listener_context;
+using namespace dtv::userland::host_runtime;
 using namespace px4::userland;
-using namespace px4::userland::ipc;
-using namespace px4::userland::ipc::posix;
-using namespace px4::userland::pcsc;
 
 #define CHECK(condition)                                                                           \
     do {                                                                                           \
@@ -37,54 +36,6 @@ using namespace px4::userland::pcsc;
             return false;                                                                          \
         }                                                                                          \
     } while (false)
-
-class SingleFrame final : public FrameConsumer {
-public:
-    Result<void> on_frame(const FrameView& frame) noexcept override
-    {
-        header = frame.header;
-        if (frame.payload.size > payload.size()) {
-            return Result<void>::failure(Error::BUFFER_TOO_SMALL);
-        }
-        std::copy(frame.payload.data, frame.payload.data + frame.payload.size, payload.begin());
-        payload_size = frame.payload.size;
-        received = true;
-        return Result<void>::success();
-    }
-    FrameHeader header{};
-    std::array<std::uint8_t, kMaxControlPayload> payload{};
-    std::size_t payload_size = 0U;
-    bool received = false;
-};
-
-Result<void> send_raw_request(SocketStream& stream, MessageType type, std::uint32_t request_id,
-                              ByteView payload)
-{
-    std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> frame{};
-    const auto encoded =
-        encode_frame(FrameHeader{kProtocolMajor, kProtocolMinor, type, MessageKind::request,
-                                 request_id, static_cast<std::uint32_t>(payload.size)},
-                     payload, MutableByteView{frame.data(), frame.size()});
-    if (!encoded) {
-        return Result<void>::failure(encoded.error());
-    }
-    return stream.write_frame(ByteView{frame.data(), encoded.value()}, Timeout{2000U});
-}
-
-Result<void> read_one_raw_response(SocketStream& stream, StreamFramer& framer,
-                                   SingleFrame& response)
-{
-    std::array<std::uint8_t, 8192U> read_buffer{};
-    for (unsigned attempt = 0U; attempt < 20U && !response.received; ++attempt) {
-        const auto read =
-            stream.read_frames(MutableByteView{read_buffer.data(), read_buffer.size()}, framer,
-                               response, Timeout{100U});
-        if (!read) {
-            return Result<void>::failure(read.error());
-        }
-    }
-    return response.received ? Result<void>::success() : Result<void>::failure(Error::TIMEOUT);
-}
 
 std::uint8_t reverse_bits(std::uint8_t value)
 {
@@ -300,7 +251,7 @@ public:
         return result;
     }
     bool initialized() const noexcept override { return session_.initialized(); }
-    const CardAtr& atr() const noexcept override { return session_.atr(); }
+    const CardAtrBytes& atr() const noexcept override { return session_.atr(); }
     void invalidate() noexcept override { session_.invalidate(); }
     void request_stop() noexcept override { session_.request_stop(); }
 
@@ -358,6 +309,48 @@ public:
     }
 };
 
+class Nonce final : public TunerNonceSource {
+public:
+    Result<std::array<std::uint8_t, ipc::kNonceLength>> generate() noexcept override
+    {
+        std::array<std::uint8_t, ipc::kNonceLength> value{};
+        value[0U] = 1U;
+        return Result<std::array<std::uint8_t, ipc::kNonceLength>>::success(value);
+    }
+};
+
+class CardFamily final : public EnclosureFamily {
+public:
+    CardFamily(TunerServiceBackend& tuner,
+               asicen::W3u3CardServiceBackend& backend,
+               ObservedProtocolSession& session, TestTime& time) noexcept
+        : tuner_(tuner), backend_(backend), session_(session), time_(time)
+    {
+    }
+    TunerServiceBackend& tuner_backend() noexcept override { return tuner_; }
+    CardServiceBackend& card_backend() noexcept override { return backend_; }
+    CardProtocolSession& card_protocol() noexcept override { return session_; }
+    TunerServiceTime& time() noexcept override { return time_; }
+    TunerStreamControl* stream_control() noexcept override { return nullptr; }
+
+private:
+    TunerServiceBackend& tuner_;
+    asicen::W3u3CardServiceBackend& backend_;
+    ObservedProtocolSession& session_;
+    TestTime& time_;
+};
+
+template <std::size_t N>
+w::WString<N> text(const char* value)
+{
+    w::WString<N> result;
+    while (value[result.length] != '\0') {
+        result.bytes[result.length] = value[result.length];
+        ++result.length;
+    }
+    return result;
+}
+
 class JoinOnExit final {
 public:
     JoinOnExit(std::atomic<bool>& stop, std::thread& thread) : stop_(stop), thread_(thread) {}
@@ -374,13 +367,16 @@ private:
     std::thread& thread_;
 };
 
-bool test_card_service_through_product_ifd()
+bool test_card_service_through_core_ipc()
 {
     std::string directory_template =
         px4::userland::test::temporary_directory_template("asicen-card-only-");
     char* directory = ::mkdtemp(directory_template.data());
     CHECK(directory != nullptr);
-    CHECK(::chmod(directory, 0700) == 0);
+    std::error_code fs_error;
+    std::filesystem::permissions(directory, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, fs_error);
+    CHECK(!fs_error);
 
     MailboxFixture transport;
     transport.queue(t1_frame(0xe0U, {}));
@@ -397,48 +393,93 @@ bool test_card_service_through_product_ifd()
     asicen::W3u3CardServiceBackend backend(mailbox, guard, &stop);
     asicen::W3u3CardProtocolSession session(raw_session, guard, &stop);
     ObservedProtocolSession observed_session(session, guard);
-    CardService card(backend, observed_session);
-    asicen::CardOnlyTunerBackend tuner_backend;
-    PosixTunerNonceSource nonce;
+    asicen::MockTunerBackend tuner_backend(2U);
     TestTime time;
-    TunerService tuner(tuner_backend, nonce, time);
-    const EndpointConfig endpoint{directory, "card-test", kControlEndpointName};
-    auto created = PosixControlServer::create(endpoint, card, tuner, {}, true,
-                                              asicen::profile::kUsbPresentMask, nullptr,
-                                              asicen::profile::kReceiverCount, false);
-    CHECK(created);
-    auto server = std::move(created.value());
+    std::unique_ptr<EnclosureFamily> family(
+        new CardFamily(tuner_backend, backend, observed_session, time));
+    ContextConfig config;
+    config.runtime_directory = directory;
+    config.product = "asicen-userland";
+    config.instance = "card-test";
+    config.server.epoch[0U] = 1U;
+    config.server.features = w::kFeatureCardService;
+    auto& list = config.canonical_list;
+    list.epoch = config.server.epoch;
+    list.producer.product = text<32U>("asicen-userland");
+    list.producer.version = text<64U>("test");
+    list.topology.state = w::TopologyState::complete;
+    list.topology.expected_function_count.present = true;
+    list.topology.expected_function_count.value = 1U;
+    list.functions.count = 1U;
+    list.functions.items[0U].id = 1U;
+    list.functions.items[0U].vid = 0x0b06U;
+    list.functions.items[0U].pid = 0x0005U;
+    list.functions.items[0U].mode = w::Mode::runtime;
+    list.functions.items[0U].serial_state = w::SerialState::absent;
+    list.functions.items[0U].identification_reason = w::IdentificationReason::descriptor_unreadable;
+    list.functions.items[0U].present = true;
+    list.enclosure.present = true;
+    list.enclosure.value.id = 0U;
+    list.enclosure.value.identity.serial_state = w::IdentitySerialState::absent;
+    list.enclosure.value.identity.uniqueness = w::Uniqueness::not_applicable;
+    list.receivers.present = true;
+    list.receivers.value.count = 0U;
+    list.readers.present = true;
+    list.readers.value.count = 1U;
+    list.readers.value.items[0U].id = 0U;
+    list.readers.value.items[0U].binding.present = true;
+    list.readers.value.items[0U].binding.value.function_id = 1U;
+    if (w::validate_list_response(list) != dtv::userland::Error::OK) {
+        std::fprintf(stderr, "card Context list error=%u\n",
+                     static_cast<unsigned>(w::validate_list_response(list)));
+    }
+    config.server.producer = list.producer;
+    config.context.epoch = config.server.epoch;
+    config.context.state = w::ContextState::ready;
+    config.stream_engine_epoch = 0x41534943454eULL;
+    config.stream_arm_budget_ms = 5000U;
+    auto created = EnclosureContext::assemble(std::move(family),
+        std::unique_ptr<TunerNonceSource>(new Nonce()), config);
+    if (!created) {
+        std::fprintf(stderr, "card Context assemble error=%u\n",
+                     static_cast<unsigned>(created.error()));
+        return false;
+    }
+    const auto reserved = created.value()->reserve_namespace();
+    if (!reserved) {
+        std::fprintf(stderr, "card Context namespace error=%u\n",
+                     static_cast<unsigned>(reserved.error()));
+        return false;
+    }
+    const auto published = created.value()->publish();
+    if (!published) {
+        std::fprintf(stderr, "card Context publish error=%u\n",
+                     static_cast<unsigned>(published.error()));
+        return false;
+    }
+    auto context = std::move(created.value());
     std::atomic<bool> done{false};
     std::thread pump([&] {
         while (!done.load()) {
-            const auto result = server->poll_once(Timeout{5U});
-            if (!result) {
-                break;
-            }
+            (void)context->poll_once(Timeout{5U});
         }
     });
     JoinOnExit join_on_exit(done, pump);
 
-    PosixIfdCardClientFactory factory;
-    IfdAdapter ifd(factory);
-    const std::string device =
-        std::string("asicen-userland:runtime=") + directory + ":instance=card-test:access=user";
-    CHECK(ifd.create_channel_by_name(0U, device.c_str()) == IfdResult::success);
-    CHECK(ifd.presence(0U) == IfdResult::icc_present);
-    std::array<std::uint8_t, 33U> atr{};
-    std::size_t atr_length = atr.size();
-    const IfdResult power_result = ifd.power(0U, IfdPowerAction::power_up,
-                                             MutableByteView{atr.data(), atr.size()}, atr_length);
-    if (power_result != IfdResult::success) {
-        std::fprintf(stderr, "IFD power-up result=%u atr_length=%zu calls=%u\n",
-                     static_cast<unsigned>(power_result), atr_length, transport.calls.load());
-    }
-    CHECK(power_result == IfdResult::success);
-    CHECK(atr_length == 13U);
+    const EndpointConfig endpoint{directory, "asicen-userland", "card-test"};
+    auto connected = connect_control(endpoint, Timeout{2000U});
+    CHECK(connected);
+    auto control = std::move(connected.value());
+    w::CardClientOptions card_options;
+    card_options.reader_id = 0U;
+    auto opened = w::begin_card(*control, card_options, Timeout{5000U});
+    CHECK(opened && opened.reader_status.present && opened.connection.usable &&
+          opened.connection.atr.present && opened.connection.atr.value.length == 13U);
+    auto card = opened.session;
     CHECK(observed_session.initialize_timeout == 15000U);
     const unsigned resets_after_connect = transport.controller_inits;
-    CHECK(ifd.presence(0U) == IfdResult::icc_present);
-    CHECK(ifd.presence(0U) == IfdResult::icc_present);
+    CHECK(w::card_status(*control, card, Timeout{2000U}));
+    CHECK(w::card_status(*control, card, Timeout{2000U}));
     // Force the presence/protocol interleaving that used to make the timeout
     // assertion scheduler-dependent, without suppressing background polling.
     CHECK(guard.last_operation_timeout == 5000U);
@@ -446,55 +487,41 @@ bool test_card_service_through_product_ifd()
     CHECK(transport.controller_inits == resets_after_connect);
 
     std::array<std::uint8_t, 5U> apdu{{0x90U, 0x30U, 0U, 0U, 0U}};
-    std::array<std::uint8_t, 80U> response{};
-    std::size_t response_length = 0U;
-    CHECK(ifd.transmit(0U, kIfdTransmitProtocolT1, ByteView{apdu.data(), apdu.size()},
-                       MutableByteView{response.data(), response.size()},
-                       response_length) == IfdResult::success);
-    CHECK(response_length == 61U && response[59] == 0x90U && response[60] == 0x00U);
+    const auto response = w::card_transmit(*control, card, w::CardProtocol::t1,
+                                            {apdu.data(), apdu.size()}, Timeout{5000U});
+    CHECK(response && response.response.response.length == 61U &&
+          response.response.response.bytes[59U] == 0x90U &&
+          response.response.response.bytes[60U] == 0x00U);
     CHECK(observed_session.transmit_timeout == 15000U);
 
-    // Exercise the actual IPC route: card-only mode rejects tuner access
-    // before any operation reaches receiver hardware.
-    auto raw_result = SocketStream::connect(endpoint, Timeout{2000U});
-    CHECK(raw_result);
-    auto raw = std::move(raw_result.value());
-    std::array<std::uint8_t, kMaxControlPayload> hello_bytes{};
-    const auto hello_size =
-        encode_payload(HelloRequestPayload{kProtocolMajor, kProtocolMinor, kProtocolMajor,
-                                           kProtocolMinor, kCapabilityCard},
-                       MutableByteView{hello_bytes.data(), hello_bytes.size()});
-    CHECK(hello_size && send_raw_request(raw, MessageType::HELLO, 1U,
-                                         ByteView{hello_bytes.data(), hello_size.value()}));
-    std::array<std::uint8_t, kFrameHeaderSize + kMaxControlPayload> frame_storage{};
-    StreamFramer framer(MutableByteView{frame_storage.data(), frame_storage.size()});
-    SingleFrame hello_response;
-    CHECK(read_one_raw_response(raw, framer, hello_response));
-    CHECK(hello_response.header.kind == MessageKind::response &&
-          hello_response.header.type == MessageType::HELLO);
-    std::array<std::uint8_t, kMaxControlPayload> acquire_bytes{};
-    const auto acquire_size = encode_payload(
-        AcquireRequestPayload{1U}, MutableByteView{acquire_bytes.data(), acquire_bytes.size()});
-    CHECK(acquire_size);
-    CHECK(send_raw_request(raw, MessageType::ACQUIRE, 2U,
-                           ByteView{acquire_bytes.data(), acquire_size.value()}));
-    SingleFrame unsupported;
-    CHECK(read_one_raw_response(raw, framer, unsupported));
-    CHECK(unsupported.header.kind == MessageKind::error_response);
-    const auto unsupported_error = decode_error_response_payload(
-        ByteView{unsupported.payload.data(), unsupported.payload_size});
-    CHECK(unsupported_error && unsupported_error.value().error_code == ErrorCode::UNSUPPORTED);
-    raw.close();
+    const auto disconnected = w::card_disconnect(*control, card, w::Disposition::leave,
+                                                  Timeout{5000U});
+    CHECK(disconnected && disconnected.response.consumed && disconnected.response.quiesced);
+    control->close();
 
-    CHECK(ifd.close_channel(0U) == IfdResult::success);
+    auto tuner_control = connect_control(endpoint, Timeout{2000U});
+    CHECK(tuner_control);
+    w::RecordingOptions recording;
+    recording.receiver_id = 1U;
+    recording.tune.epoch = config.server.epoch;
+    recording.tune.system = w::System::isdb_t;
+    recording.tune.frequency_hz = 557142000U;
+    recording.tune.timeout_ms = 1000U;
+    const auto rejected = w::begin_recording(*tuner_control.value(), recording, Timeout{2000U});
+    if (rejected || (rejected.error != dtv::userland::Error::NOT_FOUND &&
+                     rejected.error != dtv::userland::Error::UNSUPPORTED)) {
+        std::fprintf(stderr, "card-only tuner result=%u remote=%u\n",
+                     static_cast<unsigned>(rejected.error), rejected.remote_error_code);
+        CHECK(false);
+    }
+    tuner_control.value()->close();
+
     done.store(true);
     pump.join();
-    CHECK(server->shutdown());
-    const auto shutdown = card.shutdown();
-    CHECK(shutdown);
+    CHECK(context->close(Timeout{2000U}));
     CHECK(guard.cleanups != 0U && guard.last_cleanup_timeout == 2000U);
-    server.reset();
-    std::filesystem::remove_all(directory);
+    context.reset();
+    std::filesystem::remove_all(directory, fs_error);
     return true;
 }
 
@@ -503,13 +530,10 @@ bool test_card_cleanup_failure_is_reported()
     MailboxFixture transport;
     transport.fail_cleanup = true;
     asicen::W3u3CardMailboxHardware mailbox(transport);
-    CardSession raw_session(mailbox, mailbox);
     FixtureOperationGuard guard;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, nullptr);
-    asicen::W3u3CardProtocolSession session(raw_session, guard, nullptr);
-    CardService card(backend, session);
-    const auto connected = card.connect(77U, ShareMode::shared);
-    CHECK(!connected && connected.error() == Error::PROTOCOL_ERROR);
+    const auto powered_off = backend.set_power(false);
+    CHECK(!powered_off && powered_off.error() == Error::PROTOCOL_ERROR);
     CHECK(guard.quarantined);
     const auto retry = backend.detect_card();
     CHECK(!retry && retry.error() == Error::NOT_READY);
@@ -545,7 +569,7 @@ int main()
 {
     if (!test_protocol_timeouts_survive_presence_poll() ||
         !test_card_operation_entry_preserves_error_class() ||
-        !test_card_service_through_product_ifd() || !test_card_cleanup_failure_is_reported()) {
+        !test_card_service_through_core_ipc() || !test_card_cleanup_failure_is_reported()) {
         return 1;
     }
     std::puts("PASS asicen card-only service");

@@ -294,7 +294,8 @@ bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
         if (!address) return false;
         ReceiverDescriptor& receiver = list.receivers.value.items[index];
         receiver.id = static_cast<std::uint16_t>(index);
-        receiver.systems.mask = address.value().system == BroadcastSystem::IsdbT ? 0x01U : 0x02U;
+        receiver.systems.mask = profile.combined_isdb_ts ? 0x03U
+            : (address.value().system == BroadcastSystem::IsdbT ? 0x01U : 0x02U);
         receiver.binding.present = true;
         receiver.binding.value.function_id =
             static_cast<std::uint16_t>(address.value().function_index + 1U);
