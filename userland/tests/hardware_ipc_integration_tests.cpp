@@ -18,6 +18,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -223,9 +224,7 @@ bool run(bool hold_detach = false)
     if (made == nullptr) return false;
     const std::string root(made);
     std::error_code fs_error;
-    std::filesystem::permissions(root, std::filesystem::perms::owner_all,
-                                 std::filesystem::perm_options::replace, fs_error);
-    if (fs_error) {
+    if (::chmod(root.c_str(), 0700) != 0) {
         std::filesystem::remove_all(root, fs_error);
         return false;
     }

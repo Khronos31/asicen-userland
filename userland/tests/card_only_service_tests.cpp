@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -373,10 +374,7 @@ bool test_card_service_through_core_ipc()
         px4::userland::test::temporary_directory_template("asicen-card-only-");
     char* directory = ::mkdtemp(directory_template.data());
     CHECK(directory != nullptr);
-    std::error_code fs_error;
-    std::filesystem::permissions(directory, std::filesystem::perms::owner_all,
-                                 std::filesystem::perm_options::replace, fs_error);
-    CHECK(!fs_error);
+    CHECK(::chmod(directory, 0700) == 0);
 
     MailboxFixture transport;
     transport.queue(t1_frame(0xe0U, {}));
@@ -521,6 +519,7 @@ bool test_card_service_through_core_ipc()
     CHECK(context->close(Timeout{2000U}));
     CHECK(guard.cleanups != 0U && guard.last_cleanup_timeout == 2000U);
     context.reset();
+    std::error_code fs_error;
     std::filesystem::remove_all(directory, fs_error);
     return true;
 }
