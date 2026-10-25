@@ -1581,6 +1581,20 @@ bool test_startup_control_trace_records_metadata_without_write_payload()
     CHECK(capture.stop().has_value());
     CHECK(capture.close_receiver(0U).has_value());
     CHECK(capture.shutdown().has_value());
+
+    FakeUsb busy_fake;
+    busy_fake.controller[0x09U] = 0x20U;
+    busy_fake.controller[0x05U] = 0xa0U;
+    LibusbW3u3Hardware busy(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks busy_hooks{};
+    configure(busy, busy_fake, busy_hooks, 0U);
+    LibusbW3u3HardwareTestPeer::enable_startup_trace(busy);
+    CHECK(!LibusbW3u3HardwareTestPeer::snapshot_link_diagnostic(busy));
+    CHECK(LibusbW3u3HardwareTestPeer::startup_has_stage(
+        busy, "capture_snapshot_idle_rejected"));
+    CHECK(LibusbW3u3HardwareTestPeer::startup_fields(
+              busy, LibusbW3u3HardwareTestPeer::startup_events(busy) - 1U)[1] ==
+          static_cast<int>(LinkSeedSnapshotResult::controller_active));
     return true;
 }
 

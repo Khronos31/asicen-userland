@@ -15,6 +15,13 @@ class LinkSeedDiagnosticIo {
     virtual bool write_link_seed_byte(std::uint8_t reg, std::uint8_t value) = 0;
 };
 
+enum class LinkSeedSnapshotResult : std::uint8_t {
+    ready,
+    unavailable,
+    read_failed,
+    controller_active,
+};
+
 // The chip's seed write window is not observable through the recovered I2C
 // read path. This diagnostic requires controller05=0, applies a seed, then
 // sends zero writes and verifies only controller05=0. It never claims that
@@ -22,6 +29,7 @@ class LinkSeedDiagnosticIo {
 class LinkSeedDiagnostic final {
   public:
     bool snapshot_idle(LinkSeedDiagnosticIo* io);
+    LinkSeedSnapshotResult snapshot_idle_result(LinkSeedDiagnosticIo* io);
     bool apply(LinkSeedDiagnosticIo* io, const std::uint8_t* seed, std::size_t size);
     bool clear_and_verify_controller(LinkSeedDiagnosticIo* io);
     bool active() const

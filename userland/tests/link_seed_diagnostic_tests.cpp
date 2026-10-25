@@ -118,8 +118,13 @@ bool idle_only_apply_and_honest_cleanup()
     io.controller = 0x20;
     asicen::LinkSeedDiagnostic non_idle;
     io.trace.clear();
-    CHECK(!non_idle.snapshot_idle(&io) && io.trace.size() == 1,
+    CHECK(non_idle.snapshot_idle_result(&io) == asicen::LinkSeedSnapshotResult::controller_active &&
+              !non_idle.snapshot_idle(&io) && io.trace.size() == 2,
           "nonzero controller05 aborts before any seed write");
+    io.fail_read05 = true;
+    asicen::LinkSeedDiagnostic unreadable;
+    CHECK(unreadable.snapshot_idle_result(&io) == asicen::LinkSeedSnapshotResult::read_failed,
+          "controller05 read failure differs from an active output");
     return true;
 }
 

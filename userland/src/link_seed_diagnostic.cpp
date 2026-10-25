@@ -5,13 +5,20 @@ namespace asicen {
 
 bool LinkSeedDiagnostic::snapshot_idle(LinkSeedDiagnosticIo* io)
 {
+    return snapshot_idle_result(io) == LinkSeedSnapshotResult::ready;
+}
+
+LinkSeedSnapshotResult LinkSeedDiagnostic::snapshot_idle_result(LinkSeedDiagnosticIo* io)
+{
     if (io == nullptr || active_)
-        return false;
+        return LinkSeedSnapshotResult::unavailable;
     std::uint8_t controller = 0xff;
-    if (!io->read_controller05(&controller) || controller != 0x00)
-        return false;
+    if (!io->read_controller05(&controller))
+        return LinkSeedSnapshotResult::read_failed;
+    if (controller != 0x00)
+        return LinkSeedSnapshotResult::controller_active;
     active_ = true;
-    return true;
+    return LinkSeedSnapshotResult::ready;
 }
 
 bool LinkSeedDiagnostic::apply(LinkSeedDiagnosticIo* io, const std::uint8_t* seed, std::size_t size)

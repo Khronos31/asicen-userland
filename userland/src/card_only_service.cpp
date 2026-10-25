@@ -438,6 +438,9 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
         }
         if (closed.value() == CloseState::quiesced) break;
     }
+    std::fprintf(stderr, "asicend daemon exit error=%s code=%u\n",
+                 dtv::userland::error_string(loop_error),
+                 static_cast<unsigned>(loop_error));
     return core_exit_status(loop_error);
 }
 

@@ -3657,10 +3657,26 @@ bool LibusbW3u3Hardware::snapshot_link_diagnostic()
     if (receiver >= receiver_capture_states_.size()) {
         return false;
     }
+    if (!verify_device_revision()) {
+        record_startup("capture_snapshot_revision_failed", receiver);
+        return false;
+    }
     std::uint8_t type_reg = 0;
-    return verify_device_revision() && read_i2c(0x4aU, 0x09U, 1U, &type_reg) &&
-           powered_controller_type_supported(profile_, type_reg) &&
-           receiver_capture_states_[receiver].link_diagnostic.snapshot_idle(this);
+    if (!read_i2c(0x4aU, 0x09U, 1U, &type_reg)) {
+        record_startup("capture_snapshot_type_read_failed", receiver);
+        return false;
+    }
+    if (!powered_controller_type_supported(profile_, type_reg)) {
+        record_startup("capture_snapshot_type_rejected", receiver);
+        return false;
+    }
+    const auto idle = receiver_capture_states_[receiver].link_diagnostic.snapshot_idle_result(this);
+    if (idle != LinkSeedSnapshotResult::ready) {
+        record_startup("capture_snapshot_idle_rejected", receiver, static_cast<int>(idle));
+        return false;
+    }
+    record_startup("capture_snapshot_complete", receiver);
+    return true;
 }
 bool LibusbW3u3Hardware::verify_device_revision() noexcept
 {
