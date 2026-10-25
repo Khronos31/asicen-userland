@@ -298,11 +298,16 @@ private:
     bool sibling_runtime_required_ = false;
     bool v2_roles_verified_ = false;
     bool v2_identity_verified_ = false;
-    bool tuned_ = false;
-    bool gain_applied_ = false;
+    struct ReceiverTuneState {
+        bool tuned = false;
+        bool gain_applied = false;
+        px4::userland::ipc::System system = px4::userland::ipc::System::ISDB_T;
+        std::uint32_t frequency_khz = 0U;
+        PostGainReadiness readiness;
+    };
+    std::array<ReceiverTuneState, 4U> receiver_tune_states_{};
     PostGainDiagnosticConfig startup_config_ =
         parse_post_gain_diagnostic(std::getenv("ASICEN_DIAGNOSTIC_POST_GAIN_MS"));
-    PostGainReadiness post_gain_readiness_;
     struct StartupEvent {
         const char* stage = nullptr;
         std::chrono::steady_clock::time_point at{};
@@ -316,7 +321,7 @@ private:
     std::size_t startup_events_dropped_ = 0U;
     void record_startup(const char*, std::int64_t = 0, std::int64_t = 0) noexcept;
     void flush_startup_trace() noexcept;
-    void reset_startup_diagnostic() noexcept;
+    void reset_startup_diagnostic(std::uint8_t receiver) noexcept;
     bool source_prepared_ = false;
     bool dsc_attempted_ = false;
     bool dsc_stopped_ = true;
@@ -328,11 +333,9 @@ private:
     std::atomic<int> cleanup_failure_error_{0};
     static constexpr std::uint8_t kNoActiveReceiver = 0xffU;
     ReceiverLaneReservation active_receiver_{};
-    std::uint8_t tuned_receiver_ = kNoActiveReceiver;
     std::uint8_t source_receiver_ = kNoActiveReceiver;
     std::atomic<std::uint8_t> routed_source_receiver_{kNoActiveReceiver};
     std::atomic<std::uint8_t> counters_receiver_{kNoActiveReceiver};
-    px4::userland::ipc::System tuned_system_ = px4::userland::ipc::System::ISDB_T;
     const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
     bool (*diagnostic_stop_callback_)() noexcept = nullptr;
     std::array<bool, 2U> gpio_snapshot_valid_functions_{};
@@ -369,7 +372,6 @@ private:
                              std::memory_order_release);
     }
     std::uint8_t lnb_transaction_receiver_ = kNoActiveReceiver;
-    std::uint32_t tuned_frequency_khz_ = 0;
     std::array<std::uint8_t, 0x45> cf_snapshot_{};
     std::array<std::uint8_t, 16> link_seed_{};
     LinkSeedDiagnostic link_diagnostic_{};

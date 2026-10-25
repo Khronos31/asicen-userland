@@ -1420,14 +1420,15 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
             return Result<void>::failure(
                 satellite_error(v2_satellite_result(result), first_transport_error_.load()));
         }
-        tuned_ = true;
-        tuned_receiver_ = receiver;
-        tuned_system_ = System::ISDB_T;
-        tuned_frequency_khz_ = frequency_khz;
-        gain_applied_ = false;
+        auto& state = receiver_tune_states_[receiver];
+        state.tuned = true;
+        state.system = System::ISDB_T;
+        state.frequency_khz = frequency_khz;
+        state.gain_applied = false;
+        state.readiness.reset();
         return Result<void>::success();
     }
-    reset_startup_diagnostic();
+    reset_startup_diagnostic(receiver);
     startup_trace_active_.store(startup_config_.enabled && !uses_legacy_frontend() &&
                                 !uses_v2_frontend());
     record_startup("tune_begin", frequency_khz, timeout_ms);
@@ -1440,12 +1441,12 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
     if (!run_plan(plan, timeout_ms)) {
         return Result<void>::failure(plan_error_);
     }
-    tuned_ = true;
-    tuned_receiver_ = receiver;
-    tuned_system_ = System::ISDB_T;
-    tuned_frequency_khz_ = frequency_khz;
-    gain_applied_ = false;
-    post_gain_readiness_.reset();
+    auto& state = receiver_tune_states_[receiver];
+    state.tuned = true;
+    state.system = System::ISDB_T;
+    state.frequency_khz = frequency_khz;
+    state.gain_applied = false;
+    state.readiness.reset();
     record_startup("tune_complete");
     return Result<void>::success();
 }
@@ -1474,7 +1475,7 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint
     deadline_ = previous_deadline_active ? std::min(previous_deadline, selection_deadline)
                                          : selection_deadline;
     deadline_active_ = true;
-    reset_startup_diagnostic();
+    reset_startup_diagnostic(receiver);
     const SatelliteOperationResult tuned = run_model_satellite_tune(rf_khz);
     deadline_ = previous_deadline;
     deadline_active_ = previous_deadline_active;
@@ -1482,10 +1483,12 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint
     if (error != Error::OK) {
         return Result<void>::failure(error);
     }
-    tuned_ = true;
-    tuned_receiver_ = receiver;
-    tuned_system_ = System::ISDB_S;
-    gain_applied_ = false;
+    auto& state = receiver_tune_states_[receiver];
+    state.tuned = true;
+    state.system = System::ISDB_S;
+    state.frequency_khz = frequency_khz;
+    state.gain_applied = false;
+    state.readiness.reset();
     return Result<void>::success();
 }
 
@@ -1495,8 +1498,8 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
         return Result<bool>::failure(Error::USB_IO);
     }
     if (!active_receiver_.owns(receiver) || !receiver_initialized(receiver) ||
-        receiver != tuned_receiver_ ||
-        system != tuned_system_ || !tuned_) {
+        !receiver_tune_states_[receiver].tuned ||
+        system != receiver_tune_states_[receiver].system) {
         return Result<bool>::failure(Error::UNSUPPORTED);
     }
     const auto gate_deadline = steady_now() + std::chrono::seconds(2);
@@ -1524,8 +1527,10 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
     std::uint8_t lock = 0;
     bool have = false;
     const auto plan = uses_legacy_frontend()
-                          ? plan_legacy_terrestrial_lock(legacy_frontend(), tuned_frequency_khz_)
-                          : plan_terrestrial_lock_read(tuned_frequency_khz_);
+                          ? plan_legacy_terrestrial_lock(
+                                legacy_frontend(), receiver_tune_states_[receiver].frequency_khz)
+                          : plan_terrestrial_lock_read(
+                                receiver_tune_states_[receiver].frequency_khz);
     FrontendRunReport report{};
     if (!run_plan(plan, 1000U, &report)) {
         return Result<bool>::failure(plan_error_);
@@ -1537,23 +1542,24 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
     have = true;
     const bool locked = have && (lock & 0x0fU) == 0x09U;
     const bool w3_terrestrial = !uses_legacy_frontend() && !uses_v2_frontend();
-    record_startup(gain_applied_ ? "post_gain_lock" : "pre_gain_lock", lock, locked);
-    if (locked && !gain_applied_ && w3_terrestrial) {
+    auto& tune_state = receiver_tune_states_[receiver];
+    record_startup(tune_state.gain_applied ? "post_gain_lock" : "pre_gain_lock", lock, locked);
+    if (locked && !tune_state.gain_applied && w3_terrestrial) {
         record_startup("gain_begin");
         if (!run_plan(plan_fc0012_gain_once(receiver_local(receiver)), 1000U)) {
             record_startup("gain_error", static_cast<int>(plan_error_));
             return Result<bool>::failure(plan_error_);
         }
-        gain_applied_ = true;
-        post_gain_readiness_.reset();
+        tune_state.gain_applied = true;
+        tune_state.readiness.reset();
         record_startup("gain_complete");
         // The normal path and diagnostic B require a fresh post-gain sample.
         // Diagnostic A=0 alone retains the original immediate return.
         if (startup_config_.stable_ms != 0U)
             return Result<bool>::success(false);
     }
-    if (w3_terrestrial && gain_applied_ && startup_config_.stable_ms != 0U) {
-        const bool ready = post_gain_readiness_.observe(
+    if (w3_terrestrial && tune_state.gain_applied && startup_config_.stable_ms != 0U) {
+        const bool ready = tune_state.readiness.observe(
             locked, steady_now(), startup_config_.stable_ms);
         record_startup("readiness", ready, startup_config_.stable_ms);
         return Result<bool>::success(ready);
@@ -1568,8 +1574,9 @@ Result<void> LibusbW3u3Hardware::select_satellite_slot(std::uint8_t receiver, st
         return Result<void>::failure(Error::USB_IO);
     }
     if (receiver != 0U || !receiver_initialized(receiver) || !active_receiver_.owns(receiver) ||
-        tuned_receiver_ != receiver ||
-        tuned_system_ != System::ISDB_S || !tuned_ || slot >= kW3u3SatelliteTsidSlots ||
+        !receiver_tune_states_[receiver].tuned ||
+        receiver_tune_states_[receiver].system != System::ISDB_S ||
+        slot >= kW3u3SatelliteTsidSlots ||
         timeout_ms == 0U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
@@ -1606,8 +1613,8 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(std::uint8_t receiver, st
         return Result<void>::failure(Error::USB_IO);
     }
     if (receiver != 0U || !receiver_initialized(receiver) || !active_receiver_.owns(receiver) ||
-        tuned_receiver_ != receiver ||
-        tuned_system_ != System::ISDB_S || !tuned_ || timeout_ms == 0U ||
+        !receiver_tune_states_[receiver].tuned ||
+        receiver_tune_states_[receiver].system != System::ISDB_S || timeout_ms == 0U ||
         tsid == kW3u3SatelliteNoTsid) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
@@ -1652,7 +1659,7 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
         return Result<void>::failure(Error::BUSY);
     }
     flush_startup_trace();
-    post_gain_readiness_.reset();
+    receiver_tune_states_[receiver].readiness.reset();
     // Independent LNB cleanup is still attempted after another cleanup stage
     // quarantines the receiver. Never release its lease with uncertain power.
     // Only a verified, healthy independent (ctl) feed survives the close.
@@ -1673,9 +1680,7 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
     if (cleanup_failed_.load()) {
         return Result<void>::failure(Error::USB_IO);
     }
-    tuned_ = false;
-    tuned_receiver_ = kNoActiveReceiver;
-    gain_applied_ = false;
+    receiver_tune_states_[receiver] = ReceiverTuneState{};
     (void)active_receiver_.release(receiver);
     return Result<void>::success();
 }
@@ -2649,8 +2654,8 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
     first_transport_error_.store(0);
     if (!receiver_supports(receiver, system) || !claimed_ || !active_receiver_.owns(receiver) ||
-        !receiver_initialized(receiver) || tuned_receiver_ != receiver || tuned_system_ != system ||
-        !tuned_ || source_prepared_ ||
+        !receiver_initialized(receiver) || !receiver_tune_states_[receiver].tuned ||
+        receiver_tune_states_[receiver].system != system || source_prepared_ ||
         stop_requested_.load()) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -2683,14 +2688,15 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     if (cancelled_flag.load()) {
         return fail_prepare(Error::NOT_READY);
     }
-    if (uses_legacy_frontend() && system == System::ISDB_T && !gain_applied_) {
+    if (uses_legacy_frontend() && system == System::ISDB_T &&
+        !receiver_tune_states_[receiver].gain_applied) {
         // These tune wrappers establish the vendor's default cached state.
         // Apply the model-specific one-shot once per tune, without importing
         // W3U3's lock-settle/retry policy or starting a polling thread.
         if (!run_plan(plan_legacy_default_gain(legacy_frontend(), true), 1000U)) {
             return fail_prepare(plan_error_);
         }
-        gain_applied_ = true;
+        receiver_tune_states_[receiver].gain_applied = true;
     }
     if (!snapshot_link_diagnostic()) {
         return fail_prepare(Error::NOT_READY);
@@ -3153,10 +3159,12 @@ void LibusbW3u3Hardware::flush_startup_trace() noexcept
     startup_events_dropped_ = 0U;
 }
 
-void LibusbW3u3Hardware::reset_startup_diagnostic() noexcept
+void LibusbW3u3Hardware::reset_startup_diagnostic(std::uint8_t receiver) noexcept
 {
     flush_startup_trace();
-    post_gain_readiness_.reset();
+    if (receiver < receiver_tune_states_.size()) {
+        receiver_tune_states_[receiver].readiness.reset();
+    }
 }
 
 void LibusbW3u3Hardware::quarantine_capture() noexcept
@@ -3409,8 +3417,9 @@ bool LibusbW3u3Hardware::write_cf_block(std::uint8_t local, const std::uint8_t* 
 bool LibusbW3u3Hardware::terrestrial_locked(std::uint8_t local, bool* locked,
                                             std::chrono::steady_clock::time_point deadline)
 {
+    const std::uint8_t receiver = active_receiver_.owner();
     if (!receiver_supports(local, System::ISDB_T) || locked == nullptr ||
-        steady_now() >= deadline) {
+        receiver >= receiver_tune_states_.size() || steady_now() >= deadline) {
         return false;
     }
     if (uses_v2_frontend()) {
@@ -3419,8 +3428,10 @@ bool LibusbW3u3Hardware::terrestrial_locked(std::uint8_t local, bool* locked,
     }
     FrontendRunReport report{};
     const auto plan = uses_legacy_frontend()
-                          ? plan_legacy_terrestrial_lock(legacy_frontend(), tuned_frequency_khz_)
-                          : plan_terrestrial_lock_read(tuned_frequency_khz_);
+                          ? plan_legacy_terrestrial_lock(
+                                legacy_frontend(), receiver_tune_states_[receiver].frequency_khz)
+                          : plan_terrestrial_lock_read(
+                                receiver_tune_states_[receiver].frequency_khz);
     if (!run_plan(plan, 500U, &report) || !report.have_last_read) {
         return false;
     }

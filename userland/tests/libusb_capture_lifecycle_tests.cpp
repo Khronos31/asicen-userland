@@ -34,11 +34,11 @@ struct LibusbW3u3HardwareTestPeer {
         if (const auto route = receiver_address(*hardware.profile_, receiver); route) {
             hardware.initialized_functions_[route.value().rf_function_index] = true;
         }
-        hardware.tuned_ = true;
-        hardware.tuned_receiver_ = receiver;
-        hardware.tuned_frequency_khz_ = 557142U;
-        hardware.tuned_system_ = receiver % 2U == 0U ? px4::userland::ipc::System::ISDB_S
-                                                     : px4::userland::ipc::System::ISDB_T;
+        auto& tune = hardware.receiver_tune_states_[receiver];
+        tune.tuned = true;
+        tune.frequency_khz = 557142U;
+        tune.system = receiver % 2U == 0U ? px4::userland::ipc::System::ISDB_S
+                                          : px4::userland::ipc::System::ISDB_T;
         (void)hardware.active_receiver_.reserve(receiver);
     }
 
@@ -73,15 +73,23 @@ struct LibusbW3u3HardwareTestPeer {
     {
         hardware.initialized_ = false;
         hardware.initialized_functions_.fill(false);
-        hardware.tuned_ = false;
+        hardware.receiver_tune_states_.fill(LibusbW3u3Hardware::ReceiverTuneState{});
     }
-    static bool gain_applied(const LibusbW3u3Hardware& hardware) { return hardware.gain_applied_; }
+    static bool gain_applied(const LibusbW3u3Hardware& hardware)
+    {
+        const auto receiver = hardware.active_receiver_.owner();
+        return receiver < hardware.receiver_tune_states_.size() &&
+               hardware.receiver_tune_states_[receiver].gain_applied;
+    }
     static void startup_diagnostic(LibusbW3u3Hardware& hardware, const char* mode)
     {
-        hardware.reset_startup_diagnostic();
+        hardware.reset_startup_diagnostic(hardware.active_receiver_.owner());
         hardware.startup_config_ = parse_post_gain_diagnostic(mode);
         hardware.startup_trace_active_.store(hardware.startup_config_.enabled);
-        hardware.gain_applied_ = false;
+        const auto receiver = hardware.active_receiver_.owner();
+        if (receiver < hardware.receiver_tune_states_.size()) {
+            hardware.receiver_tune_states_[receiver].gain_applied = false;
+        }
     }
     static std::size_t startup_events(const LibusbW3u3Hardware& hardware)
     {
@@ -123,11 +131,16 @@ struct LibusbW3u3HardwareTestPeer {
     }
     static void mark_tuned(LibusbW3u3Hardware& hardware, std::uint8_t receiver)
     {
-        hardware.tuned_ = true;
-        hardware.tuned_receiver_ = receiver;
-        hardware.tuned_frequency_khz_ = 557142U;
-        hardware.tuned_system_ = receiver % 2U == 0U ? px4::userland::ipc::System::ISDB_S
-                                                     : px4::userland::ipc::System::ISDB_T;
+        auto& tune = hardware.receiver_tune_states_[receiver];
+        tune.tuned = true;
+        tune.frequency_khz = 557142U;
+        tune.system = receiver % 2U == 0U ? px4::userland::ipc::System::ISDB_S
+                                          : px4::userland::ipc::System::ISDB_T;
+    }
+    static bool tuned(const LibusbW3u3Hardware& hardware, std::uint8_t receiver)
+    {
+        return receiver < hardware.receiver_tune_states_.size() &&
+               hardware.receiver_tune_states_[receiver].tuned;
     }
 
     static void set_cleanup_failed(LibusbW3u3Hardware& hardware)
@@ -1365,6 +1378,7 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
     CHECK(hardware.begin_tune_power(0U, System::ISDB_S, 15U).has_value());
     CHECK(hardware.commit_tune_power(0U).has_value());
     CHECK((fake.gpio & 0x20U) == 0U);
+    LibusbW3u3HardwareTestPeer::mark_tuned(hardware, 2U);
 
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
@@ -1388,6 +1402,8 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
     CHECK(fake.cf[0] == fake.initial_cf(0U));
     CHECK((fake.gpio & 0x20U) == 0U);  // STOP_STREAM retains committed lease power.
     CHECK(hardware.close_receiver(0U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::tuned(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::tuned(hardware, 2U));
     CHECK((fake.gpio & 0x20U) != 0U);
     CHECK(hardware.open_receiver(1U).has_value());
     LibusbW3u3HardwareTestPeer::mark_tuned(hardware, 1U);
