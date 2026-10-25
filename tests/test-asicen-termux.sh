@@ -25,7 +25,7 @@ trap cleanup EXIT
 IFS= read -r version < "$root/VERSION"
 version_output=$(sh "$launcher" --version) || fail_test 'source version failed'
 [ "$version_output" = "asicen-termux $version" ] || fail_test 'source version does not match VERSION'
-for option in --help --group --allow-lnb-power --usb-device --firmware --model --instance --runtime-dir; do
+for option in --help --group --allow-lnb-power --usb-device --firmware --instance --runtime-dir; do
     status=0
     sh "$launcher" --version "$option" >/dev/null 2>&1 || status=$?
     [ "$status" -eq 2 ] || fail_test "version combined with $option was accepted"
@@ -204,14 +204,12 @@ mkdir "$termux_pid_dir" "$callback_pid_dir"
 PATH="$fake_bin:$PATH" FAKE_ASICEND_LOG="$log" FAKE_ASICEND_PID="$pid_file" \
     FAKE_TERMUX_PID_DIR="$termux_pid_dir" FAKE_CALLBACK_PID_DIR="$callback_pid_dir" \
     sh "$launcher" --usb-device "$usb_one" --usb-device "$usb_two" \
-    --firmware "$firmware" --model w3u3 --instance termux.one \
+    --firmware "$firmware" --instance termux.one \
     --runtime-dir "$runtime" --group --allow-lnb-power
 assert_log_line '[--fd]' 'normal argument forwarding'
 assert_log_line '[7]' 'normal first fd forwarding'
 assert_log_line '[8]' 'normal second fd forwarding'
 assert_log_line "[$firmware]" 'normal firmware forwarding'
-assert_log_line '[--model]' 'normal model option forwarding'
-assert_log_line '[w3u3]' 'normal model forwarding'
 assert_log_line '[--instance]' 'normal instance option forwarding'
 assert_log_line '[termux.one]' 'normal instance forwarding'
 assert_log_line "[$runtime]" 'normal runtime directory forwarding'
@@ -438,16 +436,15 @@ assert_file_absent "$pid_file" 'second-open failure asicend residue'
 assert_file_absent "$endpoint" 'second-open failure endpoint residue'
 
 PATH="$fake_bin:$PATH" sh "$launcher" --help >/dev/null
-# A single-function ASICEN model opens one USB function. It opens only
+# A single-function ASICEN device opens one USB function. It opens only
 # that device and passes exactly one --fd.
 : > "$log"
 PATH="$fake_bin:$PATH" FAKE_ASICEND_LOG="$log" FAKE_ASICEND_PID="$pid_file" \
     FAKE_TERMUX_PID_DIR="$termux_pid_dir" \
-    sh "$launcher" --usb-device "$usb_one" --firmware "$firmware" --model s3u
-assert_equal 6 "$(head -n 1 "$log")" 'single-device argument count'
+    sh "$launcher" --usb-device "$usb_one" --firmware "$firmware"
+assert_equal 4 "$(head -n 1 "$log")" 'single-device argument count'
 assert_log_line '[--fd]' 'single-device fd option'
 assert_log_line '[7]' 'single-device fd forwarding'
-assert_log_line '[s3u]' 'single-device model forwarding'
 if grep -Fx '[8]' "$log" >/dev/null; then
     fail_test 'single-device path opened a second device'
 fi
@@ -506,8 +503,8 @@ PATH="$fake_bin:$PATH" FAKE_ASICEND_LOG="$log" FAKE_ASICEND_PID="$pid_file" \
 assert_equal '2' "$(head -n 1 "$log")" 'runtime single-function argv count'
 assert_log_line '[--fd]' 'runtime fd option'
 assert_log_line '[7]' 'runtime fd value'
-if PATH="$fake_bin:$PATH" sh "$launcher" --usb-device "$usb_one" --model w3u3 --model s3u; then
-    fail_test 'duplicate model accepted'
+if PATH="$fake_bin:$PATH" sh "$launcher" --usb-device "$usb_one" --model w3u3; then
+    fail_test 'removed model option accepted'
 fi
 if PATH="$fake_bin:$PATH" sh "$launcher" --help --usb-device "$usb_one"; then
     fail_test 'help combined with arguments accepted'
