@@ -1679,7 +1679,8 @@ Result<void> LibusbW3u3Hardware::select_satellite_slot(std::uint8_t receiver, st
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return Result<void>::failure(Error::USB_IO);
     }
-    if (receiver != 0U || !receiver_initialized(receiver) || !active_receiver_.owns(receiver) ||
+    if (!receiver_supports(receiver, System::ISDB_S) || !receiver_initialized(receiver) ||
+        !active_receiver_.owns(receiver) ||
         !receiver_tune_states_[receiver].tuned ||
         receiver_tune_states_[receiver].system != System::ISDB_S ||
         slot >= kW3u3SatelliteTsidSlots ||
@@ -1719,7 +1720,8 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(std::uint8_t receiver, st
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return Result<void>::failure(Error::USB_IO);
     }
-    if (receiver != 0U || !receiver_initialized(receiver) || !active_receiver_.owns(receiver) ||
+    if (!receiver_supports(receiver, System::ISDB_S) || !receiver_initialized(receiver) ||
+        !active_receiver_.owns(receiver) ||
         !receiver_tune_states_[receiver].tuned ||
         receiver_tune_states_[receiver].system != System::ISDB_S || timeout_ms == 0U ||
         tsid == kW3u3SatelliteNoTsid) {

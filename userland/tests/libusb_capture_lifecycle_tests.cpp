@@ -280,6 +280,8 @@ struct FakeUsb {
     std::array<std::uint8_t, 256> controller{};
     std::array<std::array<std::uint8_t, 256>, 2> function_controllers{};
     bool function_local_controller = false;
+    std::array<std::uint8_t, 256> satellite_registers{};
+    bool satellite_register_model = false;
     std::array<std::array<std::uint8_t, 0x45>, 2> cf{};
     std::vector<ControlEvent> controls;
     std::vector<std::uint8_t> control_functions;
@@ -602,6 +604,8 @@ struct FakeUsb {
                 const std::uint8_t reg = static_cast<std::uint8_t>(first + i);
                 response[i + 1U] =
                     slave == 0x30U && first == 0xb0U ? terrestrial_b0 :
+                    slave == 0x32U && satellite_register_model
+                        ? satellite_registers[reg] :
                     slave == 0x4aU ? (function_local_controller
                                           ? function_controllers[current_function][reg]
                                           : controller[reg])
@@ -665,6 +669,12 @@ struct FakeUsb {
                 registers[first] = value;
                 if (transfer.length > 2U) {
                     registers[static_cast<std::uint8_t>(first + 1U)] =
+                        static_cast<std::uint8_t>(transfer.index >> 8U);
+                }
+            } else if (slave == 0x32U && satellite_register_model && transfer.length > 1U) {
+                satellite_registers[first] = static_cast<std::uint8_t>(transfer.index & 0xffU);
+                if (transfer.length > 2U) {
+                    satellite_registers[static_cast<std::uint8_t>(first + 1U)] =
                         static_cast<std::uint8_t>(transfer.index >> 8U);
                 }
             }
@@ -2471,6 +2481,43 @@ bool test_w3u3_type10_fails_both_production_gates()
     return true;
 }
 
+bool test_w3u2_secondary_satellite_selection_and_capture_route()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    fake.controller[0x09U] = 0x20U;
+    fake.function_controllers[1U][0x09U] = 0x20U;
+    fake.satellite_register_model = true;
+    fake.satellite_registers[0xceU] = 0x12U;
+    fake.satellite_registers[0xcfU] = 0x34U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 2U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+
+    CHECK(hardware.open_receiver(2U).has_value());
+    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
+    CHECK(hardware.is_locked(2U, System::ISDB_S).value());
+    CHECK(hardware.select_satellite_slot(2U, 0U, 1000U).has_value());
+    CHECK(hardware.select_satellite_tsid(2U, 0x1234U, 1000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
+    CHECK(fake.function_controllers[1U][0x05U] == 0xa0U);
+    CHECK(hardware.stop_receiver(2U).has_value());
+    CHECK(fake.function_controllers[1U][0x05U] == 0U);
+    CHECK(fake.seed_clear_count == 16 && fake.seed_clear_values_zero);
+    CHECK(hardware.close_receiver(2U).has_value());
+    CHECK(hardware.shutdown().has_value());
+    for (std::size_t i = 0U; i < fake.controls.size(); ++i) {
+        if (fake.controls[i].request == Request::I2cRead ||
+            fake.controls[i].request == Request::I2cWrite ||
+            fake.controls[i].request == Request::I2cWriteNoStop) {
+            CHECK(fake.control_functions[i] == 1U);
+        }
+    }
+    return true;
+}
+
 bool test_legacy_gpioex_off_failure_is_visible_and_quarantines()
 {
     FakeUsb fake;
@@ -2738,6 +2785,8 @@ int main()
          test_w3u2_type10_complete_capture_matches_type0f_trace},
         {"test_w3u2_type10_controller_read_failures_and_busy_output",
          test_w3u2_type10_controller_read_failures_and_busy_output},
+        {"test_w3u2_secondary_satellite_selection_and_capture_route",
+         test_w3u2_secondary_satellite_selection_and_capture_route},
         {"test_type10_helper_rejects_copied_profile_and_constructor_canonicalizes",
          test_type10_helper_rejects_copied_profile_and_constructor_canonicalizes},
         {"test_legacy_gpioex_off_failure_is_visible_and_quarantines",
