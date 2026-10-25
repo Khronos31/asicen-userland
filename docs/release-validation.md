@@ -1,6 +1,6 @@
 # 0.1.0 の実機検証手順
 
-現行候補の再現可能な手順は [`release-validation-current.md`](release-validation-current.md) です。以下のcandidate固有の実測・旧soak条件は履歴であり、現行条件は新手順を優先します。
+この文書のCARD/USB/LNBを含む製品固有の検証操作は引き続き使用し、CLIが現行READMEと異なる箇所だけ更新します。candidateへの適用頻度と1.0.0固有matrixは [`release-validation-current.md`](release-validation-current.md) に従います。以下のcandidate固有の実測値は今回候補の合格を意味しません。
 
 ## 現在の候補と検証状況
 
