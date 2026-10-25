@@ -28,22 +28,22 @@
 | 依存 / driver / permission | 実行時USB library、OS側USB access手段と権限条件 | firmware、CARD API、検証結果 | `libusb:`、`USB access:`、`FD handoff:` の属性名を使う |
 | firmware / input | 実行時に必要なfirmwareまたは製品入力と放送方式 | archiveへの同梱・埋込完了、candidate実績 | `firmware:` と `input:` を分け、該当しない属性は `なし` |
 | 製品CLIからの内蔵CARD操作 | 製品固有CLI/APIの操作範囲 | PC/SC/WinSCard adapter、実機合否 | 操作名とmodel依存条件。機能なしは `なし` |
-| native PC/SC/WinSCard adapter | OS標準APIへ接続する製品adapterの種類・配布形態 | 製品CLI CARD、adapter実機試験結果 | `Linux PC/SC:`、`macOS PC/SC:`、`Android:`、`Windows WinSCard:` を列挙 |
+| native PC/SC/WinSCard adapter | その行のOS標準APIへ接続する製品adapterの種類・配布形態 | 製品CLI CARD、adapter実機試験結果、他OSのadapter | OS/ABI行に該当する`Linux PC/SC:`、`macOS PC/SC:`、`Android:`または`Windows WinSCard:`だけを記載 |
 | 配布artifact / 手順 | 対象archive識別子とこの正本内の該当手順 | artifact hash、host、試験結果 | `artifact: <target>; procedure: §...` の順 |
 
 共通IDは E02=Linux/x86_64/musl、E03=Linux/x86_64/glibc、E04=macOS/arm64、E05=Android/aarch64、E06=Android/armv7a、E07=Android/x86_64、E15-G=Linux/aarch64/glibc、E15-M=Linux/aarch64/musl、E17=Windows 11/x86_64を表す。IDはhost名や試験済み状態を表さない。
 
 | ID | OS / ABI | 依存 / driver / permission | firmware / input | 製品CLIからの内蔵CARD操作 | native PC/SC/WinSCard adapter | 配布artifact / 手順 |
 |---|---|---|---|---|---|---|
-| E03 | Linux / x86_64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-glibc-x86_64`; procedure: §3–§5 |
-| E02 | Linux / x86_64 / musl | libusb: 静的1.0.30; USB access: HAOS Supervisorの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-musl-x86_64`; procedure: §3–§5 |
-| E15-G | Linux / aarch64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-glibc-aarch64`; procedure: §3–§5 |
-| E15-M | Linux / aarch64 / musl | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-musl-aarch64`; procedure: §3–§5 |
-| E04 | macOS / arm64 / Apple system runtime | libusb: 静的1.0.30; USB access: macOSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `darwin-arm64`; procedure: §3–§5 |
-| E05 | Android (Termux) / aarch64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `android-aarch64`; procedure: §3–§5 |
-| E06 | Android (Termux) / armv7a / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `android-armv7a`; procedure: §3–§5 |
-| E07 | Android (Termux) / x86_64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `android-x86_64`; procedure: §3–§5 |
-| E17 | Windows 11 / x86_64 / Win32 | libusb: 静的1.0.30; USB access: 既存許可済みlibusb driver | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `win-candidate`; procedure: §3–§5 |
+| E03 | Linux / x86_64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-glibc-x86_64`; procedure: §3–§5 |
+| E02 | Linux / x86_64 / musl | libusb: 静的1.0.30; USB access: HAOS Supervisorの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-musl-x86_64`; procedure: §3–§5 |
+| E15-G | Linux / aarch64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-glibc-aarch64`; procedure: §3–§5 |
+| E15-M | Linux / aarch64 / musl | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-musl-aarch64`; procedure: §3–§5 |
+| E04 | macOS / arm64 / Apple system runtime | libusb: 静的1.0.30; USB access: macOSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | macOS PC/SC: bundle | artifact: `darwin-arm64`; procedure: §3–§5 |
+| E05 | Android (Termux) / aarch64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-aarch64`; procedure: §3–§5 |
+| E06 | Android (Termux) / armv7a / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-armv7a`; procedure: §3–§5 |
+| E07 | Android (Termux) / x86_64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-x86_64`; procedure: §3–§5 |
+| E17 | Windows 11 / x86_64 / Win32 | libusb: 静的1.0.30; USB access: 既存許可済みlibusb driver | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Windows WinSCard: application-local DLL | artifact: `win-candidate`; procedure: §3–§5 |
 
 ## 共通試験シナリオ
 
@@ -197,14 +197,14 @@ LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/sbin/pcscd" --foreground \
 PCSC_PID=$!
 printf '%s\n' "$PCSC_PID" > "$LOG/pcscd.pid"
 
-if LD_LIBRARY_PATH="$PREFIX/lib" pcsc_scan -r > "$LOG/readers.txt" 2>&1; then scan_rc=0; else scan_rc=$?; fi
+if PCSCLITE_CSOCK_NAME="$IPC/pcscd.comm" LD_LIBRARY_PATH="$PREFIX/lib" "$PCSC_SCAN" -r > "$LOG/readers.txt" 2>&1; then scan_rc=0; else scan_rc=$?; fi
 printf '%s\n' "$scan_rc" > "$LOG/readers.rc"
 set -o pipefail
-if LD_LIBRARY_PATH="$PREFIX/lib" pcsc_scan -c 2>&1 | \
+if PCSCLITE_CSOCK_NAME="$IPC/pcscd.comm" LD_LIBRARY_PATH="$PREFIX/lib" "$PCSC_SCAN" -c 2>&1 | \
   sed -E 's/(ATR[[:space:]]*[:=]).*/\1 <redacted>/'
 then scan_rc=0; else scan_rc=$?; fi
 printf '%s\n' "$scan_rc" > "$LOG/card-state.rc"
-if LD_LIBRARY_PATH="$PREFIX/lib" "$WORK/bcas-safe-probe" > "$LOG/bcas-safe-probe.txt" 2>&1; then probe_rc=0; else probe_rc=$?; fi
+if PCSCLITE_CSOCK_NAME="$IPC/pcscd.comm" LD_LIBRARY_PATH="$PREFIX/lib" "$WORK/bcas-safe-probe" > "$LOG/bcas-safe-probe.txt" 2>&1; then probe_rc=0; else probe_rc=$?; fi
 printf '%s\n' "$probe_rc" > "$LOG/bcas-safe-probe.rc"
 kill -INT "$PCSC_PID"
 if wait "$PCSC_PID"; then pcscd_rc=0; else pcscd_rc=$?; fi
@@ -215,7 +215,9 @@ printf '%s\n' "$pcscd_rc" > "$LOG/pcscd.rc"
 
 #### Appendix A. Linux専用PC/SCと既存safe probeの準備
 
-次のレシピは専用`WORK`だけに書き込み、system pcscd/serviceには触れない。`RT`は候補daemonの`--runtime-dir`、`rc`はその`--instance`、`IFD`は候補archive内`ifd/asicen-userland-ifd.so`のabsolute pathとする。必要なbuild toolsは`git`, `cmake`, C/C++ compiler, `pkg-config`, `python3`/venv, `ninja`, `tar`, `sha256sum`, `curl`。
+次のレシピは専用`WORK`だけに書き込み、system pcscd/serviceには触れない。`RT`は候補daemonの`--runtime-dir`、`rc`はその`--instance`、`IFD`は候補archive内`ifd/asicen-userland-ifd.so`のabsolute pathとする。必要なbuild toolsは`git`, `cmake`, C/C++ compiler, `pkg-config`, `python3`/venv, `ninja`, `tar`, `sha256sum`, `curl`。reader/card状態確認には`pcsc-tools`由来の`pcsc_scan`も必要。
+
+Appendix Aを実行する前に、`pcsc_scan`が`pcsc-tools`から利用可能であることを確認して`PCSC_SCAN`へ絶対pathを設定する。未用意ならnative PC/SC gateは未実施として記録し、host/system PCSC serviceへ接続する代替手段を使わない。候補前提の専用library/socketは、`LD_LIBRARY_PATH="$PREFIX/lib"`と`PCSCLITE_CSOCK_NAME="$IPC/pcscd.comm"`で明示し、`ldd "$PCSC_SCAN"`が`$PREFIX/lib/libpcsclite.so.1`を指すことを確認する。いずれかが成立しない場合は実行せず未実施とする。
 
 ```sh
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/asicen-pcsc.XXXXXX")
@@ -237,6 +239,8 @@ tar -xJf "$WORK/pcsc-lite_2.3.3.orig.tar.xz" -C "$WORK"
   -Dusbdropdir="$WORK/drivers" -Dpolkit=false -Dlibsystemd=false
 "$MESON" compile -C "$WORK/pcsc-build"
 "$MESON" install -C "$WORK/pcsc-build"
+PCSC_SCAN=$(command -v pcsc_scan)
+LD_LIBRARY_PATH="$PREFIX/lib" ldd "$PCSC_SCAN" | grep -F "$PREFIX/lib/libpcsclite.so.1"
 
 git clone https://github.com/kazuki0824/recisdb-rs.git "$WORK/recisdb-rs"
 git -C "$WORK/recisdb-rs" checkout --detach badc171f15bb010b972740c17a92cfe0cbfe8584
@@ -301,9 +305,9 @@ cc -I "$SRC/b25-sys/externals/libaribb25/aribb25" \
 ldd "$WORK/bcas-safe-probe" | grep 'libpcsclite.so.1'
 ```
 
-最後の`ldd`出力が`$PREFIX/lib/libpcsclite.so.1`を指すことを確認する。reader templateは実際の候補IFD/daemon runtime/instanceへ展開済みである。実行時はこのdoc本文の手順で`$PREFIX/sbin/pcscd`をbackground起動しPIDを保存する。candidateに対応するASICEN IFD buildと`bcas-safe-probe`のcompile/linkだけではCARD gateを満たさず、reader/card実行結果を別途記録する。
+最後の`ldd`出力が`$PREFIX/lib/libpcsclite.so.1`を指すことを確認する。reader templateは実際の候補IFD/daemon runtime/instanceへ展開済みである。実行時はこのdoc本文の手順で`$PREFIX/sbin/pcscd`をbackground起動しPIDを保存する。`pcsc_scan`と`bcas-safe-probe`には専用libraryと`$IPC/pcscd.comm`を指すclient environmentを設定し、system serviceへの接続を避ける。candidateに対応するASICEN IFD buildと`bcas-safe-probe`のcompile/linkだけではCARD gateを満たさず、reader/card実行結果を別途記録する。
 
-macOSでもnative `.bundle`を使うが、system PC/SC serviceをreload/restartしてcandidate IFDを加える操作はしない。既存のisolated native stackとnative `pcsc_scan` / `bcas-safe-probe`が用意された専用test hostに限り、`pcsc_scan -r`, `pcsc_scan -c`とsafe probeを同様に実行する。native consumerや隔離stackが用意されていなければ実施不能として記録し、Linux結果を代用しない。AndroidにはIFDがない。
+macOSでもnative `.bundle`を使うが、system PC/SC serviceをreload/restartしてcandidate IFDを加える操作はしない。`pcsc-tools`由来のnative `pcsc_scan`、safe probe、既存isolated native stackがすべて用意された専用test hostに限って実行する。いずれかがなければ未実施として記録し、host/system PCSCへ接続せず、Linux結果も代用しない。AndroidにはIFDがない。
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
 
