@@ -95,6 +95,10 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return hardware.startup_event_count_;
     }
+    static void enable_startup_trace(LibusbW3u3Hardware& hardware)
+    {
+        hardware.startup_trace_active_.store(true);
+    }
     static void startup_event(LibusbW3u3Hardware& hardware, const char* stage,
                               std::int64_t first = 0)
     {
@@ -107,6 +111,12 @@ struct LibusbW3u3HardwareTestPeer {
     static const char* startup_stage(const LibusbW3u3Hardware& hardware, std::size_t index)
     {
         return hardware.startup_events_[index].stage;
+    }
+    static std::array<std::int64_t, 5U> startup_fields(
+        const LibusbW3u3Hardware& hardware, std::size_t index)
+    {
+        const auto& event = hardware.startup_events_[index];
+        return {event.first, event.second, event.third, event.fourth, event.fifth};
     }
     static void set_link_seed(LibusbW3u3Hardware& hardware,
                               const std::array<std::uint8_t, 16>& seed)
@@ -1469,6 +1479,27 @@ bool test_receiver_interrupt_is_scoped_and_global_interrupt_stops_all()
     return true;
 }
 
+bool test_startup_control_trace_records_metadata_without_write_payload()
+{
+    FakeUsb fake;
+    Hooks hooks = fake.hooks();
+    hooks.control_function = FakeUsb::control_function_hook;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3));
+    LibusbW3u3HardwareTestPeer::install_hooks_only(hardware, &hooks);
+    LibusbW3u3HardwareTestPeer::enable_startup_trace(hardware);
+    const ControlTransfer transfer{0U, Request::I2cWrite, 0x4a10U, 0xbeefU, 2U,
+                                   Direction::In, 1000U};
+    std::array<unsigned char, 2U> response{};
+    CHECK(LibusbW3u3HardwareTestPeer::function_control(hardware, 1U, transfer,
+                                                       response.data()) == 2);
+    CHECK(LibusbW3u3HardwareTestPeer::startup_events(hardware) == 1U);
+    CHECK(std::strcmp(LibusbW3u3HardwareTestPeer::startup_stage(hardware, 0U),
+                      "usb_control") == 0);
+    CHECK((LibusbW3u3HardwareTestPeer::startup_fields(hardware, 0U) ==
+           std::array<std::int64_t, 5U>{1, 3, 0x4a10, 2, 2}));
+    return true;
+}
+
 bool test_partial_submit_rolls_back_local0_and_releases_lane()
 {
     FakeUsb fake;
@@ -2557,6 +2588,8 @@ int main()
          test_primary_prepare_stop_and_receiver1_reacquisition},
         {"test_receiver_interrupt_is_scoped_and_global_interrupt_stops_all",
          test_receiver_interrupt_is_scoped_and_global_interrupt_stops_all},
+        {"test_startup_control_trace_records_metadata_without_write_payload",
+         test_startup_control_trace_records_metadata_without_write_payload},
         {"test_partial_submit_rolls_back_local0_and_releases_lane",
          test_partial_submit_rolls_back_local0_and_releases_lane},
         {"test_dsc_failure_stops_local0_and_restores_cf",

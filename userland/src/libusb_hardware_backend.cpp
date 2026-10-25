@@ -2516,6 +2516,13 @@ int LibusbW3u3Hardware::control_function(std::uint8_t function, const ControlTra
                                          unsigned char* data)
 {
     const int result = control_function_impl(function, original, data);
+    if (startup_trace_active_.load() &&
+        (original.request == Request::I2cWrite ||
+         original.request == Request::I2cWriteNoStop ||
+         original.request == Request::DscStart || original.request == Request::DscStop)) {
+        record_startup("usb_control", function, static_cast<std::uint8_t>(original.request),
+                       original.value, original.length, result);
+    }
     if (result < 0 || result != original.length) {
         int expected = 0;
         (void)first_transport_error_.compare_exchange_strong(expected, result < 0 ? result : 1);
@@ -3191,7 +3198,8 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
 
 
 void LibusbW3u3Hardware::record_startup(const char* stage, std::int64_t first,
-                                        std::int64_t second) noexcept
+                                        std::int64_t second, std::int64_t third,
+                                        std::int64_t fourth, std::int64_t fifth) noexcept
 {
     if (!startup_trace_active_.load()) return;
     std::lock_guard<std::mutex> lock(startup_trace_mutex_);
@@ -3208,7 +3216,8 @@ void LibusbW3u3Hardware::record_startup(const char* stage, std::int64_t first,
         ++startup_events_dropped_;
         return;
     }
-    startup_events_[startup_event_count_++] = {stage, steady_now(), first, second};
+    startup_events_[startup_event_count_++] = {stage, steady_now(), first, second, third,
+                                               fourth, fifth};
 }
 
 void LibusbW3u3Hardware::flush_startup_trace() noexcept
@@ -3224,9 +3233,13 @@ void LibusbW3u3Hardware::flush_startup_trace() noexcept
         const auto& event = startup_events_[i];
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                             event.at - origin).count();
-        std::fprintf(stderr, "asicen-startup-diagnostic us=%lld stage=%s first=%lld second=%lld\n",
+        std::fprintf(stderr, "asicen-startup-diagnostic us=%lld stage=%s first=%lld second=%lld third=%lld fourth=%lld fifth=%lld\n",
                      static_cast<long long>(us), event.stage,
-                     static_cast<long long>(event.first), static_cast<long long>(event.second));
+                     static_cast<long long>(event.first),
+                     static_cast<long long>(event.second),
+                     static_cast<long long>(event.third),
+                     static_cast<long long>(event.fourth),
+                     static_cast<long long>(event.fifth));
     }
     startup_event_count_ = 0U;
     startup_events_dropped_ = 0U;

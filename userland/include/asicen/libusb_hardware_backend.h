@@ -321,13 +321,17 @@ private:
         std::chrono::steady_clock::time_point at{};
         std::int64_t first = 0;
         std::int64_t second = 0;
+        std::int64_t third = 0;
+        std::int64_t fourth = 0;
+        std::int64_t fifth = 0;
     };
     std::atomic<bool> startup_trace_active_{false};
     std::mutex startup_trace_mutex_;
     std::array<StartupEvent, 256> startup_events_{};
     std::size_t startup_event_count_ = 0U;
     std::size_t startup_events_dropped_ = 0U;
-    void record_startup(const char*, std::int64_t = 0, std::int64_t = 0) noexcept;
+    void record_startup(const char*, std::int64_t = 0, std::int64_t = 0,
+                        std::int64_t = 0, std::int64_t = 0, std::int64_t = 0) noexcept;
     void flush_startup_trace() noexcept;
     void reset_startup_diagnostic(std::uint8_t receiver) noexcept;
     std::array<bool, 4U> source_prepared_{};
