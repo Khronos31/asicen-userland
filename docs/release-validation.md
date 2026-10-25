@@ -442,33 +442,137 @@ brew list --versions pcsc-lite >/dev/null 2>&1 || brew install pcsc-lite
 brew list --versions pcsc-tools >/dev/null 2>&1 || brew install pcsc-tools
 brew list --versions pkgconf >/dev/null 2>&1 || brew install pkgconf
 BREW_PREFIX=$(brew --prefix); PCSC_PREFIX=$(brew --prefix pcsc-lite); PCSC_TOOLS_PREFIX=$(brew --prefix pcsc-tools); IPC_ROOT="$BREW_PREFIX/var/run"
-if [ -d "$IPC_ROOT" ] && find "$IPC_ROOT" -maxdepth 1 \( -type s -o -name 'pcscd.pid' \) -print | grep -q .; then
-  echo 'Homebrew PC/SC IPC is occupied; stop without touching that service.' >&2; exit 1
-fi
-if lsof -nU 2>/dev/null | grep -F "$IPC_ROOT/"; then
-  echo 'Homebrew PC/SC IPC has an owner; stop without service intervention.' >&2; exit 1
-fi
+IPC_SOCKET="$IPC_ROOT/pcscd.comm"; IPC_PIDFILE="$IPC_ROOT/pcscd.pid"
 export LIBPCSCLITE_DELEGATE="$PCSC_PREFIX/lib/libpcsclite_real.1.dylib"
 test -f "$LIBPCSCLITE_DELEGATE"
 export DYLD_LIBRARY_PATH="$PCSC_PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export PKG_CONFIG_PATH="$PCSC_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 mkdir -m 700 "$WORK/runtime" "$WORK/reader.conf.d" "$WORK/log"
 RT="$WORK/runtime"; LOG="$WORK/log"; TOKEN="pcsc-$(date +%s)"; PORT='<BUS-PORT-from-asicend-list-json>'; FW='<candidate firmware path for the selected model>'
+if [ -e "$IPC_SOCKET" ] || [ -e "$IPC_PIDFILE" ]; then
+  echo 'Homebrew PC/SC IPC is occupied; stop without touching that service.' >&2; exit 1
+fi
+if lsof -nU "$IPC_SOCKET" > "$LOG/ipc-preflight-owner.txt" 2>&1; then
+  echo 'Homebrew PC/SC IPC has an owner; stop without service intervention.' >&2; exit 1
+fi
+printf '%s\n' 'socket=absent pidfile=absent lsof=unowned' > "$LOG/ipc-preflight.txt"
+
+ASICEND_PID=; PCSC_PID=; PRIMARY_RC=0; CLEANUP_RC=0; CLEANUP_DONE=0; CURRENT_STEP=preflight
+owned_child() {
+  owned_info=$(ps -p "$1" -o ppid=,stat= 2>/dev/null)
+  owned_ppid=$(printf '%s\n' "$owned_info" | awk '{print $1}')
+  owned_stat=$(printf '%s\n' "$owned_info" | awk '{print $2}')
+  [ "$owned_ppid" = "$$" ] && case "$owned_stat" in *Z*) return 1 ;; esac
+}
+stop_owned() {
+  stop_role=$1; stop_pid=$2; stop_mode=already-exited; signal_rc=not-sent; term_rc=not-sent; kill_rc=not-sent
+  if owned_child "$stop_pid"; then
+    date -u +%FT%TZ > "$LOG/$stop_role.stop-requested-at"
+    stop_mode=SIGINT-cooperative
+    if kill -INT "$stop_pid" 2>/dev/null; then signal_rc=0; else signal_rc=$?; fi
+    stop_attempt=0
+    while [ "$stop_attempt" -lt 30 ] && owned_child "$stop_pid"; do sleep 1; stop_attempt=$((stop_attempt + 1)); done
+    if owned_child "$stop_pid"; then
+      stop_mode=SIGTERM-after-SIGINT-observation-timeout; CLEANUP_RC=1
+      if kill -TERM "$stop_pid" 2>/dev/null; then term_rc=0; else term_rc=$?; fi
+      stop_attempt=0
+      while [ "$stop_attempt" -lt 10 ] && owned_child "$stop_pid"; do sleep 1; stop_attempt=$((stop_attempt + 1)); done
+      if owned_child "$stop_pid"; then
+        stop_mode=SIGKILL-after-SIGTERM-observation-timeout; CLEANUP_RC=1
+        if kill -KILL "$stop_pid" 2>/dev/null; then kill_rc=0; else kill_rc=$?; fi
+      fi
+    fi
+  fi
+  if wait "$stop_pid"; then wait_rc=0; else wait_rc=$?; fi
+  date -u +%FT%TZ > "$LOG/$stop_role.wait-completed-at"
+  printf '%s\n' "$stop_mode" > "$LOG/$stop_role.stop-mode"
+  printf '%s\n' "$signal_rc" > "$LOG/$stop_role.sigint.rc"
+  printf '%s\n' "$term_rc" > "$LOG/$stop_role.sigterm.rc"
+  printf '%s\n' "$kill_rc" > "$LOG/$stop_role.sigkill.rc"
+  printf '%s\n' "$wait_rc" > "$LOG/$stop_role.wait.rc"
+}
+cleanup_owned() {
+  cleanup_input_rc=$1; cleanup_input_step=$2
+  if [ "$CLEANUP_DONE" -eq 1 ]; then
+    if [ "$cleanup_input_rc" -ne 0 ]; then return "$cleanup_input_rc"; fi
+    return "$CLEANUP_RC"
+  fi
+  CLEANUP_DONE=1; trap - 0; trap '' INT TERM HUP; set +e
+  if [ "$PRIMARY_RC" -eq 0 ]; then PRIMARY_RC=$cleanup_input_rc; fi
+  printf '%s\n' "$PRIMARY_RC" > "$LOG/primary.rc"
+  if [ "$PRIMARY_RC" -ne 0 ]; then printf '%s\n' "$cleanup_input_step" > "$LOG/primary.step"; else printf '%s\n' 'none' > "$LOG/primary.step"; fi
+  if [ -n "$PCSC_PID" ]; then stop_owned pcscd "$PCSC_PID"; fi
+  if [ -n "$ASICEND_PID" ]; then stop_owned asicend "$ASICEND_PID"; fi
+  if [ -e "$IPC_SOCKET" ]; then
+    printf '%s\n' 'present' > "$LOG/ipc-socket.state"
+    if lsof -nU "$IPC_SOCKET" > "$LOG/ipc-socket-owner.txt" 2>&1; then
+      if awk 'NR > 1 {print $2}' "$LOG/ipc-socket-owner.txt" | grep -Fx "$PCSC_PID" >/dev/null; then
+        printf '%s\n' 'owned-residual' > "$LOG/ipc-socket.owner-state"
+      else
+        printf '%s\n' 'other-or-unattributed-owner' > "$LOG/ipc-socket.owner-state"
+      fi
+    else
+      printf '%s\n' 'no-owner-stale-or-unattributed' > "$LOG/ipc-socket.owner-state"
+    fi
+    CLEANUP_RC=1
+  else
+    printf '%s\n' 'absent' > "$LOG/ipc-socket.state"
+  fi
+  if [ -e "$IPC_PIDFILE" ]; then
+    if IFS= read -r ipc_pidfile_value < "$IPC_PIDFILE"; then :; else ipc_pidfile_value=unreadable; fi
+    printf '%s\n' "$ipc_pidfile_value" > "$LOG/ipc-pidfile.value"
+    if [ "$ipc_pidfile_value" = "$PCSC_PID" ]; then
+      printf '%s\n' 'owned-residual' > "$LOG/ipc-pidfile.state"
+    else
+      printf '%s\n' 'other-or-unattributed' > "$LOG/ipc-pidfile.state"
+    fi
+    CLEANUP_RC=1
+  else
+    printf '%s\n' 'absent' > "$LOG/ipc-pidfile.state"
+  fi
+  cleanup_pids=
+  if [ -n "$PCSC_PID" ]; then cleanup_pids=$PCSC_PID; fi
+  if [ -n "$ASICEND_PID" ]; then
+    if [ -n "$cleanup_pids" ]; then cleanup_pids="$cleanup_pids,$ASICEND_PID"; else cleanup_pids=$ASICEND_PID; fi
+  fi
+  if [ -n "$cleanup_pids" ]; then
+    if ps -p "$cleanup_pids" -o pid=,ppid=,stat=,command= > "$LOG/processes-after-stop.txt"; then PROCESS_RC=0; else PROCESS_RC=$?; fi
+  else
+    : > "$LOG/processes-after-stop.txt"; PROCESS_RC=0
+  fi
+  printf '%s\n' "$PROCESS_RC" > "$LOG/processes-after-stop.rc"
+  if [ -s "$LOG/processes-after-stop.txt" ]; then CLEANUP_RC=1; fi
+  find "$WORK" \( -type s -o -type p \) -print > "$LOG/work-ipc-remnants.txt"
+  printf '%s\n' "$CLEANUP_RC" > "$LOG/cleanup.rc"
+  trap - INT TERM HUP; set -eu
+  if [ "$PRIMARY_RC" -ne 0 ]; then return "$PRIMARY_RC"; fi
+  return "$CLEANUP_RC"
+}
+on_exit() {
+  exit_input_rc=$?
+  if [ "$PRIMARY_RC" -eq 0 ]; then PRIMARY_RC=$exit_input_rc; fi
+  if cleanup_owned "$PRIMARY_RC" "$CURRENT_STEP"; then exit 0; else exit_code=$?; exit "$exit_code"; fi
+}
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'on_exit' 0
+CURRENT_STEP=asicend-start
 "$D/asicend" --list-json > "$LOG/discovery.json"
 "$D/asicend" --device "usb:$PORT" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT" > "$LOG/asicend.log" 2>&1 & ASICEND_PID=$!
 printf '%s\n' "$ASICEND_PID" > "$LOG/asicend.pid"
+CURRENT_STEP=reader-config
 sed -e "s|@ASICEN_RUNTIME_DIR@|$RT|g" -e "s|@ASICEN_INSTANCE@|$TOKEN|g" \
   -e "s|@ASICEN_IFD_LIBRARY@|$D/ifd/asicen-userland-ifd.bundle|g" -e 's|@ASICEN_ACCESS@|user|g' \
   "$D/reader.conf.d/asicen-userland.conf" > "$WORK/reader.conf.d/asicen-userland.conf"
+CURRENT_STEP=pcscd-start
 "$PCSC_PREFIX/sbin/pcscd" --foreground --debug --config "$WORK/reader.conf.d" > "$LOG/pcscd.log" 2>&1 & PCSC_PID=$!
 printf '%s\n' "$PCSC_PID" > "$LOG/pcscd.pid"
 ```
 
 Homebrew `pcsc-lite`の固定IPCが占有されている場合は既存process/socketに介入せず未実施で止める。Apple PCSC.framework / launchd serviceは停止・変更しない。Homebrew clientとdaemonを使い、別socket名指定だけでdaemon IPCを隔離できるとは扱わない。
 
-次のhere-docでreader指定可能なnative consumerを作成する。標準APIでreader列挙、接続、status、APDU送信を行い、raw ATR、card ID、APDU response本文は出力しない。
+次のshブロックも同じ対話shellで続けて実行する。途中でcommandが非0になった場合は登録済みtrapが一次終了値を保存してcleanupする。reader指定可能なnative consumerは標準APIでreader列挙、接続、status、APDU送信を行い、raw ATR、card ID、APDU response本文は出力しない。
 
 ```sh
+CURRENT_STEP=pcsc-probe-source
 cat > "$WORK/pcsc-probe.cpp" <<'CPP'
 #include <PCSC/winscard.h>
 #include <cstring>
@@ -503,12 +607,15 @@ CPP
 ```
 
 ```sh
+CURRENT_STEP=pcsc-probe-build
 c++ -std=c++17 $(pkg-config --cflags libpcsclite) "$WORK/pcsc-probe.cpp" $(pkg-config --libs libpcsclite) -o "$WORK/pcsc-probe"
+CURRENT_STEP=reader-discovery
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
   if "$PCSC_TOOLS_PREFIX/bin/pcsc_scan" -r > "$LOG/readers.txt" 2>&1 && grep -Fq 'ASICEN PLEX Internal Card Reader' "$LOG/readers.txt"; then break; fi
   sleep 1
 done
 grep -F 'ASICEN PLEX Internal Card Reader' "$LOG/readers.txt"
+CURRENT_STEP=native-consumer
 if "$WORK/pcsc-probe" 'ASICEN PLEX Internal Card Reader' > "$LOG/probe.txt" 2>&1; then PROBE_RC=0; else PROBE_RC=$?; fi
 printf '%s\n' "$PROBE_RC" > "$LOG/probe.rc"
 ```
@@ -516,17 +623,8 @@ printf '%s\n' "$PROBE_RC" > "$LOG/probe.rc"
 合格は今回candidate bundle pathがpcscd logにあり、readerが一意、probe exit 0、card present、APDU 10回全てSW `90 00`、出力`reader_match=1 card_present=1 apdu_sw9000=10`を満たすこと。exit 1=API/context、2=reader不一致、3=connect、4=status/card、5=transmit、6=SW不一致、7=release/disconnect、64=引数不正で、0以外は未達とする。reader名・終了値・成功件数のみ保存する。
 
 ```sh
-date -u +%FT%TZ > "$LOG/pcscd.stop-requested-at"
-if kill -INT "$PCSC_PID" 2>/dev/null; then :; fi
-if wait "$PCSC_PID"; then PCSC_RC=0; else PCSC_RC=$?; fi
-printf '%s\n' "$PCSC_RC" > "$LOG/pcscd.rc"
-date -u +%FT%TZ > "$LOG/asicend.stop-requested-at"
-if kill -INT "$ASICEND_PID" 2>/dev/null; then :; fi
-if wait "$ASICEND_PID"; then ASICEND_RC=0; else ASICEND_RC=$?; fi
-printf '%s\n' "$ASICEND_RC" > "$LOG/asicend.rc"
-if ps -p "$PCSC_PID,$ASICEND_PID" -o pid=,stat=,command= > "$LOG/processes-after-stop.txt"; then PROCESS_RC=0; else PROCESS_RC=$?; fi
-printf '%s\n' "$PROCESS_RC" > "$LOG/processes-after-stop.rc"
-find "$WORK" \( -type s -o -type p \) -print > "$LOG/ipc-remnants.txt"
+CURRENT_STEP=normal-cleanup
+cleanup_owned 0 "$CURRENT_STEP"
 ```
 
 consumer終了後、記録済みの自分のPIDだけを停止し、各終了値を別記録する。process/socket/runtimeが残った場合は削除せずcleanup未達とする。正常cleanup確認後もcandidate、log、probe sourceは結果保存まで保持する。
