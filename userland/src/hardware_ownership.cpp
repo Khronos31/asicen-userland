@@ -222,12 +222,17 @@ ReceiverReservationResult ReceiverLaneReservation::reserve(std::uint8_t receiver
     if (receiver > 3U) {
         return ReceiverReservationResult::invalid;
     }
-    std::uint8_t expected = kNone;
-    if (owner_.compare_exchange_strong(expected, receiver, std::memory_order_acq_rel)) {
-        return ReceiverReservationResult::reserved;
+    const auto mask = static_cast<std::uint8_t>(1U << receiver);
+    std::uint8_t current = owners_.load(std::memory_order_acquire);
+    for (;;) {
+        if ((current & mask) != 0U) {
+            return ReceiverReservationResult::already_owned;
+        }
+        if (owners_.compare_exchange_weak(current, static_cast<std::uint8_t>(current | mask),
+                                          std::memory_order_acq_rel)) {
+            return ReceiverReservationResult::reserved;
+        }
     }
-    return expected == receiver ? ReceiverReservationResult::already_owned
-                                : ReceiverReservationResult::busy;
 }
 
 bool ReceiverLaneReservation::release(std::uint8_t receiver) noexcept
@@ -235,17 +240,35 @@ bool ReceiverLaneReservation::release(std::uint8_t receiver) noexcept
     if (receiver > 3U) {
         return false;
     }
-    return owner_.compare_exchange_strong(receiver, kNone, std::memory_order_acq_rel);
+    const auto mask = static_cast<std::uint8_t>(1U << receiver);
+    std::uint8_t current = owners_.load(std::memory_order_acquire);
+    for (;;) {
+        if ((current & mask) == 0U) {
+            return false;
+        }
+        if (owners_.compare_exchange_weak(current, static_cast<std::uint8_t>(current & ~mask),
+                                          std::memory_order_acq_rel)) {
+            return true;
+        }
+    }
 }
 
 bool ReceiverLaneReservation::owns(std::uint8_t receiver) const noexcept
 {
-    return receiver <= 3U && owner_.load(std::memory_order_acquire) == receiver;
+    return receiver <= 3U &&
+           (owners_.load(std::memory_order_acquire) & static_cast<std::uint8_t>(1U << receiver)) !=
+               0U;
 }
 
 std::uint8_t ReceiverLaneReservation::owner() const noexcept
 {
-    return owner_.load(std::memory_order_acquire);
+    const auto owners = owners_.load(std::memory_order_acquire);
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver) {
+        if ((owners & static_cast<std::uint8_t>(1U << receiver)) != 0U) {
+            return receiver;
+        }
+    }
+    return 0xffU;
 }
 
 }  // namespace asicen

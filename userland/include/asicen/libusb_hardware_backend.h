@@ -246,7 +246,8 @@ private:
     bool write_link_seed_byte(std::uint8_t, std::uint8_t) override;
 
     bool run_plan(const FrontendPlan&, unsigned timeout_ms = 3000U,
-                  FrontendRunReport* report = nullptr) noexcept;
+                  FrontendRunReport* report = nullptr,
+                  std::uint8_t receiver = 0xffU) noexcept;
     bool read_i2c(std::uint8_t slave, std::uint8_t reg, std::uint16_t length,
                   std::uint8_t* output) noexcept;
     bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value) noexcept;
@@ -286,6 +287,7 @@ private:
     bool any_source_prepared() const noexcept;
     libusb_device_handle* capture_handle(std::uint8_t receiver) const noexcept;
     bool receiver_initialized(std::uint8_t receiver) const noexcept;
+    std::uint8_t current_receiver() const noexcept;
     bool snapshot_gpio_state(std::uint8_t receiver) noexcept;
     bool restore_gpio_snapshot_for(std::uint8_t receiver) noexcept;
     px4::userland::Error plan_error_ = px4::userland::Error::OK;

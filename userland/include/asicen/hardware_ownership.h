@@ -102,8 +102,7 @@ enum class ReceiverReservationResult : std::uint8_t {
     invalid,
 };
 
-// A single active owner prevents interleaved receiver leases/captures while
-// the backend still has one capture lifecycle.
+// Per-receiver leases are independent; the backend may still serialize capture.
 class ReceiverLaneReservation final {
 public:
     ReceiverReservationResult reserve(std::uint8_t receiver) noexcept;
@@ -112,8 +111,7 @@ public:
     std::uint8_t owner() const noexcept;
 
 private:
-    static constexpr std::uint8_t kNone = 0xffU;
-    std::atomic<std::uint8_t> owner_{kNone};
+    std::atomic<std::uint8_t> owners_{0U};
 };
 
 }  // namespace asicen

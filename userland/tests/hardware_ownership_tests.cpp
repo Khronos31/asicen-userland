@@ -221,22 +221,22 @@ bool primary_endpoint81_capability_is_optional_and_measured()
     return true;
 }
 
-bool receiver_lane_reservation_rejects_cross_lane_ownership()
+bool receiver_lane_reservation_tracks_each_receiver()
 {
     asicen::ReceiverLaneReservation reservation;
     CHECK(reservation.reserve(0U) == asicen::ReceiverReservationResult::reserved,
-          "primary satellite lane reserves shared frontend state");
-    CHECK(reservation.reserve(1U) == asicen::ReceiverReservationResult::busy,
-          "terrestrial lane cannot interleave while primary owns shared state");
+          "primary satellite lane gets an independent reservation");
+    CHECK(reservation.reserve(1U) == asicen::ReceiverReservationResult::reserved,
+          "terrestrial lane can reserve while primary lease remains open");
     CHECK(reservation.reserve(0U) == asicen::ReceiverReservationResult::already_owned,
           "same lease lane can be observed idempotently");
-    CHECK(reservation.release(1U) == false, "non-owner cannot clear the active lane reservation");
-    CHECK(reservation.release(0U), "owner releases the lane after cleanup");
-    CHECK(reservation.reserve(1U) == asicen::ReceiverReservationResult::reserved,
-          "terrestrial lane can acquire after prior release");
-    CHECK(reservation.release(1U), "terrestrial lane releases after cleanup");
+    CHECK(reservation.owns(0U) && reservation.owns(1U) && reservation.owner() == 0U,
+          "owner returns first held lane while membership tracks both");
+    CHECK(reservation.release(1U) && reservation.owns(0U) && !reservation.owns(1U),
+          "releasing one lane preserves the other receiver lease");
+    CHECK(reservation.release(0U), "owner releases its lane after cleanup");
     CHECK(reservation.reserve(2U) == asicen::ReceiverReservationResult::reserved,
-          "sibling receiver can reserve after the previous lane is released");
+          "sibling receiver can reserve after earlier leases release");
     CHECK(reservation.release(2U), "sibling receiver releases after cleanup");
     CHECK(reservation.reserve(4U) == asicen::ReceiverReservationResult::invalid,
           "unknown receiver cannot reserve shared frontend state");
@@ -253,11 +253,12 @@ bool supported_lane_release_orders_and_concurrent_acquisition()
               "each supported lane can be the first owner");
         CHECK(!reservation.release(second) && reservation.owns(first),
               "reversed close order cannot release the surviving owner");
-        CHECK(reservation.release(first) && !reservation.release(first),
-              "duplicate release has no additional ownership effect");
         CHECK(reservation.reserve(second) == ReceiverReservationResult::reserved &&
-                  reservation.release(second),
-              "each supported release permutation permits the next lane to reopen");
+                  reservation.owns(first) && reservation.owns(second),
+              "supported lanes can coexist before either closes");
+        CHECK(reservation.release(first) && !reservation.release(first) && reservation.owns(second),
+              "duplicate release has no additional ownership effect");
+        CHECK(reservation.release(second), "remaining lane releases after first");
     }
     for (unsigned round = 0U; round < 32U; ++round) {
         asicen::ReceiverLaneReservation reservation;
@@ -281,17 +282,12 @@ bool supported_lane_release_orders_and_concurrent_acquisition()
         for (auto& contender : contenders) {
             contender.join();
         }
-        const std::uint8_t winner = results[0] == ReceiverReservationResult::reserved ? 0U : 1U;
-        const auto loser = static_cast<std::uint8_t>(winner ^ 1U);
-        CHECK(results[winner] == ReceiverReservationResult::reserved &&
-                  results[loser] == ReceiverReservationResult::busy && reservation.owns(winner),
-              "concurrent supported lanes produce exactly one stable owner");
-        CHECK(!reservation.release(loser) && reservation.owns(winner),
-              "losing concurrent opener cannot release the winner");
-        CHECK(reservation.release(winner) &&
-                  reservation.reserve(loser) == ReceiverReservationResult::reserved &&
-                  reservation.release(loser),
-              "joined contention has no leaked reservation and permits reacquisition");
+        CHECK(results[0] == ReceiverReservationResult::reserved &&
+                  results[1] == ReceiverReservationResult::reserved &&
+                  reservation.owns(0U) && reservation.owns(1U),
+              "concurrent supported receiver leases are both retained");
+        CHECK(reservation.release(0U) && reservation.owns(1U) && reservation.release(1U),
+              "joined concurrent leases release independently");
     }
     return true;
 }
@@ -541,7 +537,7 @@ int main()
     if (!primary_endpoint81_capability_is_optional_and_measured()) {
         return 1;
     }
-    if (!receiver_lane_reservation_rejects_cross_lane_ownership()) {
+    if (!receiver_lane_reservation_tracks_each_receiver()) {
         return 1;
     }
     if (!wrong_topology_or_busy_interfaces_fail_before_claim()) {

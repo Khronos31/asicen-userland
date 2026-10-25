@@ -87,6 +87,19 @@ private:
     bool previously_active_;
 };
 
+class ReceiverRouteScope {
+public:
+    ReceiverRouteScope(std::atomic<std::uint8_t>& route, std::uint8_t receiver) noexcept
+        : route_(route), previous_(route.exchange(receiver, std::memory_order_acq_rel))
+    {
+    }
+    ~ReceiverRouteScope() { route_.store(previous_, std::memory_order_release); }
+
+private:
+    std::atomic<std::uint8_t>& route_;
+    std::uint8_t previous_;
+};
+
 SatelliteOperationResult v2_satellite_result(V2FrontendResult result) noexcept
 {
     switch (result) {
@@ -992,6 +1005,12 @@ bool LibusbW3u3Hardware::receiver_initialized(std::uint8_t receiver) const noexc
            initialized_functions_[route.value().rf_function_index];
 }
 
+std::uint8_t LibusbW3u3Hardware::current_receiver() const noexcept
+{
+    const auto routed = cleanup_route_receiver_.load(std::memory_order_acquire);
+    return routed != kNoActiveReceiver ? routed : active_receiver_.owner();
+}
+
 std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
 {
     if (!runtime_model_supported()) {
@@ -1044,7 +1063,7 @@ SatelliteOperationResult LibusbW3u3Hardware::run_model_satellite_tune(std::uint3
             return SatelliteOperationResult::InvalidArgument;
         }
         return v2_satellite_result(
-            tune_v2_frontend(this, frontend_target(active_receiver_.owner()), rf));
+            tune_v2_frontend(this, frontend_target(current_receiver()), rf));
     }
     return uses_legacy_frontend() ? run_legacy_satellite_tune(legacy_frontend(), this, rf)
                                   : run_w3u3_satellite_tune(this, rf);
@@ -1055,7 +1074,7 @@ SatelliteLockResult LibusbW3u3Hardware::read_model_satellite_lock() noexcept
     if (uses_v2_frontend()) {
         SatelliteLockResult result{};
         result.result = v2_satellite_result(
-            read_v2_frontend_lock(this, frontend_target(active_receiver_.owner()), &result.locked));
+            read_v2_frontend_lock(this, frontend_target(current_receiver()), &result.locked));
         return result;
     }
     return uses_legacy_frontend() ? read_legacy_satellite_lock(legacy_frontend(), this)
@@ -1114,7 +1133,7 @@ SatelliteTsidReadyResult LibusbW3u3Hardware::wait_model_satellite_tsid(std::size
                                                  : deadline_);
             if (uses_v2_frontend()) {
                 result.result = v2_satellite_result(read_v2_frontend_tsids(
-                    this, frontend_target(active_receiver_.owner()), &result.tsids));
+                    this, frontend_target(current_receiver()), &result.tsids));
             } else {
                 const auto list = uses_legacy_frontend()
                                       ? read_legacy_satellite_tsids(legacy_frontend(), this)
@@ -1156,7 +1175,7 @@ SatelliteTsidSelectResult LibusbW3u3Hardware::select_model_satellite_tsid(
         return result;
     }
     result.result = v2_satellite_result(
-        select_v2_frontend_tsid(this, frontend_target(active_receiver_.owner()), tsids[slot]));
+        select_v2_frontend_tsid(this, frontend_target(current_receiver()), tsids[slot]));
     if (result.result == SatelliteOperationResult::Completed) {
         result.selected_tsid = tsids[slot];
     }
@@ -1254,6 +1273,9 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
     if (!runtime_model_supported() || receiver >= receiver_count()) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
+    if (cleanup_io_active_.load(std::memory_order_acquire)) {
+        return Result<void>::failure(Error::BUSY);
+    }
     const ReceiverReservationResult reservation = active_receiver_.reserve(receiver);
     const bool newly_reserved = reservation == ReceiverReservationResult::reserved;
     if (reservation == ReceiverReservationResult::busy ||
@@ -1271,7 +1293,11 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
         return fail_open(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
+    if (cleanup_io_active_.load(std::memory_order_acquire)) {
+        return fail_open(Error::BUSY);
+    }
     // Reserve before reading mutable session/cleanup state so a competing
     // receiver cannot race a capture teardown and start frontend I/O.
     if (!claimed_) {
@@ -1289,11 +1315,25 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
                       bulk_endpoint_for_local(route.value().local_lane))) {
         return fail_open(Error::UNSUPPORTED);
     }
+    for (std::uint8_t active = 0U; active < receiver_count(); ++active) {
+        if (active == receiver || !active_receiver_.owns(active)) {
+            continue;
+        }
+        const auto active_route = receiver_address(*profile_, active);
+        if (active_route && active_route.value().rf_function_index ==
+                                route.value().rf_function_index &&
+            active_route.value().local_lane == route.value().local_lane) {
+            return fail_open(Error::BUSY);
+        }
+    }
     if (route.value().rf_function_index >= initialized_functions_.size()) {
         return fail_open(Error::UNSUPPORTED);
     }
     if (initialized_functions_[route.value().rf_function_index]) {
         return Result<void>::success();
+    }
+    if (any_source_prepared()) {
+        return fail_open(Error::BUSY);
     }
     if (!verify_device_revision()) {
         std::fprintf(stderr, "asicend: bridge revision unavailable or unsupported (requires 11/52; "
@@ -1450,6 +1490,7 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
             return Result<void>::failure(Error::TIMEOUT);
         }
         std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+        ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
         first_transport_error_.store(0);
         const auto previous_deadline = deadline_;
         const bool previous_active = deadline_active_;
@@ -1481,7 +1522,7 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
     if (plan.empty()) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
-    if (!run_plan(plan, timeout_ms)) {
+    if (!run_plan(plan, timeout_ms, nullptr, receiver)) {
         return Result<void>::failure(plan_error_);
     }
     auto& state = receiver_tune_states_[receiver];
@@ -1511,6 +1552,7 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint
         return Result<void>::failure(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
     const auto previous_deadline = deadline_;
     const bool previous_deadline_active = deadline_active_;
@@ -1550,6 +1592,7 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
         return Result<bool>::failure(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
     if (uses_v2_frontend()) {
         bool locked = false;
@@ -1575,7 +1618,7 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
                           : plan_terrestrial_lock_read(
                                 receiver_tune_states_[receiver].frequency_khz);
     FrontendRunReport report{};
-    if (!run_plan(plan, 1000U, &report)) {
+    if (!run_plan(plan, 1000U, &report, receiver)) {
         return Result<bool>::failure(plan_error_);
     }
     if (!report.have_last_read) {
@@ -1589,7 +1632,7 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
     record_startup(tune_state.gain_applied ? "post_gain_lock" : "pre_gain_lock", lock, locked);
     if (locked && !tune_state.gain_applied && w3_terrestrial) {
         record_startup("gain_begin");
-        if (!run_plan(plan_fc0012_gain_once(receiver_local(receiver)), 1000U)) {
+        if (!run_plan(plan_fc0012_gain_once(receiver_local(receiver)), 1000U, nullptr, receiver)) {
             record_startup("gain_error", static_cast<int>(plan_error_));
             return Result<bool>::failure(plan_error_);
         }
@@ -1628,6 +1671,7 @@ Result<void> LibusbW3u3Hardware::select_satellite_slot(std::uint8_t receiver, st
         return Result<void>::failure(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
     const auto previous_deadline = deadline_;
     const bool previous_deadline_active = deadline_active_;
@@ -1666,6 +1710,7 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(std::uint8_t receiver, st
         return Result<void>::failure(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
     const auto previous_deadline = deadline_;
     const bool previous_deadline_active = deadline_active_;
@@ -1695,6 +1740,7 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
         return Result<void>::failure(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     if (!active_receiver_.owns(receiver)) {
         return Result<void>::failure(Error::NOT_FOUND);
     }
@@ -2043,6 +2089,7 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
                                                               : Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     if (!active_receiver_.owns(receiver)) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -2090,6 +2137,7 @@ Result<void> LibusbW3u3Hardware::commit_tune_power(std::uint8_t receiver) noexce
                                                               : Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     if (!active_receiver_.owns(receiver) || !lnb_transaction_active_ ||
         lnb_transaction_receiver_ != receiver) {
         return Result<void>::failure(Error::NOT_READY);
@@ -2115,6 +2163,7 @@ Result<void> LibusbW3u3Hardware::rollback_tune_power(std::uint8_t receiver) noex
         return Result<void>::failure(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     if (!active_receiver_.owns(receiver)) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -2444,7 +2493,7 @@ bool LibusbW3u3Hardware::restore_gpio_snapshot_for(std::uint8_t receiver) noexce
 }
 
 bool LibusbW3u3Hardware::run_plan(const FrontendPlan& plan, unsigned timeout_ms,
-                                  FrontendRunReport* report) noexcept
+                                  FrontendRunReport* report, std::uint8_t receiver) noexcept
 {
     plan_error_ = Error::OK;
     if (!claimed_ || disconnected_.load() || plan.empty()) {
@@ -2461,6 +2510,7 @@ bool LibusbW3u3Hardware::run_plan(const FrontendPlan& plan, unsigned timeout_ms,
         return false;
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
     const auto previous_deadline = deadline_;
     const bool previous_active = deadline_active_;
@@ -2706,6 +2756,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         return Result<void>::failure(Error::TIMEOUT);
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
     if (!receiver_supports(receiver, system) || !claimed_ || !active_receiver_.owns(receiver) ||
         !receiver_initialized(receiver) || !receiver_tune_states_[receiver].tuned ||
@@ -2747,7 +2798,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         // These tune wrappers establish the vendor's default cached state.
         // Apply the model-specific one-shot once per tune, without importing
         // W3U3's lock-settle/retry policy or starting a polling thread.
-        if (!run_plan(plan_legacy_default_gain(legacy_frontend(), true), 1000U)) {
+        if (!run_plan(plan_legacy_default_gain(legacy_frontend(), true), 1000U, nullptr, receiver)) {
             return fail_prepare(plan_error_);
         }
         receiver_tune_states_[receiver].gain_applied = true;
@@ -2772,7 +2823,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     }
     link_seed_ = seed.value();
     record_startup("filter_reset_begin");
-    if (!run_plan(plan_stream_setup(local, 1U), 5000U)) {
+    if (!run_plan(plan_stream_setup(local, 1U), 5000U, nullptr, receiver)) {
         return fail_prepare(plan_error_);
     }
     record_startup("filter_reset_complete");
@@ -3181,6 +3232,7 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
     // Like PX4's command event gate, join the bounded control operation before
     // beginning cancellation. Never abandon an owner that still uses `this`.
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, source_receiver_);
     AtomicFlagScope cleanup_scope(cleanup_io_active_);
     DrainAdapter ops(*this);
     const CaptureRunResult result =
@@ -3511,13 +3563,13 @@ bool LibusbW3u3Hardware::write_cf_block(std::uint8_t local, const std::uint8_t* 
 bool LibusbW3u3Hardware::terrestrial_locked(std::uint8_t local, bool* locked,
                                             std::chrono::steady_clock::time_point deadline)
 {
-    const std::uint8_t receiver = active_receiver_.owner();
+    const std::uint8_t receiver = current_receiver();
     if (!receiver_supports(local, System::ISDB_T) || locked == nullptr ||
         receiver >= receiver_tune_states_.size() || steady_now() >= deadline) {
         return false;
     }
     if (uses_v2_frontend()) {
-        return read_v2_frontend_lock(this, frontend_target(active_receiver_.owner()), locked,
+        return read_v2_frontend_lock(this, frontend_target(current_receiver()), locked,
                                      nullptr, 500U) == V2FrontendResult::Completed;
     }
     FrontendRunReport report{};
@@ -3526,7 +3578,7 @@ bool LibusbW3u3Hardware::terrestrial_locked(std::uint8_t local, bool* locked,
                                 legacy_frontend(), receiver_tune_states_[receiver].frequency_khz)
                           : plan_terrestrial_lock_read(
                                 receiver_tune_states_[receiver].frequency_khz);
-    if (!run_plan(plan, 500U, &report) || !report.have_last_read) {
+    if (!run_plan(plan, 500U, &report, receiver) || !report.have_last_read) {
         return false;
     }
     *locked = (report.last_read & 0x0fU) == 0x09U;

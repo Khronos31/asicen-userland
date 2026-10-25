@@ -46,6 +46,10 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return hardware.snapshot_link_diagnostic();
     }
+    static bool owns_receiver(const LibusbW3u3Hardware& hardware, std::uint8_t receiver)
+    {
+        return hardware.active_receiver_.owns(receiver);
+    }
     static const DeviceProfile* profile(const LibusbW3u3Hardware& hardware)
     {
         return hardware.profile_;
@@ -1428,9 +1432,11 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
     CHECK(has_cf_request(fake, 0U, Request::ChannelFilterRead));
     CHECK(has_cf_request(fake, 0U, Request::ChannelFilterWrite));
     CHECK(!has_cf_request(fake, 1U, Request::ChannelFilterRead));
-    const std::size_t before_busy_open = fake.controls.size();
-    CHECK(hardware.open_receiver(1U).error() == Error::BUSY);
-    CHECK(fake.controls.size() == before_busy_open);
+    const std::size_t before_second_open = fake.controls.size();
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 1U));
+    CHECK(fake.controls.size() == before_second_open);
 
     cancelled.store(true);
     CHECK(hardware.run(cancelled, discard_packets, nullptr) == CaptureRunResult::cancelled);
@@ -1615,7 +1621,7 @@ bool test_rejected_open_reserves_before_cleanup_state_and_quarantines()
     CHECK(!fake.reentrant_open_added_control);
     CHECK(fake.controls_at_restore > 0U);
     const std::size_t before_quarantined_open = fake.controls.size();
-    CHECK(hardware.open_receiver(1U).error() == Error::BUSY);
+    CHECK(!hardware.open_receiver(1U).has_value());
     CHECK(fake.controls.size() == before_quarantined_open);
     return true;
 }
@@ -2049,7 +2055,7 @@ bool test_s3u_combined_receiver_uses_lane0_for_both_systems()
     return true;
 }
 
-bool test_s3u2_powers_off_gpioex_and_retains_single_capture_lease()
+bool test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases()
 {
     FakeUsb fake;
     fake.gpio_ex_external_low = 0x01U;  // A released pin need not read high.
@@ -2075,7 +2081,9 @@ bool test_s3u2_powers_off_gpioex_and_retains_single_capture_lease()
     CHECK(saw_gpio_mask(fake, 0x20U));
     CHECK(fake.gpio_ex_read_count == 0 && fake.gpio_ex_write_count == 4);
     CHECK(fake.gpio_ex == 0xa0U);
-    CHECK(hardware.open_receiver(0U).error() == Error::BUSY);
+    CHECK(hardware.open_receiver(0U).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 1U));
     CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
@@ -2552,8 +2560,8 @@ int main()
          test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
          test_s3u_combined_receiver_uses_lane0_for_both_systems},
-        {"test_s3u2_powers_off_gpioex_and_retains_single_capture_lease",
-         test_s3u2_powers_off_gpioex_and_retains_single_capture_lease},
+        {"test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases",
+         test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases},
         {"test_legacy_controller_guard_runs_board_off_sequence",
          test_legacy_controller_guard_runs_board_off_sequence},
         {"test_powered_controller_type_predicate_exhaustive",
