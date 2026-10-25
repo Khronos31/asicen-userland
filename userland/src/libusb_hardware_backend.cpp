@@ -684,7 +684,7 @@ Result<void> LibusbW3u3Hardware::claim()
         (void)release();
         return Result<void>::failure(error);
     }
-    if (!snapshot_gpio_state()) {
+    if (!snapshot_gpio_state(0U)) {
         const Error error = transport_failure(Error::PROTOCOL_ERROR);
         (void)release();
         return Result<void>::failure(error);
@@ -937,6 +937,16 @@ bool LibusbW3u3Hardware::runtime_model_supported() const noexcept
             profile_->frontend_family == FrontendFamily::S3u ||
             profile_->frontend_family == FrontendFamily::S3u2 ||
             profile_->frontend_family == FrontendFamily::Nmi);
+}
+
+bool LibusbW3u3Hardware::receiver_initialized(std::uint8_t receiver) const noexcept
+{
+    if (profile_ == nullptr || receiver >= receiver_count()) {
+        return false;
+    }
+    const auto route = receiver_address(*profile_, receiver);
+    return route && route.value().rf_function_index < initialized_functions_.size() &&
+           initialized_functions_[route.value().rf_function_index];
 }
 
 std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
@@ -1236,7 +1246,10 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
                       bulk_endpoint_for_local(route.value().local_lane))) {
         return fail_open(Error::UNSUPPORTED);
     }
-    if (initialized_) {
+    if (route.value().rf_function_index >= initialized_functions_.size()) {
+        return fail_open(Error::UNSUPPORTED);
+    }
+    if (initialized_functions_[route.value().rf_function_index]) {
         return Result<void>::success();
     }
     if (!verify_device_revision()) {
@@ -1244,7 +1257,7 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
                              "16/52 is not implemented)\n");
         return fail_open(transport_failure(Error::UNSUPPORTED));
     }
-    if (!snapshot_gpio_state()) {
+    if (!snapshot_gpio_state(receiver)) {
         return fail_open(transport_failure(Error::PROTOCOL_ERROR));
     }
     // Establish OFF before startup. In particular V2's source default GPIO
@@ -1284,7 +1297,12 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
     PoweredControllerCheck controller_check = PoweredControllerCheck::ready;
     const PoweredInitResult result = execute_powered_init_sequence(
         [&] {
-            board_power_attempted_ = true;
+            const auto route = receiver_address(*profile_, receiver);
+            if (!route || route.value().rf_function_index >=
+                              board_power_attempted_functions_.size()) {
+                return false;
+            }
+            board_power_attempted_functions_[route.value().rf_function_index] = true;
             if (run_frontend_plan(power_plan, this) != FrontendRunResult::Completed) {
                 return false;
             }
@@ -1346,7 +1364,7 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
             }
             std::fprintf(stderr, "asicend: %s\n", reason);
         }
-        const bool restored = restore_gpio_snapshot_safely();
+        const bool restored = restore_gpio_snapshot_for(receiver);
         if (!restored) {
             mark_cleanup_failed(Error::USB_IO);
         }
@@ -1361,6 +1379,7 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
         return fail_open(error);
     }
     initialized_ = true;
+    initialized_functions_[route.value().rf_function_index] = true;
     return Result<void>::success();
 }
 
@@ -1372,7 +1391,7 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
         return Result<void>::failure(Error::USB_IO);
     }
     if (!claimed_ || !receiver_supports(receiver, System::ISDB_T) ||
-        !active_receiver_.owns(receiver) || !initialized_) {
+        !active_receiver_.owns(receiver) || !receiver_initialized(receiver)) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     if (timeout_ms == 0U) {
@@ -1439,7 +1458,7 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint
     }
     std::uint32_t rf_khz = 0U;
     if (!claimed_ || !receiver_supports(receiver, System::ISDB_S) ||
-        !active_receiver_.owns(receiver) || !initialized_ || timeout_ms == 0U ||
+        !active_receiver_.owns(receiver) || !receiver_initialized(receiver) || timeout_ms == 0U ||
         !w3u3_satellite_if_to_rf_khz(frequency_khz, &rf_khz)) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
@@ -1475,7 +1494,8 @@ Result<bool> LibusbW3u3Hardware::is_locked(std::uint8_t receiver, System system)
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return Result<bool>::failure(Error::USB_IO);
     }
-    if (!active_receiver_.owns(receiver) || receiver != tuned_receiver_ ||
+    if (!active_receiver_.owns(receiver) || !receiver_initialized(receiver) ||
+        receiver != tuned_receiver_ ||
         system != tuned_system_ || !tuned_) {
         return Result<bool>::failure(Error::UNSUPPORTED);
     }
@@ -1547,7 +1567,8 @@ Result<void> LibusbW3u3Hardware::select_satellite_slot(std::uint8_t receiver, st
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return Result<void>::failure(Error::USB_IO);
     }
-    if (receiver != 0U || !active_receiver_.owns(receiver) || tuned_receiver_ != receiver ||
+    if (receiver != 0U || !receiver_initialized(receiver) || !active_receiver_.owns(receiver) ||
+        tuned_receiver_ != receiver ||
         tuned_system_ != System::ISDB_S || !tuned_ || slot >= kW3u3SatelliteTsidSlots ||
         timeout_ms == 0U) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
@@ -1584,7 +1605,8 @@ Result<void> LibusbW3u3Hardware::select_satellite_tsid(std::uint8_t receiver, st
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return Result<void>::failure(Error::USB_IO);
     }
-    if (receiver != 0U || !active_receiver_.owns(receiver) || tuned_receiver_ != receiver ||
+    if (receiver != 0U || !receiver_initialized(receiver) || !active_receiver_.owns(receiver) ||
+        tuned_receiver_ != receiver ||
         tuned_system_ != System::ISDB_S || !tuned_ || timeout_ms == 0U ||
         tsid == kW3u3SatelliteNoTsid) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
@@ -2216,12 +2238,15 @@ Result<void> LibusbW3u3Hardware::shutdown() noexcept
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
     AtomicFlagScope cleanup_scope(cleanup_io_active_);
+    const bool gpio_snapshot_valid =
+        std::any_of(gpio_snapshot_valid_functions_.begin(), gpio_snapshot_valid_functions_.end(),
+                    [](bool valid) { return valid; });
     const bool needs_stop = source_prepared_ || cf_snapshot_valid_ || link_snapshot_valid_ ||
-                            (async_ && async_->prepared);
+                            (async_ && async_->prepared) || gpio_snapshot_valid;
     // OFF is independent of controller/CF restoration and receives its own
     // cleanup budget even when a previous step has quarantined the backend.
     (void)clear_lnb_power();
-    if (!attempt_hardware_shutdown_cleanup(*this, needs_stop, gpio_snapshot_valid_)) {
+    if (!attempt_hardware_shutdown_cleanup(*this, needs_stop, gpio_snapshot_valid)) {
         mark_cleanup_failed(Error::USB_IO);
     }
     if (!cleanup_failed_.load(std::memory_order_acquire)) {
@@ -2237,9 +2262,18 @@ bool LibusbW3u3Hardware::stop_capture_safely() noexcept
     return stop().has_value();
 }
 
-bool LibusbW3u3Hardware::snapshot_gpio_state() noexcept
+bool LibusbW3u3Hardware::snapshot_gpio_state(std::uint8_t receiver) noexcept
 {
-    if (!snapshot_gpio_if_needed(&gpio_snapshot_valid_, &gpio_snapshot_,
+    if (profile_ == nullptr) {
+        return false;
+    }
+    const auto route = receiver_address(*profile_, receiver);
+    if (!route || route.value().rf_function_index >= gpio_snapshot_valid_functions_.size()) {
+        return false;
+    }
+    const auto function = route.value().rf_function_index;
+    if (!snapshot_gpio_if_needed(&gpio_snapshot_valid_functions_[function],
+                                 &gpio_snapshots_[function],
                                  [this](std::uint8_t* value) {
                                      const auto transfer = make_gpio_set(0U, 0U, 1000U);
                                      std::array<unsigned char, 1> response{};
@@ -2262,15 +2296,55 @@ bool LibusbW3u3Hardware::restore_gpio_snapshot_safely() noexcept
     if (disconnected_.load()) {
         return true;  // USB writes are forbidden after loss.
     }
+    std::array<bool, 2U> restored_functions{};
+    for (std::uint8_t receiver = 0U; receiver < receiver_count(); ++receiver) {
+        const auto route = receiver_address(*profile_, receiver);
+        if (!route || route.value().rf_function_index >= restored_functions.size() ||
+            restored_functions[route.value().rf_function_index]) {
+            continue;
+        }
+        const auto function = route.value().rf_function_index;
+        restored_functions[function] = true;
+        if (gpio_snapshot_valid_functions_[function] ||
+            board_power_attempted_functions_[function]) {
+            if (!restore_gpio_snapshot_for(receiver)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool LibusbW3u3Hardware::restore_gpio_snapshot_for(std::uint8_t receiver) noexcept
+{
+    if (abandoned_) {
+        return false;
+    }
+    if (disconnected_.load()) {
+        return true;
+    }
+    if (profile_ == nullptr) {
+        return false;
+    }
+    const auto route = receiver_address(*profile_, receiver);
+    if (!route || route.value().rf_function_index >= gpio_snapshot_valid_functions_.size()) {
+        return false;
+    }
+    const auto function = route.value().rf_function_index;
+    const auto previous_route = cleanup_route_receiver_.exchange(receiver, std::memory_order_acq_rel);
+    const auto finish = [this, previous_route](bool success) {
+        cleanup_route_receiver_.store(previous_route, std::memory_order_release);
+        return success;
+    };
     if (uses_legacy_frontend() || uses_v2_frontend()) {
         // GPIOExGet samples physical pins, not the previous output latch.
         // A sampled-low released line must never be restored as driven-low.
         // Use the documented board-off sequence instead of claiming rollback
         // to unobservable GPIOEx latch state. V2 also has a source-defined
         // idle path which does not restore unproven GPIO20 electrical state.
-        if (!board_power_attempted_) {
-            gpio_snapshot_valid_ = false;
-            return true;
+        if (!board_power_attempted_functions_[function]) {
+            gpio_snapshot_valid_functions_[function] = false;
+            return finish(true);
         }
         AtomicFlagScope cleanup_scope(cleanup_io_active_);
         const auto previous_deadline = deadline_;
@@ -2293,25 +2367,28 @@ bool LibusbW3u3Hardware::restore_gpio_snapshot_safely() noexcept
         deadline_ = previous_deadline;
         deadline_active_ = previous_active;
         if (off) {
-            board_power_attempted_ = false;
-            gpio_snapshot_valid_ = false;
-            initialized_ = false;
-            v2_identity_verified_ = false;
+            board_power_attempted_functions_[function] = false;
+            gpio_snapshot_valid_functions_[function] = false;
+            initialized_functions_[function] = false;
+            initialized_ = std::any_of(initialized_functions_.begin(),
+                                       initialized_functions_.end(),
+                                       [](bool initialized) { return initialized; });
+            if (!initialized_) v2_identity_verified_ = false;
         }
-        return off;
+        return finish(off);
     }
     const std::uint8_t mask = 0xdfU;
-    const auto restore = make_gpio_set(gpio_snapshot_, mask, 1000U);
+    const auto restore = make_gpio_set(gpio_snapshots_[function], mask, 1000U);
     std::array<unsigned char, 1> response{};
     bool restored = control(restore, response.data()) == restore.length;
     const auto readback = make_gpio_set(0U, 0U, 1000U);
     restored = control(readback, response.data()) == readback.length &&
-               (response[0] & mask) == (gpio_snapshot_ & mask) && restored;
+               (response[0] & mask) == (gpio_snapshots_[function] & mask) && restored;
     if (restored) {
-        gpio_snapshot_valid_ = false;
-        board_power_attempted_ = false;
+        gpio_snapshot_valid_functions_[function] = false;
+        board_power_attempted_functions_[function] = false;
     }
-    return restored;
+    return finish(restored);
 }
 
 bool LibusbW3u3Hardware::run_plan(const FrontendPlan& plan, unsigned timeout_ms,
@@ -2368,8 +2445,13 @@ bool LibusbW3u3Hardware::run_plan(const FrontendPlan& plan, unsigned timeout_ms,
 int LibusbW3u3Hardware::control(const ControlTransfer& original, unsigned char* data)
 {
     std::uint8_t function = 0U;
-    if (profile_ != nullptr && active_receiver_.owner() != kNoActiveReceiver) {
-        const auto route = receiver_address(*profile_, active_receiver_.owner());
+    const auto cleanup_receiver = cleanup_route_receiver_.load(std::memory_order_acquire);
+    const auto active_receiver = active_receiver_.owner();
+    const auto route_receiver = cleanup_receiver != kNoActiveReceiver
+                                    ? cleanup_receiver
+                                    : active_receiver;
+    if (profile_ != nullptr && route_receiver != kNoActiveReceiver) {
+        const auto route = receiver_address(*profile_, route_receiver);
         if (!route) {
             return LIBUSB_ERROR_INVALID_PARAM;
         }
@@ -2567,7 +2649,8 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
     first_transport_error_.store(0);
     if (!receiver_supports(receiver, system) || !claimed_ || !active_receiver_.owns(receiver) ||
-        tuned_receiver_ != receiver || tuned_system_ != system || !tuned_ || source_prepared_ ||
+        !receiver_initialized(receiver) || tuned_receiver_ != receiver || tuned_system_ != system ||
+        !tuned_ || source_prepared_ ||
         stop_requested_.load()) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/libusb_hardware_backend.h"
+#include "asicen/enclosure.h"
 #include "asicen/powered_controller_type.h"
 #include "px4/tuner_service.h"
 
@@ -30,6 +31,9 @@ struct LibusbW3u3HardwareTestPeer {
         hardware.capture_usb_hooks_ = hooks;
         hardware.claimed_ = true;
         hardware.initialized_ = true;
+        if (const auto route = receiver_address(*hardware.profile_, receiver); route) {
+            hardware.initialized_functions_[route.value().rf_function_index] = true;
+        }
         hardware.tuned_ = true;
         hardware.tuned_receiver_ = receiver;
         hardware.tuned_frequency_khz_ = 557142U;
@@ -68,6 +72,7 @@ struct LibusbW3u3HardwareTestPeer {
     static void require_initialization(LibusbW3u3Hardware& hardware)
     {
         hardware.initialized_ = false;
+        hardware.initialized_functions_.fill(false);
         hardware.tuned_ = false;
     }
     static bool gain_applied(const LibusbW3u3Hardware& hardware) { return hardware.gain_applied_; }
@@ -102,7 +107,14 @@ struct LibusbW3u3HardwareTestPeer {
     }
     static bool gpio_snapshot_valid(const LibusbW3u3Hardware& hardware)
     {
-        return hardware.gpio_snapshot_valid_ || hardware.board_power_attempted_;
+        return std::any_of(hardware.gpio_snapshot_valid_functions_.begin(),
+                           hardware.gpio_snapshot_valid_functions_.end(), [](bool valid) {
+                               return valid;
+                           }) ||
+               std::any_of(hardware.board_power_attempted_functions_.begin(),
+                           hardware.board_power_attempted_functions_.end(), [](bool attempted) {
+                               return attempted;
+                           });
     }
     static void install_hooks_only(LibusbW3u3Hardware& hardware, const Hooks* hooks)
     {
@@ -124,8 +136,8 @@ struct LibusbW3u3HardwareTestPeer {
     }
     static void set_gpio_snapshot(LibusbW3u3Hardware& hardware, std::uint8_t value)
     {
-        hardware.gpio_snapshot_ = value;
-        hardware.gpio_snapshot_valid_ = true;
+        hardware.gpio_snapshots_[0U] = value;
+        hardware.gpio_snapshot_valid_functions_[0U] = true;
     }
     static bool begin_card_cleanup(LibusbW3u3Hardware& hardware)
     {
@@ -1822,9 +1834,21 @@ bool test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints()
     FakeUsb fake;
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
     Hooks hooks{};
-    configure(hardware, fake, hooks, 2U);
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
     CHECK(hardware.receiver_count() == 4U);
+    CHECK(hardware.open_receiver(1U).has_value());
+    const auto primary_init_count = fake.control_functions.size();
+    CHECK(primary_init_count > 0U &&
+          std::all_of(fake.control_functions.begin(), fake.control_functions.end(),
+                      [](std::uint8_t function) { return function == 0U; }));
+    CHECK(hardware.close_receiver(1U).has_value());
+    const auto before_sibling_init = fake.control_functions.size();
     CHECK(hardware.open_receiver(2U).has_value());
+    CHECK(fake.control_functions.size() > before_sibling_init &&
+          std::all_of(fake.control_functions.begin() + static_cast<std::ptrdiff_t>(before_sibling_init),
+                      fake.control_functions.end(),
+                      [](std::uint8_t function) { return function == 1U; }));
     CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
@@ -1847,9 +1871,26 @@ bool test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints()
                       [](std::uint8_t endpoint) { return endpoint == 0x82U; }));
     CHECK(hardware.stop().has_value());
     CHECK(hardware.close_receiver(3U).has_value());
-    CHECK(!fake.control_functions.empty() &&
-          std::all_of(fake.control_functions.begin(), fake.control_functions.end(),
+    CHECK(fake.control_functions.size() > before_sibling_init &&
+          std::all_of(fake.control_functions.begin(),
+                      fake.control_functions.begin() + static_cast<std::ptrdiff_t>(primary_init_count),
+                      [](std::uint8_t function) { return function == 0U; }) &&
+          std::all_of(fake.control_functions.begin() + static_cast<std::ptrdiff_t>(primary_init_count),
+                      fake.control_functions.begin() + static_cast<std::ptrdiff_t>(before_sibling_init),
+                      [](std::uint8_t function) { return function == 0U; }) &&
+          std::all_of(fake.control_functions.begin() + static_cast<std::ptrdiff_t>(before_sibling_init),
+                      fake.control_functions.end(),
                       [](std::uint8_t function) { return function == 1U; }));
+    const auto before_shutdown = fake.control_functions.size();
+    CHECK(hardware.shutdown().has_value());
+    const auto cleanup_begin = fake.control_functions.begin() +
+                               static_cast<std::ptrdiff_t>(before_shutdown);
+    const bool primary_cleanup =
+        std::find(cleanup_begin, fake.control_functions.end(), 0U) != fake.control_functions.end();
+    const bool sibling_cleanup =
+        std::find(cleanup_begin, fake.control_functions.end(), 1U) != fake.control_functions.end();
+    CHECK(primary_cleanup && sibling_cleanup);
+    CHECK(!LibusbW3u3HardwareTestPeer::gpio_snapshot_valid(hardware));
     return true;
 }
 

@@ -227,7 +227,6 @@ private:
     select_model_satellite_tsid(std::size_t,
                                 const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>&) noexcept;
     LegacyFrontendProfile legacy_frontend() const noexcept;
-    bool snapshot_gpio_state() noexcept;
     px4::userland::Result<void> set_lnb_power(bool on, bool cleanup) noexcept;
     px4::userland::Result<void> clear_lnb_power() noexcept;
     px4::userland::Result<void> check_v2_lnb_feedback() noexcept;
@@ -278,6 +277,9 @@ private:
     px4::userland::Error transport_failure(px4::userland::Error fallback) const noexcept;
     int control_function_impl(std::uint8_t function, const ControlTransfer&, unsigned char*);
     libusb_device_handle* capture_handle(std::uint8_t receiver) const noexcept;
+    bool receiver_initialized(std::uint8_t receiver) const noexcept;
+    bool snapshot_gpio_state(std::uint8_t receiver) noexcept;
+    bool restore_gpio_snapshot_for(std::uint8_t receiver) noexcept;
     px4::userland::Error plan_error_ = px4::userland::Error::OK;
     std::atomic<bool> disconnected_{false};
     std::atomic<bool> capture_interrupted_{false};
@@ -291,6 +293,7 @@ private:
     std::atomic<bool> cleanup_io_active_{false};
     std::atomic<bool> claimed_{false};
     bool initialized_ = false;
+    std::array<bool, 2U> initialized_functions_{};
     bool fd_function_mismatch_ = false;
     bool sibling_runtime_required_ = false;
     bool v2_roles_verified_ = false;
@@ -332,9 +335,10 @@ private:
     px4::userland::ipc::System tuned_system_ = px4::userland::ipc::System::ISDB_T;
     const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
     bool (*diagnostic_stop_callback_)() noexcept = nullptr;
-    bool gpio_snapshot_valid_ = false;
-    std::uint8_t gpio_snapshot_ = 0;
-    bool board_power_attempted_ = false;
+    std::array<bool, 2U> gpio_snapshot_valid_functions_{};
+    std::array<std::uint8_t, 2U> gpio_snapshots_{};
+    std::array<bool, 2U> board_power_attempted_functions_{};
+    std::atomic<std::uint8_t> cleanup_route_receiver_{0xffU};
     // LNB ownership is distinct from board-power snapshots: close/shutdown
     // must never restore an initially powered antenna feed. All fields below
     // are protected by control_gate_. Only set_lnb_power may bypass the
