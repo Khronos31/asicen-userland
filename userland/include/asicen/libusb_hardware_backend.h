@@ -382,7 +382,7 @@ private:
     std::array<std::uint8_t, 0x45> cf_snapshot_{};
     std::array<std::uint8_t, 16> link_seed_{};
     LinkSeedDiagnostic link_diagnostic_{};
-    std::array<std::unique_ptr<AsyncState>, 4U> async_states_{};
+    std::array<AsyncState*, 4U> async_states_{};
     bool abandoned_ = false;
     void quarantine_capture() noexcept;
     std::array<std::unique_ptr<TransportCaptureDecoderV7>, 4U> decoders_{};

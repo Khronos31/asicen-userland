@@ -27,10 +27,10 @@ struct LibusbW3u3HardwareTestPeer {
     }
     static void failed_capture(LibusbW3u3Hardware& hw)
     {
-        hw.source_prepared_ = true;
+        hw.source_prepared_[0U] = true;
         hw.mark_cleanup_failed(px4::userland::Error::USB_IO);
     }
-    static void clear_capture_fixture(LibusbW3u3Hardware& hw) { hw.source_prepared_ = false; }
+    static void clear_capture_fixture(LibusbW3u3Hardware& hw) { hw.source_prepared_[0U] = false; }
     static bool quarantined(const LibusbW3u3Hardware& hw) { return hw.cleanup_failed_.load(); }
     static int generic_gpio(LibusbW3u3Hardware& hw, std::uint8_t value, std::uint8_t mask)
     {

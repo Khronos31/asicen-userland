@@ -237,13 +237,13 @@ struct LibusbW3u3Hardware::AsyncState {
 LibusbW3u3Hardware::AsyncState*
 LibusbW3u3Hardware::capture_async(std::uint8_t receiver) noexcept
 {
-    return receiver < async_states_.size() ? async_states_[receiver].get() : nullptr;
+    return receiver < async_states_.size() ? async_states_[receiver] : nullptr;
 }
 
 const LibusbW3u3Hardware::AsyncState*
 LibusbW3u3Hardware::capture_async(std::uint8_t receiver) const noexcept
 {
-    return receiver < async_states_.size() ? async_states_[receiver].get() : nullptr;
+    return receiver < async_states_.size() ? async_states_[receiver] : nullptr;
 }
 
 TransportCaptureDecoderV7*
@@ -665,6 +665,9 @@ LibusbW3u3Hardware::~LibusbW3u3Hardware() noexcept
     stop_lnb_monitor();
     (void)release();
     flush_startup_trace();
+    for (auto* async : async_states_) {
+        delete async;
+    }
 }
 
 Result<void> LibusbW3u3Hardware::claim()
@@ -2765,8 +2768,8 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     if (!set_cf_bit(local, 0x03U, true)) {
         return fail_prepare(Error::USB_IO);
     }
-    if (!async_states_[receiver]) {
-        async_states_[receiver].reset(new (std::nothrow) AsyncState());
+    if (async_states_[receiver] == nullptr) {
+        async_states_[receiver] = new (std::nothrow) AsyncState();
         if (!async_states_[receiver]) {
             return fail_prepare(Error::INTERNAL);
         }
@@ -2877,7 +2880,7 @@ CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
     const std::uint8_t receiver = source_receiver_;
     if (receiver >= source_prepared_.size() || !source_prepared_[receiver] ||
         receiver >= async_states_.size() || emit == nullptr ||
-        !async_states_[receiver]) return CaptureRunResult::usb_error;
+        async_states_[receiver] == nullptr) return CaptureRunResult::usb_error;
     AsyncState& state = *async_states_[receiver];
     record_startup("worker_run");
     std::unique_ptr<SplitPump> pump(
@@ -3236,8 +3239,8 @@ void LibusbW3u3Hardware::quarantine_capture() noexcept
     abandoned_ = true;
     quarantine_libusb_context(context_);
     for (auto& async : async_states_) {
-        if (async && async->prepared) {
-            (void)async.release();
+        if (async != nullptr && async->prepared) {
+            async = nullptr;
         }
     }
     ownership_.abandon();

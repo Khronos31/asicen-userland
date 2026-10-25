@@ -145,7 +145,7 @@ struct LibusbW3u3HardwareTestPeer {
     static const void* capture_state(const LibusbW3u3Hardware& hardware,
                                     std::uint8_t receiver)
     {
-        return receiver < hardware.async_states_.size() ? hardware.async_states_[receiver].get()
+        return receiver < hardware.async_states_.size() ? hardware.async_states_[receiver]
                                                         : nullptr;
     }
     static const void* decoder_state(const LibusbW3u3Hardware& hardware,
