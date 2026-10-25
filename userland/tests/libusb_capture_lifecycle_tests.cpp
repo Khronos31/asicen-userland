@@ -153,6 +153,11 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return receiver < hardware.decoders_.size() ? hardware.decoders_[receiver].get() : nullptr;
     }
+    static bool source_prepared(const LibusbW3u3Hardware& hardware, std::uint8_t receiver)
+    {
+        return receiver < hardware.source_prepared_.size() &&
+               hardware.source_prepared_[receiver];
+    }
 
     static void set_cleanup_failed(LibusbW3u3Hardware& hardware)
     {
@@ -1393,6 +1398,8 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
 
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::source_prepared(hardware, 0U));
+    CHECK(!LibusbW3u3HardwareTestPeer::source_prepared(hardware, 1U));
     const void* const receiver0_capture =
         LibusbW3u3HardwareTestPeer::capture_state(hardware, 0U);
     const void* const receiver0_decoder =
@@ -1412,6 +1419,7 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
 
     cancelled.store(true);
     CHECK(hardware.run(cancelled, discard_packets, nullptr) == CaptureRunResult::cancelled);
+    CHECK(!LibusbW3u3HardwareTestPeer::source_prepared(hardware, 0U));
     CHECK(saw_dsc(fake, Request::DscStop, 0U));
     CHECK(fake.cancel_count == 4);
     CHECK(fake.free_count == 4);
@@ -1428,6 +1436,7 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
     cancelled.store(false);
     const int old_start_count = fake.dsc_start_count;
     CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::source_prepared(hardware, 1U));
     CHECK(LibusbW3u3HardwareTestPeer::capture_state(hardware, 1U) != receiver0_capture);
     CHECK(LibusbW3u3HardwareTestPeer::decoder_state(hardware, 1U) != receiver0_decoder);
     CHECK(fake.dsc_start_count == old_start_count + 1);

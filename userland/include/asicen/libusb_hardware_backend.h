@@ -282,6 +282,7 @@ private:
     const AsyncState* capture_async(std::uint8_t receiver) const noexcept;
     TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) noexcept;
     const TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) const noexcept;
+    bool any_source_prepared() const noexcept;
     libusb_device_handle* capture_handle(std::uint8_t receiver) const noexcept;
     bool receiver_initialized(std::uint8_t receiver) const noexcept;
     bool snapshot_gpio_state(std::uint8_t receiver) noexcept;
@@ -328,7 +329,7 @@ private:
     void record_startup(const char*, std::int64_t = 0, std::int64_t = 0) noexcept;
     void flush_startup_trace() noexcept;
     void reset_startup_diagnostic(std::uint8_t receiver) noexcept;
-    bool source_prepared_ = false;
+    std::array<bool, 4U> source_prepared_{};
     bool dsc_attempted_ = false;
     bool dsc_stopped_ = true;
     bool cf_snapshot_valid_ = false;
