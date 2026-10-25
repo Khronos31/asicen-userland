@@ -162,7 +162,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 
 - **適用対象/頻度:** 対応OS/APIのみ。非対応製品は理由付きN/A。
 - **準備:** native OS adapter/consumerとcandidate IFD/DLL pathを用意。
-- **実操作/利用者への依頼:** Linux Appendix Aのisolated pcsc-liteでpcsc_scan -r/-cと既存bcas-safe-probe。macOSはE04「native PC/SC手順」でcandidate bundle/reader template、Homebrew pcsc-lite、reader指定SCard consumerを実行する。Windowsは既存native transaction consumerがある場合のみ。
+- **実操作/利用者への依頼:** Linux Appendix Aのisolated pcsc-liteでpcsc_scan -r/-cと既存bcas-safe-probe。macOSはE04 [native PC/SC](#e04-macos-native-pcsc)でcandidate bundle/reader template、Homebrew pcsc-lite、reader指定SCard consumerを実行する。Windowsは既存native transaction consumerがある場合のみ。
 - **期待値/終了値:** CLI CARD/CI smokeをnative transaction合格にしない。実consumer/adapter/path/exitが必要。
 - **停止/cleanup:** consumer/isolated pcscd通常停止。system PCSC serviceを変更しない。
 - **記録:** OS/ABI、module/DLL absolute path、consumer、reader/card、operation/exit。
