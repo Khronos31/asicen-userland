@@ -165,7 +165,33 @@ done
 
 現行の公開`asicenctl`は pinned Coreの`card-apdu HEX`単発送信を使う。カードreaderを公開する実機でstatus present、ATR取得、reset後のATR、上の通常コマンド10回それぞれの終了値を確認する。カード抜去を依頼してからstatusが不在となり、ATR/APDUがCARD_REMOVED/NO_CARD (exit 9) となること、再挿入後にstatus/ATR/reset/APDUが戻ることを確認する。生ATR、カードID、APDU応答本文は公開記録に保存しない。未対応またはreaderなしprofileでのエラーはそのprofileの実測として記録し、製品全体の未実装と一般化しない。
 
-hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapterである。Linux/macOSでは該当libc/platform向けIFDを候補から選び、[`README.md`](../README.md#pcsc-と内蔵カードリーダー)の`reader.conf.d/asicen-userland.conf`の4値を、実行中daemonと同じruntime/instance、IFD絶対path、`user`または`group` accessへ置き換えてnative PC/SC stackへ登録する。test hostの`pcscd` logとnative PC/SC consumerでreader列挙、card status、ATR/reset、通常APDUを確認する。system PC/SC serviceの設定を戻し、consumer/contextを解放してからdaemonを通常停止する。production hostのサービス再読込・再起動をこの手順へ含めない。AndroidにはIFDがない。
+hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapterである。Linuxでは専用test hostのisolated pcsc-liteを使い、productionのPC/SC serviceには接続しない。候補の`reader.conf.d/asicen-userland.conf`で次の4値を候補・実行daemonに合わせ、readerをASICEN 1つだけに絞る。
+
+| 設定値 | 設定内容 |
+|---|---|
+| `@ASICEN_RUNTIME_DIR@` | `asicend`の`--runtime-dir`と同じ絶対path |
+| `@ASICEN_INSTANCE@` | `asicend`の`--instance`と同じ値 |
+| `@ASICEN_IFD_LIBRARY@` | 候補のLinux `ifd/asicen-userland-ifd.so`絶対path |
+| `@ASICEN_ACCESS@` | 同一accountで動かす`user`。共有groupを使う場合はdaemon/consumer/pcscdのpermissionを合わせる |
+
+専用pcsc-lite prefixとその`libpcsclite.so.1`を使い、reader config directoryだけを登録してforeground daemonを起動する。既存のLinux probeは次の形式で実行する。
+
+```sh
+LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib \
+  <isolated-pcsc-lite-prefix>/sbin/pcscd --foreground \
+  --config <candidate-reader-config-dir>
+
+LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib pcsc_scan -r
+set -o pipefail
+LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib pcsc_scan -c 2>&1 | \
+  sed -E 's/(ATR[[:space:]]*[:=]).*/\1 <redacted>/'
+LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib \
+  <existing-bcas-safe-probe>
+```
+
+`pcsc_scan -r`はexit 0かつASICEN readerが1件、ATRを伏せた`pcsc_scan -c`はpipeline exit 0かつcard insertedを期待する。既存`bcas-safe-probe`はPC/SC connect後の標準B-CAS初期設定、`get_init_status()`、read-only `get_id()`を行い、exit 0かつ`bcas_init=ok` / `init_status=ok` / `id_query=ok`を期待する。readerを1つだけ登録し、probeのreader選択を一意にする。カード不在・ATR/resetの独立確認は同じdaemon/runtime/instanceの`asicenctl card-status`, `card-atr`, `card-reset`を使い、ATR/resetのraw出力は`/dev/null`へ送り終了値だけを記録する。CLI CARD操作はnative PC/SC probe結果の代用ではない。raw ATR、card ID、status内識別値、APDU response bytesを出力・保存しない。probeがtest hostにない場合は新規probeを作らず、そのPC/SC transaction gateを未実施とする。consumerを終了したらisolated `pcscd`だけをSIGINTで停止し、process/socket消失を確認してから`asicend`を通常停止する。test config/runtimeを削除し、system serviceは変更しない。
+
+macOSでもnative `.bundle`を使うが、system PC/SC serviceをreload/restartしてcandidate IFDを加える操作はしない。既存のisolated native stackとnative `pcsc_scan` / `bcas-safe-probe`が用意された専用test hostに限り、`pcsc_scan -r`, `pcsc_scan -c`とsafe probeを同様に実行する。native consumerや隔離stackが用意されていなければ実施不能として記録し、Linux結果を代用しない。AndroidにはIFDがない。
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
 
@@ -189,7 +215,7 @@ $selector = 'usb:BUS-PORT[,BUS-PORT]'
 & $B --instance rc --runtime-dir $RT --receiver <ID> --channel T27 --time <SECONDS> --output t27.ts
 ```
 
-candidate内のapplication-local `WinSCard.dll`をconsumerと同じdirectoryに置き、Windows native PC/SC consumerからそのabsolute module pathをロードする。consumerの操作でcontext確立、reader/card status、connect、ATR/reset、反復APDU、disconnect/context releaseを確認し、実行fileとloaded DLL pathを記録する。物理CARD抜去時の不在と再挿入後の復帰も同じ依頼/待機/確認型で記録する。CLIの`card-*`結果はWinSCard経路の代用にならない。consumer/API probeの実行fileが該当candidateに用意されていない場合は未実施とし、CI結果をnative WinSCard試験へ代用しない。生ATR、card ID、APDU応答本文は公開記録へ保存しない。
+candidate内のapplication-local `WinSCard.dll`はconsumerと同じdirectoryに置き、consumerがこのabsolute pathをloadする。既存のWindows scratch checkは`LoadLibraryW`と`GetProcAddress`で`SCardEstablishContext` / `SCardTransmit`等のexportを確認するDLL load/export smokeであり、reader列挙・context確立・connect・ATR/reset・APDUのconsumer試験ではない。現在の`win-candidate`にはnative transaction consumer/API probeが含まれず、repoにも実行手順付きの既存probeがないため、このgateは実施不能として未完了に記録する。native consumerを用意できないまま新しいprobeを作成せず、CI、DLL export smoke、ASICEN CLIの`card-*`をnative WinSCard transactionの合格にしない。既存のnative consumerが候補とともに提供された場合だけ、その実行file・loaded absolute DLL path・reader選択・status/connect/ATR/reset/標準APDU/disconnect/context release・終了値・cleanupを記録する。生ATR、card ID、APDU response本文は公開記録へ保存しない。
 
 ## 5. LNB・soak・cleanup
 
