@@ -1298,11 +1298,8 @@ endif()
 
 if(ASICEN_BUILD_TESTS)
     add_executable(asicen-ts-argument-tests
-        ${ASICEN_PX4_ROOT}/tests/asicen_ts_argument_tests.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
-    target_compile_definitions(asicen-ts-argument-tests PRIVATE ASICEN_PRODUCT_CLI=1)
-    target_include_directories(asicen-ts-argument-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
-    target_link_libraries(asicen-ts-argument-tests PRIVATE asicen_px4_mock)
+        userland/tests/ts_argument_tests.cpp)
+    target_link_libraries(asicen-ts-argument-tests PRIVATE dtv::host_ts)
     asicen_enable_project_warnings(asicen-ts-argument-tests)
     add_test(NAME asicen-ts-argument-tests COMMAND asicen-ts-argument-tests)
 endif()
