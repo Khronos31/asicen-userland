@@ -2578,6 +2578,8 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     source_receiver_ = receiver;
+    routed_source_receiver_.store(receiver, std::memory_order_release);
+    counters_receiver_ = receiver;
     dsc_attempted_ = false;
     dsc_stopped_ = true;
     capture_interrupted_.store(false);
@@ -2908,6 +2910,15 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
     return run_split_usb_pump(cancelled_flag, emit, context);
 }
 
+CaptureRunResult LibusbW3u3Hardware::run_for_receiver(
+    std::uint8_t receiver, const std::atomic<bool>& cancelled_flag,
+    bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
+{
+    return receiver == routed_source_receiver_.load(std::memory_order_acquire)
+               ? run(cancelled_flag, emit, context)
+               : CaptureRunResult::usb_error;
+}
+
 void LibusbW3u3Hardware::interrupt() noexcept
 {
     capture_interrupted_.store(true);
@@ -2918,12 +2929,27 @@ void LibusbW3u3Hardware::interrupt() noexcept
     }
 }
 
+void LibusbW3u3Hardware::interrupt_receiver(std::uint8_t receiver) noexcept
+{
+    if (receiver == routed_source_receiver_.load(std::memory_order_acquire)) {
+        interrupt();
+    }
+}
+
 px4::userland::TunerStreamCounters LibusbW3u3Hardware::source_counters() const noexcept
 {
     px4::userland::TunerStreamCounters counters{};
     counters.sync_errors = capture_sync_errors_.load();
     counters.empty_intervals = capture_empty_intervals_.load();
     return counters;
+}
+
+px4::userland::TunerStreamCounters
+LibusbW3u3Hardware::source_counters_for_receiver(std::uint8_t receiver) const noexcept
+{
+    return receiver == counters_receiver_.load(std::memory_order_acquire)
+               ? source_counters()
+               : px4::userland::TunerStreamCounters{};
 }
 
 StreamCaptureFramingCounters LibusbW3u3Hardware::source_framing_counters() const noexcept
@@ -2953,12 +2979,21 @@ Result<void> LibusbW3u3Hardware::stop() noexcept
     }
     if (!cleanup_failed_.load()) {
         source_receiver_ = kNoActiveReceiver;
+        routed_source_receiver_.store(kNoActiveReceiver, std::memory_order_release);
     }
     if (!cleanup_failed_.load()) {
         return Result<void>::success();
     }
     const int stored = cleanup_failure_error_.load(std::memory_order_acquire);
     return Result<void>::failure(stored == 0 ? Error::USB_IO : static_cast<Error>(stored));
+}
+
+Result<void> LibusbW3u3Hardware::stop_receiver(std::uint8_t receiver) noexcept
+{
+    if (receiver != routed_source_receiver_.load(std::memory_order_acquire)) {
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
+    return stop();
 }
 
 CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noexcept

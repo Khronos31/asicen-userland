@@ -140,10 +140,17 @@ public:
     CaptureRunResult run(const std::atomic<bool>& cancelled,
                          bool (*emit)(void*, const std::uint8_t*, std::size_t),
                          void* context) noexcept override;
+    CaptureRunResult run_for_receiver(
+        std::uint8_t receiver, const std::atomic<bool>& cancelled,
+        bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept override;
     void interrupt() noexcept override;
+    void interrupt_receiver(std::uint8_t receiver) noexcept override;
     px4::userland::TunerStreamCounters source_counters() const noexcept override;
+    px4::userland::TunerStreamCounters
+    source_counters_for_receiver(std::uint8_t receiver) const noexcept override;
     StreamCaptureFramingCounters source_framing_counters() const noexcept override;
     px4::userland::Result<void> stop() noexcept override;
+    px4::userland::Result<void> stop_receiver(std::uint8_t receiver) noexcept override;
 
 private:
     friend struct LibusbW3u3HardwareTestPeer;
@@ -320,6 +327,8 @@ private:
     ReceiverLaneReservation active_receiver_{};
     std::uint8_t tuned_receiver_ = kNoActiveReceiver;
     std::uint8_t source_receiver_ = kNoActiveReceiver;
+    std::atomic<std::uint8_t> routed_source_receiver_{kNoActiveReceiver};
+    std::atomic<std::uint8_t> counters_receiver_{kNoActiveReceiver};
     px4::userland::ipc::System tuned_system_ = px4::userland::ipc::System::ISDB_T;
     const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
     bool (*diagnostic_stop_callback_)() noexcept = nullptr;

@@ -252,7 +252,9 @@ void HardwareStreamService::request_stop() noexcept
     shutdown_requested_.store(true);
     cancelled_.store(true);
     condition_.notify_all();
-    source_.interrupt();
+    const auto receiver = capture_receiver_.load();
+    if (receiver < receiver_count()) source_.interrupt_receiver(receiver);
+    else source_.interrupt();
     frontend_.request_stop();
 }
 
@@ -271,7 +273,7 @@ Result<void> HardwareStreamService::shutdown() noexcept
     bool failed = already_quarantined;
     Error first_error = Error::USB_IO;
     if (needs_stop) {
-        const auto stopped = source_.stop();
+        const auto stopped = source_.stop_receiver(capture_receiver_.load());
         std::lock_guard<std::mutex> lock(mutex_);
         if (!stopped) {
             if (!failed) {
@@ -332,21 +334,24 @@ Result<void> HardwareStreamService::start_capture(std::uint8_t receiver, System 
         state_ = State::preparing;
         source_stopped_ = false;
     }
+    capture_receiver_.store(receiver);
     const auto prepared = source_.prepare(receiver, system, cancelled_);
     if (!prepared) {
-        const auto cleaned = source_.stop();
+        const auto cleaned = source_.stop_receiver(receiver);
         std::lock_guard<std::mutex> lock(mutex_);
         state_ = cleaned ? State::idle : State::quarantined;
         source_stopped_ = static_cast<bool>(cleaned);
+        if (cleaned) capture_receiver_.store(0xffU);
         return Result<void>::failure(prepared.error());
     }
     if (shutdown_requested_.load()) {
-        source_.interrupt();
-        const auto cleaned = source_.stop();
+        source_.interrupt_receiver(receiver);
+        const auto cleaned = source_.stop_receiver(receiver);
         std::lock_guard<std::mutex> lock(mutex_);
         source_prepared_ = true;
         source_stopped_ = static_cast<bool>(cleaned);
         state_ = cleaned ? State::idle : State::quarantined;
+        if (cleaned) capture_receiver_.store(0xffU);
         return Result<void>::failure(Error::NOT_READY);
     }
     {
@@ -365,12 +370,13 @@ Result<void> HardwareStreamService::start_capture(std::uint8_t receiver, System 
         }
     }
     if (launch_failed) {
-        source_.interrupt();
-        const auto stopped = source_.stop();
+        source_.interrupt_receiver(receiver);
+        const auto stopped = source_.stop_receiver(receiver);
         std::lock_guard<std::mutex> lock(mutex_);
         source_stopped_ = static_cast<bool>(stopped);
         if (stopped) {
             state_ = State::idle;
+            capture_receiver_.store(0xffU);
         }
         return Result<void>::failure(Error::INTERNAL);
     }
@@ -391,6 +397,9 @@ Result<void> HardwareStreamService::stop_capture(std::uint8_t receiver, System s
         if (state_ == State::quarantined) {
             return Result<void>::failure(Error::USB_IO);
         }
+        if (state_ != State::idle && capture_receiver_.load() != receiver) {
+            return Result<void>::failure(Error::BUSY);
+        }
     }
     cancel_and_join();
     bool needs_stop = false;
@@ -399,7 +408,7 @@ Result<void> HardwareStreamService::stop_capture(std::uint8_t receiver, System s
         needs_stop = source_prepared_ && !source_stopped_;
     }
     if (needs_stop) {
-        const auto stopped = source_.stop();
+        const auto stopped = source_.stop_receiver(receiver);
         std::lock_guard<std::mutex> lock(mutex_);
         if (!stopped) {
             source_stopped_ = true;  // cleanup was attempted; the frontend still gets shutdown
@@ -414,6 +423,7 @@ Result<void> HardwareStreamService::stop_capture(std::uint8_t receiver, System s
             state_ = State::idle;
         }
         final_ = {counters_locked(), static_cast<std::uint8_t>(terminal_)};
+        capture_receiver_.store(0xffU);
     }
     return Result<void>::success();
 }
@@ -426,7 +436,8 @@ Result<void> HardwareStreamService::attach(const TunerAttachment& attachment) no
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (state_ != State::running || have_attachment_) {
+    if (state_ != State::running || have_attachment_ ||
+        attachment.receiver != capture_receiver_.load()) {
         return Result<void>::failure(Error::NOT_READY);
     }
     attachment_ = attachment;
@@ -456,7 +467,7 @@ Result<void> HardwareStreamService::detach(const TunerAttachment& attachment) no
         }
         condition_.notify_all();
     }
-    source_.interrupt();
+    source_.interrupt_receiver(attachment.receiver);
     if (worker_.joinable()) {
         worker_.join();
     }
@@ -617,7 +628,7 @@ bool HardwareStreamService::emit(const std::uint8_t* bytes, std::size_t size) no
         condition_.notify_all();
     }
     if (overflow) {
-        source_.interrupt();
+        source_.interrupt_receiver(capture_receiver_.load());
     }
     return false;
 }
@@ -633,8 +644,9 @@ void HardwareStreamService::run_worker() noexcept
             return;
         }
     }
-    const CaptureRunResult result =
-        source_.run(cancelled_, &HardwareStreamService::emit_trampoline, this);
+    const auto receiver = capture_receiver_.load();
+    const CaptureRunResult result = source_.run_for_receiver(
+        receiver, cancelled_, &HardwareStreamService::emit_trampoline, this);
     if (result == CaptureRunResult::fatal_drain) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -697,6 +709,7 @@ void HardwareStreamService::clear_attempt_locked() noexcept
     worker_done_ = false;
     source_prepared_ = false;
     source_stopped_ = true;
+    capture_receiver_.store(0xffU);
     terminal_ = TunerStreamTerminal::none;
 }
 
@@ -704,7 +717,9 @@ void HardwareStreamService::cancel_and_join() noexcept
 {
     cancelled_.store(true);
     condition_.notify_all();
-    source_.interrupt();
+    const auto receiver = capture_receiver_.load();
+    if (receiver < receiver_count()) source_.interrupt_receiver(receiver);
+    else source_.interrupt();
     if (worker_.joinable()) {
         worker_.join();
     }
@@ -713,7 +728,7 @@ void HardwareStreamService::cancel_and_join() noexcept
 px4::userland::TunerStreamCounters HardwareStreamService::counters_locked() const noexcept
 {
     auto counters = counters_;
-    const auto source = source_.source_counters();
+    const auto source = source_.source_counters_for_receiver(capture_receiver_.load());
     counters.sync_errors += source.sync_errors;
     counters.empty_intervals += source.empty_intervals;
     return counters;

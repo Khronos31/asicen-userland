@@ -39,9 +39,19 @@ public:
     virtual CaptureRunResult run(const std::atomic<bool>& cancelled,
                                  bool (*emit)(void*, const std::uint8_t*, std::size_t),
                                  void* context) noexcept = 0;
+    virtual CaptureRunResult run_for_receiver(
+        std::uint8_t, const std::atomic<bool>& cancelled,
+        bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
+    {
+        return run(cancelled, emit, context);
+    }
     virtual void interrupt() noexcept = 0;
+    virtual void interrupt_receiver(std::uint8_t) noexcept { interrupt(); }
     virtual px4::userland::Result<void> stop() noexcept = 0;
+    virtual px4::userland::Result<void> stop_receiver(std::uint8_t) noexcept { return stop(); }
     virtual px4::userland::TunerStreamCounters source_counters() const noexcept { return {}; }
+    virtual px4::userland::TunerStreamCounters
+    source_counters_for_receiver(std::uint8_t) const noexcept { return source_counters(); }
     // Inspect only after run() has returned; this is parser-owner state.
     virtual StreamCaptureFramingCounters source_framing_counters() const noexcept { return {}; }
 };
@@ -165,6 +175,7 @@ private:
     bool worker_done_ = false;
     bool source_prepared_ = false;
     bool source_stopped_ = true;
+    std::atomic<std::uint8_t> capture_receiver_{0xffU};
     px4::userland::TunerStreamTerminal terminal_ = px4::userland::TunerStreamTerminal::none;
     NativeThread worker_;
     NativeThread::Start thread_launcher_;

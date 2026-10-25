@@ -87,6 +87,14 @@ public:
         return result;
     }
 
+    asicen::CaptureRunResult run_for_receiver(
+        std::uint8_t receiver, const std::atomic<bool>& cancelled,
+        bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept override
+    {
+        run_receiver = receiver;
+        return run(cancelled, emit, context);
+    }
+
     void interrupt() noexcept override
     {
         {
@@ -98,6 +106,12 @@ public:
         condition.notify_all();
     }
 
+    void interrupt_receiver(std::uint8_t receiver) noexcept override
+    {
+        interrupt_receiver_id = receiver;
+        interrupt();
+    }
+
     Result<void> stop() noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -106,7 +120,18 @@ public:
         return stop_error ? Result<void>::failure(Error::USB_IO) : Result<void>::success();
     }
 
+    Result<void> stop_receiver(std::uint8_t receiver) noexcept override
+    {
+        stop_receiver_id = receiver;
+        return stop();
+    }
+
     TunerStreamCounters source_counters() const noexcept override { return observations; }
+    TunerStreamCounters source_counters_for_receiver(std::uint8_t receiver) const noexcept override
+    {
+        counter_receiver = receiver;
+        return observations;
+    }
 
     bool wait_emitted(std::size_t count)
     {
@@ -131,6 +156,10 @@ public:
     std::uint8_t expected_receiver = 1U;
     ipc::System expected_system = ipc::System::ISDB_T;
     int stop_calls = 0;
+    std::uint8_t run_receiver = 0xffU;
+    std::uint8_t interrupt_receiver_id = 0xffU;
+    std::uint8_t stop_receiver_id = 0xffU;
+    mutable std::uint8_t counter_receiver = 0xffU;
     bool prepared = false;
     bool interrupted = false;
     bool prepare_error = false;
@@ -396,6 +425,11 @@ bool start_precedes_attach_and_full_identity_is_required()
     auto id = identity();
     CHECK(service.attach(id), "attach registers identity after capture start");
     CHECK(source.wait_emitted(2U), "attached queue receives bounded data");
+    CHECK(source.run_receiver == 1U, "run is scoped to the receiver prepared by this capture");
+    auto wrong_receiver = id;
+    wrong_receiver.receiver = 3U;
+    CHECK(service.attach(wrong_receiver).error() == Error::NOT_READY,
+          "attachment cannot bind to a receiver other than the prepared capture");
     auto wrong = id;
     wrong.nonce[0] ^= 1U;
     CHECK(service.stats(wrong).error() == Error::NOT_FOUND, "nonce mismatch is rejected");
@@ -422,6 +456,8 @@ bool start_precedes_attach_and_full_identity_is_required()
     CHECK(queued_stats && queued_stats.value().packets == 2U && queued_stats.value().bytes == 376U,
           "counters include queued unread packets at enqueue time");
     CHECK(service.detach(id), "detach stops and joins producer");
+    CHECK(source.interrupt_receiver_id == 1U,
+          "detach interrupts only the receiver owned by this capture");
     const auto drained = service.read(id, {output.data(), output.size()}, {0U});
     CHECK(drained && drained.value().bytes == 188U && output[3] == 0x11U,
           "detached attachment drains its queued tail in order");
@@ -431,10 +467,13 @@ bool start_precedes_attach_and_full_identity_is_required()
     CHECK(service.read(id, {output.data(), output.size()}, {0U}).error() == Error::NOT_FOUND,
           "terminal EOF retires the drain-only identity");
     const auto final = service.final_snapshot(id);
+    CHECK(source.counter_receiver == 1U,
+          "final counters are read from the receiver owned by this capture");
     CHECK(final && final.value().counters.bytes == output.size() + 188U &&
               final.value().terminal == static_cast<std::uint8_t>(TunerStreamTerminal::stopped),
           "final counters are retained for exact identity");
     CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "cleanup succeeds after detach");
+    CHECK(source.stop_receiver_id == 1U, "cleanup stops only the receiver owned by this capture");
     CHECK(service.release_final(id), "final state is released after protocol flush");
     CHECK(service.start_capture(1U, ipc::System::ISDB_T), "fresh generation can restart");
     CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "unattached attempt can stop");
