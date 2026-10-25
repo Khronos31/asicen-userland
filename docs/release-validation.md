@@ -59,6 +59,62 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 
 ## 共通試験シナリオ T00–T14
 
+### run別candidateの取得と作業directory
+
+この手順書commitとcandidate source SHAは一致不要。成功した`build_userland.yml` runについてhead SHA、attempt、結論、artifact ID/name/expiryを照合し、該当版matrixのtarget archiveだけを使う。手動dispatchや正式Releaseは実行しない。ASICEN firmwareの供給/同梱は別途確定したrepo配布物が用意されるまで未達として止め、候補取得だけで解決扱いしない。
+
+```sh
+set -eu
+gh run list --repo Khronos31/asicen-userland --workflow build_userland.yml --limit 20
+RUN_ID='<successful-candidate-run-id>'; TARGET='<linux-glibc-x86_64|linux-musl-x86_64|linux-glibc-aarch64|linux-musl-aarch64|darwin-arm64|android-aarch64|android-armv7a|android-x86_64>'
+RUN_JSON=$(gh run view "$RUN_ID" --repo Khronos31/asicen-userland --json headSha,attempt,conclusion)
+SOURCE_SHA=$(printf '%s\n' "$RUN_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["headSha"])')
+printf '%s\n' "$RUN_JSON" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["conclusion"] == "success" and r["headSha"] and r["attempt"] > 0'
+test -n "$SOURCE_SHA"
+gh api "repos/Khronos31/asicen-userland/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | [.id,.name,.expired] | @tsv'
+WORK=$(mktemp -d "${TMPDIR:-$HOME}/asicen-run-${RUN_ID}.XXXXXX"); chmod 700 "$WORK"; mkdir -m 700 "$WORK/download"
+gh run download "$RUN_ID" --repo Khronos31/asicen-userland --name release-candidate --dir "$WORK/download"
+cd "$WORK/download"; sha256sum -c SHA256SUMS || shasum -a 256 -c SHA256SUMS
+VERSION='<candidate-version>'; ARCHIVE="asicen-userland-$VERSION-$TARGET.tar.gz"
+mkdir "$WORK/candidate"; tar -xzf "$WORK/download/$ARCHIVE" -C "$WORK/candidate"
+D="$WORK/candidate"; LOG="$WORK/log"; RT="$WORK/runtime"; mkdir -m 700 "$LOG" "$RT"; cd "$D"; export PATH="$D:$PATH"
+test -x "$D/asicend"; test -x "$D/asicenctl"; test -x "$D/asicen-ts"
+python3 -c 'import json,sys; m=json.load(open("manifest.json")); assert m.get("source_ref")==sys.argv[1] and m.get("platform")==sys.argv[2]' "$SOURCE_SHA" "$TARGET"
+```
+
+Windows対象版は同runの`win-candidate` artifactを別に取得し、`Get-FileHash -Algorithm SHA256`でZIPを照合して空のrun固有directoryへ展開する。通常`release-candidate`にはWindows ZIPがないので、欠落を通常archiveとして補わない。Linux/macOS/Termuxでは`gh`, `python3` (Termux: `pkg install gh python coreutils tar`), SHA-256 tool, `tar`を確認し、Windowsでは`gh`と`py -3`を確認する。追加installはhost管理者承認後に行う。
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$RunId = '<successful-candidate-run-id>'; $Version = '<candidate-version>'; $CandidateSourceSha = '<candidate-source-sha>'
+$Work = Join-Path $HOME "asicen-win-$RunId"; $Download = Join-Path $Work 'download'; $D = Join-Path $Work 'candidate'
+if (Test-Path $Work) { throw "refusing to reuse $Work" }
+New-Item -ItemType Directory -Path $Download,$D,(Join-Path $Work 'log'),(Join-Path $Work 'runtime') | Out-Null
+gh run view $RunId --repo Khronos31/asicen-userland --json headSha,attempt,conclusion
+gh api "repos/Khronos31/asicen-userland/actions/runs/$RunId/artifacts" --jq '.artifacts[] | [.id,.name,.expired] | @tsv'
+gh run download $RunId --repo Khronos31/asicen-userland --name win-candidate --dir $Download
+$ZIP = Join-Path $Download "asicen-userland-$Version-windows-x86_64.zip"
+if (-not (Test-Path $ZIP)) { throw "candidate ZIP missing: $ZIP" }
+$jobs = (gh run view $RunId --repo Khronos31/asicen-userland --json jobs | ConvertFrom-Json).jobs
+$winJob = $jobs | Where-Object { $_.name -eq 'Windows x64 development cross-build, PE audit, and package regression' }
+if (-not $winJob) { throw 'Windows candidate build job missing' }
+$runLog = gh run view $RunId --repo Khronos31/asicen-userland --job $winJob.databaseId --log
+$hashLine = $runLog | Select-String -Pattern 'windows zip sha256: ([0-9a-f]{64})' | Select-Object -Last 1
+if (-not $hashLine) { throw 'Windows archive SHA-256 missing from candidate build log' }
+$expectedFromRunLog = $hashLine.Matches[0].Groups[1].Value
+$actual = (Get-FileHash -Algorithm SHA256 $ZIP).Hash.ToLowerInvariant()
+if ($actual -ne $expectedFromRunLog) { throw 'Windows candidate archive hash mismatch' }
+Expand-Archive -LiteralPath $ZIP -DestinationPath $D
+if (-not (Test-Path (Join-Path $D 'manifest.json'))) { throw 'candidate manifest missing' }
+$manifest = Get-Content (Join-Path $D 'manifest.json') -Raw | ConvertFrom-Json
+if ($manifest.source_ref -ne $CandidateSourceSha) { throw 'candidate source commit mismatch' }
+$LOG = Join-Path $Work 'log'; $RT = Join-Path $Work 'runtime'
+```
+
+job名/ID・head SHAとsource refが当該candidate一致しない場合、またはhash行がない場合は未達で停止する。firmware imageの取得・同梱は本レシピの対象外であり、別途確定した供給手順がない限りUSB試験へ進まない。
+
+`WORK`を作るOSでは`LOG`/`RT`もrun固有directoryとして先に生成する。Termuxは`$PREFIX/tmp`または`$HOME`配下を使い、OS `/tmp`を前提にしない。`termux-usb -l`で対象VID/PID/product nameを照合したnodeだけを`termux-usb -r <path>`へ渡す。権限不足はLinux `id`/`stat`/`lsusb -t`、Termux `termux-usb -l`で読み取り記録して停止し、udev/権限の変更は別途承認、変更前保存、試験後復元を記録する。HAOS/Supervisor stateをこの手順から変更しない。
+
 各IDを同じ順序・同じ6項目で実施する。$RT/$LOG/$BUS-PORT/$CHANNEL_PLANはrunごとの実値に置換し、空のcandidate専用runtime/logを使う。物理操作を依頼する各回は既定通知を行い、最大5分で応答がなければ未完了として停止する。OS/API固有の長い操作は同じT-IDから後続recipeを参照する。
 
 ### T00 候補/配布物固定
@@ -94,7 +150,11 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **準備:** 各公開receiver/deviceを一意に割り当て、各clientに別TS出力/ログを用意する。`CAPTURE_SECONDS`には正の有限秒数（例: `10`）を明示設定して記録する。
 - **実操作/利用者への依頼:** asicenctl --instance rc --runtime-dir "$RT" listで一意なR1–R4を選ぶ。次の4 clientを同時起動し各PIDを個別waitする。衛星channel/receiverはREADMEと現地割当へ置換する。
 
+    D='<extracted-candidate-dir>'; LOG='<new-private-run-log-dir>'; RT='<new-private-run-runtime-dir>'
+    mkdir -m 700 "$LOG" "$RT"; export PATH="$D:$PATH"; test -x "$D/asicen-ts"
+    R1='<listed-terrestrial-receiver-1>'; R2='<listed-terrestrial-receiver-2>'; R3='<listed-satellite-receiver-1>'; R4='<listed-satellite-receiver-2>'
     CAPTURE_SECONDS=10
+    test -n "$R1" && test -n "$R2" && test -n "$R3" && test -n "$R4" && test "$CAPTURE_SECONDS" -gt 0
     asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R1" --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-1.ts" & P1=$!
     asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R2" --channel T30 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-2.ts" & P2=$!
     asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-1.ts" & P3=$!
@@ -140,6 +200,43 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** idle/streamそれぞれでowned client/daemonを通常停止してwaitし、再接続後の新daemonも通常停止する。Androidはpermission/FD再取得。
 - **記録:** idle/stream、daemon USB owner状態、依頼/応答時刻、path、status/診断、各実終了値、再取得TS/counter、cleanup。
 
+Linux native Bash runで使うidle/stream手順。各物理操作は利用者へ依頼しEnter応答を最大300秒待ち、daemon/client PIDと返却値を保存する。再接続後は必ず新しいruntimeを使う。
+
+```sh
+PORT='<listed-usb-port>'; TOKEN='idle'; ID="usb:$PORT"
+RT_IDLE="$WORK/runtime-idle"; mkdir -m 700 "$RT_IDLE"
+"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_IDLE" > "$LOG/idle-daemon.log" 2>&1 & IDLE_PID=$!
+printf '%s\n' "$IDLE_PID" > "$LOG/idle-daemon.pid"
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" status > "$LOG/idle-before.txt" 2>&1
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" list > "$LOG/idle-list-before.txt" 2>&1
+printf '%s' 'USB抜去完了後にEnter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/idle-human-wait.txt"; exit 1; fi
+# 操作後の状態と実終了値を記録する。
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" status > "$LOG/idle-removed.txt" 2>&1 || :
+kill -INT "$IDLE_PID"; if wait "$IDLE_PID"; then IDLE_RC=0; else IDLE_RC=$?; fi
+printf '%s\n' "$IDLE_RC" > "$LOG/idle-daemon.rc"
+printf '%s' 'USB再接続完了後にEnter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/reconnect-human-wait.txt"; exit 1; fi
+# 再列挙で新しいPORTを選んでから続ける。
+"$D/asicend" --list-json > "$LOG/discovery-reconnected.json"
+PORT='<new-listed-usb-port>'; ID="usb:$PORT"; TOKEN='stream'; RT_STREAM="$WORK/runtime-stream"; mkdir -m 700 "$RT_STREAM"
+"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_STREAM" > "$LOG/stream-daemon.log" 2>&1 & STREAM_PID=$!
+printf '%s\n' "$STREAM_PID" > "$LOG/stream-daemon.pid"
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-ready.txt" 2>&1
+"$D/asicen-ts" --instance "$TOKEN" --runtime-dir "$RT_STREAM" --receiver '<listed-receiver>' --channel T27 --time 300 --output "$LOG/stream-cut.ts" > "$LOG/stream-cut.out" 2> "$LOG/stream-cut.err" & CLIENT_PID=$!
+printf '%s\n' "$CLIENT_PID" > "$LOG/stream-client.pid"
+printf '%s' 'stream中にUSB抜去完了後Enter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-human-wait.txt"; exit 1; fi
+# 物理切断後、有限観測後にclientをwaitする。
+if wait "$CLIENT_PID"; then CLIENT_RC=0; else CLIENT_RC=$?; fi
+printf '%s\n' "$CLIENT_RC" > "$LOG/stream-client.rc"
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-after-cut.txt" 2>&1 || :
+kill -INT "$STREAM_PID"; if wait "$STREAM_PID"; then STREAM_RC=0; else STREAM_RC=$?; fi
+printf '%s\n' "$STREAM_RC" > "$LOG/stream-daemon.rc"
+```
+
+stream clientの期待値はUSB切断診断とexit 7であり、時間満了exit 0は不合格。idleでdaemonが生存する場合は状態/診断を残してからowned daemonを通常停止する。物理復帰後の新daemonで再列挙・ready・短TS成功を別の新runtimeで記録する。物理操作待ちが上限を超える場合は未完了として停止し、切断・再取得成功に読み替えない。
+
 ### T08 通常停止・cleanup
 
 - **適用対象/頻度:** 全test終了時。
@@ -149,14 +246,37 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** 無関係processへsignalしない。test専用runtimeだけ片付け失敗log保持。
 - **記録:** PID/role/exit、process/FD/IPC/socket/runtime、復旧状態。
 
+POSIX cleanupでowned PIDの終了値と残留を保存する。
+
+```sh
+cleanup_pids="${CLIENT_PID:-} ${CLIENT_B_PID:-} ${DAEMON_PID:-} ${IDLE_PID:-} ${STREAM_PID:-}"
+for pid in $cleanup_pids; do [ -n "$pid" ] || continue; kill -INT "$pid" 2>/dev/null || :; if wait "$pid"; then rc=0; else rc=$?; fi; printf '%s %s\n' "$pid" "$rc" >> "$LOG/owned-wait.rc"; done
+cleanup_csv=$(printf '%s\n' $cleanup_pids | awk 'NF {printf "%s%s", separator, $1; separator=","}')
+if [ -n "$cleanup_csv" ]; then ps -p "$cleanup_csv" -o pid=,ppid=,stat=,command= > "$LOG/processes-after-stop.txt" 2>&1 || :; else : > "$LOG/processes-after-stop.txt"; fi
+find "$WORK" \( -type s -o -type p \) -print > "$LOG/ipc-remnants.txt"
+test ! -s "$LOG/processes-after-stop.txt"; test ! -s "$LOG/ipc-remnants.txt"
+```
+
+残留、wait非0、process所有者が識別できない場合はcleanup未達とし、外部processや既存socketを削除しない。
+
 ### T09 TS・counter・終了値判定
 
 - **適用対象/頻度:** 全capture/soak。
-- **準備:** TS parser/SPEC条件とdaemon counterを確認できるようにする。
-- **実操作/利用者への依頼:** ASICEN SPECの188-byte/sync/TEI/continuity基準とdaemon countersを各TS/client別に確認。
+- **準備:** Python 3.11以上を`python3 --version`で確認し、手順書checkoutの[`ts-check.py`](release-validation/ts-check.py)を使う。候補ごとに新規作成した`$LOG`を使う。
+- **実操作/利用者への依頼:** POSIXでは各TSに`python3 <runbook-checkout>/docs/release-validation/ts-check.py "$LOG/<receiver>.ts" > "$LOG/<receiver>.ts-check.json"`を実行する。Windowsは同じhelperを`py -3 <runbook-checkout>\docs\release-validation\ts-check.py "$LOG\<receiver>.ts"`で実行し、標準出力を`$LOG`へ保存する。全capture/soakの各TSで実行し、候補daemonのdrop/USB counterも記録する。
 - **期待値/終了値:** 全TSが製品SPEC基準を満たし通常取得exit 0。非空file/counter 0だけでpassにしない。
 - **停止/cleanup:** 元TS/hash/logを残してT08 cleanup。
-- **記録:** parser/version、TS hash、sync/TEI/continuity/drop/counter、exit。
+- **記録:** `python3 --version`、helperのGit SHA、TS hash、helperのJSON/終了値、sync/TEI/continuity/drop/counter、client exit。
+
+Windowsで各TSを確認するcommand:
+
+```powershell
+$helper = '<runbook-checkout>\docs\release-validation\ts-check.py'; $ts = Join-Path $LOG '<receiver>.ts'
+$json = Join-Path $LOG '<receiver>.ts-check.json'; $err = Join-Path $LOG '<receiver>.ts-check.err'
+& py -3 $helper $ts 1> $json 2> $err; $parserRc = $LASTEXITCODE
+$parserRc | Set-Content (Join-Path $LOG '<receiver>.ts-check.rc')
+if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
+```
 
 ### T10 native PC/SC・WinSCard
 
@@ -716,12 +836,24 @@ foreach ($channel in $CHANNEL_PLAN) {
   $client = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver',$R1,'--channel',$channel,'--time','10','--output',$file) -PassThru -NoNewWindow -Wait
   [pscustomobject]@{ Channel=$channel; ExitCode=$client.ExitCode; File=$file }
 }
-& $C --instance rc --runtime-dir $RT card-status
-# 利用者へ抜去を依頼し、状態/終了値を保存した後、再挿入を依頼する。
-& $C --instance rc --runtime-dir $RT card-status
-& $C --instance rc --runtime-dir $RT card-atr *> $null; $LASTEXITCODE
-& $C --instance rc --runtime-dir $RT card-reset *> $null; $LASTEXITCODE
-1..10 | ForEach-Object { & $C --instance rc --runtime-dir $RT card-apdu 90:30:00:00:00 *> $null; [pscustomobject]@{ APDU=$_; ExitCode=$LASTEXITCODE } }
+function Wait-CardAction([string]$message) {
+  if ([Console]::IsInputRedirected) { throw 'CARD action requires an interactive PowerShell console.' }
+  Write-Host "$message Enterキーで完了を記録 (最大300秒): " -NoNewline
+  $deadline = [DateTime]::UtcNow.AddSeconds(300)
+  while ([DateTime]::UtcNow -lt $deadline) { if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq [ConsoleKey]::Enter) { Write-Host; return }; Start-Sleep -Milliseconds 250 }
+  throw 'CARD action was not confirmed within 300 seconds; record the gate as incomplete.'
+}
+& $C --instance rc --runtime-dir $RT card-status 2>&1 | Tee-Object (Join-Path $LOG 'card-before-status.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'card-before-status.rc')
+foreach ($op in 'card-atr','card-reset') { & $C --instance rc --runtime-dir $RT $op *> $null; $LASTEXITCODE | Out-File (Join-Path $LOG "card-before-$op.rc") }
+1..10 | ForEach-Object { & $C --instance rc --runtime-dir $RT card-apdu 90:30:00:00:00 *> $null; $LASTEXITCODE | Out-File (Join-Path $LOG "card-before-apdu-$_.rc") }
+Wait-CardAction '同じCARDを物理的に抜いてください。'
+& $C --instance rc --runtime-dir $RT card-status 2>&1 | Tee-Object (Join-Path $LOG 'card-removed-status.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'card-removed-status.rc')
+& $C --instance rc --runtime-dir $RT card-atr *> $null; $LASTEXITCODE | Out-File (Join-Path $LOG 'card-removed-card-atr.rc')
+& $C --instance rc --runtime-dir $RT card-apdu 90:30:00:00:00 *> $null; $LASTEXITCODE | Out-File (Join-Path $LOG 'card-removed-card-apdu.rc')
+Wait-CardAction '同じCARDを再挿入してください。'
+& $C --instance rc --runtime-dir $RT card-status 2>&1 | Tee-Object (Join-Path $LOG 'card-reinserted-status.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'card-reinserted-status.rc')
+foreach ($op in 'card-atr','card-reset') { & $C --instance rc --runtime-dir $RT $op *> $null; $LASTEXITCODE | Out-File (Join-Path $LOG "card-reinserted-$op.rc") }
+1..10 | ForEach-Object { & $C --instance rc --runtime-dir $RT card-apdu 90:30:00:00:00 *> $null; $LASTEXITCODE | Out-File (Join-Path $LOG "card-reinserted-apdu-$_.rc") }
 ```
 
 T08ではclientごとの`ExitCode`保存後にdaemon consoleでCtrl+Cを入力し、daemon exit 0、process/FD/runtime cleanupを確認する。daemon終了後に同一instance/runtimeの`status`を実行しendpointが消えたことを確認する。T09は各TSのSHA-256とTSDuck `tsanalyze`のsync/TEI/continuity結果を記録する。T11は対応機種だけで、電圧計を使ったLNB on/offの公開command/実電圧を記録する。T12はdeviceごとに異なる`--instance`/`--runtime-dir`でdaemonを2つ起動し、client/終了値を分ける。T13は同じcaptureを確定頻度表の秒数で連続実行し、開始・定期・終了時のTS/counter/process/FD/RSSを保存する。T14は全T-IDの今回状態と証拠pathを版別記録へ集約し、未実施・候補欠落・unsupportedをpassにしない。
