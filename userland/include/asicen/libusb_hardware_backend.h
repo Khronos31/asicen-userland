@@ -106,6 +106,7 @@ public:
     bool selects_satellite_stream_before_tune() const noexcept override;
     bool requires_terrestrial_lock_settle() const noexcept override;
     px4::userland::Result<void> open_receiver(std::uint8_t) noexcept override;
+    px4::userland::Result<void> prepare_runtime_functions() noexcept;
     px4::userland::Result<void> tune_terrestrial(std::uint8_t, std::uint32_t,
                                                  std::uint32_t) noexcept override;
     px4::userland::Result<void> tune_satellite(std::uint8_t, std::uint32_t,

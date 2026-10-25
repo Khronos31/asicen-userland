@@ -63,6 +63,11 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return hardware.cleanup_failed_.load();
     }
+    static bool function_initialized(const LibusbW3u3Hardware& hardware, std::uint8_t function)
+    {
+        return function < hardware.initialized_functions_.size() &&
+               hardware.initialized_functions_[function];
+    }
     static bool function_capture_quarantined(const LibusbW3u3Hardware& hardware,
                                              std::uint8_t receiver)
     {
@@ -310,6 +315,7 @@ struct FakeUsb {
     int fail_submit_number = 0;
     int fail_submit_error = LIBUSB_ERROR_IO;
     int fail_control_once = 0;
+    int fail_control_on_function_once = -1;
     bool short_control_once = false;
     std::uint16_t fail_i2c_read_value_once = 0U;
     std::uint16_t short_i2c_read_value_once = 0U;
@@ -486,6 +492,10 @@ struct FakeUsb {
 
     int control(const ControlTransfer& transfer, unsigned char* response)
     {
+        if (fail_control_on_function_once == current_function) {
+            fail_control_on_function_once = -1;
+            return LIBUSB_ERROR_IO;
+        }
         if (transfer.request == Request::I2cRead && fail_i2c_read_value_once == transfer.value) {
             fail_i2c_read_value_once = 0U;
             return LIBUSB_ERROR_IO;
@@ -2231,6 +2241,56 @@ bool test_w3u2_four_receiver_capture_and_function_seed_lifecycles()
     return true;
 }
 
+bool test_w3u2_startup_prepares_other_function_before_capture()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    fake.controller[0x09U] = 0x20U;
+    fake.function_controllers[1U][0x09U] = 0x20U;
+    fake.satellite_register_model = true;
+    fake.satellite_registers[0xceU] = 0x12U;
+    fake.satellite_registers[0xcfU] = 0x34U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.prepare_runtime_functions().has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::function_initialized(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::function_initialized(hardware, 1U));
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.open_receiver(2U).has_value());
+    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
+    CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
+    CHECK(hardware.stop_receiver(1U).has_value());
+    CHECK(hardware.stop_receiver(2U).has_value());
+    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.close_receiver(2U).has_value());
+    CHECK(hardware.shutdown().has_value());
+    return true;
+}
+
+bool test_w3u2_startup_function_failure_releases_receiver_before_ready()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    fake.controller[0x09U] = 0x20U;
+    fake.function_controllers[1U][0x09U] = 0x20U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    fake.fail_control_on_function_once = 1;
+    CHECK(hardware.prepare_runtime_functions().error() == Error::USB_IO);
+    CHECK(LibusbW3u3HardwareTestPeer::function_initialized(hardware, 0U));
+    CHECK(!LibusbW3u3HardwareTestPeer::function_initialized(hardware, 1U));
+    CHECK(!LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 2U));
+    CHECK(hardware.shutdown().has_value());
+    return true;
+}
+
 bool test_w3u2_seed_cleanup_quarantine_is_function_scoped()
 {
     FakeUsb fake;
@@ -2883,6 +2943,10 @@ int main()
          test_w3u2_same_function_peer_release_preserves_shared_seed},
         {"test_w3u2_four_receiver_capture_and_function_seed_lifecycles",
          test_w3u2_four_receiver_capture_and_function_seed_lifecycles},
+        {"test_w3u2_startup_prepares_other_function_before_capture",
+         test_w3u2_startup_prepares_other_function_before_capture},
+        {"test_w3u2_startup_function_failure_releases_receiver_before_ready",
+         test_w3u2_startup_function_failure_releases_receiver_before_ready},
         {"test_w3u2_seed_cleanup_quarantine_is_function_scoped",
          test_w3u2_seed_cleanup_quarantine_is_function_scoped},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",

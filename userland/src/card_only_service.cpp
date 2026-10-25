@@ -351,11 +351,12 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
     const auto* profile = hardware.device_profile();
     if (profile == nullptr || !profile_runtime_supported(*profile)) return 3;
     const std::uint8_t initial_receiver = profile->combined_isdb_ts ? 0U : 1U;
-    const auto opened = hardware.open_receiver(initial_receiver);
-    if (!opened) return exit_status(opened.error());
-    if (!card_only) {
-        const auto closed = hardware.close_receiver(initial_receiver);
-        if (!closed) return exit_status(closed.error());
+    if (card_only) {
+        const auto opened = hardware.open_receiver(initial_receiver);
+        if (!opened) return exit_status(opened.error());
+    } else {
+        const auto prepared = hardware.prepare_runtime_functions();
+        if (!prepared) return exit_status(prepared.error());
     }
 
     std::unique_ptr<AsicenEnclosureFamily> family(new (std::nothrow) AsicenEnclosureFamily(

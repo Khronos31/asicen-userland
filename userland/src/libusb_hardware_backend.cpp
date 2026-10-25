@@ -1032,6 +1032,33 @@ std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
     return profile_->combined_isdb_ts ? 1U : 2U;
 }
 
+Result<void> LibusbW3u3Hardware::prepare_runtime_functions() noexcept
+{
+    if (!runtime_model_supported()) {
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
+    std::array<bool, 2U> prepared{};
+    const std::uint8_t initial_receiver = profile_->combined_isdb_ts ? 0U : 1U;
+    for (std::uint8_t offset = 0U; offset < receiver_count(); ++offset) {
+        const std::uint8_t receiver = offset == 0U
+                                          ? initial_receiver
+                                          : offset <= initial_receiver ? offset - 1U : offset;
+        if (receiver >= receiver_count()) continue;
+        const auto route = receiver_address(*profile_, receiver);
+        if (!route || route.value().rf_function_index >= prepared.size()) {
+            return Result<void>::failure(Error::UNSUPPORTED);
+        }
+        const std::uint8_t function = route.value().rf_function_index;
+        if (prepared[function]) continue;
+        const auto opened = open_receiver(receiver);
+        if (!opened) return opened;
+        const auto closed = close_receiver(receiver);
+        if (!closed) return closed;
+        prepared[function] = true;
+    }
+    return Result<void>::success();
+}
+
 V2FrontendTarget LibusbW3u3Hardware::frontend_target(std::uint8_t receiver) const noexcept
 {
     if (profile_ == nullptr) {
