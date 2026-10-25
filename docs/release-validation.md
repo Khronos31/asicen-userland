@@ -8,12 +8,110 @@
 
 | 区分 | 適用頻度 | ASICENでの確認 |
 |---|---|---|
-| 機種初回 | ASICENの各機種を個別に代表機で2時間連続受信し、その機種で毎releaseの回帰項目を代表機だけで行う。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ機種別に記録する。 | PX-W3U2とPX-W3U3では最低4番組同時録画が必須。現行実装は同時stream 1本のため、この要求は未達。地上波/衛星、CARD、対応LNBも確認する。ほかの機種はREADME記載の機種別能力に従う。 |
-| 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、機種の最大能力による同時受信とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | PX-W3U2とPX-W3U3の最低要求は4番組同時録画。現行実装の同時stream上限1本は要求未達であり、4番組同時録画試験に合格した候補が必要。W3U3の公称4 tuner paths、discoveryの4 route records、公開slot 0/1の2つはそれぞれ別の値で、4番組同時録画の実績を示さない。WinSCard/PCSCはnative stackを別経路で確認。 |
+| 機種初回 | ASICENの全機種で、機種ごとに代表機の2時間連続受信と毎release項目を実施する。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ機種別に記録する。 | PX-W3U2とPX-W3U3は4番組同時録画、地上波/衛星、CARD、対応LNBを確認する。ほかの機種はREADME記載の機種別能力に従う。 |
+| 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、機種別の同時受信能力とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | PX-W3U2とPX-W3U3は4番組を同時録画し、各TS/counter/終了値を確認する。W3U3のtuner path数、discovery route数、公開slot数は録画数と別々に記録する。WinSCard/PCSCはnative stackを別経路で確認する。 |
 | 必要に応じて | LNB電圧実測と非対応機種の拒否、複数チューナー列挙/daemon並列、変更機能に応じた機種×OS/ABIの追加確認。 | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種へsoftware要求を送らない。 |
 | 初回/major | 必要時項目を通し、代表機で全無料channelを各10秒TS取得。macOS/Windows各30分連続、残るOS/ABI各10分連続で取得する。全channel取得は代表機だけ。別途指示されたソークは別記する。 | 現地channel planとmodel receiver割当を記録。Windows ZIPは通常aggregate外でも同候補の`win-candidate`を使う。 |
 
 全配布archiveはnative OS/ABIで回帰し、代表機の全channel10秒取得を全archiveへ広げない。具体的な候補・操作・判定は以下の手順、実施結果は[`release-validation/1.0.0.md`](release-validation/1.0.0.md)と初回機種記録へ分ける。
+
+## 共通実行環境表
+
+表の列は4製品で共通とする。配布targetごとに対応するnative OS/ABIで実行し、依存・driver/permission・firmware/input・CARD backendを記録する。実際に使ったhost OS/ABIと結果は版別の検証記録へ記す。
+
+| ID | OS / ABI | 依存 / driver / permission | firmware / input | CARD backend | 配布artifact / 手順 |
+|---|---|---|---|---|---|
+| E03 | AnduinOS Linux x86_64 / glibc | native CPU、libusb静的、USB access pathを記録 | 共通loader image | Linux PC/SC IFDを別途確認 | `linux-glibc-x86_64` / §3–§5 |
+| E02 | HAOS Alpine Linux x86_64 / musl | native CPU、libusb静的、Supervisor USB access pathを記録 | 共通loader image | musl用IFDを別途確認 | `linux-musl-x86_64` / §3–§5 |
+| E15-G | native Linux aarch64 / glibc | native aarch64、libusb静的、USB access pathを記録 | 共通loader image | Linux PC/SC IFDを別途確認 | `linux-glibc-aarch64` / §3–§5 |
+| E15-M | native Linux aarch64 / musl | native aarch64、emulationなし。Alpine arm64 runtime | 共通loader image | musl用IFDを別途確認 | `linux-musl-aarch64` / §3–§5 |
+| E04 | macOS arm64 | libusb静的、USB access permissionを記録 | 共通loader image | macOS PC/SC IFDを別途確認 | `darwin-arm64` / §3–§5 |
+| E05 | Android Termux aarch64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | 非対応 | `android-aarch64` / §3–§5 |
+| E06 | Android Termux armv7a | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | 非対応 | `android-armv7a` / §3–§5 |
+| E07 | Android Termux x86_64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | 非対応 | `android-x86_64` / §3–§5 |
+| W1 | Windows 11 x86_64 | 使用許可済みlibusb driver。変更しない | 同source candidateの`win-candidate` | native WinSCardを別途確認 | Windows候補ZIP / §3–§5 |
+
+## 共通試験シナリオ
+
+各シナリオは同じ順に「適用頻度/対象能力」「準備/起動」「操作/利用者への依頼」「期待値」「停止/cleanup」「記録」を記載する。チャンネル、USB位置、firmware pathは現地の値へ置き換え、失敗試行も保存する。HAOS/SCSでは各物理操作を依頼する直前にCodexは`beep`、Claude Codeは`vibe`を実行し、依頼から最大5分待つ。期限内に操作がなければ、その工程を未完了として停止する。
+
+### A. 列挙と同時録画
+
+| 適用頻度 / 対象能力 | 準備 / 起動 | 操作 / 利用者への依頼 | 期待値 | 停止 / cleanup | 記録 |
+|---|---|---|---|---|---|
+| 毎release。PX-W3U2/W3U3は4番組同時、他機種はREADMEのreceiver能力 | `asicend --list-json`で機種/USB pathを固定し、候補firmwareと空の`$RT`を用意。`asicend --device usb:<BUS-PORT[,BUS-PORT]> --instance rc --firmware <FIRMWARE> --runtime-dir "$RT"`を起動 | `status`/`list`から使用receiverを選び、W3U2/W3U3では地上波2番組と衛星2番組を同時開始する。下記の4 client例を使用する | 全4 clientが同時に稼働し、各TS同期/品質、packet・sync・TEI・continuity counter、各client終了0を確認。順次取得で代用しない | 4 clientを通常終了し、daemonを通常終了。status、process、FD、IPC/runtime残留がないことを確認 | 候補/source SHA、model/revision、channel/receiver、各CLIとexit、TS/counter、cleanupを記録 |
+
+```sh
+asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R1" --channel T27 --time <SECONDS> --output terrestrial-1.ts & P1=$!
+asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R2" --channel T30 --time <SECONDS> --output terrestrial-2.ts & P2=$!
+asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time <SECONDS> --output satellite-1.ts & P3=$!
+asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --lnb-voltage 0 --time <SECONDS> --output satellite-2.ts & P4=$!
+if wait "$P1"; then RC1=0; else RC1=$?; fi
+if wait "$P2"; then RC2=0; else RC2=$?; fi
+if wait "$P3"; then RC3=0; else RC3=$?; fi
+if wait "$P4"; then RC4=0; else RC4=$?; fi
+```
+
+`R1`–`R4`はcandidateで起動した`asicenctl list`の実際のreceiver IDから設定し、重複しない4系統を用いる。`T27`/`T30`/`BS01_0`/`BS15_0`は例であり、現地channel planと各receiverの公開system能力に合わせて選び、実値を記録する。各client開始時刻と終了時刻が重なることを確認し、4本全ての終了値を保存する。
+
+各4 clientが動作している間、別terminalからstatus確認と通常CARD APDU 10回を実施する。CARDなしprofileではAPDU項目を対象外とし、受信中statusは各対象で記録する。
+
+```sh
+asicenctl --runtime-dir "$RT" --instance rc status
+asicenctl --runtime-dir "$RT" --instance rc list
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00 > "$LOG/stream-card-$i.apdu"; then rc=0; else rc=$?; fi
+  echo "$rc" > "$LOG/stream-card-$i.rc"
+done
+```
+
+各status/APDUは4 clientの開始/終了時刻内に行い、APDUはCoreの単発送信を10回個別に呼び出す。clientごとのTS/counter/exitとは別に照会時刻・response class・各終了値を保存する。
+
+### B. CARD抜去・再挿入
+
+適用: readerと内蔵CARD経路を備える機種。受信を止めてもdaemonは起動したままにし、各人手操作の前にIssue/作業画面で抜去または再挿入を依頼する。依頼後最大5分待ち、応答がなければその工程を未完了で終了する。
+
+```sh
+asicenctl --runtime-dir "$RT" --instance rc card-status
+asicenctl --runtime-dir "$RT" --instance rc card-atr
+asicenctl --runtime-dir "$RT" --instance rc card-reset
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00 > "$LOG/card-$i.apdu"; then rc=0; else rc=$?; fi
+  echo "$rc" > "$LOG/card-$i.rc"
+done
+```
+
+1. 準備時にstatus present、ATR取得、reset後ATRと10回のAPDU終了値を確認する。
+2. 親が「対象機のカードを抜いてください」と依頼し、最大5分待つ。抜去後に`card-status`で不在、`card-atr`と`card-apdu`で`CARD_REMOVED`/`NO_CARD`・exit 9を確認する。
+
+```sh
+asicenctl --runtime-dir "$RT" --instance rc card-status
+asicenctl --runtime-dir "$RT" --instance rc card-atr
+asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00
+```
+
+3. 親が「同じカードを再挿入してください」と依頼し、最大5分待つ。再挿入後にstatus present、ATR/reset/APDUの復帰を確認する。
+
+```sh
+asicenctl --runtime-dir "$RT" --instance rc card-status
+asicenctl --runtime-dir "$RT" --instance rc card-atr
+asicenctl --runtime-dir "$RT" --instance rc card-reset
+asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00
+```
+
+4. CARD操作を終了しdaemonを通常停止する。生ATR、カードID、APDU応答本文は公開記録へ残さない。
+
+期待値は不在時の明示的失敗と、再挿入後の経路復帰。readerなし/unsupported profileの結果はprofile単位で記録する。Linux/macOS PC/SC IFDとWindows WinSCardは各native stackで別シナリオとして同様の挿抜を行い、CLI結果で代用しない。
+
+### C. USB切断・再接続
+
+| 適用頻度 / 対象能力 | 準備 / 起動 | 操作 / 利用者への依頼 | 期待値 | 停止 / cleanup | 記録 |
+|---|---|---|---|---|---|
+| 毎release。対応する各USB接続機種のidle時とstreaming時 | `asicend --list-json`でportを記録し、idle確認後、別runで短時間clientを起動 | 親がidle時と受信中それぞれで対象USBを抜くよう依頼。client/daemonを観測。親が同じportへの再挿入を依頼し、再列挙後に新daemonを起動 | 切断表示と規定終了値を記録し、ハングやclient残留なし。自動hotplug再取得は期待しない。新daemonのstatus/listと短時間再取得が成功 | client/旧daemonを通常停止し終了を待つ。新daemonを通常停止しFD/IPC/runtime残留を確認。Termuxは許可を再取得し新FDで起動 | 物理操作時刻、port、ログ、exit、再列挙/再取得、permission経路とcleanup |
+
+### D. cleanupと版別結果
+
+受信clientを通常終了しdaemonを通常停止する。process/FD/IPC/runtime endpointを確認して後始末する。環境表と頻度表の実施結果は版別文書へ、実測済み/未実施/失敗/対象外を分けて記録する。
 
 ## 1. 候補と配布物
 
@@ -36,6 +134,8 @@ gh run download <candidate-run-id> --name release-candidate --dir candidate
 毎release、代表Linux x86_64機で2時間連続受信し、全配布archiveをnative OS/ABIで短時間回帰する。初回/major追加確認ではmacOS/Windowsは各30分、残るOS/ABIは各10分連続受信し、全無料channel各10秒は代表機だけで行う。Windowsが対象の版ではnative確認に同source candidateの `win-candidate` artifactを使い、通常配布binaryの代替とは扱わない。
 
 候補archiveをnative hostに展開し、`asicend --list-json` でUSB位置とmodelを確認する。値は現地の `BUS-PORT`、firmware、runtimeへ置換する。USB複数機能機種では確認済み内部hubで相方が一意な場合以外、両positionを指定する。
+
+以下のT27単体commandは起動・TS出力のsmoke確認用であり、PX-W3U2/W3U3の4番組同時録画を満たす判定には使わない。4 client同時の開始・各TS/counter/終了値は共通シナリオAで確認する。
 
 ```sh
 RT=$(mktemp -d "${TMPDIR:-/tmp}/asicen-release.XXXXXX")
@@ -65,7 +165,7 @@ done
 
 現行の公開`asicenctl`は pinned Coreの`card-apdu HEX`単発送信を使う。カードreaderを公開する実機でstatus present、ATR取得、reset後のATR、上の通常コマンド10回それぞれの終了値を確認する。カード抜去を依頼してからstatusが不在となり、ATR/APDUがCARD_REMOVED/NO_CARD (exit 9) となること、再挿入後にstatus/ATR/reset/APDUが戻ることを確認する。生ATR、カードID、APDU応答本文は公開記録に保存しない。未対応またはreaderなしprofileでのエラーはそのprofileの実測として記録し、製品全体の未実装と一般化しない。
 
-hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapterである。過去のphysical CARD remove/reinsert記録はPX-W3U3上のlinux-glibc-x86_64候補であり、他model/OSの認定を意味しない。Linux/macOSの配布IFDをnative OSのPC/SC stackへ設定し、reader/card列挙、reset/ATR、通常APDU交換まで別経路で確認する。AndroidにはIFDなし。Windows WinSCardは該当版で検証対象の場合、CLIのCARD_*とは別経路として確認する。各OS/platform routeの未実施を未確認として残す。
+hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapterである。Linux/macOSでは該当libc/platform向けIFDを候補から選び、[`README.md`](../README.md#pcsc-と内蔵カードリーダー)の`reader.conf.d/asicen-userland.conf`の4値を、実行中daemonと同じruntime/instance、IFD絶対path、`user`または`group` accessへ置き換えてnative PC/SC stackへ登録する。test hostの`pcscd` logとnative PC/SC consumerでreader列挙、card status、ATR/reset、通常APDUを確認する。system PC/SC serviceの設定を戻し、consumer/contextを解放してからdaemonを通常停止する。production hostのサービス再読込・再起動をこの手順へ含めない。AndroidにはIFDがない。
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
 
@@ -89,7 +189,7 @@ $selector = 'usb:BUS-PORT[,BUS-PORT]'
 & $B --instance rc --runtime-dir $RT --receiver <ID> --channel T27 --time <SECONDS> --output t27.ts
 ```
 
-candidate内のapplication-local `WinSCard.dll`をWindows native PC/SC consumerからロードし、context、reader/card status、connect、ATR/reset、反復APDU、disconnect/context releaseを確認する。物理CARD抜去時の不在と再挿入後の復帰も記録する。CLIの`card-*`結果はWinSCard経路の代用にならない。生ATR、card ID、APDU応答本文は公開記録へ保存しない。
+candidate内のapplication-local `WinSCard.dll`をconsumerと同じdirectoryに置き、Windows native PC/SC consumerからそのabsolute module pathをロードする。consumerの操作でcontext確立、reader/card status、connect、ATR/reset、反復APDU、disconnect/context releaseを確認し、実行fileとloaded DLL pathを記録する。物理CARD抜去時の不在と再挿入後の復帰も同じ依頼/待機/確認型で記録する。CLIの`card-*`結果はWinSCard経路の代用にならない。consumer/API probeの実行fileが該当candidateに用意されていない場合は未実施とし、CI結果をnative WinSCard試験へ代用しない。生ATR、card ID、APDU応答本文は公開記録へ保存しない。
 
 ## 5. LNB・soak・cleanup
 
