@@ -80,13 +80,14 @@
 ### T03 最大同時受信
 
 - **適用対象/頻度:** 毎release、各modelの公開最大能力。
-- **準備:** 各公開receiver/deviceを一意に割り当て、各clientに別TS出力/ログを用意。
+- **準備:** 各公開receiver/deviceを一意に割り当て、各clientに別TS出力/ログを用意する。`CAPTURE_SECONDS`には正の有限秒数（例: `10`）を明示設定して記録する。
 - **実操作/利用者への依頼:** asicenctl --instance rc --runtime-dir "$RT" listで一意なR1–R4を選ぶ。次の4 clientを同時起動し各PIDを個別waitする。衛星channel/receiverはREADMEと現地割当へ置換する。
 
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R1" --channel T27 --time "$SECONDS" --output "$LOG/terrestrial-1.ts" & P1=$!
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R2" --channel T30 --time "$SECONDS" --output "$LOG/terrestrial-2.ts" & P2=$!
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time "$SECONDS" --output "$LOG/satellite-1.ts" & P3=$!
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --lnb-voltage 0 --time "$SECONDS" --output "$LOG/satellite-2.ts" & P4=$!
+    CAPTURE_SECONDS=10
+    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R1" --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-1.ts" & P1=$!
+    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R2" --channel T30 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-2.ts" & P2=$!
+    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-1.ts" & P3=$!
+    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-2.ts" & P4=$!
     for P in "$P1" "$P2" "$P3" "$P4"; do if wait "$P"; then RC=0; else RC=$?; fi; printf "%s %s\n" "$P" "$RC"; done
 - **期待値/終了値:** 各clientの稼働時間が重なり、各exit 0とTS/counter合格。順次取得を同時試験の代用にしない。
 - **停止/cleanup:** 全client通常終了後daemon通常停止、残留なし。
@@ -123,10 +124,10 @@
 
 - **適用対象/頻度:** 毎release。USB対応deviceのidle/streamを別run。
 - **準備:** USB pathをlist-jsonで固定。有限captureとそれより短い観測窓を準備。
-- **実操作/利用者への依頼:** asicend --list-jsonでport固定、有限asicen-ts中に抜去を依頼。再接続後新runtimeでdaemon/status/list/短TS。
-- **期待値/終了値:** 切断側のexit 7/診断、新daemon再取得exit 0。time満了exit 0は切断合格でない。
-- **停止/cleanup:** 旧client/daemon stop/wait後に再接続、新daemonも停止。Androidはpermission/FD再取得。
-- **記録:** idle/stream、観測/capture deadline、port/diagnostic/exit、再取得TS/counter。
+- **実操作/利用者への依頼:** `asicend --list-json`でUSB pathを特定し、streamなしのdaemonを起動してstatus/listとdaemonのUSB owner状態を記録する。daemonがdeviceを保持したidle中に利用者へ抜去を依頼し、応答後にstatus/list、診断、daemonの実際の終了値を採取する。通常停止後、再接続を依頼し、再列挙したpathで新runtime/daemonを起動してstatus/listと短い`asicen-ts`を実行する。別runでは有限`asicen-ts`中に抜去を依頼し、client/daemonの切断診断と終了値を採取する。
+- **期待値/終了値:** idle抜去では保持中USBの切断がdaemon状態/診断に現れ、実際に終了したprocessの値をそのまま記録する。stream抜去では切断診断とclient exit 7を確認する。いずれもtime満了exit 0は切断合格でない。新daemonの短TSはexit 0とTS/counter合格。
+- **停止/cleanup:** idle/streamそれぞれでowned client/daemonを通常停止してwaitし、再接続後の新daemonも通常停止する。Androidはpermission/FD再取得。
+- **記録:** idle/stream、daemon USB owner状態、依頼/応答時刻、path、status/診断、各実終了値、再取得TS/counter、cleanup。
 
 ### T08 通常stop/cleanup
 
@@ -159,10 +160,10 @@
 
 - **適用対象/頻度:** 必要時。給電対応profileだけ実測。
 - **準備:** 対応profile、meter、独立給電の状態を確認。
-- **実操作/利用者への依頼:** 対応機で--allow-lnb-power、asicenctl lnb-on/lnb-offを使いmeter測定。非対応profileはsoftware給電要求を送らない。
-- **期待値/終了値:** 対応はmeter実測、非対応は拒否しGPIO/給電変化なし。
-- **停止/cleanup:** daemon停止、0Vと通常配線復帰。非対応機へ給電しない。
-- **記録:** model/profile、command/exit、meter値/条件、cleanupまたはN/A根拠。
+- **実操作/利用者への依頼:** 対応機は`asicend --device usb:<BUS-PORT> --instance rc --runtime-dir "$RT" --allow-lnb-power`でdaemonを起動し、`asicenctl --device usb:<BUS-PORT> --runtime-dir "$RT" --instance rc lnb-on` / `lnb-off`を各実行してmeter測定する。将来、LNB制御非対応profileを持つ実機が利用可能になった場合だけ、sourceで非対応と確認した機器を選び、誤選択時に出力がないことをmeterで確認してから、同じdaemon commandと公開`asicenctl` commandを使う。`--allow-lnb-power`付きで`lnb-on`を一度呼び、未許可フラグによる一般拒否とprofile拒否を区別する。非対応profileを一意に確認できない候補では実行しない。
+- **期待値/終了値:** 対応機はmeter実測を記録する。非対応profileの公開APIは`UNSUPPORTED`・exit 3を返し、GPIO/物理給電は切り替わらずmeter値も変化しないことを確認する。API拒否だけでは物理給電不変の確認にならない。
+- **停止/cleanup:** daemonを通常停止し、非対応profileでは給電要求を追加せず0Vと通常配線復帰を確認する。
+- **記録:** model/profile、command/response/exit、meter値と条件、cleanup。現所持ASICEN機器は全てLNB対応のため非対応profile拒否の実機確認は未実施・現在実行不可と記録する。対応機試験やmockを代替合格にしない。
 
 ### T12 複数device/daemon/access
 
