@@ -2804,6 +2804,28 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
                        static_cast<int>(error), receiver);
         const CaptureRunResult cleanup = stop_and_drain(
             receiver, receiver_capture_states_[receiver].dsc_attempted);
+        if (startup_config_.enabled) {
+            const AsyncState* const async = capture_async(receiver);
+            bool async_prepared = false;
+            if (async != nullptr) {
+                std::lock_guard<std::mutex> lock(async->mutex);
+                async_prepared = async->prepared;
+            }
+            const auto& capture = receiver_capture_states_[receiver];
+            std::fprintf(stderr,
+                         "asicen-capture-prepare-cleanup receiver=%u original_error=%u "
+                         "mapped_error=%u drain_result=%u source_prepared=%u "
+                         "async_prepared=%u cf_snapshot=%u link_snapshot=%u "
+                         "dsc_attempted=%u cleanup_failed=%u\n",
+                         static_cast<unsigned>(receiver),
+                         static_cast<unsigned>(original_error),
+                         static_cast<unsigned>(error), static_cast<unsigned>(cleanup),
+                         source_prepared_[receiver] ? 1U : 0U, async_prepared ? 1U : 0U,
+                         capture.cf_snapshot_valid ? 1U : 0U,
+                         capture.link_snapshot_valid ? 1U : 0U,
+                         capture.dsc_attempted ? 1U : 0U,
+                         cleanup_failed_.load() ? 1U : 0U);
+        }
         if (cleanup == CaptureRunResult::fatal_drain) {
             return Result<void>::failure(Error::USB_IO);
         }
@@ -3247,16 +3269,40 @@ Result<void> LibusbW3u3Hardware::stop_source_receiver(std::uint8_t receiver) noe
         capture.cf_snapshot_valid || capture.link_snapshot_valid) {
         const auto result = stop_and_drain(receiver, capture.dsc_attempted);
         if (result == CaptureRunResult::fatal_drain) {
+            if (startup_config_.enabled) {
+                std::fprintf(stderr,
+                             "asicen-capture-stop receiver=%u drain_result=%u "
+                             "returned_error=%u cleanup_failed=%u\n",
+                             static_cast<unsigned>(receiver), static_cast<unsigned>(result),
+                             static_cast<unsigned>(Error::USB_IO),
+                             cleanup_failed_.load() ? 1U : 0U);
+            }
             return Result<void>::failure(Error::USB_IO);
         }
         if (result != CaptureRunResult::cancelled) {
             mark_cleanup_failed(Error::USB_IO);
+            if (startup_config_.enabled) {
+                std::fprintf(stderr,
+                             "asicen-capture-stop receiver=%u drain_result=%u "
+                             "returned_error=%u cleanup_failed=%u\n",
+                             static_cast<unsigned>(receiver), static_cast<unsigned>(result),
+                             static_cast<unsigned>(Error::USB_IO),
+                             cleanup_failed_.load() ? 1U : 0U);
+            }
             return Result<void>::failure(Error::USB_IO);
         }
         source_prepared_[receiver] = false;
     }
-    return cleanup_failed_.load() ? Result<void>::failure(Error::USB_IO)
-                                  : Result<void>::success();
+    const bool failed = cleanup_failed_.load();
+    if (startup_config_.enabled) {
+        std::fprintf(stderr,
+                     "asicen-capture-stop receiver=%u drain_result=not_needed "
+                     "returned_error=%u cleanup_failed=%u\n",
+                     static_cast<unsigned>(receiver),
+                     static_cast<unsigned>(failed ? Error::USB_IO : Error::OK),
+                     failed ? 1U : 0U);
+    }
+    return failed ? Result<void>::failure(Error::USB_IO) : Result<void>::success();
 }
 
 CaptureRunResult LibusbW3u3Hardware::stop_and_drain(std::uint8_t receiver,
