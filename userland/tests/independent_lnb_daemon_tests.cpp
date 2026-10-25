@@ -99,6 +99,12 @@ struct FakeUsb {
             if (transfer.value == 0x094aU) data[1] = 0x1eU;
             return transfer.length;
         }
+        if (transfer.request == Request::SysCtrlRead) {
+            data[0] = 1U;
+            data[1] = 0x11U;
+            data[2] = 0x52U;
+            return transfer.length;
+        }
         if (transfer.request == Request::Gpio || transfer.request == Request::GpioRead) {
             const auto mask = transfer.request == Request::GpioRead
                                   ? 0U
@@ -257,7 +263,7 @@ bool test_ctl_lnb_on_off_reaches_the_gpio()
         Daemon daemon(hardware, root.path);
         CHECK(daemon.ready());
         CHECK(advertises_lnb(daemon));
-        CHECK(lnb_state(daemon, false));  // Nothing verified yet: null, never a guessed false.
+        CHECK(lnb_state(daemon, true, false));  // Startup readback confirmed OFF.
         CHECK(daemon.ctl(root.path, "lnb-on") == 0);
         CHECK(usb.on());
         CHECK(lnb_state(daemon, true, true));
@@ -292,9 +298,10 @@ bool test_ctl_lnb_on_is_refused_without_allow_lnb_power()
     CHECK(LibusbW3u3HardwareTestPeer::configure(hardware, &hooks, usb.primary, usb.sibling));
     Daemon daemon(hardware, root.path);
     CHECK(daemon.ready());
+    const unsigned writes_before_request = usb.writes();
     CHECK(daemon.ctl(root.path, "lnb-on") == 3);  // UNSUPPORTED
-    CHECK(usb.writes() == 0U && !usb.on());
-    CHECK(lnb_state(daemon, false));
+    CHECK(usb.writes() == writes_before_request && !usb.on());
+    CHECK(lnb_state(daemon, true, false));
     CHECK(daemon.ctl(root.path, "lnb-off") == 0);  // OFF stays available and is verified.
     CHECK(lnb_state(daemon, true, false));
     CHECK(daemon.stop());
