@@ -2104,8 +2104,26 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
     if (!initialized_ || !claimed_) {
         return Result<void>::failure(Error::NOT_READY);
     }
-    if (source_prepared_[receiver] || lnb_transaction_active_ ||
-        (any_source_prepared() && (lnb_on_ || lnb_cleanup_required_))) {
+    const bool receiver_prepared = source_prepared_[receiver];
+    const bool peer_satellite_powered = any_source_prepared() && (lnb_on_ || lnb_cleanup_required_);
+    if (receiver_prepared || lnb_transaction_active_ || peer_satellite_powered) {
+        if (startup_config_.enabled) {
+            unsigned prepared_mask = 0U;
+            for (std::size_t index = 0U; index < source_prepared_.size(); ++index) {
+                if (source_prepared_[index]) prepared_mask |= 1U << index;
+            }
+            std::fprintf(stderr,
+                         "asicen-tune-power-rejected receiver=%u reason=%s "
+                         "prepared_mask=%u lnb_on=%u lnb_cleanup_required=%u "
+                         "transaction_active=%u transaction_receiver=%u\n",
+                         static_cast<unsigned>(receiver),
+                         receiver_prepared ? "receiver_capture" :
+                         lnb_transaction_active_ ? "power_transaction" : "peer_satellite_power",
+                         prepared_mask, lnb_on_ ? 1U : 0U,
+                         lnb_cleanup_required_ ? 1U : 0U,
+                         lnb_transaction_active_ ? 1U : 0U,
+                         static_cast<unsigned>(lnb_transaction_receiver_));
+        }
         return Result<void>::failure(Error::BUSY);
     }
     DeadlineScope deadline(deadline_, deadline_active_, until);
