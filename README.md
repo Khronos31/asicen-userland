@@ -14,13 +14,13 @@
 | PX-W3U3 | `0b06:0005` | 同上 | 同上 |
 | PX-W3U3 V2 | `0b06:0006` | 条件付きの primary（[仕様上の制限](SPEC.md#010-source-supported-model-boundary)） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
 
-候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
+候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation/0.1.0.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
 
 4 チューナー機（PX-W3U2、PX-W3U3、PX-W3U3 V2）は sibling 側の USB 機能も認識して確保しますが、現行のバックエンドが公開している受信部は primary 側の 2 つ（0: 衛星、1: 地デジ）のみです。同時受信可能なストリームは 1 本であり、製品カタログ上の 4 系統同時受信には対応していません。
 
 実行時の内部経路はブリッジ revision 11/52・controller type 0f・version 7 に限定し、W3U2 は type 10 も受理します。未実装の revision 16/52 等は起動時に拒否します。機種名だけで全個体の対応を保証しません。
 
-`asicend --models` は USB にアクセスせず、対応機種名と VID:PID だけの静的一覧を表示します。機種別の認定状態や個別の電圧実測は[検証記録](docs/release-validation.md#現在の候補と検証状況)で区別します。
+`asicend --models` は USB にアクセスせず、対応機種名と VID:PID だけの静的一覧を表示します。機種別の認定状態や個別の電圧実測は[検証記録](docs/release-validation/0.1.0.md#現在の候補と検証状況)で区別します。
 
 `asicend`・`asicen-ts`・`asicenctl`・`asicen-termux` は、それぞれ単独の `--version` で製品の版を表示します。機器やデーモンの起動は不要です。`asicend -h` は `--help` と同じヘルプを表示します。
 
@@ -39,7 +39,7 @@ LNB 給電に関する注意点は以下のとおりです。
 
 ## 動作環境
 
-バージョン 0.1.0 のバイナリ配布は Linux・macOS・Android の 8 種類です。Windows のコードとビルド検証は含みますが、Windows バイナリは配布しません。Windows の正式対応は WinSCard 対応を揃えた 0.2.x で予定しています。候補ごとの結果は[検証状況](docs/release-validation.md#現在の候補と検証状況)に記録します。アーカイブ名は `asicen-userland-0.1.0-` で始まります。
+バージョン 0.1.0 のバイナリ配布は Linux・macOS・Android の 8 種類です。Windows のコードとビルド検証は含みますが、Windows バイナリは配布しません。Windows の正式対応は WinSCard 対応を揃えた 0.2.x で予定しています。候補ごとの結果は[検証状況](docs/release-validation/0.1.0.md#現在の候補と検証状況)に記録します。アーカイブ名は `asicen-userland-0.1.0-` で始まります。
 
 | 対象 OS / 環境 | 配布アーカイブ名 | ビルド方針 | 候補 6dbdba2 の実機確認 | 構成と備考 |
 |---|---|:---:|:---:|---|
