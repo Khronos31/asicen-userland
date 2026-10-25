@@ -8,8 +8,8 @@
 
 | 区分 | 適用頻度 | ASICENでの確認 |
 |---|---|---|
-| 機種初回 | ASICENの各機種を個別に代表機で2時間連続受信し、その機種で毎releaseの回帰項目を代表機だけで行う。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ機種別に記録する。 | PX-W3U3では公開能力と未確認の最大能力を区別し、地上波/衛星、CARD、対応LNBを確認する。ほかの機種はREADME記載の機種別能力に従う。 |
-| 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、機種の最大能力による同時受信とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | W3U3の公開receiver slotは0/1の2つ。README記載の現行実装上限は同時stream 1本だが、これは機種本来の最大能力を示す根拠ではない。最大能力を確認したうえで試験し、候補がその能力を出せない場合は未達として記録する。WinSCard/PCSCはnative stackを別経路で確認。 |
+| 機種初回 | ASICENの各機種を個別に代表機で2時間連続受信し、その機種で毎releaseの回帰項目を代表機だけで行う。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ機種別に記録する。 | PX-W3U2とPX-W3U3では最低4番組同時録画が必須。現行実装は同時stream 1本のため、この要求は未達。地上波/衛星、CARD、対応LNBも確認する。ほかの機種はREADME記載の機種別能力に従う。 |
+| 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、機種の最大能力による同時受信とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | PX-W3U2とPX-W3U3の最低要求は4番組同時録画。現行実装の同時stream上限1本は要求未達であり、4番組同時録画試験に合格した候補が必要。W3U3の公称4 tuner paths、discoveryの4 route records、公開slot 0/1の2つはそれぞれ別の値で、4番組同時録画の実績を示さない。WinSCard/PCSCはnative stackを別経路で確認。 |
 | 必要に応じて | LNB電圧実測と非対応機種の拒否、複数チューナー列挙/daemon並列、変更機能に応じた機種×OS/ABIの追加確認。 | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種へsoftware要求を送らない。 |
 | 初回/major | 必要時項目を通し、代表機で全無料channelを各10秒TS取得。macOS/Windows各30分連続、残るOS/ABI各10分連続で取得する。全channel取得は代表機だけ。別途指示されたソークは別記する。 | 現地channel planとmodel receiver割当を記録。Windows ZIPは通常aggregate外でも同候補の`win-candidate`を使う。 |
 
