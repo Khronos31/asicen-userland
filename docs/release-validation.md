@@ -17,19 +17,33 @@
 
 ## 共通実行環境表
 
-表の列は4製品で共通とする。配布targetごとに対応するnative OS/ABIで実行し、依存・driver/permission・firmware/input、製品CLIからの内蔵CARD操作、native PC/SC/WinSCard adapterを別々に記録する。APIの提供状態と実機結果を混同せず、host/ABIの結果は版別記録へ記す。
+表の列と値の意味は4製品で共通とする。ここでは候補の対象OS/ABIと実行前提を記し、host名、candidateの実施状態、過去実績は版別文書へ記す。
+
+### 環境表データ辞書
+
+| 列 | 意味・含める属性 | 含めない属性 | 表記・許容値 |
+|---|---|---|---|
+| ID | OS/ABIと必要なruntime/access境界を持つ実行環境シナリオの識別子 | candidate状態、過去実績 | `E` + 番号。4製品で共通するシナリオは同じID、別runtime/access scenarioは別ID |
+| OS / ABI | OS系統、CPU ABI、libcまたはOS runtime | host名、依存、実施状態 | `OS / CPU ABI / libc・runtime` の順。根拠文書にlibc記載がない場合は `未特定` |
+| 依存 / driver / permission | 実行時USB library、OS側USB access手段と権限条件 | firmware、CARD API、検証結果 | `libusb:`、`USB access:`、`FD handoff:` の属性名を使う |
+| firmware / input | 実行時に必要なfirmwareまたは製品入力と放送方式 | archiveへの同梱・埋込完了、candidate実績 | `firmware:` と `input:` を分け、該当しない属性は `なし` |
+| 製品CLIからの内蔵CARD操作 | 製品固有CLI/APIの操作範囲 | PC/SC/WinSCard adapter、実機合否 | 操作名とmodel依存条件。機能なしは `なし` |
+| native PC/SC/WinSCard adapter | OS標準APIへ接続する製品adapterの種類・配布形態 | 製品CLI CARD、adapter実機試験結果 | `Linux PC/SC:`、`macOS PC/SC:`、`Android:`、`Windows WinSCard:` を列挙 |
+| 配布artifact / 手順 | 対象archive識別子とこの正本内の該当手順 | artifact hash、host、試験結果 | `artifact: <target>; procedure: §...` の順 |
+
+共通IDは E02=Linux/x86_64/musl、E03=Linux/x86_64/glibc、E04=macOS/arm64、E05=Android/aarch64、E06=Android/armv7a、E07=Android/x86_64、E15-G=Linux/aarch64/glibc、E15-M=Linux/aarch64/musl、E17=Windows 11/x86_64を表す。IDはhost名や試験済み状態を表さない。
 
 | ID | OS / ABI | 依存 / driver / permission | firmware / input | 製品CLIからの内蔵CARD操作 | native PC/SC/WinSCard adapter | 配布artifact / 手順 |
 |---|---|---|---|---|---|---|
-| E03 | AnduinOS Linux x86_64 / glibc | native CPU、libusb静的、USB access pathを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | Linux PC/SC IFDを別途確認 | `linux-glibc-x86_64` / §3–§5 |
-| E02 | HAOS Alpine Linux x86_64 / musl | native CPU、libusb静的、Supervisor USB access pathを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | musl用IFDを別途確認 | `linux-musl-x86_64` / §3–§5 |
-| E15-G | native Linux aarch64 / glibc | native aarch64、libusb静的、USB access pathを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | Linux PC/SC IFDを別途確認 | `linux-glibc-aarch64` / §3–§5 |
-| E15-M | native Linux aarch64 / musl | native aarch64、emulationなし。Alpine arm64 runtime | 共通loader image | CARD CLI/APIと機種能力を確認 | musl用IFDを別途確認 | `linux-musl-aarch64` / §3–§5 |
-| E04 | macOS arm64 | libusb静的、USB access permissionを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | macOS PC/SC IFDを別途確認 | `darwin-arm64` / §3–§5 |
-| E05 | Android Termux aarch64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | CARD CLI/APIあり。Android実機は未確認 | Android IFD未提供 | `android-aarch64` / §3–§5 |
-| E06 | Android Termux armv7a | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | CARD CLI/APIあり。Android実機は未確認 | Android IFD未提供 | `android-armv7a` / §3–§5 |
-| E07 | Android Termux x86_64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | CARD CLI/APIあり。Android実機は未確認 | Android IFD未提供 | `android-x86_64` / §3–§5 |
-| W1 | Windows 11 x86_64 | 使用許可済みlibusb driver。変更しない | 同source candidateの`win-candidate` | 同一host IPCのCARD CLI/APIを確認 | candidate DLLあり。native transaction consumer/API probeなし・未実施 | Windows候補ZIP / §3–§5 |
+| E03 | Linux / x86_64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-glibc-x86_64`; procedure: §3–§5 |
+| E02 | Linux / x86_64 / musl | libusb: 静的1.0.30; USB access: HAOS Supervisorの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-musl-x86_64`; procedure: §3–§5 |
+| E15-G | Linux / aarch64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-glibc-aarch64`; procedure: §3–§5 |
+| E15-M | Linux / aarch64 / musl | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `linux-musl-aarch64`; procedure: §3–§5 |
+| E04 | macOS / arm64 / Apple system runtime | libusb: 静的1.0.30; USB access: macOSの許可済み経路 | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `darwin-arm64`; procedure: §3–§5 |
+| E05 | Android (Termux) / aarch64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `android-aarch64`; procedure: §3–§5 |
+| E06 | Android (Termux) / armv7a / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `android-armv7a`; procedure: §3–§5 |
+| E07 | Android (Termux) / x86_64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `android-x86_64`; procedure: §3–§5 |
+| E17 | Windows 11 / x86_64 / Win32 | libusb: 静的1.0.30; USB access: 既存許可済みlibusb driver | firmware: loader image; input: 対応modelのISDB-T/ISDB-S channel | CARD status/ATR/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD; macOS PC/SC: bundle; Android: なし; Windows WinSCard: application-local DLL | artifact: `win-candidate`; procedure: §3–§5 |
 
 ## 共通試験シナリオ
 
