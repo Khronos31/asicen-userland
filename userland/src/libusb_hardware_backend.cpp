@@ -1339,6 +1339,18 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
         return Result<void>::success();
     }
     if (any_source_prepared()) {
+        if (startup_config_.enabled) {
+            unsigned prepared_mask = 0U;
+            for (std::size_t index = 0U; index < source_prepared_.size(); ++index) {
+                if (source_prepared_[index]) prepared_mask |= 1U << index;
+            }
+            std::fprintf(stderr,
+                         "asicen-open-receiver-rejected receiver=%u function=%u "
+                         "reason=uninitialized_function_while_capture_active "
+                         "prepared_mask=%u\n",
+                         static_cast<unsigned>(receiver),
+                         static_cast<unsigned>(route.value().rf_function_index), prepared_mask);
+        }
         return fail_open(Error::BUSY);
     }
     if (!verify_device_revision()) {
