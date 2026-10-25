@@ -38,14 +38,18 @@ statusがready、listにreceiverが存在すること、client終了値0、TSが
 
 ## 4. CARD・PC/SC・USB
 
-CARDを搭載した対象機で、daemonを起動したまま受信を止め、以下を各段階で実行する。
+`asicenctl` は `card-status` / `card-atr` / `card-reset` / `card-apdu` を公開する。各段階で以下を実行し、statusのreader数と候補profileを記録する。
 
 ```sh
 asicenctl --runtime-dir "$RT" --instance rc card-status
 asicenctl --runtime-dir "$RT" --instance rc card-atr
+asicenctl --runtime-dir "$RT" --instance rc card-reset
+asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00 --repeat 10
 ```
 
-reader status/ATR probeの実測終了値を保存する。制御CLIのreset/APDUは未実装操作として失敗する契約なので、成功を要求しない。カード抜去を依頼してからstatus/ATRを再実行し、不在状態とエラーを確認する。再挿入後にstatus/ATRが戻ることを確認する。Linux/macOS PC/SC IFDとWindows WinSCard経路は実装・配布対象のnative OSで分け、OSの標準PC/SC APIからreader列挙とATR取得まで確認する。APDU/reset機能は未実装として記録する。生ATR、カードID、応答本文は公開記録に保存しない。非対応profileは対象外と明記する。
+カードreaderを公開する実機でstatus present、ATR取得、reset後のATR、10回のAPDU交換が成功することを確認する。カード抜去を依頼してからstatusが不在となり、ATR/APDUがCARD_REMOVED/NO_CARD (exit 9) となること、再挿入後にstatus/ATR/reset/APDUが戻ることを確認する。生ATR、カードID、APDU応答本文は公開記録に保存しない。未対応またはreaderなしprofileでのエラーはそのprofileの実測として記録し、製品全体の未実装と一般化しない。
+
+hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapterである。過去のphysical CARD remove/reinsert記録はPX-W3U3上のlinux-glibc-x86_64候補であり、他model/OSの認定を意味しない。Linux/macOSの配布IFDをnative OSのPC/SC stackへ設定し、reader/card列挙、reset/ATR、通常APDU交換まで別経路で確認する。AndroidにはIFDなし。現行0.1.0のWindows binaryは配布対象外で、WinSCardはPhase 2 plannedのため試験済みとしない。各OS/platform routeの未実施を未確認として残す。
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
 
