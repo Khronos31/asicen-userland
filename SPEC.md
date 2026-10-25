@@ -97,9 +97,9 @@ Use those components instead of the former research 24-byte IPC.
 Record exact source revisions and GPL-2.0-only notices before incorporating
 source. recisdb remains an external downstream program.
 
-- Match `--runtime-dir`, `--instance`, `--receiver`, `--system`, `--channel`,
-  `--frequency-khz`, `--slot`, `--stream-id`, `--timeout-ms`, `--packet-count`,
-  `--duration-seconds`, and `--output PATH|-` where implemented.
+- Match `--runtime-dir`, `--instance`, `--receiver`, `-s/--system`,
+  `-c/--channel`, `-f/--freq HZ`, `--slot`, `--tsid`, `--tune-timeout-ms`,
+  `--packet-count`, `-t/--time SECONDS|-`, and `-o/--output PATH|-` where implemented.
 - Runtime devices have no USB serial descriptor. `--list-json` must expose
   `serial: null` and an explicit topology identity; do not invent a serial.
   Define the selection grammar and map before wiring runtime selection.
