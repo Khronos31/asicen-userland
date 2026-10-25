@@ -154,6 +154,8 @@ public:
 
 private:
     friend struct LibusbW3u3HardwareTestPeer;
+    struct AsyncState;
+    struct DrainAdapter;
 
     friend int run_card_only_server(LibusbW3u3Hardware&, const char*, const char*, bool,
                                     const volatile std::sig_atomic_t*,
@@ -276,6 +278,10 @@ private:
     std::atomic<int> first_transport_error_{0};
     px4::userland::Error transport_failure(px4::userland::Error fallback) const noexcept;
     int control_function_impl(std::uint8_t function, const ControlTransfer&, unsigned char*);
+    AsyncState* capture_async(std::uint8_t receiver) noexcept;
+    const AsyncState* capture_async(std::uint8_t receiver) const noexcept;
+    TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) noexcept;
+    const TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) const noexcept;
     libusb_device_handle* capture_handle(std::uint8_t receiver) const noexcept;
     bool receiver_initialized(std::uint8_t receiver) const noexcept;
     bool snapshot_gpio_state(std::uint8_t receiver) noexcept;
@@ -283,8 +289,8 @@ private:
     px4::userland::Error plan_error_ = px4::userland::Error::OK;
     std::atomic<bool> disconnected_{false};
     std::atomic<bool> capture_interrupted_{false};
-    std::atomic<std::uint64_t> capture_sync_errors_{0U};
-    std::atomic<std::uint64_t> capture_empty_intervals_{0U};
+    std::array<std::atomic<std::uint64_t>, 4U> capture_sync_errors_{};
+    std::array<std::atomic<std::uint64_t>, 4U> capture_empty_intervals_{};
     bool allow_lnb_power_ = true;
     bool card_cleanup_active_ = false;
     std::chrono::steady_clock::time_point deadline_{};
@@ -375,12 +381,10 @@ private:
     std::array<std::uint8_t, 0x45> cf_snapshot_{};
     std::array<std::uint8_t, 16> link_seed_{};
     LinkSeedDiagnostic link_diagnostic_{};
-    struct AsyncState;
-    struct DrainAdapter;
-    std::unique_ptr<AsyncState> async_;
+    std::array<std::unique_ptr<AsyncState>, 4U> async_states_{};
     bool abandoned_ = false;
     void quarantine_capture() noexcept;
-    TransportCaptureDecoderV7 decoder_;
+    std::array<std::unique_ptr<TransportCaptureDecoderV7>, 4U> decoders_{};
     const CaptureUsbHooks* capture_usb_hooks_ = nullptr;
 };
 

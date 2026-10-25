@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/libusb_hardware_backend.h"
-
+#include "asicen/enclosure.h"
 
 #include <algorithm>
 #include <array>
@@ -39,11 +39,14 @@ struct LibusbW3u3HardwareTestPeer {
         hardware.capture_usb_hooks_ = hooks;
         hardware.claimed_ = true;
         hardware.initialized_ = true;
-        hardware.tuned_ = true;
-        hardware.tuned_receiver_ = receiver;
-        hardware.tuned_frequency_khz_ = 557142U;
-        hardware.tuned_system_ = receiver == 0U ? px4::userland::ipc::System::ISDB_S
-                                                : px4::userland::ipc::System::ISDB_T;
+        if (const auto route = receiver_address(*hardware.profile_, receiver); route) {
+            hardware.initialized_functions_[route.value().rf_function_index] = true;
+        }
+        auto& tune = hardware.receiver_tune_states_[receiver];
+        tune.tuned = true;
+        tune.frequency_khz = 557142U;
+        tune.system = receiver == 0U ? px4::userland::ipc::System::ISDB_S
+                                     : px4::userland::ipc::System::ISDB_T;
         (void)hardware.active_receiver_.reserve(receiver);
     }
 
@@ -143,10 +146,17 @@ struct FakeUsb {
         fake.event_changed.notify_all();
     }
 
+    static libusb_device_handle* handle_for_function_hook(void*, std::uint8_t function)
+    {
+        return reinterpret_cast<libusb_device_handle*>(static_cast<std::uintptr_t>(function + 1U));
+    }
+
     Hooks hooks()
     {
-        return {this,        control_hook, allocate_hook,  submit_hook,
-                cancel_hook, free_hook,    pump_wait_hook, interrupt_events_hook};
+        Hooks result{this,        control_hook, allocate_hook,  submit_hook,
+                     cancel_hook, free_hook,    pump_wait_hook, interrupt_events_hook};
+        result.handle_for_function = handle_for_function_hook;
+        return result;
     }
 
     int control(const ControlTransfer& transfer, unsigned char* response) {

@@ -142,6 +142,17 @@ struct LibusbW3u3HardwareTestPeer {
         return receiver < hardware.receiver_tune_states_.size() &&
                hardware.receiver_tune_states_[receiver].tuned;
     }
+    static const void* capture_state(const LibusbW3u3Hardware& hardware,
+                                    std::uint8_t receiver)
+    {
+        return receiver < hardware.async_states_.size() ? hardware.async_states_[receiver].get()
+                                                        : nullptr;
+    }
+    static const void* decoder_state(const LibusbW3u3Hardware& hardware,
+                                     std::uint8_t receiver)
+    {
+        return receiver < hardware.decoders_.size() ? hardware.decoders_[receiver].get() : nullptr;
+    }
 
     static void set_cleanup_failed(LibusbW3u3Hardware& hardware)
     {
@@ -1382,6 +1393,11 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
 
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    const void* const receiver0_capture =
+        LibusbW3u3HardwareTestPeer::capture_state(hardware, 0U);
+    const void* const receiver0_decoder =
+        LibusbW3u3HardwareTestPeer::decoder_state(hardware, 0U);
+    CHECK(receiver0_capture != nullptr && receiver0_decoder != nullptr);
     CHECK((fake.gpio & 0x20U) == 0U);
     CHECK(fake.submit_count == 4);
     CHECK(std::all_of(fake.endpoints.begin(), fake.endpoints.end(),
@@ -1412,6 +1428,8 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
     cancelled.store(false);
     const int old_start_count = fake.dsc_start_count;
     CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_state(hardware, 1U) != receiver0_capture);
+    CHECK(LibusbW3u3HardwareTestPeer::decoder_state(hardware, 1U) != receiver0_decoder);
     CHECK(fake.dsc_start_count == old_start_count + 1);
     CHECK(std::all_of(fake.endpoints.begin(), fake.endpoints.end(),
                       [](std::uint8_t endpoint) { return endpoint == 0x82U; }));

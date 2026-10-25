@@ -195,7 +195,7 @@ struct LibusbW3u3Hardware::AsyncState {
     CaptureRunResult split_callback_result = CaptureRunResult::cancelled;
     bool raw_io_enabled = false;
     std::uint8_t endpoint = 0U;
-    std::mutex mutex;
+    mutable std::mutex mutex;
 
     static void LIBUSB_CALL completed(libusb_transfer* transfer)
     {
@@ -234,6 +234,30 @@ struct LibusbW3u3Hardware::AsyncState {
     }
 };
 
+LibusbW3u3Hardware::AsyncState*
+LibusbW3u3Hardware::capture_async(std::uint8_t receiver) noexcept
+{
+    return receiver < async_states_.size() ? async_states_[receiver].get() : nullptr;
+}
+
+const LibusbW3u3Hardware::AsyncState*
+LibusbW3u3Hardware::capture_async(std::uint8_t receiver) const noexcept
+{
+    return receiver < async_states_.size() ? async_states_[receiver].get() : nullptr;
+}
+
+TransportCaptureDecoderV7*
+LibusbW3u3Hardware::capture_decoder(std::uint8_t receiver) noexcept
+{
+    return receiver < decoders_.size() ? decoders_[receiver].get() : nullptr;
+}
+
+const TransportCaptureDecoderV7*
+LibusbW3u3Hardware::capture_decoder(std::uint8_t receiver) const noexcept
+{
+    return receiver < decoders_.size() ? decoders_[receiver].get() : nullptr;
+}
+
 // One run-owned heap allocation. A reserved or consumer-held block counts
 // against the same bounded ingress limit as a queued block. USB slots are separate.
 struct LibusbW3u3Hardware::SplitPump {
@@ -244,6 +268,7 @@ struct LibusbW3u3Hardware::SplitPump {
         std::size_t size = 0;
     };
     LibusbW3u3Hardware& hardware;
+    std::uint8_t receiver;
     const std::atomic<bool>& cancelled;
     bool (*emit)(void*, const std::uint8_t*, std::size_t);
     void* context;
@@ -264,9 +289,10 @@ struct LibusbW3u3Hardware::SplitPump {
     std::uint64_t overflow_submission = 0;
     unsigned ingress_overflow = 0;
 
-    SplitPump(LibusbW3u3Hardware& owner, const std::atomic<bool>& stop,
+    SplitPump(LibusbW3u3Hardware& owner, std::uint8_t source_receiver,
+              const std::atomic<bool>& stop,
               bool (*sink)(void*, const std::uint8_t*, std::size_t), void* opaque) noexcept
-        : hardware(owner), cancelled(stop), emit(sink), context(opaque) {}
+        : hardware(owner), receiver(source_receiver), cancelled(stop), emit(sink), context(opaque) {}
 
     bool stopping() const noexcept
     {
@@ -346,10 +372,15 @@ struct LibusbW3u3Hardware::SplitPump {
             }
             auto& block = blocks[index];
             // No queue or state lock is held through decode/emit.
-            const auto before = hardware.decoder_.sync_loss_events();
+            auto* decoder = hardware.capture_decoder(receiver);
+            if (decoder == nullptr) {
+                consumer_result = CaptureRunResult::usb_error;
+                break;
+            }
+            const auto before = decoder->sync_loss_events();
             ++decoder_input_chunks;
             decoder_input_bytes += block.size;
-            const auto delivered = hardware.decoder_.push({block.bytes.data(), block.size},
+            const auto delivered = decoder->push({block.bytes.data(), block.size},
                 [](void* opaque, px4::userland::ByteView packet) noexcept {
                     auto& self = *static_cast<SplitPump*>(opaque);
                     // A stop between packets must not drain a whole queued run.
@@ -357,9 +388,9 @@ struct LibusbW3u3Hardware::SplitPump {
                     return self.emit(self.context, packet.data, packet.size)
                         ? Result<void>::success() : Result<void>::failure(Error::SLOW_CONSUMER);
                 }, this);
-            hardware.capture_sync_errors_.fetch_add(hardware.decoder_.sync_loss_events() - before);
+            hardware.capture_sync_errors_[receiver].fetch_add(decoder->sync_loss_events() - before);
             if (block.submission < kQueueDepth) {
-                const auto framing = hardware.decoder_.counters();
+                const auto framing = decoder->counters();
                 hardware.record_startup("framing_emitted",
                     static_cast<std::int64_t>(framing.emitted_packets),
                     static_cast<std::int64_t>(framing.discarded_sync_search_bytes));
@@ -423,14 +454,15 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     void cancel_pending() noexcept override
     {
-        if (!owner_.async_) {
+        AsyncState* const async = owner_.capture_async(owner_.source_receiver_);
+        if (async == nullptr) {
             return;
         }
         std::array<libusb_transfer*, kQueueDepth> transfers{};
         {
-            std::lock_guard<std::mutex> lock(owner_.async_->mutex);
-            for (std::size_t i = 0; i < owner_.async_->slots.size(); ++i) {
-                const auto& slot = owner_.async_->slots[i];
+            std::lock_guard<std::mutex> lock(async->mutex);
+            for (std::size_t i = 0; i < async->slots.size(); ++i) {
+                const auto& slot = async->slots[i];
                 if (slot.transfer != nullptr && slot.pending) {
                     transfers[i] = slot.transfer;
                 }
@@ -444,11 +476,12 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     bool has_pending() const noexcept override
     {
-        if (!owner_.async_) {
+        const AsyncState* const async = owner_.capture_async(owner_.source_receiver_);
+        if (async == nullptr) {
             return false;
         }
-        std::lock_guard<std::mutex> lock(owner_.async_->mutex);
-        for (const auto& slot : owner_.async_->slots) {
+        std::lock_guard<std::mutex> lock(async->mutex);
+        for (const auto& slot : async->slots) {
             if (slot.pending) {
                 return true;
             }
@@ -461,22 +494,23 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     void release_transfers() noexcept override
     {
-        if (!owner_.async_) {
+        AsyncState* const async = owner_.capture_async(owner_.source_receiver_);
+        if (async == nullptr) {
             return;
         }
         std::array<libusb_transfer*, kQueueDepth> transfers{};
         {
-            std::lock_guard<std::mutex> lock(owner_.async_->mutex);
-            for (std::size_t i = 0; i < owner_.async_->slots.size(); ++i) {
-                auto& slot = owner_.async_->slots[i];
+            std::lock_guard<std::mutex> lock(async->mutex);
+            for (std::size_t i = 0; i < async->slots.size(); ++i) {
+                auto& slot = async->slots[i];
                 transfers[i] = slot.transfer;
                 slot.transfer = nullptr;
                 slot.pending = false;
             }
-            owner_.async_->prepared = false;
-            owner_.async_->next_submission_order = 0U;
-            owner_.async_->next_delivery_order = 0U;
-            owner_.async_->drain_failed = false;
+            async->prepared = false;
+            async->next_submission_order = 0U;
+            async->next_delivery_order = 0U;
+            async->drain_failed = false;
         }
         for (auto* transfer : transfers) {
             if (transfer != nullptr) {
@@ -484,10 +518,10 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
             }
         }
 #if defined(_WIN32)
-        if (owner_.async_->raw_io_enabled) {
+        if (async->raw_io_enabled) {
             const int result = finish_libusb_stream(
-                owner_.capture_handle(owner_.source_receiver_), owner_.async_->endpoint);
-            owner_.async_->raw_io_enabled = false;
+                owner_.capture_handle(owner_.source_receiver_), async->endpoint);
+            async->raw_io_enabled = false;
             if (result != 0) {
                 owner_.mark_cleanup_failed(map_libusb_error(result));
             }
@@ -536,8 +570,7 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, UsbLocation prim
       sibling_claim_(sibling_, "sibling"),
       primary_location_(primary), sibling_location_(sibling),
       primary_path_(std::move(primary_path)), sibling_path_(std::move(sibling_path)),
-      sibling_runtime_required_(sibling_runtime_required),
-      async_(new (std::nothrow) AsyncState()), decoder_(nullptr, 0U)
+      sibling_runtime_required_(sibling_runtime_required)
 {
     if (expected_profile != nullptr) {
         const auto* known = find_profile(expected_profile->vid, expected_profile->pid);
@@ -572,8 +605,7 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, int primary_fd, 
                                        bool sibling_runtime_required)
     : context_(context), primary_(api), sibling_(api),
       primary_claim_(primary_, "primary"), sibling_claim_(sibling_, "sibling"),
-      sibling_runtime_required_(sibling_runtime_required),
-      async_(new (std::nothrow) AsyncState()), decoder_(nullptr, 0U)
+      sibling_runtime_required_(sibling_runtime_required)
 {
     if (expected_profile != nullptr) {
         const auto* known = find_profile(expected_profile->vid, expected_profile->pid);
@@ -2246,8 +2278,10 @@ Result<void> LibusbW3u3Hardware::shutdown() noexcept
     const bool gpio_snapshot_valid =
         std::any_of(gpio_snapshot_valid_functions_.begin(), gpio_snapshot_valid_functions_.end(),
                     [](bool valid) { return valid; });
+    const AsyncState* const active_async = capture_async(source_receiver_);
     const bool needs_stop = source_prepared_ || cf_snapshot_valid_ || link_snapshot_valid_ ||
-                            (async_ && async_->prepared) || gpio_snapshot_valid;
+                            (active_async != nullptr && active_async->prepared) ||
+                            gpio_snapshot_valid;
     // OFF is independent of controller/CF restoration and receives its own
     // cleanup budget even when a previous step has quarantined the backend.
     (void)clear_lnb_power();
@@ -2725,13 +2759,13 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     if (!set_cf_bit(local, 0x03U, true)) {
         return fail_prepare(Error::USB_IO);
     }
-    if (!async_) {
-        async_.reset(new (std::nothrow) AsyncState());
-        if (!async_) {
+    if (!async_states_[receiver]) {
+        async_states_[receiver].reset(new (std::nothrow) AsyncState());
+        if (!async_states_[receiver]) {
             return fail_prepare(Error::INTERNAL);
         }
     }
-    AsyncState& state = *async_;
+    AsyncState& state = *async_states_[receiver];
     bool already_prepared = false;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -2812,14 +2846,20 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         return fail_prepare(Error::USB_IO);
     }
     record_startup("controller_output_enabled");
-    decoder_.clear();
-    decoder_ = TransportCaptureDecoderV7(link_seed_.data(), link_seed_.size());
-    if (!decoder_.valid()) {
+    if (!decoders_[receiver]) {
+        decoders_[receiver].reset(
+            new (std::nothrow) TransportCaptureDecoderV7(link_seed_.data(), link_seed_.size()));
+    } else {
+        decoders_[receiver]->clear();
+        *decoders_[receiver] =
+            TransportCaptureDecoderV7(link_seed_.data(), link_seed_.size());
+    }
+    if (!capture_decoder(receiver) || !capture_decoder(receiver)->valid()) {
         return fail_prepare(Error::INTERNAL);
     }
     source_prepared_ = true;
-    capture_sync_errors_.store(0U);
-    capture_empty_intervals_.store(0U);
+    capture_sync_errors_[receiver].store(0U);
+    capture_empty_intervals_[receiver].store(0U);
     link_seed_.fill(0);
     return Result<void>::success();
 }
@@ -2828,10 +2868,13 @@ CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
     const std::atomic<bool>& cancelled_flag,
     bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
 {
-    if (!source_prepared_ || emit == nullptr) return CaptureRunResult::usb_error;
-    AsyncState& state = *async_;
+    const std::uint8_t receiver = source_receiver_;
+    if (!source_prepared_ || receiver >= async_states_.size() || emit == nullptr ||
+        !async_states_[receiver]) return CaptureRunResult::usb_error;
+    AsyncState& state = *async_states_[receiver];
     record_startup("worker_run");
-    std::unique_ptr<SplitPump> pump(new (std::nothrow) SplitPump(*this, cancelled_flag, emit, context));
+    std::unique_ptr<SplitPump> pump(
+        new (std::nothrow) SplitPump(*this, receiver, cancelled_flag, emit, context));
     CaptureRunResult outcome = CaptureRunResult::cancelled;
     bool discard = false;
     if (!pump) {
@@ -2916,7 +2959,7 @@ CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
             record_startup("delivery", static_cast<std::int64_t>(submission), actual);
         if (has_bytes) {
             if (!pump->publish(copy)) break;
-        } else capture_empty_intervals_.fetch_add(1U);
+        } else capture_empty_intervals_[receiver].fetch_add(1U);
 
         // Publication and submission are solely on this original run caller.
         // No mutex is held across libusb: it can synchronously call completed().
@@ -3028,22 +3071,31 @@ void LibusbW3u3Hardware::interrupt_receiver(std::uint8_t receiver) noexcept
 px4::userland::TunerStreamCounters LibusbW3u3Hardware::source_counters() const noexcept
 {
     px4::userland::TunerStreamCounters counters{};
-    counters.sync_errors = capture_sync_errors_.load();
-    counters.empty_intervals = capture_empty_intervals_.load();
+    const auto receiver = counters_receiver_.load(std::memory_order_acquire);
+    if (receiver < capture_sync_errors_.size()) {
+        counters.sync_errors = capture_sync_errors_[receiver].load();
+        counters.empty_intervals = capture_empty_intervals_[receiver].load();
+    }
     return counters;
 }
 
 px4::userland::TunerStreamCounters
 LibusbW3u3Hardware::source_counters_for_receiver(std::uint8_t receiver) const noexcept
 {
-    return receiver == counters_receiver_.load(std::memory_order_acquire)
-               ? source_counters()
-               : px4::userland::TunerStreamCounters{};
+    if (receiver >= capture_sync_errors_.size()) {
+        return {};
+    }
+    px4::userland::TunerStreamCounters counters{};
+    counters.sync_errors = capture_sync_errors_[receiver].load();
+    counters.empty_intervals = capture_empty_intervals_[receiver].load();
+    return counters;
 }
 
 StreamCaptureFramingCounters LibusbW3u3Hardware::source_framing_counters() const noexcept
 {
-    return decoder_.counters();
+    const auto receiver = counters_receiver_.load(std::memory_order_acquire);
+    const auto* decoder = capture_decoder(receiver);
+    return decoder != nullptr ? decoder->counters() : StreamCaptureFramingCounters{};
 }
 
 Result<void> LibusbW3u3Hardware::stop() noexcept
@@ -3054,7 +3106,8 @@ Result<void> LibusbW3u3Hardware::stop() noexcept
     if (!claimed_) {
         return Result<void>::failure(Error::NOT_READY);
     }
-    if (source_prepared_ || (async_ && async_->prepared) || cf_snapshot_valid_ ||
+    const AsyncState* const active_async = capture_async(source_receiver_);
+    if (source_prepared_ || (active_async != nullptr && active_async->prepared) || cf_snapshot_valid_ ||
         link_snapshot_valid_) {
         const auto result = stop_and_drain(dsc_attempted_);
         if (result == CaptureRunResult::fatal_drain) {
@@ -3090,9 +3143,9 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
     if (abandoned_) {
         return CaptureRunResult::fatal_drain;
     }
-    if (async_) {
-        std::lock_guard<std::mutex> lock(async_->mutex);
-        async_->split_draining = true;
+    if (auto* const async = capture_async(source_receiver_); async != nullptr) {
+        std::lock_guard<std::mutex> lock(async->mutex);
+        async->split_draining = true;
     }
     // A card transaction owns the bridge until its bounded operation ends.
     // Hold the same gate across DSC stop, callback drain and restoration so
@@ -3175,7 +3228,11 @@ void LibusbW3u3Hardware::quarantine_capture() noexcept
     mark_cleanup_failed(Error::USB_IO);
     abandoned_ = true;
     quarantine_libusb_context(context_);
-    (void)async_.release();
+    for (auto& async : async_states_) {
+        if (async && async->prepared) {
+            (void)async.release();
+        }
+    }
     ownership_.abandon();
     primary_.abandon();
     sibling_.abandon();
@@ -3198,7 +3255,9 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(bool dsc_ok,
         cleanup_capture_state(ops, dsc_ok, dsc_was_attempted, link_apply_attempted_,
                               output_start_attempted_, cf_snapshot_valid_);
     const bool cleaned = result == CaptureRunResult::cancelled;
-    decoder_.clear();
+    if (auto* const decoder = capture_decoder(source_receiver_); decoder != nullptr) {
+        decoder->clear();
+    }
     link_seed_.fill(0U);
     if (cleaned || disconnected_.load()) {
         link_snapshot_valid_ = false;
@@ -3222,15 +3281,16 @@ bool LibusbW3u3Hardware::wait_capture_events(unsigned timeout_ms,
     // run in a synchronous control caller, between run's scan and this wait.
     if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->pump_events != nullptr)
         return handle_events(timeout_ms);
-    if (context_ == nullptr || !async_) return false;
+    AsyncState* const async = capture_async(source_receiver_);
+    if (context_ == nullptr || async == nullptr) return false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     const auto should_return = [&]() noexcept {
         if (cancelled_flag.load() || stop_requested_.load() || capture_interrupted_.load() ||
             cleanup_failed_.load(std::memory_order_acquire)) return true;
-        std::lock_guard<std::mutex> lock(async_->mutex);
-        if (async_->drain_failed) return true;
-        for (const auto& slot : async_->slots)
-            if (slot.ready && slot.submission_order == async_->next_delivery_order) return true;
+        std::lock_guard<std::mutex> lock(async->mutex);
+        if (async->drain_failed) return true;
+        for (const auto& slot : async->slots)
+            if (slot.ready && slot.submission_order == async->next_delivery_order) return true;
         return false;
     };
     const auto remaining = [&]() noexcept {
