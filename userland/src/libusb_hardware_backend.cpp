@@ -2102,7 +2102,8 @@ Result<void> LibusbW3u3Hardware::begin_tune_power(std::uint8_t receiver, System 
     if (!initialized_ || !claimed_) {
         return Result<void>::failure(Error::NOT_READY);
     }
-    if (any_source_prepared() || lnb_transaction_active_) {
+    if (source_prepared_[receiver] || lnb_transaction_active_ ||
+        (any_source_prepared() && (lnb_on_ || lnb_cleanup_required_))) {
         return Result<void>::failure(Error::BUSY);
     }
     DeadlineScope deadline(deadline_, deadline_active_, until);

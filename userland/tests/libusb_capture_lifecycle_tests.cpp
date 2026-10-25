@@ -2039,6 +2039,9 @@ bool test_w3u2_capture_state_is_independent_across_sibling_receivers()
     CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.begin_tune_power(3U, System::ISDB_T, 0U).has_value());
+    CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
+    CHECK(hardware.commit_tune_power(3U).has_value());
     CHECK(hardware.prepare(3U, System::ISDB_T, cancelled).has_value());
     CHECK(LibusbW3u3HardwareTestPeer::capture_storage_is_distinct(hardware, 1U, 3U));
     CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
@@ -2046,7 +2049,15 @@ bool test_w3u2_capture_state_is_independent_across_sibling_receivers()
     CHECK(hardware.stop_receiver(1U).has_value());
     CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
     CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(hardware.begin_tune_power(1U, System::ISDB_T, 0U).has_value());
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    CHECK(hardware.commit_tune_power(1U).has_value());
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(hardware.stop_receiver(1U).has_value());
     CHECK(hardware.stop_receiver(3U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
     CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
     CHECK(hardware.close_receiver(1U).has_value());
     CHECK(hardware.close_receiver(3U).has_value());
