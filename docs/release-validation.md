@@ -82,7 +82,7 @@ test -x "$D/asicend"; test -x "$D/asicenctl"; test -x "$D/asicen-ts"
 python3 -c 'import json,sys; m=json.load(open("manifest.json")); assert m.get("source_ref")==sys.argv[1] and m.get("platform")==sys.argv[2]' "$SOURCE_SHA" "$TARGET"
 ```
 
-Windows対象版は同runの`win-candidate` artifactを別に取得し、`Get-FileHash -Algorithm SHA256`でZIPを照合して空のrun固有directoryへ展開する。通常`release-candidate`にはWindows ZIPがないので、欠落を通常archiveとして補わない。Linux/macOS/Termuxでは`gh`, `python3` (Termux: `pkg install gh python coreutils tar`), SHA-256 tool, `tar`を確認し、Windowsでは`gh`と`py -3`を確認する。追加installはhost管理者承認後に行う。
+Windows対象版は同runの`win-candidate` artifactを別に取得し、`Get-FileHash -Algorithm SHA256`でZIPを照合して空のrun固有directoryへ展開する。通常`release-candidate`にはWindows ZIPがないので、欠落を通常archiveとして補わない。Linux/macOS/Termuxでは`gh`, `python3` (Termux: `pkg install gh python coreutils tar`), SHA-256 tool, `tar`を確認し、Windowsでは`gh`と`python --version`を確認する。追加installはhost管理者承認後に行う。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -263,7 +263,7 @@ test ! -s "$LOG/processes-after-stop.txt"; test ! -s "$LOG/ipc-remnants.txt"
 
 - **適用対象/頻度:** 全capture/soak。
 - **準備:** Python 3.11以上を`python3 --version`で確認し、手順書checkoutの[`ts-check.py`](release-validation/ts-check.py)を使う。候補ごとに新規作成した`$LOG`を使う。
-- **実操作/利用者への依頼:** POSIXでは各TSに`python3 <runbook-checkout>/docs/release-validation/ts-check.py "$LOG/<receiver>.ts" > "$LOG/<receiver>.ts-check.json"`を実行する。Windowsは同じhelperを`py -3 <runbook-checkout>\docs\release-validation\ts-check.py "$LOG\<receiver>.ts"`で実行し、標準出力を`$LOG`へ保存する。全capture/soakの各TSで実行し、候補daemonのdrop/USB counterも記録する。
+- **実操作/利用者への依頼:** POSIXでは各TSに`python3 <runbook-checkout>/docs/release-validation/ts-check.py "$LOG/<receiver>.ts" > "$LOG/<receiver>.ts-check.json"`を実行する。Windowsは同じhelperを`python <runbook-checkout>\docs\release-validation\ts-check.py "$LOG\<receiver>.ts"`で実行し、標準出力を`$LOG`へ保存する。全capture/soakの各TSで実行し、候補daemonのdrop/USB counterも記録する。
 - **期待値/終了値:** 全TSが製品SPEC基準を満たし通常取得exit 0。非空file/counter 0だけでpassにしない。
 - **停止/cleanup:** 元TS/hash/logを残してT08 cleanup。
 - **記録:** `python3 --version`、helperのGit SHA、TS hash、helperのJSON/終了値、sync/TEI/continuity/drop/counter、client exit。
@@ -273,7 +273,7 @@ Windowsで各TSを確認するcommand:
 ```powershell
 $helper = '<runbook-checkout>\docs\release-validation\ts-check.py'; $ts = Join-Path $LOG '<receiver>.ts'
 $json = Join-Path $LOG '<receiver>.ts-check.json'; $err = Join-Path $LOG '<receiver>.ts-check.err'
-& py -3 $helper $ts 1> $json 2> $err; $parserRc = $LASTEXITCODE
+& python $helper $ts 1> $json 2> $err; $parserRc = $LASTEXITCODE
 $parserRc | Set-Content (Join-Path $LOG '<receiver>.ts-check.rc')
 if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
 ```
