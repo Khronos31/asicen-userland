@@ -170,6 +170,50 @@ bool cleanup_failure_is_explicit_and_retryable()
           "zero-write ACK failure is an explicit cleanup failure");
     return true;
 }
+
+bool function_lanes_share_seed_until_last_release()
+{
+    FakeIo io;
+    asicen::LinkSeedCaptureCoordinator state;
+    std::array<std::uint8_t, 16> first{};
+    std::array<std::uint8_t, 16> second{};
+    first.fill(0x11U);
+    second.fill(0x22U);
+    CHECK(state.reserve(&io, 0U) && state.apply(&io, 0U, first.data(), first.size()),
+          "first lane snapshots and applies the shared seed");
+    const int writes_after_first = io.writes;
+    CHECK(state.reserve(&io, 1U) && state.apply(&io, 1U, second.data(), second.size()),
+          "peer lane joins the active function scope without another seed apply");
+    CHECK(state.seed() == first && io.writes == writes_after_first,
+          "the function keeps the first seed while the peer joins");
+    CHECK(state.release(&io, 0U) == asicen::LinkSeedLaneRelease::peer_active &&
+              io.writes == writes_after_first && io.controller == 0xa0U,
+          "stopping one lane preserves peer output and shared seed");
+    CHECK(state.release(&io, 1U) == asicen::LinkSeedLaneRelease::released &&
+              io.controller == 0U && !state.quarantined(),
+          "last lane clears shared seed window and verifies controller zero");
+    return true;
+}
+
+bool uncertain_shared_cleanup_quarantines_function()
+{
+    FakeIo io;
+    asicen::LinkSeedCaptureCoordinator state;
+    std::array<std::uint8_t, 16> seed{};
+    CHECK(state.reserve(&io, 2U), "function coordinator reserves the first lane");
+    io.fail_write_at = 4;
+    io.fail_read05 = true;
+    CHECK(!state.apply(&io, 2U, seed.data(), seed.size()),
+          "partial apply is reported before the stop-boundary cleanup");
+    CHECK(state.release(&io, 2U) == asicen::LinkSeedLaneRelease::cleanup_failed &&
+              state.quarantined(),
+          "partial apply with unverified cleanup quarantines the shared function");
+    io.fail_write_at = -1;
+    io.fail_read05 = false;
+    CHECK(!state.reserve(&io, 3U),
+          "quarantine blocks peer acquisition and cannot report clean release");
+    return true;
+}
 } // namespace
 
 int main()
@@ -177,7 +221,9 @@ int main()
     if (!wire_numbers_are_exact() ||
         !idle_only_apply_and_honest_cleanup() ||
         !partial_application_gets_zero_cleanup() ||
-        !cleanup_failure_is_explicit_and_retryable()) {
+        !cleanup_failure_is_explicit_and_retryable() ||
+        !function_lanes_share_seed_until_last_release() ||
+        !uncertain_shared_cleanup_quarantines_function()) {
         return 1;
     }
     return 0;

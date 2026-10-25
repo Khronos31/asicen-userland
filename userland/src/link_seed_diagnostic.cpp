@@ -54,4 +54,57 @@ bool LinkSeedDiagnostic::clear_and_verify_controller(LinkSeedDiagnosticIo* io)
     return cleaned;
 }
 
+bool LinkSeedCaptureCoordinator::reserve(LinkSeedDiagnosticIo* io, std::uint8_t lane)
+{
+    if (lane >= 4U || quarantined_ || (lane_mask_ & (1U << lane)) != 0U) return false;
+    if (lane_mask_ == 0U) {
+        if (diagnostic_.snapshot_idle_result(io) != LinkSeedSnapshotResult::ready) return false;
+    }
+    lane_mask_ |= static_cast<std::uint8_t>(1U << lane);
+    return true;
+}
+
+bool LinkSeedCaptureCoordinator::apply(LinkSeedDiagnosticIo* io, std::uint8_t lane,
+                                       const std::uint8_t* seed, std::size_t size)
+{
+    if (!active(lane) || io == nullptr || seed == nullptr || size != seed_.size() ||
+        quarantined_) return false;
+    if (seed_active_) return true;
+    seed_apply_attempted_ = true;
+    seed_ = {};
+    for (std::size_t index = 0U; index < seed_.size(); ++index) seed_[index] = seed[index];
+    if (diagnostic_.apply(io, seed_.data(), seed_.size())) {
+        seed_active_ = true;
+        return true;
+    }
+    return false;
+}
+
+LinkSeedLaneRelease LinkSeedCaptureCoordinator::release(LinkSeedDiagnosticIo* io,
+                                                         std::uint8_t lane)
+{
+    if (!active(lane)) return quarantined_ ? LinkSeedLaneRelease::cleanup_failed
+                                           : LinkSeedLaneRelease::released;
+    lane_mask_ &= static_cast<std::uint8_t>(~(1U << lane));
+    if (lane_mask_ != 0U) return LinkSeedLaneRelease::peer_active;
+    bool clean = true;
+    if (seed_apply_attempted_ && !quarantined_) {
+        clean = diagnostic_.clear_and_verify_controller(io);
+    }
+    if (!clean) quarantined_ = true;
+    if (!quarantined_) {
+        diagnostic_ = LinkSeedDiagnostic{};
+        seed_.fill(0U);
+        seed_apply_attempted_ = false;
+        seed_active_ = false;
+    }
+    return clean && !quarantined_ ? LinkSeedLaneRelease::released
+                                  : LinkSeedLaneRelease::cleanup_failed;
+}
+
+bool LinkSeedCaptureCoordinator::active(std::uint8_t lane) const
+{
+    return lane < 4U && (lane_mask_ & (1U << lane)) != 0U;
+}
+
 } // namespace asicen

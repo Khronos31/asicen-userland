@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 
 namespace asicen {
 
@@ -39,6 +40,32 @@ class LinkSeedDiagnostic final {
 
   private:
     bool active_ = false;
+};
+
+enum class LinkSeedLaneRelease : std::uint8_t {
+    released,
+    peer_active,
+    cleanup_failed,
+};
+
+class LinkSeedCaptureCoordinator final {
+  public:
+    bool reserve(LinkSeedDiagnosticIo* io, std::uint8_t lane);
+    bool apply(LinkSeedDiagnosticIo* io, std::uint8_t lane, const std::uint8_t* seed,
+               std::size_t size);
+    LinkSeedLaneRelease release(LinkSeedDiagnosticIo* io, std::uint8_t lane);
+    void quarantine() { quarantined_ = true; }
+    bool active(std::uint8_t lane) const;
+    bool quarantined() const { return quarantined_; }
+    const std::array<std::uint8_t, 16>& seed() const { return seed_; }
+
+  private:
+    LinkSeedDiagnostic diagnostic_;
+    std::array<std::uint8_t, 16> seed_{};
+    std::uint8_t lane_mask_ = 0U;
+    bool seed_apply_attempted_ = false;
+    bool seed_active_ = false;
+    bool quarantined_ = false;
 };
 
 } // namespace asicen

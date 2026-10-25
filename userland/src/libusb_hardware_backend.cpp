@@ -563,6 +563,11 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     bool disable_output_and_verify() noexcept override
     {
+        if (auto* const coordinator = owner_.capture_coordinator(receiver_);
+            coordinator != nullptr && coordinator->active(receiver_)) {
+            coordinator->quarantine();
+            return false;
+        }
         return owner_.write_controller05(0U) && owner_.read_controller05_value_zero();
     }
     bool restore_cf_and_verify() noexcept override
@@ -2827,7 +2832,6 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     capture.link_apply_attempted = false;
     capture.output_start_attempted = false;
     capture_interrupted_[receiver].store(false);
-    capture.link_diagnostic = LinkSeedDiagnostic{};
     record_startup("capture_prepare_begin", receiver, local, static_cast<int>(system));
     const auto fail_prepare = [this, receiver](Error error) {
         const Error original_error = error;
@@ -3473,7 +3477,6 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(std::uint8_t receiver, 
         capture.cf_snapshot_valid = false;
         capture.link_apply_attempted = false;
         capture.output_start_attempted = false;
-        capture.link_diagnostic = LinkSeedDiagnostic{};
         capture.dsc_attempted = false;
         capture.dsc_stopped = true;
         if (source_receiver_ == receiver) {
@@ -3732,9 +3735,8 @@ bool LibusbW3u3Hardware::set_cf_bit(std::uint8_t local, std::uint8_t mask, bool 
 bool LibusbW3u3Hardware::snapshot_link_diagnostic()
 {
     const auto receiver = current_receiver();
-    if (receiver >= receiver_capture_states_.size()) {
-        return false;
-    }
+    auto* const coordinator = capture_coordinator(receiver);
+    if (coordinator == nullptr) return false;
     if (!verify_device_revision()) {
         record_startup("capture_snapshot_revision_failed", receiver);
         return false;
@@ -3748,11 +3750,14 @@ bool LibusbW3u3Hardware::snapshot_link_diagnostic()
         record_startup("capture_snapshot_type_rejected", receiver);
         return false;
     }
-    const auto idle = receiver_capture_states_[receiver].link_diagnostic.snapshot_idle_result(this);
-    if (idle != LinkSeedSnapshotResult::ready) {
-        record_startup("capture_snapshot_idle_rejected", receiver, static_cast<int>(idle));
+    if (!coordinator->reserve(this, receiver)) {
+        record_startup("capture_snapshot_idle_rejected", receiver,
+                       coordinator->quarantined()
+                           ? static_cast<int>(LinkSeedSnapshotResult::unavailable)
+                           : static_cast<int>(LinkSeedSnapshotResult::controller_active));
         return false;
     }
+    receiver_capture_states_[receiver].link_apply_attempted = true;
     record_startup("capture_snapshot_complete", receiver);
     return true;
 }
@@ -3789,16 +3794,29 @@ LibusbW3u3Hardware::PoweredControllerCheck LibusbW3u3Hardware::verify_powered_co
 bool LibusbW3u3Hardware::apply_link_seed()
 {
     const auto receiver = current_receiver();
-    return receiver < receiver_capture_states_.size() &&
-           receiver_capture_states_[receiver].link_diagnostic.apply(
-               this, receiver_capture_states_[receiver].link_seed.data(),
-               receiver_capture_states_[receiver].link_seed.size());
+    auto* const coordinator = capture_coordinator(receiver);
+    if (coordinator == nullptr || receiver >= receiver_capture_states_.size()) return false;
+    auto& capture = receiver_capture_states_[receiver];
+    if (!coordinator->apply(this, receiver, capture.link_seed.data(), capture.link_seed.size()))
+        return false;
+    capture.link_seed = coordinator->seed();
+    return true;
 }
 bool LibusbW3u3Hardware::clear_link_seed_and_verify_controller()
 {
     const auto receiver = current_receiver();
-    return receiver < receiver_capture_states_.size() &&
-           receiver_capture_states_[receiver].link_diagnostic.clear_and_verify_controller(this);
+    auto* const coordinator = capture_coordinator(receiver);
+    if (coordinator == nullptr) return false;
+    return coordinator->release(this, receiver) != LinkSeedLaneRelease::cleanup_failed;
+}
+LinkSeedCaptureCoordinator* LibusbW3u3Hardware::capture_coordinator(
+    std::uint8_t receiver) noexcept
+{
+    if (profile_ == nullptr) return nullptr;
+    const auto route = receiver_address(*profile_, receiver);
+    if (!route || route.value().rf_function_index >= function_capture_coordinators_.size())
+        return nullptr;
+    return &function_capture_coordinators_[route.value().rf_function_index];
 }
 bool LibusbW3u3Hardware::read_controller05(std::uint8_t* value)
 {

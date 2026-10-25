@@ -60,7 +60,8 @@ struct CardProbeRequest {
 // their local lanes on each function, while S3U/S3U2/V2 use model-specific
 // plans. Physical enclosure capacity is in device_profile(); receiver_count()
 // reports routable lanes. Paired models claim both functions before writes.
-// The shared frontend permits one active receiver lease/capture at a time.
+// Receiver lanes own their USB transfers and decoder state independently;
+// function coordinators own the shared link-seed/output lifecycle.
 class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
                                  public StreamCaptureSource,
                                  public CardOperationGuard,
@@ -238,6 +239,7 @@ private:
     void monitor_lnb_power() noexcept;
     bool verify_device_revision() noexcept;
     PoweredControllerCheck verify_powered_controller() noexcept;
+    LinkSeedCaptureCoordinator* capture_coordinator(std::uint8_t) noexcept;
     bool apply_link_seed() override;
     bool clear_link_seed_and_verify_controller() override;
     bool read_controller05(std::uint8_t*) override;
@@ -348,9 +350,9 @@ private:
         bool output_start_attempted = false;
         std::array<std::uint8_t, 0x45> cf_snapshot{};
         std::array<std::uint8_t, 16> link_seed{};
-        LinkSeedDiagnostic link_diagnostic;
     };
     std::array<ReceiverCaptureState, 4U> receiver_capture_states_{};
+    std::array<LinkSeedCaptureCoordinator, 2U> function_capture_coordinators_{};
     std::atomic<bool> cleanup_failed_{false};
     std::atomic<int> cleanup_failure_error_{0};
     static constexpr std::uint8_t kNoActiveReceiver = 0xffU;

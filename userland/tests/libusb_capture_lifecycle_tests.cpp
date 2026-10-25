@@ -2136,7 +2136,7 @@ bool test_w3u2_capture_state_is_independent_across_sibling_receivers()
     return true;
 }
 
-bool test_w3u2_same_function_second_capture_failure_preserves_peer_state()
+bool test_w3u2_same_function_peer_release_preserves_shared_seed()
 {
     FakeUsb fake;
     fake.function_local_controller = true;
@@ -2152,12 +2152,16 @@ bool test_w3u2_same_function_second_capture_failure_preserves_peer_state()
     CHECK(hardware.begin_tune_power(0U, System::ISDB_S, 0U).has_value());
     CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
     CHECK(hardware.commit_tune_power(0U).has_value());
-    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).error() == Error::NOT_READY);
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(fake.seed_write_count == 16);
     CHECK(!LibusbW3u3HardwareTestPeer::capture_cleanup_failed(hardware));
     CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
     CHECK(hardware.stop_receiver(0U).has_value());
+    CHECK(fake.seed_clear_count == 0 && fake.function_controllers[0U][0x05U] == 0xa0U);
     CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
     CHECK(hardware.stop_receiver(1U).has_value());
+    CHECK(fake.seed_clear_count == 16 && fake.function_controllers[0U][0x05U] == 0U);
     CHECK(hardware.close_receiver(0U).has_value());
     CHECK(hardware.close_receiver(1U).has_value());
     CHECK(hardware.shutdown().has_value());
@@ -2767,8 +2771,8 @@ int main()
          test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints},
         {"test_w3u2_capture_state_is_independent_across_sibling_receivers",
          test_w3u2_capture_state_is_independent_across_sibling_receivers},
-        {"test_w3u2_same_function_second_capture_failure_preserves_peer_state",
-         test_w3u2_same_function_second_capture_failure_preserves_peer_state},
+        {"test_w3u2_same_function_peer_release_preserves_shared_seed",
+         test_w3u2_same_function_peer_release_preserves_shared_seed},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
          test_s3u_combined_receiver_uses_lane0_for_both_systems},
         {"test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases",
