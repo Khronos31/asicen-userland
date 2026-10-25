@@ -2,6 +2,19 @@
 
 この文書はASICEN Stable releaseで再利用する準備・操作・判定・cleanupの正本です。版固有matrixと検証記録は [`release-validation/1.0.0.md`](release-validation/1.0.0.md) のように版別文書へ記録します。公開契約は [`SPEC.md`](../SPEC.md)、CLI構文・機種能力は [`README.md`](../README.md) と各コマンドの `--help` が正です。
 
+## 共通の検証項目と頻度
+
+用語は4製品で共通とする。代表機はLinux x86_64 glibc、機種はチューナー、製品はドライバ、ソークは30分以上の連続TS取得を指す。ASICENの標準機種はPX-W3U3。
+
+| 区分 | 適用頻度 | ASICENでの確認 |
+|---|---|---|
+| 機種初回 | PX-W3U3を代表機で2時間連続受信し、毎releaseの回帰項目を代表機だけで行う。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ記録する。 | READMEのW3U3能力に従い、地上波/衛星、CARD、対応LNBを確認。 |
+| 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、最大能力の同時受信とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | W3U3の同時受信能力とREADME記載の地上/衛星receiver配置を使う。WinSCard/PCSCはnative stackを別経路で確認。 |
+| 必要に応じて | LNB電圧実測と非対応機種の拒否、複数チューナー列挙/daemon並列、変更機能に応じた機種×OS/ABIの追加確認。 | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種へsoftware要求を送らない。 |
+| 初回/major | 必要時項目を通し、代表機で全無料channelを各10秒TS取得。macOS/Windows各30分連続、残るOS/ABI各10分連続で取得する。全channel取得は代表機だけ。別途指示されたソークは別記する。 | 現地channel planとmodel receiver割当を記録。Windows ZIPは通常aggregate外でも同候補の`win-candidate`を使う。 |
+
+全配布archiveはnative OS/ABIで回帰し、代表機の全channel10秒取得を全archiveへ広げない。具体的な候補・操作・判定は以下の手順、実施結果は[`release-validation/1.0.0.md`](release-validation/1.0.0.md)と初回機種記録へ分ける。
+
 ## 1. 候補と配布物
 
 候補source commitの `build_userland.yml` によるcandidate artifactを使い、run/ref/SHA、artifact ID、全archive hash、source manifest、license/provenanceを保存する。通常release配布binaryはLinux glibc/musl x86_64/aarch64、macOS arm64、Android aarch64/armv7a/x86_64の8 target。Windows ZIPは通常release aggregateに接続されない。Windowsが該当版の検証対象なら同候補runの `win-candidate` artifactを使う。source archiveも検査する。空の作業directoryへ展開し、同梱checksumを確認する。
@@ -20,7 +33,7 @@ gh run download <candidate-run-id> --name release-candidate --dir candidate
 
 ## 3. archiveごとの起動と受信
 
-各releaseのSoakでは代表Linux x86_64機で2時間連続受信する。対応機種ごとのqualificationでは各機種自体を一度以上2時間試験し、releaseごとの繰り返し条件ではない。major versionでは全OS/architectureごとにnative binaryで短時間TSを行う。Windowsが対象の版ではnative確認に同source candidateの `win-candidate` artifactを使い、通常配布binaryの代替とは扱わない。
+毎release、代表Linux x86_64機で2時間連続受信し、全配布archiveをnative OS/ABIで短時間回帰する。初回/major追加確認ではmacOS/Windowsは各30分、残るOS/ABIは各10分連続受信し、全無料channel各10秒は代表機だけで行う。Windowsが対象の版ではnative確認に同source candidateの `win-candidate` artifactを使い、通常配布binaryの代替とは扱わない。
 
 候補archiveをnative hostに展開し、`asicend --list-json` でUSB位置とmodelを確認する。値は現地の `BUS-PORT`、firmware、runtimeへ置換する。USB複数機能機種では確認済み内部hubで相方が一意な場合以外、両positionを指定する。
 
@@ -29,7 +42,7 @@ RT=$(mktemp -d "${TMPDIR:-/tmp}/asicen-release.XXXXXX")
 asicend --device usb:<BUS-PORT[,BUS-PORT]> --instance rc --firmware <FIRMWARE> --runtime-dir "$RT" & P=$!
 asicenctl --instance rc --runtime-dir "$RT" status
 asicenctl --instance rc --runtime-dir "$RT" list
-asicen-ts --instance rc --receiver 1 --channel T27 --time <SECONDS> --output t27.ts
+asicen-ts --instance rc --runtime-dir "$RT" --receiver 1 --channel T27 --time <SECONDS> --output t27.ts
 ```
 
 statusがready、listにreceiverが存在すること、client終了値0、TSが188-byte packet列として同期すること、daemonのpacket/sync/TEI/continuity統計を確認する。変更に関係するchannel/receiverを受信し、チャンネル名・周波数・TSID等は現地channel planから列挙してログへ実値を記録する。衛星は実機のreceiver割当とREADMEに従い `--channel BS01_0 --lnb-voltage 0` を使う。出力非空だけをpassとせず、README/SPECのTS基準で判定し、失敗試行を消さない。
@@ -52,6 +65,28 @@ asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00 --repeat 10
 hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapterである。過去のphysical CARD remove/reinsert記録はPX-W3U3上のlinux-glibc-x86_64候補であり、他model/OSの認定を意味しない。Linux/macOSの配布IFDをnative OSのPC/SC stackへ設定し、reader/card列挙、reset/ATR、通常APDU交換まで別経路で確認する。AndroidにはIFDなし。Windows WinSCardは該当版で検証対象の場合、CLIのCARD_*とは別経路として確認する。各OS/platform routeの未実施を未確認として残す。
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
+
+### Windows native / WinSCard
+
+Windows x86_64は回帰対象である。通常release aggregateにWindows ZIPがない場合は同じcandidate source runの`win-candidate` artifactを展開し、hash/manifest/provenanceを照合する。native Windows hostでUSB driverを自動変更せず、既に許可済みのlibusb access pathを記録する。実時間は共通頻度表に従い、初回/majorの30分連続受信は全無料channel取得とは別に記録する。
+
+```powershell
+$D = (Resolve-Path .\asicend.exe).Path
+$C = (Resolve-Path .\asicenctl.exe).Path
+$B = (Resolve-Path .\asicen-ts.exe).Path
+$FW = (Resolve-Path .\firmware\<model-firmware>).Path
+$RT = Join-Path $env:TEMP "asicen-rc-runtime-$PID"
+New-Item -ItemType Directory -Path $RT | Out-Null
+& $D --list-json
+$selector = 'usb:BUS-PORT[,BUS-PORT]'
+& $D --device $selector --instance rc --firmware $FW --runtime-dir $RT
+# daemonを別PowerShellで維持し、同一instance/runtimeから照会・受信する
+& $C --instance rc --runtime-dir $RT status
+& $C --instance rc --runtime-dir $RT list
+& $B --instance rc --runtime-dir $RT --receiver <ID> --channel T27 --time <SECONDS> --output t27.ts
+```
+
+candidate内のapplication-local `WinSCard.dll`をWindows native PC/SC consumerからロードし、context、reader/card status、connect、ATR/reset、反復APDU、disconnect/context releaseを確認する。物理CARD抜去時の不在と再挿入後の復帰も記録する。CLIの`card-*`結果はWinSCard経路の代用にならない。生ATR、card ID、APDU応答本文は公開記録へ保存しない。
 
 ## 5. LNB・soak・cleanup
 
