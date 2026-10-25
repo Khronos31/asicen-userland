@@ -286,7 +286,8 @@ bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
     list.enclosure.value.identity.serial_state = IdentitySerialState::unknown;
     list.enclosure.value.identity.uniqueness = Uniqueness::not_applicable;
     list.enclosure.value.limits.max_concurrent_streams.present = true;
-    list.enclosure.value.limits.max_concurrent_streams.value = 1U;
+    list.enclosure.value.limits.max_concurrent_streams.value =
+        profile.enclosure_receiver_count == 4U ? receiver_count : 1U;
     list.functions.count = profile.expected_runtime_functions;
     for (std::size_t index = 0U; index < list.functions.count; ++index) {
         UsbFunction& function = list.functions.items[index];

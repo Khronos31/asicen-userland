@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/hardware_stream_session.h"
+#include "asicen/product_profile.h"
 #include "asicen/px4_mock_backend.h"
 
 #include <array>
@@ -198,7 +199,8 @@ public:
     Result<void> prepare(std::uint8_t receiver, ipc::System system,
                          const std::atomic<bool>& cancelled) noexcept override
     {
-        if (receiver >= lanes.size() || system != ipc::System::ISDB_T || cancelled.load()) {
+        if (receiver >= lanes.size() ||
+            (system != ipc::System::ISDB_T && system != ipc::System::ISDB_S) || cancelled.load()) {
             return Result<void>::failure(Error::UNSUPPORTED);
         }
         auto& lane = lanes[receiver];
@@ -601,34 +603,61 @@ bool receiver_sessions_keep_peer_queue_and_worker_after_one_stop()
     ReceiverFakeSource source;
     asicen::HardwareStreamService service(
         frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{2U * 188U});
-    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start terrestrial receiver one");
-    CHECK(service.start_capture(3U, ipc::System::ISDB_T), "start terrestrial receiver three in parallel");
-    auto first = identity(81U);
-    auto peer = identity(83U);
-    peer.receiver = 3U;
-    CHECK(service.attach(first), "attach receiver one stream");
-    CHECK(service.attach(peer), "attach receiver three stream");
-    CHECK(source.wait_emitted(1U, 1U) && source.wait_emitted(3U, 1U),
-          "both receiver workers emit their first packet");
-    const auto first_stats = service.stats(first);
-    const auto peer_stats = service.stats(peer);
-    CHECK(first_stats && first_stats.value().packets == 1U &&
-              peer_stats && peer_stats.value().packets == 1U,
-          "each receiver owns independent packet counters");
+    constexpr std::array<std::uint8_t, 4U> receivers{0U, 1U, 2U, 3U};
+    std::array<TunerAttachment, 4U> identities{};
+    for (const auto receiver : receivers) {
+        const auto system = asicen::profile::is_satellite_receiver(receiver)
+                                ? ipc::System::ISDB_S
+                                : ipc::System::ISDB_T;
+        CHECK(service.start_capture(receiver, system), "start one of four receiver captures");
+        identities[receiver] = identity(static_cast<std::uint64_t>(81U + receiver));
+        identities[receiver].receiver = receiver;
+        identities[receiver].system = system;
+        CHECK(service.attach(identities[receiver]), "attach one of four receiver streams");
+    }
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T).error() == Error::BUSY,
+          "a fifth stream cannot reserve an already active receiver");
+    CHECK(service.start_capture(4U, ipc::System::ISDB_T).error() == Error::UNSUPPORTED,
+          "receiver outside the four-lane product is rejected");
+    for (const auto receiver : receivers) {
+        CHECK(source.wait_emitted(receiver, 1U), "all four receiver workers emit a packet");
+        const auto stats = service.stats(identities[receiver]);
+        CHECK(stats && stats.value().packets == 1U,
+              "each receiver owns independent packet counters");
+    }
 
-    CHECK(service.detach(first), "detach receiver one only");
+    CHECK(service.detach(identities[1U]), "detach receiver one only");
     CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop receiver one only");
-    source.request_more(3U);
-    CHECK(source.wait_emitted(3U, 2U), "receiver three continues after receiver one stopped");
-    const auto continued = service.stats(peer);
-    CHECK(continued && continued.value().packets == 2U,
-          "peer queue and counters advance after other receiver cleanup");
-    CHECK(service.detach(peer), "detach surviving receiver three");
-    CHECK(service.stop_capture(3U, ipc::System::ISDB_T), "stop receiver three");
-    CHECK(source.lanes[1U].stop_calls == 1 && source.lanes[3U].stop_calls == 1,
-          "each receiver cleanup reaches only its own source lifecycle");
-    CHECK(service.release_final(first) && service.release_final(peer),
-          "each receiver releases its own final snapshot");
+    CHECK(service.release_final(identities[1U]), "release receiver one's final snapshot");
+    for (const auto receiver : {0U, 2U, 3U}) source.request_more(receiver);
+    for (const auto receiver : {0U, 2U, 3U}) {
+        CHECK(source.wait_emitted(receiver, 2U), "three peer captures continue after one stop");
+        const auto stats = service.stats(identities[receiver]);
+        CHECK(stats && stats.value().packets == 2U,
+              "each surviving peer queue advances independently");
+    }
+
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "reacquire stopped receiver one");
+    auto reacquired = identity(91U);
+    reacquired.receiver = 1U;
+    CHECK(service.attach(reacquired), "attach reacquired receiver one stream");
+    CHECK(source.wait_emitted(1U, 1U), "reacquired receiver one emits independently");
+    CHECK(service.detach(reacquired), "detach reacquired receiver one");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop reacquired receiver one");
+    CHECK(service.release_final(reacquired), "release reacquired receiver one's final snapshot");
+
+    for (const auto receiver : {0U, 2U, 3U}) {
+        const auto system = asicen::profile::is_satellite_receiver(receiver)
+                                ? ipc::System::ISDB_S
+                                : ipc::System::ISDB_T;
+        CHECK(service.detach(identities[receiver]), "detach surviving receiver stream");
+        CHECK(service.stop_capture(receiver, system), "stop surviving receiver capture");
+        CHECK(service.release_final(identities[receiver]), "release surviving final snapshot");
+        CHECK(source.lanes[receiver].stop_calls == 1,
+              "each receiver cleanup reaches only its own source lifecycle");
+    }
+    CHECK(source.lanes[1U].stop_calls == 2,
+          "receiver stop and reacquire cleanup remain scoped to that lane");
     return true;
 }
 
