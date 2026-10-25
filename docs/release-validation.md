@@ -1,4 +1,4 @@
-# Stable リリース前検証手順
+# 安定版リリース前検証手順
 
 この文書はASICEN Stable releaseで再利用する準備・操作・判定・cleanupの正本です。版固有matrixと検証記録は [`release-validation/1.0.0.md`](release-validation/1.0.0.md) のように版別文書へ記録します。公開契約は [`SPEC.md`](../SPEC.md)、CLI構文・機種能力は [`README.md`](../README.md) と各コマンドの `--help` が正です。
 
@@ -41,21 +41,21 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 | RF試験入力（system / channel） | 実際に受信させる放送systemと現地channel | firmware、機種data、candidate実績 | `system:` と `channel:`。対応波がない場合は `なし（理由）` |
 | 製品CLIからの内蔵CARD操作 | 製品固有CLI/APIの操作範囲 | PC/SC/WinSCard adapter、実機合否 | 操作名とmodel依存条件。機能なしは `なし` |
 | native PC/SC/WinSCard adapter | その行のOS標準APIへ接続する製品adapterの種類・配布形態 | 製品CLI CARD、adapter実機試験結果、他OSのadapter | OS/ABI行に該当する`Linux PC/SC:`、`macOS PC/SC:`、`Android:`または`Windows WinSCard:`だけを記載 |
-| 配布artifact / 手順 | 対象archive識別子とこの正本内の該当手順 | artifact hash、host、試験結果 | `artifact: <target>; procedure: [archive別手順](#3-release-archive-procedure)` の順 |
+| 配布artifact / 手順 | 対象archive識別子とこの正本内の該当手順 | artifact hash、host、試験結果 | `artifact: <target>; procedure: [archive別手順](#3-配布アーカイブ別手順)` の順 |
 
 共通IDは E02=Linux/x86_64/musl、E03=Linux/x86_64/glibc、E04=macOS/arm64、E05=Android/aarch64、E06=Android/armv7a、E07=Android/x86_64、E15-G=Linux/aarch64/glibc、E15-M=Linux/aarch64/musl、E17=Windows 11/x86_64を表す。IDはhost名や試験済み状態を表さない。
 
 | ID | OS / ABI | 依存 / driver / permission | firmware / 補助data | RF試験入力（system / channel） | 製品CLIからの内蔵CARD操作 | native PC/SC/WinSCard adapter | 配布artifact / 手順 |
 |---|---|---|---|---|---|---|---|
-| E03 | Linux / x86_64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-glibc-x86_64`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E02 | Linux / x86_64 / musl | libusb: 静的1.0.30; USB access: HAOS Supervisorの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-musl-x86_64`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E15-G | Linux / aarch64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-glibc-aarch64`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E15-M | Linux / aarch64 / musl | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-musl-aarch64`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E04 | macOS / arm64 / Apple system runtime | libusb: 静的1.0.30; USB access: macOSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | macOS PC/SC: bundle | artifact: `darwin-arm64`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E05 | Android (Termux) / aarch64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-aarch64`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E06 | Android (Termux) / armv7a / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-armv7a`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E07 | Android (Termux) / x86_64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-x86_64`; procedure: [archive別手順](#3-release-archive-procedure) |
-| E17 | Windows 11 / x86_64 / Win32 | libusb: 静的1.0.30; USB access: 既存許可済みlibusb driver | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Windows WinSCard: application-local DLL | artifact: `win-candidate`; procedure: [archive別手順](#3-release-archive-procedure) |
+| E03 | Linux / x86_64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-glibc-x86_64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E02 | Linux / x86_64 / musl | libusb: 静的1.0.30; USB access: HAOS Supervisorの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-musl-x86_64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E15-G | Linux / aarch64 / glibc | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-glibc-aarch64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E15-M | Linux / aarch64 / musl | libusb: 静的1.0.30; USB access: native OSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Linux PC/SC: libc対応IFD | artifact: `linux-musl-aarch64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E04 | macOS / arm64 / Apple system runtime | libusb: 静的1.0.30; USB access: macOSの許可済み経路 | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | macOS PC/SC: bundle | artifact: `darwin-arm64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E05 | Android (Termux) / aarch64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-aarch64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E06 | Android (Termux) / armv7a / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-armv7a`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E07 | Android (Termux) / x86_64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-x86_64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
+| E17 | Windows 11 / x86_64 / Win32 | libusb: 静的1.0.30; USB access: 既存許可済みlibusb driver | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Windows WinSCard: application-local DLL | artifact: `win-candidate`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
 
 ## 共通試験シナリオ T00–T14
 
@@ -70,7 +70,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** deviceを開かず、archive/logを保持。
 - **記録:** source SHA、CI run/attempt、artifact ID/target/hash、取得日時、未取得理由。
 
-### T01 環境/permission/input
+### T01 実行環境・アクセス権・入力
 
 - **適用対象/頻度:** 全native archive。初回は全modelごと。
 - **準備:** E-ID/OS/ABI、USB access、firmware/model data、channel planを環境表と照合。
@@ -79,7 +79,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** 権限不足やdriver変更が必要なら操作せず未実施記録。
 - **記録:** E-ID/host/OS/ABI/model、USB topology/permission、firmware/data、channel plan。
 
-### T02 列挙/selector/ready
+### T02 列挙・selector・ready確認
 
 - **適用対象/頻度:** 毎release、対象model/device。
 - **準備:** 候補archiveのlist-json/models入口とdevice selectorを準備しdaemon専用runtimeを作る。
@@ -104,7 +104,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** 全client通常終了後daemon通常停止、残留なし。
 - **記録:** model/receiver/system/channel、各start/end/exit、TS/counter、cleanup。
 
-### T04 不足波/全無料channel
+### T04 不足波・全無料channel
 
 - **適用対象/頻度:** 毎releaseは不足波。初回/majorは全機種の代表機で全無料channel各10秒。
 - **準備:** 現地channel planとmodel能力から対象system/channel一覧を作る。
@@ -113,7 +113,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** client wait/exit保存、daemon通常停止。
 - **記録:** model/system/channel/全channel list、TS解析/counter/exit、未取得理由。
 
-### T05 stream中monitor/control
+### T05 受信中の状態確認・制御
 
 - **適用対象/頻度:** 毎release。CARD/controlは製品能力に従う。
 - **準備:** capture clientを起動し、別terminalでstatus/list/controlを行えるようにする。
@@ -122,7 +122,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** client/daemonを通常停止し残留確認。
 - **記録:** 照会/control時刻、response class、各exit、streamとの重なり。
 
-### T06 CARD物理挿抜/復帰
+### T06 CARD物理挿抜・復帰
 
 - **適用対象/頻度:** CARD reader/status対応model。毎release。
 - **準備:** capture停止・daemon維持。初期CARD状態とreader有無を確認。
@@ -131,7 +131,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** daemon通常停止、FD/IPC/runtimeを確認。
 - **記録:** 依頼時刻、状態/response/exit、復帰、cleanup。
 
-### T07 USB idle/stream切断と再取得
+### T07 USB待機中・受信中の切断と再取得
 
 - **適用対象/頻度:** 毎release。USB対応deviceのidle/streamを別run。
 - **準備:** USB pathをlist-jsonで固定。有限captureとそれより短い観測窓を準備。
@@ -140,7 +140,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** idle/streamそれぞれでowned client/daemonを通常停止してwaitし、再接続後の新daemonも通常停止する。Androidはpermission/FD再取得。
 - **記録:** idle/stream、daemon USB owner状態、依頼/応答時刻、path、status/診断、各実終了値、再取得TS/counter、cleanup。
 
-### T08 通常stop/cleanup
+### T08 通常停止・cleanup
 
 - **適用対象/頻度:** 全test終了時。
 - **準備:** 各owned client/daemon PIDとruntimeを記録してから起動する。
@@ -149,7 +149,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** 無関係processへsignalしない。test専用runtimeだけ片付け失敗log保持。
 - **記録:** PID/role/exit、process/FD/IPC/socket/runtime、復旧状態。
 
-### T09 TS/counter/exit判定
+### T09 TS・counter・終了値判定
 
 - **適用対象/頻度:** 全capture/soak。
 - **準備:** TS parser/SPEC条件とdaemon counterを確認できるようにする。
@@ -158,7 +158,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** 元TS/hash/logを残してT08 cleanup。
 - **記録:** parser/version、TS hash、sync/TEI/continuity/drop/counter、exit。
 
-### T10 native PC/SC/WinSCard
+### T10 native PC/SC・WinSCard
 
 - **適用対象/頻度:** 対応OS/APIのみ。非対応製品は理由付きN/A。
 - **準備:** native OS adapter/consumerとcandidate IFD/DLL pathを用意。
@@ -167,7 +167,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** consumer/isolated pcscd通常停止。system PCSC serviceを変更しない。
 - **記録:** OS/ABI、module/DLL absolute path、consumer、reader/card、operation/exit。
 
-### T11 LNB/非対応拒否
+### T11 LNB・非対応要求の拒否
 
 - **適用対象/頻度:** 必要時。給電対応profileだけ実測。
 - **準備:** 対応profile、meter、独立給電の状態を確認。
@@ -176,7 +176,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** daemonを通常停止し、非対応profileでは給電要求を追加せず0Vと通常配線復帰を確認する。
 - **記録:** model/profile、command/response/exit、meter値と条件、cleanup。現所持ASICEN機器は全てLNB対応のため非対応profile拒否の実機確認は未実施・現在実行不可と記録する。対応機試験やmockを代替合格にしない。
 
-### T12 複数device/daemon/access
+### T12 複数device・daemon・access
 
 - **適用対象/頻度:** 必要時、複数device/selector/access変更時。
 - **準備:** USB port/selectorとinstance/runtimeをdeviceごとに割り当てる。
@@ -185,7 +185,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** 各client/daemon個別wait/stopしFD/IPC/socket確認。
 - **記録:** device/port/PID/runtime、各exit/継続/再取得/access/cleanup。
 
-### T13 soak/頻度
+### T13 連続受信・頻度
 
 - **適用対象/頻度:** 毎releaseおよび全model初回/major。
 - **準備:** 確定頻度表の対象archive/model/timeをmatrixへ展開する。
@@ -194,7 +194,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 - **停止/cleanup:** T08通常stopと全resource cleanup。
 - **記録:** model/OS/ABI/archive、時間、TS/counter、FD/RSS、未実施理由。
 
-### T14 failure/release disposition
+### T14 失敗・リリース判定
 
 - **適用対象/頻度:** 全candidate gate完了後。
 - **準備:** source/archive SHAと全T-IDの結果を版別記録へ用意。
@@ -205,7 +205,25 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 
 N/Aは製品機能上該当しない項目だけに使う。OS/ABI候補のunsupported、candidate欠落、未実施、失敗、環境不能は版別結果で未達とし、passに読み替えない。手順に記した期待値は実測結果ではない。
 
-## 0. 共通artifact matrixと共通手順
+## 対象アーカイブ・環境から全試験への対応
+
+選択したarchive/E-IDごとに、下表のT00–T14を同じrun記録へ実施する。各T見出しは準備・実操作・期待値/終了値・停止/cleanup・記録を含む手順本体であり、表は対象環境からその全項目へ直接辿る索引である。環境表に載る別OS/ABIの結果や過去runで代用しない。
+
+| archive / E-ID / 実行環境 | T00–T14の手順リンク |
+|---|---|
+| `linux-glibc-x86_64` / [E03](#3-配布アーカイブ別手順) / Linux x86_64/glibc | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `linux-musl-x86_64` / [E02](#3-配布アーカイブ別手順) / Linux x86_64/musl | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `linux-glibc-aarch64` / [E15-G](#3-配布アーカイブ別手順) / Linux aarch64/glibc | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `linux-musl-aarch64` / [E15-M](#3-配布アーカイブ別手順) / Linux aarch64/musl | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `darwin-arm64` / [E04](#3-配布アーカイブ別手順) / macOS arm64 | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `android-aarch64` / [E05](#4-cardpcscusb) / Android Termux/aarch64 | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `android-armv7a` / [E06](#4-cardpcscusb) / Android Termux/armv7a | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `android-x86_64` / [E07](#4-cardpcscusb) / Android Termux/x86_64 | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+| `win-candidate` / [E17](#windowsネイティブwinscard) / Windows 11 x86_64 candidate（正式配布archive外） | [T00](#t00-候補配布物固定) · [T01](#t01-実行環境アクセス権入力) · [T02](#t02-列挙selectorready確認) · [T03](#t03-最大同時受信) · [T04](#t04-不足波全無料channel) · [T05](#t05-受信中の状態確認制御) · [T06](#t06-card物理挿抜復帰) · [T07](#t07-usb待機中受信中の切断と再取得) · [T08](#t08-通常停止cleanup) · [T09](#t09-tscounter終了値判定) · [T10](#t10-native-pcscwinscard) · [T11](#t11-lnb非対応要求の拒否) · [T12](#t12-複数devicedaemonaccess) · [T13](#t13-連続受信頻度) · [T14](#t14-失敗リリース判定) |
+
+OS/ABI固有の起動方法は以下の環境recipeと§3のarchive手順を使う。試験の期待・cleanup・記録項目はリンク先T本文に従う。機能対象外だけを理由付きN/Aとし、候補未入手・unsupported・未実施・環境不足は未達で記録する。
+
+## 0. 共通配布アーカイブと共通手順
 
 各冊の「共通実行環境表」は、Stable release gateで確認する正式配布artifactとnative/canonical runtimeの対応matrixである。環境IDはOS/ABIとUSB access boundaryを識別し、host名や試験状態を表さない。正式な対象archiveはREADME/SPECと各版のmatrixに従う。
 
@@ -238,11 +256,11 @@ gh run download <candidate-run-id> --name release-candidate --dir candidate
 
 通常release aggregateに含まれないWindows ZIPは配布物として数えない。適用版にWindows native検証が含まれる場合はこの区別を保ち、通常配布物にないことを理由にnative確認を除外しない。欠落・hash不一致・source/licenseの不整合は候補失敗。
 
-## 2. device-free gate
+## 2. 機器非接続gate
 
 候補commitの全CI build/test/package/audit job成功を確認する。README記載のnative・cross build、unit test、sanitizer、package展開試験、source archive再buildを行い、出力と終了値を保存する。Linux/macOSで `asicend --version`、`asicen-ts --version`、`asicenctl --version`、`asicend --list-json` を実行し、版情報と妥当なinventory JSONを確認する。USBなしinventoryはscan incomplete等の状態を区別して示す。`--list-json` はdevice ownership不要。異常引数・未知optionのexitとstderrをREADMEのCLI契約に照合する。
 
-## 3. Release archive procedure
+## 3. 配布アーカイブ別手順
 
 毎release、代表Linux x86_64機で2時間連続受信し、全配布archiveをnative OS/ABIで短時間回帰する。初回/major追加確認ではmacOS/Windowsは各30分、残るOS/ABIは各10分連続受信し、全無料channel各10秒は代表機だけで行う。Windowsが対象の版ではnative確認に同source candidateの `win-candidate` artifactを使い、通常配布binaryの代替とは扱わない。
 
@@ -312,7 +330,7 @@ printf '%s\n' "$pcscd_rc" > "$LOG/pcscd.rc"
 
 `pcsc_scan -r`はexit 0かつASICEN readerが1件、ATRを伏せた`pcsc_scan -c`はpipeline exit 0かつcard insertedを期待する。Appendix Aの既存`bcas-safe-probe`はPC/SC connect後の標準B-CAS初期設定、`get_init_status()`、read-only `get_id()`を行い、exit 0かつ`bcas_init=ok` / `init_status=ok` / `id_query=ok`を期待する。3つの`.rc`が全て`0`で、記録されたreaderが1件、cardがinserted、probeの3ラベルが`ok`の場合だけpassとする。probeはreaderを1つだけ登録したconfigから一意に選ぶ。カード不在・ATR/resetの独立確認は同じdaemon/runtime/instanceの`asicenctl card-status`, `card-atr`, `card-reset`を使い、ATR/resetのraw出力は`/dev/null`へ送り終了値だけを記録する。CLI CARD操作はnative PC/SC probe結果の代用ではない。raw ATR、card ID、status内識別値、APDU response bytesを出力・保存しない。consumerを終了したら`kill -INT "$PCSC_PID"`後に`wait "$PCSC_PID"`し、pcscd終了値を保存してからisolated socket/process消失を確認する。続いて`asicend`を通常停止し、test config/runtimeを削除する。system serviceは変更しない。
 
-#### Appendix A. Linux専用PC/SCと既存safe probeの準備
+#### 付録A. Linux専用PC/SCと既存safe probeの準備
 
 次のレシピは専用`WORK`だけに書き込み、system pcscd/serviceには触れない。`RT`は候補daemonの`--runtime-dir`、`rc`はその`--instance`、`IFD`は候補archive内`ifd/asicen-userland-ifd.so`のabsolute pathとする。必要なbuild toolsは`git`, `cmake`, C/C++ compiler, `pkg-config`, `python3`/venv, `ninja`, `tar`, `sha256sum`, `curl`。reader/card状態確認には`pcsc-tools`由来の`pcsc_scan`も必要。
 
@@ -410,29 +428,260 @@ macOSでもnative `.bundle`を使うが、system PC/SC serviceをreload/restart�
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
 
-### Windows native / WinSCard
+### WindowsネイティブWinSCard
 
 Windows x86_64は回帰対象である。通常release aggregateにWindows ZIPがない場合は同じcandidate source runの`win-candidate` artifactを展開し、hash/manifest/provenanceを照合する。native Windows hostでUSB driverを自動変更せず、既に許可済みのlibusb access pathを記録する。実時間は共通頻度表に従い、初回/majorの30分連続受信は全無料channel取得とは別に記録する。
 
 ```powershell
 $D = (Resolve-Path .\asicend.exe).Path
-$C = (Resolve-Path .\asicenctl.exe).Path
-$B = (Resolve-Path .\asicen-ts.exe).Path
-$FW = (Resolve-Path .\firmware\<model-firmware>).Path
-$RT = Join-Path $env:TEMP "asicen-rc-runtime-$PID"
+$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$RT = 'C:\asicen-rc-<run-id>'
+if (Test-Path $RT) { throw "refusing to reuse existing runtime path: $RT" }
 New-Item -ItemType Directory -Path $RT | Out-Null
+$LOG = 'C:\asicen-e17-<run-id>-logs'
+if (Test-Path $LOG) { throw "refusing to reuse existing log path: $LOG" }
+New-Item -ItemType Directory -Path $LOG | Out-Null
 & $D --list-json
 $selector = 'usb:BUS-PORT[,BUS-PORT]'
 & $D --device $selector --instance rc --firmware $FW --runtime-dir $RT
-# daemonを別PowerShellで維持し、同一instance/runtimeから照会・受信する
-& $C --instance rc --runtime-dir $RT status
-& $C --instance rc --runtime-dir $RT list
-& $B --instance rc --runtime-dir $RT --receiver <ID> --channel T27 --time <SECONDS> --output t27.ts
 ```
 
-candidate内のapplication-local `WinSCard.dll`はconsumerと同じdirectoryに置き、consumerがこのabsolute pathをloadする。既存のWindows scratch checkは`LoadLibraryW`と`GetProcAddress`で`SCardEstablishContext` / `SCardTransmit`等のexportを確認するDLL load/export smokeであり、reader列挙・context確立・connect・ATR/reset・APDUのconsumer試験ではない。現在の`win-candidate`にはnative transaction consumer/API probeが含まれず、repoにも実行手順付きの既存probeがないため、このgateは実施不能として未完了に記録する。native consumerを用意できないまま新しいprobeを作成せず、CI、DLL export smoke、ASICEN CLIの`card-*`をnative WinSCard transactionの合格にしない。既存のnative consumerが候補とともに提供された場合だけ、その実行file・loaded absolute DLL path・reader選択・status/connect/ATR/reset/標準APDU/disconnect/context release・終了値・cleanupを記録する。生ATR、card ID、APDU response本文は公開記録へ保存しない。
+daemonはこのPowerShellで維持し、別のPowerShellを同じcandidate directoryで開いて同一instance/runtimeから照会・受信する。
 
-## 5. LNB・soak・cleanup
+```powershell
+$D = (Resolve-Path .\asicend.exe).Path
+$C = (Resolve-Path .\asicenctl.exe).Path
+$B = (Resolve-Path .\asicen-ts.exe).Path
+$RT = 'C:\asicen-rc-<run-id>'
+$LOG = 'C:\asicen-e17-<run-id>-logs'
+& $C --instance rc --runtime-dir $RT status
+& $C --instance rc --runtime-dir $RT list
+$capture = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver','<ID>','--channel','T27','--time','30','--output',(Join-Path $PWD 't27.ts')) -PassThru -NoNewWindow -Wait
+$capture.ExitCode
+Get-FileHash -Algorithm SHA256 .\t27.ts
+```
+
+T07はdaemonを維持したままclientなしの状態でUSBを抜くidle runと、有限受信中のstream runを別々に行う。抜去を依頼する前にstatus/listとdaemon PIDを記録し、依頼から最大5分待つ。stream runでは`--time`を観測窓より長くしたclientを前景実行し、抜去時の実終了値を保存する。選択した観測窓内に自然終了しない場合はclient consoleでCtrl+Cを入力して終了値を保存し、その試行はtimeout未達として記録する。抜去後にdaemonを通常停止し、再接続後は`--list-json`で同じUSB pathを確認して新しいruntimeで起動し、status/listと30秒受信を再実行する。T08のPID/終了値/process確認をこのWindows手順にも適用する。
+
+```powershell
+$B = (Resolve-Path .\asicen-ts.exe).Path
+$RT = 'C:\asicen-rc-<run-id>'
+$LOG = 'C:\asicen-e17-<run-id>-logs'
+$R1 = '<receiver-1>'
+$CAPTURE_SECONDS = 3600
+& $B --instance rc --runtime-dir $RT --receiver $R1 --channel T27 --time $CAPTURE_SECONDS --output (Join-Path $LOG 'usb-cut.ts')
+$LASTEXITCODE
+```
+
+WindowsではT03–T06も候補directoryの3 executableで行う。T03はW3U2/W3U3の公開最低要求である4 receiverを別TSへ同時起動し、他機種は公開receiver数を全て同時起動する。T04は現地channel planの各無料channelを個別に有限受信する。T05は受信中に別consoleからstatus/listと対応CARD controlを実行する。T06はdaemonを維持したまま利用者に物理挿抜を依頼し、status/ATR/reset/APDUを各段階で保存する。
+
+```powershell
+$D = (Resolve-Path .\asicend.exe).Path
+$C = (Resolve-Path .\asicenctl.exe).Path
+$B = (Resolve-Path .\asicen-ts.exe).Path
+$RT = 'C:\asicen-rc-<run-id>'
+$LOG = 'C:\asicen-e17-<run-id>-logs'
+$R1 = '<receiver-1>'; $R2 = '<receiver-2>'; $R3 = '<receiver-3>'; $R4 = '<receiver-4>'
+$CHANNEL_PLAN = @('<free-channel-1>','<free-channel-2>')
+$CAPTURE_SECONDS = '30'
+$jobs = @(
+  [pscustomobject]@{ Receiver=$R1; Channel='T27'; Output='r1.ts'; Lnb=$false },
+  [pscustomobject]@{ Receiver=$R2; Channel='T30'; Output='r2.ts'; Lnb=$false },
+  [pscustomobject]@{ Receiver=$R3; Channel='BS01_0'; Output='r3.ts'; Lnb=$true },
+  [pscustomobject]@{ Receiver=$R4; Channel='BS15_0'; Output='r4.ts'; Lnb=$true }
+)
+$clients = foreach ($job in $jobs) {
+  $captureArgs = @('--instance','rc','--runtime-dir',$RT,'--receiver',$job.Receiver,'--channel',$job.Channel,'--time',$CAPTURE_SECONDS,'--output',(Join-Path $LOG $job.Output))
+  if ($job.Lnb) { $captureArgs += @('--lnb-voltage','0') }
+  Start-Process -FilePath $B -ArgumentList $captureArgs -PassThru -NoNewWindow
+}
+foreach ($client in $clients) { $client.WaitForExit(); $client.Refresh(); [pscustomobject]@{ PID=$client.Id; ExitCode=$client.ExitCode } }
+Get-FileHash -Algorithm SHA256 (Join-Path $LOG 'r1.ts'), (Join-Path $LOG 'r2.ts'), (Join-Path $LOG 'r3.ts'), (Join-Path $LOG 'r4.ts')
+
+foreach ($channel in $CHANNEL_PLAN) {
+  $file = Join-Path $LOG ($channel + '.ts')
+  $client = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver',$R1,'--channel',$channel,'--time','10','--output',$file) -PassThru -NoNewWindow -Wait
+  [pscustomobject]@{ Channel=$channel; ExitCode=$client.ExitCode; File=$file }
+}
+& $C --instance rc --runtime-dir $RT card-status
+# 利用者へ抜去を依頼し、状態/終了値を保存した後、再挿入を依頼する。
+& $C --instance rc --runtime-dir $RT card-status
+& $C --instance rc --runtime-dir $RT card-atr *> $null; $LASTEXITCODE
+& $C --instance rc --runtime-dir $RT card-reset *> $null; $LASTEXITCODE
+1..10 | ForEach-Object { & $C --instance rc --runtime-dir $RT card-apdu 90:30:00:00:00 *> $null; [pscustomobject]@{ APDU=$_; ExitCode=$LASTEXITCODE } }
+```
+
+T08ではclientごとの`ExitCode`保存後にdaemon consoleでCtrl+Cを入力し、daemon exit 0、process/FD/runtime cleanupを確認する。daemon終了後に同一instance/runtimeの`status`を実行しendpointが消えたことを確認する。T09は各TSのSHA-256とTSDuck `tsanalyze`のsync/TEI/continuity結果を記録する。T11は対応機種だけで、電圧計を使ったLNB on/offの公開command/実電圧を記録する。T12はdeviceごとに異なる`--instance`/`--runtime-dir`でdaemonを2つ起動し、client/終了値を分ける。T13は同じcaptureを確定頻度表の秒数で連続実行し、開始・定期・終了時のTS/counter/process/FD/RSSを保存する。T14は全T-IDの今回状態と証拠pathを版別記録へ集約し、未実施・候補欠落・unsupportedをpassにしない。
+
+T12では別consoleごとに次のdaemon commandを使い、各consoleでCtrl+C後の終了値を記録する。
+
+```powershell
+$D = (Resolve-Path .\asicend.exe).Path
+$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$RTA = 'C:\asicen-e17-<run-id>-a'; $RTB = 'C:\asicen-e17-<run-id>-b'
+New-Item -ItemType Directory -Path $RTA, $RTB | Out-Null
+& $D --device 'usb:<PORT_A>' --instance a --firmware $FW --runtime-dir $RTA
+```
+
+別console Bでdaemonを起動する。
+
+```powershell
+& $D --device 'usb:<PORT_B>' --instance b --firmware $FW --runtime-dir $RTB
+```
+
+両daemonの停止後、client/endpoint cleanupを記録する。
+
+```powershell
+Get-Process asicend,asicen-ts -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,WorkingSet64,HandleCount
+Get-ChildItem -LiteralPath $RTA, $RTB -Force
+& $C --instance a --runtime-dir $RTA status 2>&1 | Tee-Object "$LOG\status-a-after-stop.txt"
+$LASTEXITCODE
+& $C --instance b --runtime-dir $RTB status 2>&1 | Tee-Object "$LOG\status-b-after-stop.txt"
+$LASTEXITCODE
+```
+
+Android/Termuxでは`termux-usb -l`の出力からUSB nodeを選び、`termux-usb -r`でpermissionを取得する。T02のdevice/path確認にはこのTermux列挙とpermission結果を使い、borrowed FD起動と併用できない`asicend --list-json`を実行しない。2機能機種はprimary/siblingのnodeを区別する。runtimeは短い`$PREFIX/tmp`直下へ作り、`--runtime-dir`/`--instance`を全clientで一致させる。E05/E06/E07それぞれで当該ABI archiveを使う。runtime VID:PIDなら下の通常起動へ進み、cold loaderならfirmware転送、再列挙、runtime FD grantを分けて実施する。transfer stageのexit 3とdiagnosticはruntime daemonの失敗ではなく、固定sourceが示す次のUSB grant段階への遷移なので、stageごとに保存する。
+
+```sh
+runtime_dir="$PREFIX/tmp/asicen-<run-id>"
+mkdir -p "$runtime_dir" && chmod 700 "$runtime_dir"
+termux-usb -l
+termux-usb -r /dev/bus/usb/BBB/AAA
+asicen-termux --usb-device /dev/bus/usb/BBB/AAA --runtime-dir "$runtime_dir" --instance rc
+```
+
+cold loaderのfirmware転送はTermux:APIから渡されたFDを`asicen-termux`経由で既存daemon入口へ渡す。single-function機器では次を実行し、固定sourceのtransfer完了diagnosticとexit 3の両方を保存する。続いて`termux-usb -l`で同じUSB pathに戻ったruntime VID:PID nodeを確認し、`termux-usb -r`でそのnodeのpermissionを取得して、同じruntime/instanceで`--firmware`を外した上のruntime起動を行う。exit 3だけ、別pathのruntime、または再列挙なしを成功に読み替えない。`termux-usb -r`で古いloader nodeを再利用しない。
+
+```sh
+firmware_path='./firmware/<model-firmware>'
+termux-usb -l | tee "$runtime_dir/devices-loader.txt"
+termux-usb -r /dev/bus/usb/BBB/AAA
+if asicen-termux --usb-device /dev/bus/usb/BBB/AAA --firmware "$firmware_path" --runtime-dir "$runtime_dir" --instance rc > "$runtime_dir/firmware-stage.out" 2> "$runtime_dir/firmware-stage.err"; then stage_rc=0; else stage_rc=$?; fi
+printf '%s\n' "$stage_rc" > "$runtime_dir/firmware-stage.rc"
+test "$stage_rc" -eq 3 && grep -F 'firmware: --fd cannot follow the loader re-enumeration; upload separately, re-grant the runtime fd, then run again' "$runtime_dir/firmware-stage.err"
+termux-usb -l | tee "$runtime_dir/devices-runtime.txt"
+```
+
+2-function機器では、固定sourceがpaired loaderの2 FD同時firmware指定を拒否するため、primary→sibling→runtime pairを一機能ずつ順に処理する。まずprimary loader nodeだけへpermissionを与え、上と同じ`asicen-termux --usb-device <primary-loader> --firmware "$firmware_path" --runtime-dir "$runtime_dir" --instance rc`を実行する。期待するのはfirmware transfer完了diagnosticとexit 3であり、次に`termux-usb -l`で同じprimary pathのruntime VID:PIDを確認する。続けてprimary runtime nodeを`--firmware`なしで一度grantすると、固定sourceはsibling restoreを要求してexit 3を返す。このとき`sibling restore: requested; grant the sibling loader FD and transfer its firmware`があり、かつprimary pathの隣接siblingがloader VID:PIDで列挙されることを確認する。そのsibling loader nodeを`--firmware "$firmware_path"`付きで一度grantし、firmware transfer完了diagnosticとexit 3を確認する。最後に`termux-usb -l`でprimary/sibling両方が同じ筐体のruntime VID:PIDへ戻ったことを確認し、両runtime nodeをprimary順に`asicen-termux --usb-device <primary-runtime> --usb-device <sibling-runtime> --runtime-dir "$runtime_dir" --instance rc`へ渡してdaemonを起動する。各exit 3は記載したstage diagnosticと次段のVID/PID/path確認がそろった場合だけstage遷移として扱う。単体のexit 3、異なるpathのruntime、期待node欠落、diagnostic不一致は失敗/未達とし、続行しない。daemonがreadyになった後status/list、capture exit 0、TSを確認して初めて合格とする。
+
+paired機の段階呼出しは次のとおり。各runで`$PRIMARY_LOADER`、`$PRIMARY_RUNTIME`、`$SIBLING_LOADER`、`$PRIMARY_RUNTIME`/`$SIBLING_RUNTIME`を、その直前の`termux-usb -l`出力から選び、path/PID/VID:PIDと各終了値を保存する。各一時daemon invocationはfailure-on-exitのshell環境でも続くように終了値を`if`で採取する。
+
+```sh
+firmware_path='./firmware/<model-firmware>'
+primary_loader='<primary-loader-usb-path>'
+runtime_dir="$PREFIX/tmp/asicen-<run-id>"
+mkdir -p "$runtime_dir" && chmod 700 "$runtime_dir"
+termux-usb -l | tee "$runtime_dir/devices-primary-loader.txt"
+termux-usb -r "$primary_loader"
+if asicen-termux --usb-device "$primary_loader" --firmware "$firmware_path" --runtime-dir "$runtime_dir" --instance rc > "$runtime_dir/primary-firmware.out" 2> "$runtime_dir/primary-firmware.err"; then rc=0; else rc=$?; fi
+printf '%s\n' "$rc" > "$runtime_dir/primary-firmware.rc"
+test "$rc" -eq 3 && grep -F 'firmware: --fd cannot follow the loader re-enumeration; upload separately, re-grant the runtime fd, then run again' "$runtime_dir/primary-firmware.err"
+# termux-usb -lでprimary runtime VID:PID/pathを確認後、primary runtime FDでsibling restoreを要求する。
+termux-usb -l | tee "$runtime_dir/devices-primary-runtime.txt"
+primary_runtime='<primary-runtime-usb-path-from-previous-output>'
+termux-usb -r "$primary_runtime"
+if asicen-termux --usb-device "$primary_runtime" --runtime-dir "$runtime_dir" --instance rc > "$runtime_dir/sibling-restore.out" 2> "$runtime_dir/sibling-restore.err"; then rc=0; else rc=$?; fi
+printf '%s\n' "$rc" > "$runtime_dir/sibling-restore.rc"
+test "$rc" -eq 3 && grep -F 'sibling restore: requested; grant the sibling loader FD and transfer its firmware' "$runtime_dir/sibling-restore.err"
+# sibling restore diagnosticとsibling loader VID:PID/pathを確認してから続行する。
+termux-usb -l | tee "$runtime_dir/devices-sibling-loader.txt"
+sibling_loader='<sibling-loader-usb-path-from-previous-output>'
+termux-usb -r "$sibling_loader"
+if asicen-termux --usb-device "$sibling_loader" --firmware "$firmware_path" --runtime-dir "$runtime_dir" --instance rc > "$runtime_dir/sibling-firmware.out" 2> "$runtime_dir/sibling-firmware.err"; then rc=0; else rc=$?; fi
+printf '%s\n' "$rc" > "$runtime_dir/sibling-firmware.rc"
+test "$rc" -eq 3 && grep -F 'firmware: --fd cannot follow the loader re-enumeration; upload separately, re-grant the runtime fd, then run again' "$runtime_dir/sibling-firmware.err"
+# termux-usb -lでprimary/sibling両方のruntime VID:PID/pathを確認してからdaemonを起動する。
+termux-usb -l | tee "$runtime_dir/devices-runtime-pair.txt"
+primary_runtime='<primary-runtime-usb-path-from-previous-output>'
+sibling_runtime='<sibling-runtime-usb-path-from-previous-output>'
+termux-usb -r "$primary_runtime"
+termux-usb -r "$sibling_runtime"
+asicen-termux --usb-device "$primary_runtime" --usb-device "$sibling_runtime" --runtime-dir "$runtime_dir" --instance rc
+```
+
+通常daemon起動後の各T本文にある`asicenctl`/`asicen-ts` client commandは別Termux sessionから候補archive内の同じclientを実行する。clientへUSB path/FDを渡さず、daemonの`--runtime-dir`/`--instance`を一致させる。終わりはlauncher sessionでCtrl+Cを送り、その終了値、daemon終了、process/FD/runtime cleanupを記録する。
+
+`win-candidate`の`WinSCard.dll`はconsumerと同じdirectoryに置く。候補はCI専用で正式配布archiveの代替ではない。最初のPowerShell consoleで専用runtimeを作り、daemonを前景起動する。probeは2つ目のconsoleから実行し、Coreの既存APIを呼ぶ。Coreが選ぶASICEN reader名は`DTV userland (asicen:rc/reader-0)`である。DLL load/export smokeやoffline fixtureは実機transactionの証明ではない。
+
+```powershell
+$D = (Resolve-Path .\asicend.exe).Path
+$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$RT = 'C:\asicen-e17-<run-id>'
+if (Test-Path $RT) { throw "refusing to reuse existing runtime path: $RT" }
+New-Item -ItemType Directory -Path $RT | Out-Null
+$env:DTV_USERLAND_RUNTIME_DIR = $RT
+$selector = 'usb:BUS-PORT[,BUS-PORT]'
+& $D --device $selector --instance rc --firmware $FW --runtime-dir $RT
+```
+
+このconsoleはprobe cleanupまで開いたままにする。
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$DLL = (Resolve-Path .\WinSCard.dll).Path
+$RT = 'C:\asicen-e17-<run-id>'
+$env:DTV_USERLAND_RUNTIME_DIR = $RT
+$env:PATH = (Split-Path $DLL) + ';' + $env:PATH
+Set-Location (Split-Path $DLL)
+$ctx = [IntPtr]::Zero; $card = [IntPtr]::Zero
+try {
+  $reader = 'DTV userland (asicen:rc/reader-0)'
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public struct ScardIoRequest { public uint Protocol; public uint Length; }
+public static class WinSCardProbe {
+  [DllImport("WinSCard.dll", EntryPoint="SCardEstablishContext", ExactSpelling=true)] public static extern int SCardEstablishContext(uint scope, IntPtr r1, IntPtr r2, out IntPtr context);
+  [DllImport("WinSCard.dll", EntryPoint="SCardListReadersW", ExactSpelling=true, CharSet=CharSet.Unicode)] public static extern int SCardListReadersW(IntPtr context, string groups, System.Text.StringBuilder readers, ref uint length);
+  [DllImport("WinSCard.dll", EntryPoint="SCardConnectW", ExactSpelling=true, CharSet=CharSet.Unicode)] public static extern int SCardConnectW(IntPtr context, string reader, uint share, uint protocols, out IntPtr card, out uint activeProtocol);
+  [DllImport("WinSCard.dll", EntryPoint="SCardStatusW", ExactSpelling=true, CharSet=CharSet.Unicode)] public static extern int SCardStatusW(IntPtr card, System.Text.StringBuilder readers, ref uint readerLength, out uint state, out uint protocol, byte[] atr, ref uint atrLength);
+  [DllImport("WinSCard.dll", EntryPoint="SCardTransmit", ExactSpelling=true)] public static extern int SCardTransmit(IntPtr card, ref ScardIoRequest sendPci, byte[] send, uint sendLength, IntPtr recvPci, byte[] recv, ref uint recvLength);
+  [DllImport("WinSCard.dll", EntryPoint="SCardDisconnect", ExactSpelling=true)] public static extern int SCardDisconnect(IntPtr card, uint disposition);
+  [DllImport("WinSCard.dll", EntryPoint="SCardReleaseContext", ExactSpelling=true)] public static extern int SCardReleaseContext(IntPtr context);
+}
+'@
+  $active = [uint32]0
+  $rc = [WinSCardProbe]::SCardEstablishContext(2, [IntPtr]::Zero, [IntPtr]::Zero, [ref]$ctx)
+  if ($rc -ne 0) { throw ('SCardEstablishContext rc=' + $rc) }
+  [uint32]$length = 0
+  $rc = [WinSCardProbe]::SCardListReadersW($ctx, $null, $null, [ref]$length)
+  if ($rc -ne 0 -and $rc -ne -2146435064) { throw ('SCardListReadersW size rc=' + $rc) }
+  $names = New-Object System.Text.StringBuilder ([int]$length)
+  $rc = [WinSCardProbe]::SCardListReadersW($ctx, $null, $names, [ref]$length)
+  if ($rc -ne 0 -or $names.ToString() -notlike ('*' + $reader + '*')) { throw ('reader missing; rc=' + $rc) }
+  $rc = [WinSCardProbe]::SCardConnectW($ctx, $reader, 2, 3, [ref]$card, [ref]$active)
+  if ($rc -ne 0) { throw ('SCardConnectW rc=' + $rc) }
+  [uint32]$readerLength = 256; [uint32]$state = 0; [uint32]$protocol = 0; [uint32]$atrLength = 64
+  $readerNames = New-Object System.Text.StringBuilder 256
+  $atr = New-Object byte[] 64
+  $rc = [WinSCardProbe]::SCardStatusW($card, $readerNames, [ref]$readerLength, [ref]$state, [ref]$protocol, $atr, [ref]$atrLength)
+  if ($rc -ne 0) { throw ('SCardStatusW rc=' + $rc) }
+  Write-Host "reader=$reader state=$state protocol=$protocol ATR-length=$atrLength"
+  $sendPci = New-Object ScardIoRequest
+  $sendPci.Protocol = $active
+  $sendPci.Length = [uint32][Runtime.InteropServices.Marshal]::SizeOf([ScardIoRequest])
+  [byte[]]$send = 0x90,0x30,0x00,0x00,0x00
+  [byte[]]$recv = New-Object byte[] 258
+  [uint32]$recvLength = $recv.Length
+  $rc = [WinSCardProbe]::SCardTransmit($card, [ref]$sendPci, $send, [uint32]$send.Length, [IntPtr]::Zero, $recv, [ref]$recvLength)
+  if ($rc -ne 0) { throw ('SCardTransmit rc=' + $rc) }
+  Write-Host "APDU=90:30:00:00:00 transmit=success response-length=$recvLength response-body=redacted"
+  $rc = [WinSCardProbe]::SCardDisconnect($card, 0); $card = [IntPtr]::Zero
+  if ($rc -ne 0) { throw ('SCardDisconnect rc=' + $rc) }
+  $rc = [WinSCardProbe]::SCardReleaseContext($ctx); $ctx = [IntPtr]::Zero
+  if ($rc -ne 0) { throw ('SCardReleaseContext rc=' + $rc) }
+  Write-Host 'status=PASS'
+}
+finally {
+  if ($card -ne [IntPtr]::Zero) { [void][WinSCardProbe]::SCardDisconnect($card, 0) }
+  if ($ctx -ne [IntPtr]::Zero) { [void][WinSCardProbe]::SCardReleaseContext($ctx) }
+  Remove-Item Env:DTV_USERLAND_RUNTIME_DIR -ErrorAction SilentlyContinue
+}
+```
+
+2つのconsoleで同じ固定`$RT`を使う。`BUS-PORT`、firmware、model、DLL SHA、reader list/status、各API戻り値を保存する。カードを必要とする場合は利用者が挿入し、ATR本文・カードID・APDU応答本文を保存しない。native API probeの実行結果がない段階では未実施であり、fixtureはAPI形状の参照に限る。probeの期待値はcontext/list/connect/status/transmit/disconnect/releaseがすべてsuccess、指定readerが列挙されること。probe後はdaemon consoleでCtrl+Cを入力し、終了値を記録してprocess/FD/runtime残留がないことを確認してから専用runtimeを削除する。
+
+## 5. LNB・連続受信・cleanup
 
 PX-W3U2/W3U3/V2などREADMEで15V対応が明示された機種のみ、壁設備と他給電源を分離し、衛星端子へテスターを接続する。停止状態から `--allow-lnb-power` を付けてdaemonを起動し、`asicenctl --runtime-dir "$RT" --instance rc lnb-on` 後に実測15V、`asicenctl --runtime-dir "$RT" --instance rc lnb-off` 後に要求0と実測0Vを確認する。独立要求と受信部 `--lnb-voltage` は別の状態として記録する。非対応機はsoftware要求も試さない。daemon停止後0Vと通常配線への復帰を確認する。
 
