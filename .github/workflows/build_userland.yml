@@ -8,6 +8,7 @@ on:
       - LICENSE
       - README.md
       - THIRD_PARTY_NOTICES.md
+      - cmake/dtv-userland-core.revision
       - packaging/**
       - tests/**
       - userland/**
@@ -23,6 +24,7 @@ on:
       - LICENSE
       - README.md
       - THIRD_PARTY_NOTICES.md
+      - cmake/dtv-userland-core.revision
       - packaging/**
       - tests/**
       - userland/**
