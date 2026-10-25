@@ -485,8 +485,8 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
         }
 #if defined(_WIN32)
         if (owner_.async_->raw_io_enabled) {
-            const int result =
-                finish_libusb_stream(owner_.primary_.handle(), owner_.async_->endpoint);
+            const int result = finish_libusb_stream(
+                owner_.capture_handle(owner_.source_receiver_), owner_.async_->endpoint);
             owner_.async_->raw_io_enabled = false;
             if (result != 0) {
                 owner_.mark_cleanup_failed(map_libusb_error(result));
@@ -2398,11 +2398,10 @@ int LibusbW3u3Hardware::control_function_impl(std::uint8_t function,
     if (!runtime_model_supported()) {
         return LIBUSB_ERROR_NOT_SUPPORTED;
     }
-    // Secondary access is limited to V2's source-backed read-only pair checks.
-    // Every frontend/card/link/capture operation still targets primary.
+    // V2 keeps its secondary function read-only for the source-backed pair checks.
     if (function > 1U ||
-        (function == 1U &&
-         (!uses_v2_frontend() || original.direction != Direction::In ||
+        (function == 1U && uses_v2_frontend() &&
+         (original.direction != Direction::In ||
           !(original.request == Request::CustomerInfo ||
             (original.request == Request::SysCtrlRead && original.value == 2U &&
              original.index == 0U && original.length == 3U) ||
@@ -2489,6 +2488,22 @@ int LibusbW3u3Hardware::control_function_impl(std::uint8_t function,
     }
     return rc;
 }
+
+libusb_device_handle* LibusbW3u3Hardware::capture_handle(std::uint8_t receiver) const noexcept
+{
+    if (profile_ == nullptr) {
+        return nullptr;
+    }
+    const auto route = receiver_address(*profile_, receiver);
+    if (!route) {
+        return nullptr;
+    }
+    if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->handle_for_function != nullptr) {
+        return capture_usb_hooks_->handle_for_function(capture_usb_hooks_->context,
+                                                       route.value().function_index);
+    }
+    return route.value().function_index == 0U ? primary_.handle() : sibling_.handle();
+}
 void LibusbW3u3Hardware::delay_ms(unsigned ms)
 {
     const auto until = steady_now() + std::chrono::milliseconds(ms);
@@ -2544,7 +2559,8 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     }
     const std::uint8_t local = receiver_local(receiver);
     const std::uint8_t endpoint = bulk_endpoint_for_local(local);
-    if (endpoint == 0U) {
+    libusb_device_handle* const handle = capture_handle(receiver);
+    if (endpoint == 0U || handle == nullptr) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     source_receiver_ = receiver;
@@ -2636,7 +2652,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
 #if defined(_WIN32)
     if (capture_usb_hooks_ == nullptr) {
         std::size_t transfer_size = kChunkSize;
-        const int result = prepare_libusb_stream(primary_.handle(), endpoint, &transfer_size,
+        const int result = prepare_libusb_stream(handle, endpoint, &transfer_size,
                                                  &state.raw_io_enabled);
         if (result != 0) {
             return fail_prepare(map_libusb_error(result));
@@ -2651,7 +2667,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         if (slot.transfer == nullptr) {
             return fail_prepare(Error::INTERNAL);
         }
-        libusb_fill_bulk_transfer(slot.transfer, primary_.handle(), endpoint, slot.buffer.data(),
+        libusb_fill_bulk_transfer(slot.transfer, handle, endpoint, slot.buffer.data(),
                                   static_cast<int>(kChunkSize), AsyncState::completed,
                                   &slot, 0U);
     }

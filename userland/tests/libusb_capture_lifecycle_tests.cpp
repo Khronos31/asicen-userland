@@ -145,6 +145,16 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return static_cast<FrontendTransport&>(hardware).control(transfer, response);
     }
+    static libusb_device_handle* capture_handle(LibusbW3u3Hardware& hardware,
+                                               std::uint8_t receiver)
+    {
+        return hardware.capture_handle(receiver);
+    }
+    static int function_control(LibusbW3u3Hardware& hardware, std::uint8_t function,
+                                const ControlTransfer& transfer, unsigned char* response)
+    {
+        return hardware.control_function(function, transfer, response);
+    }
 };
 
 }  // namespace asicen
@@ -190,6 +200,7 @@ struct FakeUsb {
     std::uint16_t v2_selected_reg = 0;
     bool v2_selected_tuner = false;
     std::vector<std::uint8_t> endpoints;
+    std::vector<libusb_device_handle*> transfer_handles;
     std::atomic<int> submit_count{0};
     int fail_submit_number = 0;
     int fail_submit_error = LIBUSB_ERROR_IO;
@@ -295,6 +306,7 @@ struct FakeUsb {
         ++fake.submit_count;
         fake.submitted[static_cast<std::size_t>((fake.submit_count - 1) % 4)] = transfer;
         fake.endpoints.push_back(transfer->endpoint);
+        fake.transfer_handles.push_back(transfer->dev_handle);
         if (fake.fail_submit_number != 0 && fake.submit_count == fake.fail_submit_number) {
             return fake.fail_submit_error;
         }
@@ -345,10 +357,17 @@ struct FakeUsb {
         fake.event_changed.notify_all();
     }
 
+    static libusb_device_handle* handle_for_function_hook(void*, std::uint8_t function)
+    {
+        return reinterpret_cast<libusb_device_handle*>(static_cast<std::uintptr_t>(function + 1U));
+    }
+
     Hooks hooks()
     {
-        return {this,        control_hook, allocate_hook,  submit_hook,
-                cancel_hook, free_hook,    pump_wait_hook, interrupt_events_hook};
+        Hooks result{this,        control_hook, allocate_hook,  submit_hook,
+                     cancel_hook, free_hook,    pump_wait_hook, interrupt_events_hook};
+        result.handle_for_function = handle_for_function_hook;
+        return result;
     }
 
     bool is_cf_restore(const ControlTransfer& transfer) const
@@ -696,7 +715,7 @@ void configure(LibusbW3u3Hardware& hardware, FakeUsb& fake, Hooks& hooks, std::u
     fake.save_initial_cf();
     LibusbW3u3HardwareTestPeer::configure(hardware, &hooks, receiver);
     const auto* profile = hardware.device_profile();
-    if (profile->model_id == ModelId::W3u3V2) {
+    if (profile->expected_runtime_functions == 2U) {
         hooks.control_function = FakeUsb::control_function_hook;
     }
     UsbFunctionSnapshot snapshot{};
@@ -1800,6 +1819,27 @@ bool test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity()
     return true;
 }
 
+bool test_paired_capture_routes_select_each_function_handle()
+{
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks = fake.hooks();
+    configure(hardware, fake, hooks, 1U);
+    auto* primary = reinterpret_cast<libusb_device_handle*>(static_cast<std::uintptr_t>(1U));
+    auto* sibling = reinterpret_cast<libusb_device_handle*>(static_cast<std::uintptr_t>(2U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_handle(hardware, 0U) == primary);
+    CHECK(LibusbW3u3HardwareTestPeer::capture_handle(hardware, 1U) == primary);
+    CHECK(LibusbW3u3HardwareTestPeer::capture_handle(hardware, 2U) == sibling);
+    CHECK(LibusbW3u3HardwareTestPeer::capture_handle(hardware, 3U) == sibling);
+    const ControlTransfer read{0U, Request::CustomerInfo, 0U, 0U, kCustomerInfoSize,
+                              Direction::In, 100U};
+    std::array<unsigned char, kCustomerInfoSize> response{};
+    CHECK(LibusbW3u3HardwareTestPeer::function_control(hardware, 1U, read, response.data()) ==
+          read.length);
+    CHECK(!fake.control_functions.empty() && fake.control_functions.back() == 1U);
+    return true;
+}
+
 bool test_s3u_combined_receiver_uses_lane0_for_both_systems()
 {
     FakeUsb fake;
@@ -2337,6 +2377,8 @@ int main()
          test_unsupported_models_fail_before_any_usb_io},
         {"test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity",
          test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity},
+        {"test_paired_capture_routes_select_each_function_handle",
+         test_paired_capture_routes_select_each_function_handle},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
          test_s3u_combined_receiver_uses_lane0_for_both_systems},
         {"test_s3u2_powers_off_gpioex_and_retains_single_capture_lease",

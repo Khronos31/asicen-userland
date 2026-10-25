@@ -182,6 +182,7 @@ private:
         void (*interrupt_events)(void*) = nullptr;
         int (*control_function)(void*, std::uint8_t, const ControlTransfer&,
                                 unsigned char*) = nullptr;
+        libusb_device_handle* (*handle_for_function)(void*, std::uint8_t) = nullptr;
         // Test-only monotonic clock; production always uses steady_clock.
         std::chrono::steady_clock::time_point (*now)(void*) = nullptr;
         NativeThread::Start launch_thread = nullptr;
@@ -270,6 +271,7 @@ private:
     std::atomic<int> first_transport_error_{0};
     px4::userland::Error transport_failure(px4::userland::Error fallback) const noexcept;
     int control_function_impl(std::uint8_t function, const ControlTransfer&, unsigned char*);
+    libusb_device_handle* capture_handle(std::uint8_t receiver) const noexcept;
     px4::userland::Error plan_error_ = px4::userland::Error::OK;
     std::atomic<bool> disconnected_{false};
     std::atomic<bool> capture_interrupted_{false};
