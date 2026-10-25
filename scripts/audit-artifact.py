@@ -66,13 +66,21 @@ LIBUSB_COPYING_SHA256 = "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739
 FIRMWARE_SHA256 = "b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8"
 FIRMWARE_SIZE = 16384
 FIRMWARE_MEMBER = "firmware/asicen-loader.bin"
+COMMON_FIRMWARE_SHA256 = "5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a"
+COMMON_FIRMWARE_MEMBER = "firmware/asicen-loader-common.bin"
+FIRMWARE_MEMBERS = (FIRMWARE_MEMBER, COMMON_FIRMWARE_MEMBER)
 FIRMWARE_NOTICE_MEMBER = "licenses/VENDOR-FIRMWARE-NOTICE.txt"
 FIRMWARE_NOTICE = (
-    "Vendor component: PLEX loader firmware, distributed separately from this project's license.\n"
-    "Source artifact SHA-256: 11a84eaef0157ac08c0b4128aa622a625e8914a28c59ef06e76378ee6094c5de\n"
-    "Original loader object: loader.ko, SHA-256 10ad321dd47d93f89fde556ec8683b7a8ce0fcc74cd90e4a04308592dc9719f0\n"
-    f"Extracted component: FirmBin, {FIRMWARE_SIZE} bytes, SHA-256 {FIRMWARE_SHA256}\n"
-    "Redistribution rights: unresolved. Inclusion reflects the user's explicit candidate-distribution choice and does not assert that rights are cleared.\n"
+    "Vendor component: PLEX loader firmware images, distributed separately from this project's license.\n"
+    "Default common image: firmware/asicen-loader-common.bin, extracted from the verified Windows BDA x64 Loader.sys.\n"
+    "Windows source artifact SHA-256: 071469e57215774366eaab14055d23a134452248be3b7caf1d85990b3f961ff2\n"
+    "Windows Loader.sys SHA-256: edd9badb7588f59c6438e1ceaa0e0f3f33b2ce75667e541e51d75c45e2c485e5\n"
+    f"Default common FirmBin: {FIRMWARE_SIZE} bytes, SHA-256 {COMMON_FIRMWARE_SHA256}, start address 0x55d6.\n"
+    "Compatibility image: firmware/asicen-loader.bin, extracted from the verified Linux loader.ko.\n"
+    "Linux source artifact SHA-256: 11a84eaef0157ac08c0b4128aa622a625e8914a28c59ef06e76378ee6094c5de\n"
+    "Linux loader.ko SHA-256: 10ad321dd47d93f89fde556ec8683b7a8ce0fcc74cd90e4a04308592dc9719f0\n"
+    f"Compatibility FirmBin: {FIRMWARE_SIZE} bytes, SHA-256 {FIRMWARE_SHA256}, start address 0x5399.\n"
+    "Redistribution rights: unresolved. Inclusion follows the existing user-directed distribution policy and does not assert that rights are cleared.\n"
     "This file is not relicensed under GPL, MIT, public domain, or this project's terms.\n"
 )
 LINUX_RUNTIME_LICENSE_SHA256 = {
@@ -92,6 +100,7 @@ COMMON = {
     "SHA256SUMS",
     "evidence/binary-audit.json",
     FIRMWARE_MEMBER,
+    COMMON_FIRMWARE_MEMBER,
     FIRMWARE_NOTICE_MEMBER,
 }
 LINUX_MDEV = {
@@ -450,7 +459,7 @@ def archive_members(archive: Path, *, forbidden: re.Pattern | None = FORBIDDEN) 
                     fail(f"duplicate archive member: {member.name}")
                 if not member.isfile():
                     fail(f"archive member is not a regular file: {member.name}")
-                if forbidden is not None and forbidden.search(member.name) and member.name != FIRMWARE_MEMBER:
+                if forbidden is not None and forbidden.search(member.name) and member.name not in FIRMWARE_MEMBERS:
                     fail(f"forbidden archive member: {member.name}")
                 members[member.name] = member
     except (OSError, tarfile.TarError) as error:
@@ -632,6 +641,7 @@ def audit_windows_archive(args: argparse.Namespace) -> dict:
              f"{sorted(set(members) - expected_members)}, "
              f"missing={sorted(expected_members - set(members))}")
     verify_firmware(read_zip_file(archive, FIRMWARE_MEMBER),
+                    read_zip_file(archive, COMMON_FIRMWARE_MEMBER),
                     read_zip_file(archive, FIRMWARE_NOTICE_MEMBER),
                     {name: member.external_attr >> 16 & 0o777 for name, member in members.items()})
     if members["libusb/COPYING"].external_attr >> 16 & 0o777 != 0o644:
@@ -1593,12 +1603,17 @@ def verify_linux_mdev_modes(modes: dict[str, int], platform: str) -> None:
             fail(f"Linux mdev file has mode {actual_mode!r}, expected {expected_mode:o}: {name}")
 
 
-def verify_firmware(payload: bytes, notice: bytes, modes: dict[str, int]) -> None:
-    if len(payload) != FIRMWARE_SIZE or hashlib.sha256(payload).hexdigest() != FIRMWARE_SHA256:
-        fail("binary archive firmware does not match the recorded vendor component")
+def verify_firmware(compatibility_payload: bytes, common_payload: bytes,
+                    notice: bytes, modes: dict[str, int]) -> None:
+    if (len(compatibility_payload) != FIRMWARE_SIZE or
+            hashlib.sha256(compatibility_payload).hexdigest() != FIRMWARE_SHA256):
+        fail("binary archive Linux compatibility firmware differs from its pinned component")
+    if (len(common_payload) != FIRMWARE_SIZE or
+            hashlib.sha256(common_payload).hexdigest() != COMMON_FIRMWARE_SHA256):
+        fail("binary archive default common firmware differs from its pinned component")
     if notice != FIRMWARE_NOTICE.encode("utf-8"):
         fail("vendor firmware notice does not preserve exact provenance and unresolved rights status")
-    for name in (FIRMWARE_MEMBER, FIRMWARE_NOTICE_MEMBER):
+    for name in (*FIRMWARE_MEMBERS, FIRMWARE_NOTICE_MEMBER):
         if modes.get(name) != 0o644:
             fail(f"vendor firmware material must have mode 644: {name}")
 
@@ -1696,6 +1711,7 @@ def audit_binary_archive(args: argparse.Namespace) -> dict:
         if member.mode != expected_mode:
             fail(f"binary archive mode mismatch for {name}: expected {expected_mode:o}, got {member.mode:o}")
     verify_firmware(read_archive_file(args.archive.resolve(), FIRMWARE_MEMBER),
+                    read_archive_file(args.archive.resolve(), COMMON_FIRMWARE_MEMBER),
                     read_archive_file(args.archive.resolve(), FIRMWARE_NOTICE_MEMBER),
                     {name: member.mode for name, member in members.items()})
     if args.platform.startswith("linux-"):
@@ -1907,7 +1923,8 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
             data = payload.read()
             if record["size"] != len(data) or record["sha256"] != hashlib.sha256(data).hexdigest():
                 fail(f"source manifest file record mismatch: {name}")
-            if len(data) == FIRMWARE_SIZE and record["sha256"] == FIRMWARE_SHA256:
+            if len(data) == FIRMWARE_SIZE and record["sha256"] in {
+                    FIRMWARE_SHA256, COMMON_FIRMWARE_SHA256}:
                 fail(f"vendor firmware bytes are forbidden in corresponding source: {name}")
     if manifest.get("libusb_archive_sha256") != LIBUSB_SHA256:
         fail("source manifest does not record the pinned libusb checksum")
@@ -2039,6 +2056,7 @@ def self_test() -> int:
             "mdev/asicen-userland-mdev.sh": b"#!/bin/sh\n",
             "mdev/asicen-userland-mdev.start": b"#!/bin/sh\n",
             FIRMWARE_MEMBER: (Path(__file__).resolve().parents[1] / FIRMWARE_MEMBER).read_bytes(),
+            COMMON_FIRMWARE_MEMBER: (Path(__file__).resolve().parents[1] / COMMON_FIRMWARE_MEMBER).read_bytes(),
             FIRMWARE_NOTICE_MEMBER: FIRMWARE_NOTICE.encode("utf-8"),
             LINUX_BUILD_METADATA_MEMBER: (json.dumps(build_metadata, sort_keys=True) + "\n").encode(),
             LINUX_IFD_METADATA_MEMBER: (json.dumps(ifd_metadata, sort_keys=True) + "\n").encode(),
@@ -2220,7 +2238,7 @@ def self_test() -> int:
         write_test_archive(tampered_license_archive, valid_evidence,
                            file_overrides={"libusb/COPYING": base_files["libusb/COPYING"] + b"tampered\n"})
         expect_archive_rejected(tampered_license_archive, "tampered libusb/COPYING")
-        for name in (FIRMWARE_MEMBER, FIRMWARE_NOTICE_MEMBER, *LINUX_RUNTIME_LICENSE_SHA256):
+        for name in (*FIRMWARE_MEMBERS, FIRMWARE_NOTICE_MEMBER, *LINUX_RUNTIME_LICENSE_SHA256):
             for description, replacement in (("missing", None), ("tampered", b"tampered\n")):
                 invalid_archive = root / f"{description}-{PurePosixPath(name).name}" / archive_name
                 invalid_archive.parent.mkdir()

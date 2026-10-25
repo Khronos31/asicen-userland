@@ -92,13 +92,19 @@ On 2026-10-09 the user selected inclusion of the Linux loader image in binary
 distribution archives, and later the same day directed that image into Git so
 GitHub-hosted runners can copy it. The file is `firmware/asicen-loader.bin`
 (16384 bytes, SHA-256
-`b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`).
-Corresponding-source archives and `git archive` omit `firmware/`.
+`b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`). The
+accepted common default image is also tracked at
+`firmware/asicen-loader-common.bin` (16384 bytes, SHA-256
+`5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`). Both
+images are included in binary distribution archives; corresponding-source
+archives and `git archive` omit `firmware/`.
 
 The user reaffirmed this ASICEN-specific preservation and redistribution policy
 on 2026-10-11 JST because continued availability from PLEX is uncertain.
 This is an explicit project-policy difference from px4-userland, not evidence
-of a redistribution grant. The existing image and provenance remain preserved.
+of a redistribution grant. The Linux image and provenance remain preserved;
+the common image is extracted from the verified Windows BDA x64 loader
+described in the archive notice.
 
 The firmware is a separate vendor component: this project's GPL license and
 any licenses on newly written packaging code do not grant rights to it.

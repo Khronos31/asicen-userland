@@ -48,7 +48,10 @@ test -z "$pcscd_allows"
 test "$(printf '%s\n' "$pcscd_allows" | grep -Ec 'unconfined|self:|domain|\*' || true)" -eq 0
 
 grep -F '/opt/asicen-userland/asicend -- gen_context(system_u:object_r:asicend_exec_t,s0)' "$file_contexts" >/dev/null
-grep -F '/opt/asicen-userland/firmware/asicen-loader\.bin -- gen_context(system_u:object_r:asicend_data_t,s0)' "$file_contexts" >/dev/null
+firmware_path=$(sed -n 's/.*--firmware \([^ ]*\).*/\1/p' "$unit")
+test "$firmware_path" = /opt/asicen-userland/firmware/asicen-loader-common.bin
+firmware_context_path=$(printf '%s' "$firmware_path" | sed 's/\./\\./g')
+grep -F "$firmware_context_path -- gen_context(system_u:object_r:asicend_data_t,s0)" "$file_contexts" >/dev/null
 grep -F '/run/asicen-userland(/.*)? gen_context(system_u:object_r:asicend_var_run_t,s0)' "$file_contexts" >/dev/null
 
 grep -F 'User=asicend' "$unit" >/dev/null
@@ -60,7 +63,7 @@ grep -F 'UMask=0007' "$unit" >/dev/null
 grep -F 'EnvironmentFile=/etc/asicen-userland/%i.conf' "$unit" >/dev/null
 # shellcheck disable=SC2016
 grep -F 'asicend $ASICEN_DEVICE_ARGUMENTS --instance %i' "$unit" >/dev/null
-grep -F -- '--firmware /opt/asicen-userland/firmware/asicen-loader.bin' "$unit" >/dev/null
+grep -F -- '--firmware /opt/asicen-userland/firmware/asicen-loader-common.bin' "$unit" >/dev/null
 grep -F -- '--runtime-dir /run/asicen-userland --group' "$unit" >/dev/null
 # SocketListener validates the explicit runtime base as daemon-owned with mode
 # 0750.  The daemon then appends asicen-userland/<instance>, so this unit's actual

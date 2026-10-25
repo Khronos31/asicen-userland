@@ -47,6 +47,8 @@ WORKFLOW = ".github/workflows/build_userland.yml"
 LIBUSB_SHA256 = "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
 FIRMWARE_MEMBER = "firmware/asicen-loader.bin"
 FIRMWARE_SHA256 = "b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8"
+COMMON_FIRMWARE_MEMBER = "firmware/asicen-loader-common.bin"
+COMMON_FIRMWARE_SHA256 = "5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a"
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
@@ -425,7 +427,12 @@ def check_binary(members: dict, *, product: str, platform: str, version: str,
     if product == "asicen-userland":
         require(FIRMWARE_MEMBER in members and members[FIRMWARE_MEMBER].sha256 == FIRMWARE_SHA256 and
                 members[FIRMWARE_MEMBER].size == 16384 and members[FIRMWARE_MEMBER].mode == 0o644,
-                "ASICEN firmware differs from pinned loader")
+                "ASICEN Linux compatibility firmware differs from pinned loader")
+        require(COMMON_FIRMWARE_MEMBER in members and
+                members[COMMON_FIRMWARE_MEMBER].sha256 == COMMON_FIRMWARE_SHA256 and
+                members[COMMON_FIRMWARE_MEMBER].size == 16384 and
+                members[COMMON_FIRMWARE_MEMBER].mode == 0o644,
+                "ASICEN default common firmware differs from pinned loader")
         require("licenses/VENDOR-FIRMWARE-NOTICE.txt" in members, "missing ASICEN firmware notice")
     else:
         require(not any("firmware" in name.lower().split("/") for name in members),
