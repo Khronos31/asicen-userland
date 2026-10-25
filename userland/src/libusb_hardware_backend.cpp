@@ -1519,8 +1519,7 @@ Result<void> LibusbW3u3Hardware::tune_terrestrial(std::uint8_t receiver,
         return Result<void>::success();
     }
     reset_startup_diagnostic(receiver);
-    startup_trace_active_.store(startup_config_.enabled && !uses_legacy_frontend() &&
-                                !uses_v2_frontend());
+    startup_trace_active_.store(startup_config_.enabled);
     record_startup("tune_begin", frequency_khz, timeout_ms);
     const auto plan = uses_legacy_frontend()
                           ? plan_legacy_terrestrial_tune(legacy_frontend(), frequency_khz, 6U)
@@ -1567,6 +1566,7 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint
                                          : selection_deadline;
     deadline_active_ = true;
     reset_startup_diagnostic(receiver);
+    startup_trace_active_.store(startup_config_.enabled);
     const SatelliteOperationResult tuned = run_model_satellite_tune(rf_khz);
     deadline_ = previous_deadline;
     deadline_active_ = previous_deadline_active;

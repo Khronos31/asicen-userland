@@ -1538,6 +1538,24 @@ bool test_startup_control_trace_records_metadata_without_write_payload()
                       "usb_control") == 0);
     CHECK((LibusbW3u3HardwareTestPeer::startup_fields(hardware, 0U) ==
            std::array<std::int64_t, 5U>{1, 3, 0x4a10, 2, 2}));
+
+    FakeUsb legacy_fake;
+    Hooks legacy_hooks{};
+    LibusbW3u3Hardware legacy(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    configure(legacy, legacy_fake, legacy_hooks, 1U);
+    LibusbW3u3HardwareTestPeer::startup_diagnostic(legacy, "0");
+    CHECK(legacy.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    bool traced_legacy_function = false;
+    for (std::size_t event = 0U;
+         event < LibusbW3u3HardwareTestPeer::startup_events(legacy); ++event) {
+        if (std::strcmp(LibusbW3u3HardwareTestPeer::startup_stage(legacy, event),
+                        "usb_control") == 0 &&
+            LibusbW3u3HardwareTestPeer::startup_fields(legacy, event)[0] == 0) {
+            traced_legacy_function = true;
+            break;
+        }
+    }
+    CHECK(traced_legacy_function);
     return true;
 }
 
