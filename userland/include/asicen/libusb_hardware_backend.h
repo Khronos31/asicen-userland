@@ -254,9 +254,10 @@ private:
     CaptureRunResult stop_and_drain(bool dsc_was_attempted) noexcept;
     CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept;
     bool handle_events(unsigned timeout_ms) noexcept;
-    bool wait_capture_events(unsigned timeout_ms, const std::atomic<bool>& cancelled) noexcept;
+    bool wait_capture_events(std::uint8_t receiver, unsigned timeout_ms,
+                             const std::atomic<bool>& cancelled) noexcept;
     struct SplitPump;
-    CaptureRunResult run_split_usb_pump(const std::atomic<bool>& cancelled,
+    CaptureRunResult run_split_usb_pump(std::uint8_t receiver, const std::atomic<bool>& cancelled,
         bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept;
     bool stop_capture_safely() noexcept override;
     bool restore_gpio_snapshot_safely() noexcept override;
@@ -289,7 +290,7 @@ private:
     bool restore_gpio_snapshot_for(std::uint8_t receiver) noexcept;
     px4::userland::Error plan_error_ = px4::userland::Error::OK;
     std::atomic<bool> disconnected_{false};
-    std::atomic<bool> capture_interrupted_{false};
+    std::array<std::atomic<bool>, 4U> capture_interrupted_{};
     std::array<std::atomic<std::uint64_t>, 4U> capture_sync_errors_{};
     std::array<std::atomic<std::uint64_t>, 4U> capture_empty_intervals_{};
     bool allow_lnb_power_ = true;

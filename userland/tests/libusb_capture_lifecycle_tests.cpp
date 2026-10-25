@@ -158,6 +158,11 @@ struct LibusbW3u3HardwareTestPeer {
         return receiver < hardware.source_prepared_.size() &&
                hardware.source_prepared_[receiver];
     }
+    static bool interrupted(const LibusbW3u3Hardware& hardware, std::uint8_t receiver)
+    {
+        return receiver < hardware.capture_interrupted_.size() &&
+               hardware.capture_interrupted_[receiver].load();
+    }
 
     static void set_cleanup_failed(LibusbW3u3Hardware& hardware)
     {
@@ -1449,6 +1454,21 @@ bool test_primary_prepare_stop_and_receiver1_reacquisition()
     return true;
 }
 
+bool test_receiver_interrupt_is_scoped_and_global_interrupt_stops_all()
+{
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3));
+    hardware.interrupt_receiver(2U);
+    CHECK(LibusbW3u3HardwareTestPeer::interrupted(hardware, 2U));
+    CHECK(!LibusbW3u3HardwareTestPeer::interrupted(hardware, 0U));
+    CHECK(!LibusbW3u3HardwareTestPeer::interrupted(hardware, 1U));
+    CHECK(!LibusbW3u3HardwareTestPeer::interrupted(hardware, 3U));
+    hardware.interrupt();
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver) {
+        CHECK(LibusbW3u3HardwareTestPeer::interrupted(hardware, receiver));
+    }
+    return true;
+}
+
 bool test_partial_submit_rolls_back_local0_and_releases_lane()
 {
     FakeUsb fake;
@@ -2535,6 +2555,8 @@ int main()
          test_v2_duplicate_roles_and_revision16_fail_before_board_writes},
         {"test_primary_prepare_stop_and_receiver1_reacquisition",
          test_primary_prepare_stop_and_receiver1_reacquisition},
+        {"test_receiver_interrupt_is_scoped_and_global_interrupt_stops_all",
+         test_receiver_interrupt_is_scoped_and_global_interrupt_stops_all},
         {"test_partial_submit_rolls_back_local0_and_releases_lane",
          test_partial_submit_rolls_back_local0_and_releases_lane},
         {"test_dsc_failure_stops_local0_and_restores_cf",

@@ -303,7 +303,9 @@ struct LibusbW3u3Hardware::SplitPump {
     bool stopping() const noexcept
     {
         return abort.load(std::memory_order_acquire) || cancelled.load() ||
-            hardware.stop_requested_.load() || hardware.capture_interrupted_.load() ||
+            hardware.stop_requested_.load() ||
+            (receiver < hardware.capture_interrupted_.size() &&
+             hardware.capture_interrupted_[receiver].load()) ||
             hardware.cleanup_failed_.load(std::memory_order_acquire);
     }
 
@@ -2192,7 +2194,9 @@ void LibusbW3u3Hardware::mark_cleanup_failed(Error error) noexcept
     (void)cleanup_failure_error_.compare_exchange_strong(expected, static_cast<int>(error),
                                                          std::memory_order_acq_rel);
     cleanup_failed_.store(true, std::memory_order_release);
-    capture_interrupted_.store(true, std::memory_order_release);
+    for (auto& interrupted : capture_interrupted_) {
+        interrupted.store(true, std::memory_order_release);
+    }
     if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->interrupt_events != nullptr) {
         capture_usb_hooks_->interrupt_events(capture_usb_hooks_->context);
     } else if (context_ != nullptr) {
@@ -2713,7 +2717,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     counters_receiver_ = receiver;
     dsc_attempted_ = false;
     dsc_stopped_ = true;
-    capture_interrupted_.store(false);
+    capture_interrupted_[receiver].store(false);
     link_diagnostic_ = LinkSeedDiagnostic{};
     link_apply_attempted_ = false;
     output_start_attempted_ = false;
@@ -2874,10 +2878,9 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
 }
 
 CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
-    const std::atomic<bool>& cancelled_flag,
+    std::uint8_t receiver, const std::atomic<bool>& cancelled_flag,
     bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
 {
-    const std::uint8_t receiver = source_receiver_;
     if (receiver >= source_prepared_.size() || !source_prepared_[receiver] ||
         receiver >= async_states_.size() || emit == nullptr ||
         async_states_[receiver] == nullptr) return CaptureRunResult::usb_error;
@@ -2920,7 +2923,7 @@ CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
             break;
         }
         if (index == kQueueDepth) {
-            const bool ok = wait_capture_events(100U, cancelled_flag);
+            const bool ok = wait_capture_events(receiver, 100U, cancelled_flag);
             if (!ok) {
                 pump->terminal = "event_failure";
                 outcome = disconnected_.load() ? CaptureRunResult::disconnected : CaptureRunResult::usb_error;
@@ -3049,7 +3052,7 @@ CaptureRunResult LibusbW3u3Hardware::run(const std::atomic<bool>& cancelled_flag
                                          bool (*emit)(void*, const std::uint8_t*, std::size_t),
                                          void* context) noexcept
 {
-    return run_split_usb_pump(cancelled_flag, emit, context);
+    return run_split_usb_pump(source_receiver_, cancelled_flag, emit, context);
 }
 
 CaptureRunResult LibusbW3u3Hardware::run_for_receiver(
@@ -3057,13 +3060,15 @@ CaptureRunResult LibusbW3u3Hardware::run_for_receiver(
     bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
 {
     return receiver == routed_source_receiver_.load(std::memory_order_acquire)
-               ? run(cancelled_flag, emit, context)
+               ? run_split_usb_pump(receiver, cancelled_flag, emit, context)
                : CaptureRunResult::usb_error;
 }
 
 void LibusbW3u3Hardware::interrupt() noexcept
 {
-    capture_interrupted_.store(true);
+    for (auto& interrupted : capture_interrupted_) {
+        interrupted.store(true, std::memory_order_release);
+    }
     if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->interrupt_events != nullptr) {
         capture_usb_hooks_->interrupt_events(capture_usb_hooks_->context);
     } else if (context_ != nullptr) {
@@ -3073,8 +3078,13 @@ void LibusbW3u3Hardware::interrupt() noexcept
 
 void LibusbW3u3Hardware::interrupt_receiver(std::uint8_t receiver) noexcept
 {
-    if (receiver == routed_source_receiver_.load(std::memory_order_acquire)) {
-        interrupt();
+    if (receiver < capture_interrupted_.size()) {
+        capture_interrupted_[receiver].store(true, std::memory_order_release);
+        if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->interrupt_events != nullptr) {
+            capture_usb_hooks_->interrupt_events(capture_usb_hooks_->context);
+        } else if (context_ != nullptr) {
+            libusb_interrupt_event_handler(context_);
+        }
     }
 }
 
@@ -3284,18 +3294,19 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(bool dsc_ok,
     return result;
 }
 
-bool LibusbW3u3Hardware::wait_capture_events(unsigned timeout_ms,
+bool LibusbW3u3Hardware::wait_capture_events(std::uint8_t receiver, unsigned timeout_ms,
                                             const std::atomic<bool>& cancelled_flag) noexcept
 {
     // Preserve existing injected event pumps. Real libusb callbacks may also
     // run in a synchronous control caller, between run's scan and this wait.
     if (capture_usb_hooks_ != nullptr && capture_usb_hooks_->pump_events != nullptr)
         return handle_events(timeout_ms);
-    AsyncState* const async = capture_async(source_receiver_);
+    AsyncState* const async = capture_async(receiver);
     if (context_ == nullptr || async == nullptr) return false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     const auto should_return = [&]() noexcept {
-        if (cancelled_flag.load() || stop_requested_.load() || capture_interrupted_.load() ||
+        if (cancelled_flag.load() || stop_requested_.load() || receiver >= capture_interrupted_.size() ||
+            capture_interrupted_[receiver].load() ||
             cleanup_failed_.load(std::memory_order_acquire)) return true;
         std::lock_guard<std::mutex> lock(async->mutex);
         if (async->drain_failed) return true;
