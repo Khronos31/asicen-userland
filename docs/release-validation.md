@@ -1,5 +1,7 @@
 # 0.1.0 の実機検証手順
 
+現行候補の再現可能な手順は [`release-validation-current.md`](release-validation-current.md) です。以下のcandidate固有の実測・旧soak条件は履歴であり、現行条件は新手順を優先します。
+
 ## 現在の候補と検証状況
 
 実機試験対象は `6dbdba248a4d9dc5d3f0ef9c887c6e150cb2e9cd`
