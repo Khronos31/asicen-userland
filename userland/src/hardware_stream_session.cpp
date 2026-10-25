@@ -54,10 +54,46 @@ HardwareStreamService::HardwareStreamService(px4::userland::TunerServiceBackend&
                                     queue_capacity.bytes % 188U != 0U
                                 ? 0U
                                 : queue_capacity.bytes),
+      thread_launcher_(thread_launcher)
+{
+}
+
+HardwareStreamService::HardwareStreamService(px4::userland::TunerServiceBackend& frontend,
+                                             StreamCaptureSource& source,
+                                             TestQueueCapacityBytes queue_capacity,
+                                             NativeThread::Start thread_launcher,
+                                             std::uint8_t receiver, ReceiverSessionTag)
+    : frontend_(frontend), source_(source),
+      queue_capacity_bytes_(queue_capacity.bytes > kMaxQueuePackets * 188U ||
+                                    queue_capacity.bytes % 188U != 0U
+                                ? 0U
+                                : queue_capacity.bytes),
+      pinned_receiver_(receiver), dispatcher_(false),
       queue_(new (std::nothrow) std::uint8_t[queue_capacity_bytes_]),
       continuity_(new (std::nothrow) px4::userland::TsContinuityChecker),
       thread_launcher_(thread_launcher)
 {
+}
+
+HardwareStreamService* HardwareStreamService::session_for(std::uint8_t receiver) noexcept
+{
+    if (!dispatcher_ || receiver >= receiver_count() || receiver >= receiver_sessions_.size()) {
+        return nullptr;
+    }
+    auto& session = receiver_sessions_[receiver];
+    if (!session) {
+        session.reset(new (std::nothrow) HardwareStreamService(
+            frontend_, source_, TestQueueCapacityBytes{queue_capacity_bytes_}, thread_launcher_,
+            receiver, ReceiverSessionTag{}));
+    }
+    return session.get();
+}
+
+const HardwareStreamService* HardwareStreamService::session_for(std::uint8_t receiver) const noexcept
+{
+    return !dispatcher_ || receiver >= receiver_count() || receiver >= receiver_sessions_.size()
+               ? nullptr
+               : receiver_sessions_[receiver].get();
 }
 
 HardwareStreamService::~HardwareStreamService() noexcept
@@ -76,7 +112,8 @@ std::uint8_t HardwareStreamService::receiver_count() const noexcept
 
 bool HardwareStreamService::receiver_supports(std::uint8_t receiver, System system) const noexcept
 {
-    return receiver < receiver_count() && frontend_.receiver_supports(receiver, system);
+    return receiver < receiver_count() &&
+           (dispatcher_ || receiver == pinned_receiver_) && frontend_.receiver_supports(receiver, system);
 }
 
 bool HardwareStreamService::selects_satellite_stream_before_tune() const noexcept
@@ -249,6 +286,14 @@ void HardwareStreamService::mark_receiver_disconnected(std::uint8_t receiver) no
 
 void HardwareStreamService::request_stop() noexcept
 {
+    if (dispatcher_) {
+        shutdown_requested_.store(true);
+        for (auto& session : receiver_sessions_) {
+            if (session) session->request_stop();
+        }
+        frontend_.request_stop();
+        return;
+    }
     shutdown_requested_.store(true);
     cancelled_.store(true);
     condition_.notify_all();
@@ -259,6 +304,30 @@ void HardwareStreamService::request_stop() noexcept
 }
 
 Result<void> HardwareStreamService::shutdown() noexcept
+{
+    if (dispatcher_) {
+        request_stop();
+        bool failed = false;
+        Error first_error = Error::USB_IO;
+        for (auto& session : receiver_sessions_) {
+            if (!session) continue;
+            const auto stopped = session->shutdown_capture(false);
+            if (!stopped && !failed) {
+                first_error = stopped.error();
+                failed = true;
+            }
+        }
+        const auto frontend_stopped = frontend_.shutdown();
+        if (!frontend_stopped && !failed) {
+            first_error = frontend_stopped.error();
+            failed = true;
+        }
+        return failed ? Result<void>::failure(first_error) : Result<void>::success();
+    }
+    return shutdown_capture(true);
+}
+
+Result<void> HardwareStreamService::shutdown_capture(bool shutdown_frontend) noexcept
 {
     request_stop();
     std::lock_guard<std::mutex> life(lifecycle_mutex_);
@@ -293,16 +362,23 @@ Result<void> HardwareStreamService::shutdown() noexcept
     // A failed ordinary stream cleanup still permits independent frontend
     // shutdown work (notably safe GPIO restoration). Callback-drain failures
     // retain ownership in source quarantine and reject further hardware I/O.
-    const auto frontend_stopped = frontend_.shutdown();
-    if (!frontend_stopped && !failed) {
-        first_error = frontend_stopped.error();
-        failed = true;
+    if (shutdown_frontend) {
+        const auto frontend_stopped = frontend_.shutdown();
+        if (!frontend_stopped && !failed) {
+            first_error = frontend_stopped.error();
+            failed = true;
+        }
     }
     return failed ? Result<void>::failure(first_error) : Result<void>::success();
 }
 
 Result<void> HardwareStreamService::start_capture(std::uint8_t receiver, System system) noexcept
 {
+    if (dispatcher_) {
+        auto* session = session_for(receiver);
+        return session == nullptr ? Result<void>::failure(Error::UNSUPPORTED)
+                                  : session->start_capture(receiver, system);
+    }
     if (!receiver_supports(receiver, system)) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -385,6 +461,12 @@ Result<void> HardwareStreamService::start_capture(std::uint8_t receiver, System 
 
 Result<void> HardwareStreamService::stop_capture(std::uint8_t receiver, System system) noexcept
 {
+    if (dispatcher_) {
+        const auto* session = session_for(receiver);
+        return session == nullptr ? Result<void>::success()
+                                  : const_cast<HardwareStreamService*>(session)->stop_capture(
+                                        receiver, system);
+    }
     if (!receiver_supports(receiver, system)) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -430,6 +512,11 @@ Result<void> HardwareStreamService::stop_capture(std::uint8_t receiver, System s
 
 Result<void> HardwareStreamService::attach(const TunerAttachment& attachment) noexcept
 {
+    if (dispatcher_) {
+        auto* session = session_for(attachment.receiver);
+        return session == nullptr ? Result<void>::failure(Error::NOT_READY)
+                                  : session->attach(attachment);
+    }
     if (!receiver_supports(attachment.receiver, attachment.system) ||
         attachment.owner_client_id == 0U || attachment.lease_id == 0U ||
         attachment.attachment_id == 0U) {
@@ -448,6 +535,11 @@ Result<void> HardwareStreamService::attach(const TunerAttachment& attachment) no
 
 Result<void> HardwareStreamService::detach(const TunerAttachment& attachment) noexcept
 {
+    if (dispatcher_) {
+        const auto* session = session_for(attachment.receiver);
+        return session == nullptr ? Result<void>::failure(Error::NOT_FOUND)
+                                  : const_cast<HardwareStreamService*>(session)->detach(attachment);
+    }
     std::lock_guard<std::mutex> life(lifecycle_mutex_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -483,6 +575,12 @@ Result<void> HardwareStreamService::detach(const TunerAttachment& attachment) no
 Result<px4::userland::TunerStreamCounters>
 HardwareStreamService::stats(const TunerAttachment& attachment) const noexcept
 {
+    if (dispatcher_) {
+        const auto* session = session_for(attachment.receiver);
+        return session == nullptr
+                   ? Result<px4::userland::TunerStreamCounters>::failure(Error::NOT_FOUND)
+                   : session->stats(attachment);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!matches_locked(attachment)) {
         return Result<px4::userland::TunerStreamCounters>::failure(Error::NOT_FOUND);
@@ -493,6 +591,12 @@ HardwareStreamService::stats(const TunerAttachment& attachment) const noexcept
 Result<px4::userland::TunerStreamFinalSnapshot>
 HardwareStreamService::final_snapshot(const TunerAttachment& attachment) const noexcept
 {
+    if (dispatcher_) {
+        const auto* session = session_for(attachment.receiver);
+        return session == nullptr
+                   ? Result<px4::userland::TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND)
+                   : session->final_snapshot(attachment);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!matches_final_locked(attachment) || !final_snapshot_ready_ ||
         (state_ != State::detached && state_ != State::quarantined)) {
@@ -504,6 +608,12 @@ HardwareStreamService::final_snapshot(const TunerAttachment& attachment) const n
 
 Result<void> HardwareStreamService::release_final(const TunerAttachment& attachment) noexcept
 {
+    if (dispatcher_) {
+        const auto* session = session_for(attachment.receiver);
+        return session == nullptr ? Result<void>::failure(Error::NOT_FOUND)
+                                  : const_cast<HardwareStreamService*>(session)->release_final(
+                                        attachment);
+    }
     std::lock_guard<std::mutex> life(lifecycle_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     if (!matches_final_locked(attachment)) {
@@ -522,6 +632,12 @@ HardwareStreamService::read(const TunerAttachment& attachment,
                             px4::userland::MutableByteView output,
                             px4::userland::Timeout timeout) noexcept
 {
+    if (dispatcher_) {
+        const auto* session = session_for(attachment.receiver);
+        return session == nullptr
+                   ? Result<px4::userland::TunerStreamReadResult>::failure(Error::NOT_FOUND)
+                   : const_cast<HardwareStreamService*>(session)->read(attachment, output, timeout);
+    }
     if (attachment.receiver >= receiver_count() || output.data == nullptr || output.size == 0U ||
         output.size % 188U != 0U || output.size > kMaxReadBytes) {
         return Result<px4::userland::TunerStreamReadResult>::failure(Error::INVALID_ARGUMENT);
@@ -578,6 +694,12 @@ HardwareStreamService::read(const TunerAttachment& attachment,
 Result<TunerStreamTerminal>
 HardwareStreamService::terminal(const TunerAttachment& attachment) const noexcept
 {
+    if (dispatcher_) {
+        const auto* session = session_for(attachment.receiver);
+        return session == nullptr
+                   ? Result<TunerStreamTerminal>::failure(Error::NOT_FOUND)
+                   : session->terminal(attachment);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!matches_locked(attachment)) {
         return Result<TunerStreamTerminal>::failure(Error::NOT_FOUND);

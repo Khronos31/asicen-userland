@@ -9,6 +9,7 @@
 #include "asicen/ts_framer.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -137,6 +138,14 @@ public:
     terminal(const px4::userland::TunerAttachment& attachment) const noexcept override;
 
 private:
+    struct ReceiverSessionTag {};
+    HardwareStreamService(px4::userland::TunerServiceBackend& frontend, StreamCaptureSource& source,
+                          TestQueueCapacityBytes queue_capacity,
+                          NativeThread::Start thread_launcher, std::uint8_t receiver,
+                          ReceiverSessionTag);
+    HardwareStreamService* session_for(std::uint8_t receiver) noexcept;
+    const HardwareStreamService* session_for(std::uint8_t receiver) const noexcept;
+    px4::userland::Result<void> shutdown_capture(bool shutdown_frontend) noexcept;
     enum class State : std::uint8_t { idle, preparing, running, detached, quarantined };
     static bool emit_trampoline(void* context, const std::uint8_t* bytes,
                                 std::size_t size) noexcept;
@@ -153,6 +162,9 @@ private:
     px4::userland::TunerServiceBackend& frontend_;
     StreamCaptureSource& source_;
     const std::size_t queue_capacity_bytes_;
+    std::array<std::unique_ptr<HardwareStreamService>, 4U> receiver_sessions_{};
+    std::uint8_t pinned_receiver_ = 0xffU;
+    bool dispatcher_ = true;
     mutable std::mutex mutex_;
     std::mutex lifecycle_mutex_;
     std::condition_variable condition_;

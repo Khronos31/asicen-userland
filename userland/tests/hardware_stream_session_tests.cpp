@@ -172,6 +172,121 @@ public:
     TunerStreamCounters observations{};
 };
 
+class ReceiverFakeSource final : public asicen::StreamCaptureSource {
+public:
+    static std::array<std::uint8_t, 188U> sample_packet(std::uint8_t cc) noexcept
+    {
+        std::array<std::uint8_t, 188U> bytes{};
+        bytes.fill(0xffU);
+        bytes[0] = 0x47U;
+        bytes[1] = 0x00U;
+        bytes[2] = 0x20U;
+        bytes[3] = static_cast<std::uint8_t>(0x10U | (cc & 0x0fU));
+        return bytes;
+    }
+
+    struct Lane {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool interrupted = false;
+        bool prepared = false;
+        bool emit_more = false;
+        std::size_t emitted = 0U;
+        int stop_calls = 0;
+    };
+
+    Result<void> prepare(std::uint8_t receiver, ipc::System system,
+                         const std::atomic<bool>& cancelled) noexcept override
+    {
+        if (receiver >= lanes.size() || system != ipc::System::ISDB_T || cancelled.load()) {
+            return Result<void>::failure(Error::UNSUPPORTED);
+        }
+        auto& lane = lanes[receiver];
+        std::lock_guard<std::mutex> lock(lane.mutex);
+        lane.interrupted = false;
+        lane.prepared = true;
+        lane.emit_more = false;
+        lane.emitted = 0U;
+        return Result<void>::success();
+    }
+
+    asicen::CaptureRunResult run(const std::atomic<bool>& cancelled,
+                                 bool (*emit)(void*, const std::uint8_t*, std::size_t),
+                                 void* context) noexcept override
+    {
+        return run_for_receiver(1U, cancelled, emit, context);
+    }
+
+    asicen::CaptureRunResult run_for_receiver(
+        std::uint8_t receiver, const std::atomic<bool>& cancelled,
+        bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept override
+    {
+        if (receiver >= lanes.size()) return asicen::CaptureRunResult::usb_error;
+        auto& lane = lanes[receiver];
+        const auto first = sample_packet(receiver);
+        if (!emit(context, first.data(), first.size())) return asicen::CaptureRunResult::cancelled;
+        {
+            std::lock_guard<std::mutex> lock(lane.mutex);
+            ++lane.emitted;
+        }
+        lane.condition.notify_all();
+        std::unique_lock<std::mutex> lock(lane.mutex);
+        lane.condition.wait(lock, [&] { return cancelled.load() || lane.interrupted || lane.emit_more; });
+        if (!cancelled.load() && !lane.interrupted && lane.emit_more) {
+            lane.emit_more = false;
+            lock.unlock();
+            const auto second = sample_packet(static_cast<std::uint8_t>(receiver + 1U));
+            if (!emit(context, second.data(), second.size())) return asicen::CaptureRunResult::cancelled;
+            lock.lock();
+            ++lane.emitted;
+            lock.unlock();
+            lane.condition.notify_all();
+            lock.lock();
+        }
+        lane.condition.wait(lock, [&] { return cancelled.load() || lane.interrupted; });
+        return asicen::CaptureRunResult::cancelled;
+    }
+
+    void interrupt() noexcept override { interrupt_receiver(1U); }
+    void interrupt_receiver(std::uint8_t receiver) noexcept override
+    {
+        if (receiver >= lanes.size()) return;
+        auto& lane = lanes[receiver];
+        {
+            std::lock_guard<std::mutex> lock(lane.mutex);
+            lane.interrupted = true;
+        }
+        lane.condition.notify_all();
+    }
+    Result<void> stop() noexcept override { return stop_receiver(1U); }
+    Result<void> stop_receiver(std::uint8_t receiver) noexcept override
+    {
+        if (receiver >= lanes.size()) return Result<void>::failure(Error::UNSUPPORTED);
+        std::lock_guard<std::mutex> lock(lanes[receiver].mutex);
+        ++lanes[receiver].stop_calls;
+        lanes[receiver].prepared = false;
+        return Result<void>::success();
+    }
+    bool wait_emitted(std::uint8_t receiver, std::size_t count)
+    {
+        auto& lane = lanes[receiver];
+        std::unique_lock<std::mutex> lock(lane.mutex);
+        return lane.condition.wait_for(lock, std::chrono::seconds(2),
+                                       [&] { return lane.emitted >= count; });
+    }
+    void request_more(std::uint8_t receiver)
+    {
+        auto& lane = lanes[receiver];
+        {
+            std::lock_guard<std::mutex> lock(lane.mutex);
+            lane.emit_more = true;
+        }
+        lane.condition.notify_all();
+    }
+
+    std::array<Lane, 4U> lanes{};
+};
+
 class ShutdownTrackingFrontend final : public TunerServiceBackend {
 public:
     std::uint8_t receiver_count() const noexcept override { return 4U; }
@@ -477,6 +592,43 @@ bool start_precedes_attach_and_full_identity_is_required()
     CHECK(service.release_final(id), "final state is released after protocol flush");
     CHECK(service.start_capture(1U, ipc::System::ISDB_T), "fresh generation can restart");
     CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "unattached attempt can stop");
+    return true;
+}
+
+bool receiver_sessions_keep_peer_queue_and_worker_after_one_stop()
+{
+    asicen::MockTunerBackend frontend(4U);
+    ReceiverFakeSource source;
+    asicen::HardwareStreamService service(
+        frontend, source, asicen::HardwareStreamService::TestQueueCapacityBytes{2U * 188U});
+    CHECK(service.start_capture(1U, ipc::System::ISDB_T), "start terrestrial receiver one");
+    CHECK(service.start_capture(3U, ipc::System::ISDB_T), "start terrestrial receiver three in parallel");
+    auto first = identity(81U);
+    auto peer = identity(83U);
+    peer.receiver = 3U;
+    CHECK(service.attach(first), "attach receiver one stream");
+    CHECK(service.attach(peer), "attach receiver three stream");
+    CHECK(source.wait_emitted(1U, 1U) && source.wait_emitted(3U, 1U),
+          "both receiver workers emit their first packet");
+    const auto first_stats = service.stats(first);
+    const auto peer_stats = service.stats(peer);
+    CHECK(first_stats && first_stats.value().packets == 1U &&
+              peer_stats && peer_stats.value().packets == 1U,
+          "each receiver owns independent packet counters");
+
+    CHECK(service.detach(first), "detach receiver one only");
+    CHECK(service.stop_capture(1U, ipc::System::ISDB_T), "stop receiver one only");
+    source.request_more(3U);
+    CHECK(source.wait_emitted(3U, 2U), "receiver three continues after receiver one stopped");
+    const auto continued = service.stats(peer);
+    CHECK(continued && continued.value().packets == 2U,
+          "peer queue and counters advance after other receiver cleanup");
+    CHECK(service.detach(peer), "detach surviving receiver three");
+    CHECK(service.stop_capture(3U, ipc::System::ISDB_T), "stop receiver three");
+    CHECK(source.lanes[1U].stop_calls == 1 && source.lanes[3U].stop_calls == 1,
+          "each receiver cleanup reaches only its own source lifecycle");
+    CHECK(service.release_final(first) && service.release_final(peer),
+          "each receiver releases its own final snapshot");
     return true;
 }
 
@@ -1128,6 +1280,9 @@ int main()
         return 1;
     }
     if (!start_precedes_attach_and_full_identity_is_required()) {
+        return 1;
+    }
+    if (!receiver_sessions_keep_peer_queue_and_worker_after_one_stop()) {
         return 1;
     }
     if (!detach_does_not_publish_stale_final_snapshot_before_worker_join()) {
