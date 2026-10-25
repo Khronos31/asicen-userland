@@ -17,19 +17,19 @@
 
 ## 共通実行環境表
 
-表の列は4製品で共通とする。配布targetごとに対応するnative OS/ABIで実行し、依存・driver/permission・firmware/input・CARD backendを記録する。実際に使ったhost OS/ABIと結果は版別の検証記録へ記す。
+表の列は4製品で共通とする。配布targetごとに対応するnative OS/ABIで実行し、依存・driver/permission・firmware/input、製品CLIからの内蔵CARD操作、native PC/SC/WinSCard adapterを別々に記録する。APIの提供状態と実機結果を混同せず、host/ABIの結果は版別記録へ記す。
 
-| ID | OS / ABI | 依存 / driver / permission | firmware / input | CARD backend | 配布artifact / 手順 |
-|---|---|---|---|---|---|
-| E03 | AnduinOS Linux x86_64 / glibc | native CPU、libusb静的、USB access pathを記録 | 共通loader image | Linux PC/SC IFDを別途確認 | `linux-glibc-x86_64` / §3–§5 |
-| E02 | HAOS Alpine Linux x86_64 / musl | native CPU、libusb静的、Supervisor USB access pathを記録 | 共通loader image | musl用IFDを別途確認 | `linux-musl-x86_64` / §3–§5 |
-| E15-G | native Linux aarch64 / glibc | native aarch64、libusb静的、USB access pathを記録 | 共通loader image | Linux PC/SC IFDを別途確認 | `linux-glibc-aarch64` / §3–§5 |
-| E15-M | native Linux aarch64 / musl | native aarch64、emulationなし。Alpine arm64 runtime | 共通loader image | musl用IFDを別途確認 | `linux-musl-aarch64` / §3–§5 |
-| E04 | macOS arm64 | libusb静的、USB access permissionを記録 | 共通loader image | macOS PC/SC IFDを別途確認 | `darwin-arm64` / §3–§5 |
-| E05 | Android Termux aarch64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | 非対応 | `android-aarch64` / §3–§5 |
-| E06 | Android Termux armv7a | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | 非対応 | `android-armv7a` / §3–§5 |
-| E07 | Android Termux x86_64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | 非対応 | `android-x86_64` / §3–§5 |
-| W1 | Windows 11 x86_64 | 使用許可済みlibusb driver。変更しない | 同source candidateの`win-candidate` | native WinSCardを別途確認 | Windows候補ZIP / §3–§5 |
+| ID | OS / ABI | 依存 / driver / permission | firmware / input | 製品CLIからの内蔵CARD操作 | native PC/SC/WinSCard adapter | 配布artifact / 手順 |
+|---|---|---|---|---|---|---|
+| E03 | AnduinOS Linux x86_64 / glibc | native CPU、libusb静的、USB access pathを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | Linux PC/SC IFDを別途確認 | `linux-glibc-x86_64` / §3–§5 |
+| E02 | HAOS Alpine Linux x86_64 / musl | native CPU、libusb静的、Supervisor USB access pathを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | musl用IFDを別途確認 | `linux-musl-x86_64` / §3–§5 |
+| E15-G | native Linux aarch64 / glibc | native aarch64、libusb静的、USB access pathを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | Linux PC/SC IFDを別途確認 | `linux-glibc-aarch64` / §3–§5 |
+| E15-M | native Linux aarch64 / musl | native aarch64、emulationなし。Alpine arm64 runtime | 共通loader image | CARD CLI/APIと機種能力を確認 | musl用IFDを別途確認 | `linux-musl-aarch64` / §3–§5 |
+| E04 | macOS arm64 | libusb静的、USB access permissionを記録 | 共通loader image | CARD CLI/APIと機種能力を確認 | macOS PC/SC IFDを別途確認 | `darwin-arm64` / §3–§5 |
+| E05 | Android Termux aarch64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | CARD CLI/APIあり。Android実機は未確認 | Android IFD未提供 | `android-aarch64` / §3–§5 |
+| E06 | Android Termux armv7a | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | CARD CLI/APIあり。Android実機は未確認 | Android IFD未提供 | `android-armv7a` / §3–§5 |
+| E07 | Android Termux x86_64 | Termux:API / `termux-usb`、再列挙後FD再取得 | 共通loader image | CARD CLI/APIあり。Android実機は未確認 | Android IFD未提供 | `android-x86_64` / §3–§5 |
+| W1 | Windows 11 x86_64 | 使用許可済みlibusb driver。変更しない | 同source candidateの`win-candidate` | 同一host IPCのCARD CLI/APIを確認 | candidate DLLあり。native transaction consumer/API probeなし・未実施 | Windows候補ZIP / §3–§5 |
 
 ## 共通試験シナリオ
 
@@ -174,22 +174,120 @@ hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapt
 | `@ASICEN_IFD_LIBRARY@` | 候補のLinux `ifd/asicen-userland-ifd.so`絶対path |
 | `@ASICEN_ACCESS@` | 同一accountで動かす`user`。共有groupを使う場合はdaemon/consumer/pcscdのpermissionを合わせる |
 
-専用pcsc-lite prefixとその`libpcsclite.so.1`を使い、reader config directoryだけを登録してforeground daemonを起動する。既存のLinux probeは次の形式で実行する。
+専用pcsc-lite prefixとその`libpcsclite.so.1`を使い、reader config directoryだけを登録してforeground daemonを別processとして起動する。候補archiveを展開したdirectoryをcurrent directoryとし、同じ`RT`/`rc`で候補`asicend`を起動済みとする。準備からprobe buildまでのsource、template生成、固定pathはAppendix Aに示す。以下の例は`WORK`, `PREFIX`, `IPC`, `CONF`, `LOG`, `IFD`, `RT`をその例に従い設定済みとする。
 
 ```sh
-LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib \
-  <isolated-pcsc-lite-prefix>/sbin/pcscd --foreground \
-  --config <candidate-reader-config-dir>
+mkdir -p "$LOG"
+LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/sbin/pcscd" --foreground \
+  --config "$CONF" > "$LOG/pcscd.log" 2>&1 &
+PCSC_PID=$!
+printf '%s\n' "$PCSC_PID" > "$LOG/pcscd.pid"
 
-LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib pcsc_scan -r
+if LD_LIBRARY_PATH="$PREFIX/lib" pcsc_scan -r > "$LOG/readers.txt" 2>&1; then scan_rc=0; else scan_rc=$?; fi
+printf '%s\n' "$scan_rc" > "$LOG/readers.rc"
 set -o pipefail
-LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib pcsc_scan -c 2>&1 | \
+if LD_LIBRARY_PATH="$PREFIX/lib" pcsc_scan -c 2>&1 | \
   sed -E 's/(ATR[[:space:]]*[:=]).*/\1 <redacted>/'
-LD_LIBRARY_PATH=<isolated-pcsc-lite-prefix>/lib \
-  <existing-bcas-safe-probe>
+then scan_rc=0; else scan_rc=$?; fi
+printf '%s\n' "$scan_rc" > "$LOG/card-state.rc"
+if LD_LIBRARY_PATH="$PREFIX/lib" "$WORK/bcas-safe-probe" > "$LOG/bcas-safe-probe.txt" 2>&1; then probe_rc=0; else probe_rc=$?; fi
+printf '%s\n' "$probe_rc" > "$LOG/bcas-safe-probe.rc"
+kill -INT "$PCSC_PID"
+if wait "$PCSC_PID"; then pcscd_rc=0; else pcscd_rc=$?; fi
+printf '%s\n' "$pcscd_rc" > "$LOG/pcscd.rc"
 ```
 
-`pcsc_scan -r`はexit 0かつASICEN readerが1件、ATRを伏せた`pcsc_scan -c`はpipeline exit 0かつcard insertedを期待する。既存`bcas-safe-probe`はPC/SC connect後の標準B-CAS初期設定、`get_init_status()`、read-only `get_id()`を行い、exit 0かつ`bcas_init=ok` / `init_status=ok` / `id_query=ok`を期待する。readerを1つだけ登録し、probeのreader選択を一意にする。カード不在・ATR/resetの独立確認は同じdaemon/runtime/instanceの`asicenctl card-status`, `card-atr`, `card-reset`を使い、ATR/resetのraw出力は`/dev/null`へ送り終了値だけを記録する。CLI CARD操作はnative PC/SC probe結果の代用ではない。raw ATR、card ID、status内識別値、APDU response bytesを出力・保存しない。probeがtest hostにない場合は新規probeを作らず、そのPC/SC transaction gateを未実施とする。consumerを終了したらisolated `pcscd`だけをSIGINTで停止し、process/socket消失を確認してから`asicend`を通常停止する。test config/runtimeを削除し、system serviceは変更しない。
+`pcsc_scan -r`はexit 0かつASICEN readerが1件、ATRを伏せた`pcsc_scan -c`はpipeline exit 0かつcard insertedを期待する。Appendix Aの既存`bcas-safe-probe`はPC/SC connect後の標準B-CAS初期設定、`get_init_status()`、read-only `get_id()`を行い、exit 0かつ`bcas_init=ok` / `init_status=ok` / `id_query=ok`を期待する。3つの`.rc`が全て`0`で、記録されたreaderが1件、cardがinserted、probeの3ラベルが`ok`の場合だけpassとする。probeはreaderを1つだけ登録したconfigから一意に選ぶ。カード不在・ATR/resetの独立確認は同じdaemon/runtime/instanceの`asicenctl card-status`, `card-atr`, `card-reset`を使い、ATR/resetのraw出力は`/dev/null`へ送り終了値だけを記録する。CLI CARD操作はnative PC/SC probe結果の代用ではない。raw ATR、card ID、status内識別値、APDU response bytesを出力・保存しない。consumerを終了したら`kill -INT "$PCSC_PID"`後に`wait "$PCSC_PID"`し、pcscd終了値を保存してからisolated socket/process消失を確認する。続いて`asicend`を通常停止し、test config/runtimeを削除する。system serviceは変更しない。
+
+#### Appendix A. Linux専用PC/SCと既存safe probeの準備
+
+次のレシピは専用`WORK`だけに書き込み、system pcscd/serviceには触れない。`RT`は候補daemonの`--runtime-dir`、`rc`はその`--instance`、`IFD`は候補archive内`ifd/asicen-userland-ifd.so`のabsolute pathとする。必要なbuild toolsは`git`, `cmake`, C/C++ compiler, `pkg-config`, `python3`/venv, `ninja`, `tar`, `sha256sum`, `curl`。
+
+```sh
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/asicen-pcsc.XXXXXX")
+PREFIX="$WORK/prefix"
+IPC="$WORK/ipc"
+CONF="$WORK/readers/asicen"
+LOG="$WORK/log"
+mkdir -p "$IPC" "$CONF" "$LOG" "$WORK/drivers"
+python3 -m venv "$WORK/venv"
+"$WORK/venv/bin/pip" install --disable-pip-version-check meson==1.7.0
+MESON="$WORK/venv/bin/meson"
+
+curl -fL https://deb.debian.org/debian/pool/main/p/pcsc-lite/pcsc-lite_2.3.3.orig.tar.xz -o "$WORK/pcsc-lite_2.3.3.orig.tar.xz"
+printf '%s  %s\n' cdff7d7153a0b37aa74e26dfec89ec7dc5c5286aa21b91b903e38739d227e8e7 "$WORK/pcsc-lite_2.3.3.orig.tar.xz" | sha256sum -c -
+tar -xJf "$WORK/pcsc-lite_2.3.3.orig.tar.xz" -C "$WORK"
+"$MESON" setup "$WORK/pcsc-build" "$WORK/pcsc-lite-2.3.3" \
+  --prefix "$PREFIX" -Dusb=false -Dlibusb=false -Dlibudev=false \
+  -Dserial=true -Dipcdir="$IPC" -Dserialconfdir="$CONF" \
+  -Dusbdropdir="$WORK/drivers" -Dpolkit=false -Dlibsystemd=false
+"$MESON" compile -C "$WORK/pcsc-build"
+"$MESON" install -C "$WORK/pcsc-build"
+
+git clone https://github.com/kazuki0824/recisdb-rs.git "$WORK/recisdb-rs"
+git -C "$WORK/recisdb-rs" checkout --detach badc171f15bb010b972740c17a92cfe0cbfe8584
+SRC="$WORK/recisdb-rs"
+PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" cmake \
+  -S "$SRC/b25-sys/externals/libaribb25" -B "$WORK/aribb25-build" \
+  -DWITH_PCSC_PACKAGE=libpcsclite -DUSE_AVX2=OFF
+cmake --build "$WORK/aribb25-build" --target aribb25-static --parallel
+
+IFD=$(realpath ./ifd/asicen-userland-ifd.so)
+sed -e "s|@ASICEN_RUNTIME_DIR@|$RT|g" \
+    -e 's|@ASICEN_INSTANCE@|rc|g' \
+    -e "s|@ASICEN_IFD_LIBRARY@|$IFD|g" \
+    -e 's|@ASICEN_ACCESS@|user|g' \
+    packaging/pcsc/reader.conf.d/asicen-userland.conf.in > "$CONF/asicen-userland.conf"
+```
+
+Create `$WORK/bcas_safe_probe.c` with the following existing diagnostic source, then build it against the pinned `libaribb25` and this isolated pcsc-lite client library. This probe only reports operation success labels; it does not print ATR, card ID, status fields, or APDU response bytes.
+
+```c
+#include <stdio.h>
+#include <string.h>
+#include "b_cas_card.h"
+
+int main(void)
+{
+    B_CAS_CARD *card = create_b_cas_card();
+    B_CAS_INIT_STATUS status;
+    B_CAS_ID id;
+    int init_rc, status_rc, id_rc;
+
+    memset(&status, 0, sizeof(status));
+    memset(&id, 0, sizeof(id));
+    if (!card) {
+        puts("bcas_create=fail");
+        return 1;
+    }
+    init_rc = card->init(card);
+    if (init_rc < 0) {
+        puts("bcas_init=fail");
+        card->release(card);
+        return 2;
+    }
+    puts("bcas_init=ok");
+    status_rc = card->get_init_status(card, &status);
+    printf("init_status=%s\n", status_rc < 0 ? "fail" : "ok");
+    id_rc = card->get_id(card, &id);
+    printf("id_query=%s\n", id_rc < 0 ? "fail" : "ok");
+    if (id.data && id.count > 0)
+        memset(id.data, 0, (size_t)id.count * sizeof(*id.data));
+    memset(&status, 0, sizeof(status));
+    card->release(card);
+    return status_rc < 0 || id_rc < 0 ? 3 : 0;
+}
+```
+
+```sh
+cc -I "$SRC/b25-sys/externals/libaribb25/aribb25" \
+  "$WORK/bcas_safe_probe.c" "$WORK/aribb25-build/libaribb25.a" \
+  -L "$PREFIX/lib" -Wl,-rpath,"$PREFIX/lib" \
+  -lpcsclite -lstdc++ -lm -o "$WORK/bcas-safe-probe"
+ldd "$WORK/bcas-safe-probe" | grep 'libpcsclite.so.1'
+```
+
+最後の`ldd`出力が`$PREFIX/lib/libpcsclite.so.1`を指すことを確認する。reader templateは実際の候補IFD/daemon runtime/instanceへ展開済みである。実行時はこのdoc本文の手順で`$PREFIX/sbin/pcscd`をbackground起動しPIDを保存する。candidateに対応するASICEN IFD buildと`bcas-safe-probe`のcompile/linkだけではCARD gateを満たさず、reader/card実行結果を別途記録する。
 
 macOSでもnative `.bundle`を使うが、system PC/SC serviceをreload/restartしてcandidate IFDを加える操作はしない。既存のisolated native stackとnative `pcsc_scan` / `bcas-safe-probe`が用意された専用test hostに限り、`pcsc_scan -r`, `pcsc_scan -c`とsafe probeを同様に実行する。native consumerや隔離stackが用意されていなければ実施不能として記録し、Linux結果を代用しない。AndroidにはIFDがない。
 
