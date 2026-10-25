@@ -4,11 +4,11 @@
 
 ## 共通の検証項目と頻度
 
-用語は4製品で共通とする。代表機はLinux x86_64 glibc、機種はチューナー、製品はドライバ、ソークは30分以上の連続TS取得を指す。ASICENの標準機種はPX-W3U3。
+用語は4製品で共通とする。代表機はLinux x86_64 glibc、機種はチューナー、製品はドライバ、ソークは30分以上の連続TS取得を指す。ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対象を限定しない。ASICENが対象とする全機種で初回手順を個別に実施し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ機種別に記録する。
 
 | 区分 | 適用頻度 | ASICENでの確認 |
 |---|---|---|
-| 機種初回 | PX-W3U3を代表機で2時間連続受信し、毎releaseの回帰項目を代表機だけで行う。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ記録する。 | READMEのW3U3能力に従い、地上波/衛星、CARD、対応LNBを確認。 |
+| 機種初回 | ASICENの各機種を個別に代表機で2時間連続受信し、その機種で毎releaseの回帰項目を代表機だけで行う。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ機種別に記録する。 | PX-W3U3では公開能力と未確認の最大能力を区別し、地上波/衛星、CARD、対応LNBを確認する。ほかの機種はREADME記載の機種別能力に従う。 |
 | 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、機種の最大能力による同時受信とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | W3U3の公開receiver slotは0/1の2つ。README記載の現行実装上限は同時stream 1本だが、これは機種本来の最大能力を示す根拠ではない。最大能力を確認したうえで試験し、候補がその能力を出せない場合は未達として記録する。WinSCard/PCSCはnative stackを別経路で確認。 |
 | 必要に応じて | LNB電圧実測と非対応機種の拒否、複数チューナー列挙/daemon並列、変更機能に応じた機種×OS/ABIの追加確認。 | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種へsoftware要求を送らない。 |
 | 初回/major | 必要時項目を通し、代表機で全無料channelを各10秒TS取得。macOS/Windows各30分連続、残るOS/ABI各10分連続で取得する。全channel取得は代表機だけ。別途指示されたソークは別記する。 | 現地channel planとmodel receiver割当を記録。Windows ZIPは通常aggregate外でも同候補の`win-candidate`を使う。 |
