@@ -208,6 +208,8 @@ private:
                               const volatile std::sig_atomic_t* stop_flag = nullptr,
                               bool cleanup = false) noexcept;
     void mark_cleanup_failed(px4::userland::Error error) noexcept;
+    void mark_capture_cleanup_failed(std::uint8_t receiver,
+                                     px4::userland::Error error) noexcept;
     bool dsc_start(std::uint8_t) override;
     bool dsc_stop(std::uint8_t) override;
     CaptureIo bulk_read(std::uint8_t, unsigned char*, int, int*, unsigned) override;

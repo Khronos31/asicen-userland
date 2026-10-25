@@ -2299,6 +2299,14 @@ void LibusbW3u3Hardware::mark_cleanup_failed(Error error) noexcept
     }
 }
 
+void LibusbW3u3Hardware::mark_capture_cleanup_failed(std::uint8_t receiver,
+                                                     Error error) noexcept
+{
+    const auto* const coordinator = capture_coordinator(receiver);
+    if (coordinator != nullptr && coordinator->quarantined()) return;
+    mark_cleanup_failed(error);
+}
+
 Result<void>
 LibusbW3u3Hardware::begin_card_operation(std::uint32_t timeout_ms,
                                          const volatile std::sig_atomic_t* stop_flag) noexcept
@@ -2866,7 +2874,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
             return Result<void>::failure(Error::USB_IO);
         }
         if (cleanup != CaptureRunResult::cancelled) {
-            mark_cleanup_failed(Error::USB_IO);
+            mark_capture_cleanup_failed(receiver, Error::USB_IO);
         }
         return Result<void>::failure(error);
     };
@@ -3174,7 +3182,7 @@ CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
     const auto cleanup = stop_and_drain(receiver, receiver_capture_states_[receiver].dsc_attempted);
     if (cleanup == CaptureRunResult::fatal_drain) return cleanup;
     if (cleanup != CaptureRunResult::cancelled) {
-        mark_cleanup_failed(Error::USB_IO);
+        mark_capture_cleanup_failed(receiver, Error::USB_IO);
         return cleanup;
     }
     {
@@ -3316,7 +3324,7 @@ Result<void> LibusbW3u3Hardware::stop_source_receiver(std::uint8_t receiver) noe
             return Result<void>::failure(Error::USB_IO);
         }
         if (result != CaptureRunResult::cancelled) {
-            mark_cleanup_failed(Error::USB_IO);
+            mark_capture_cleanup_failed(receiver, Error::USB_IO);
             if (startup_config_.enabled) {
                 std::fprintf(stderr,
                              "asicen-capture-stop receiver=%u drain_result=%u "
@@ -3368,7 +3376,7 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(std::uint8_t receiver,
         quarantine_capture();
     }
     if (result != CaptureRunResult::cancelled) {
-        mark_cleanup_failed(Error::USB_IO);
+        mark_capture_cleanup_failed(receiver, Error::USB_IO);
     }
     record_startup("drain_complete", static_cast<int>(result));
     flush_startup_trace();
@@ -3492,7 +3500,7 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(std::uint8_t receiver, 
             routed_source_receiver_.store(source_receiver_, std::memory_order_release);
         }
     } else {
-        mark_cleanup_failed(Error::USB_IO);
+        mark_capture_cleanup_failed(receiver, Error::USB_IO);
     }
     return result;
 }

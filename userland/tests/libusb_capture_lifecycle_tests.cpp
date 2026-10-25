@@ -63,6 +63,15 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return hardware.cleanup_failed_.load();
     }
+    static bool function_capture_quarantined(const LibusbW3u3Hardware& hardware,
+                                             std::uint8_t receiver)
+    {
+        const auto route = receiver_address(*hardware.profile_, receiver);
+        return route && route.value().rf_function_index <
+                            hardware.function_capture_coordinators_.size() &&
+               hardware.function_capture_coordinators_[route.value().rf_function_index]
+                   .quarantined();
+    }
     static bool capture_storage_is_distinct(const LibusbW3u3Hardware& hardware,
                                             std::uint8_t first, std::uint8_t second)
     {
@@ -320,6 +329,7 @@ struct FakeUsb {
     std::array<unsigned, 16> seed_clear_register_counts{};
     bool seed_clear_values_zero = true;
     bool seed_cleanup_active = false;
+    bool fail_seed_cleanup_read_once = false;
     int fail_seed_write_number = 0;
     const std::array<std::uint8_t, 16>* seed_override = nullptr;
     bool fail_dsc_start = false;
@@ -738,6 +748,10 @@ struct FakeUsb {
         case Request::DscStop:
             ++dsc_stop_count;
             seed_cleanup_active = true;
+            if (fail_seed_cleanup_read_once) {
+                fail_seed_cleanup_read_once = false;
+                fail_i2c_read_value_once = 0x054aU;
+            }
             return status();
         case Request::GpioRead:
             if (response == nullptr) {
@@ -2168,6 +2182,100 @@ bool test_w3u2_same_function_peer_release_preserves_shared_seed()
     return true;
 }
 
+bool test_w3u2_four_receiver_capture_and_function_seed_lifecycles()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    fake.controller[0x09U] = 0x20U;
+    fake.function_controllers[1U][0x09U] = 0x20U;
+    fake.satellite_register_model = true;
+    fake.satellite_registers[0xceU] = 0x12U;
+    fake.satellite_registers[0xcfU] = 0x34U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 0U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver)
+        CHECK(hardware.open_receiver(receiver).has_value());
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(hardware.select_satellite_slot(0U, 0U, 1000U).has_value());
+    CHECK(hardware.select_satellite_tsid(0U, 0x1234U, 1000U).has_value());
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
+    CHECK(hardware.select_satellite_slot(2U, 0U, 1000U).has_value());
+    CHECK(hardware.select_satellite_tsid(2U, 0x1234U, 1000U).has_value());
+    CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver)
+        CHECK(hardware.prepare(receiver, receiver % 2U == 0U ? System::ISDB_S : System::ISDB_T,
+                              cancelled).has_value());
+    CHECK(fake.seed_write_count == 32);
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver)
+        CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, receiver));
+    CHECK(hardware.stop_receiver(0U).has_value());
+    CHECK(hardware.stop_receiver(2U).has_value());
+    CHECK(fake.seed_clear_count == 0 && fake.function_controllers[0U][0x05U] == 0xa0U &&
+          fake.function_controllers[1U][0x05U] == 0xa0U);
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(hardware.stop_receiver(1U).has_value());
+    CHECK(fake.seed_clear_count == 16 && fake.function_controllers[0U][0x05U] == 0U &&
+          fake.function_controllers[1U][0x05U] == 0xa0U);
+    CHECK(hardware.stop_receiver(3U).has_value());
+    CHECK(fake.seed_clear_count == 32 && fake.function_controllers[1U][0x05U] == 0U);
+    CHECK(fake.seed_clear_values_zero);
+    for (unsigned count : fake.seed_clear_register_counts) CHECK(count == 2U);
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver)
+        CHECK(hardware.close_receiver(receiver).has_value());
+    CHECK(hardware.shutdown().has_value());
+    return true;
+}
+
+bool test_w3u2_seed_cleanup_quarantine_is_function_scoped()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    fake.controller[0x09U] = 0x20U;
+    fake.function_controllers[1U][0x09U] = 0x20U;
+    fake.satellite_register_model = true;
+    fake.satellite_registers[0xceU] = 0x12U;
+    fake.satellite_registers[0xcfU] = 0x34U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 3U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver)
+        CHECK(hardware.open_receiver(receiver).has_value());
+    CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
+    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
+    CHECK(hardware.select_satellite_slot(2U, 0U, 1000U).has_value());
+    CHECK(hardware.select_satellite_tsid(2U, 0x1234U, 1000U).has_value());
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(hardware.select_satellite_slot(0U, 0U, 1000U).has_value());
+    CHECK(hardware.select_satellite_tsid(0U, 0x1234U, 1000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(3U, System::ISDB_T, cancelled).has_value());
+    fake.fail_seed_write_number = fake.seed_write_count + 2;
+    fake.fail_seed_cleanup_read_once = true;
+    CHECK(!hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::function_capture_quarantined(hardware, 0U));
+    CHECK(!LibusbW3u3HardwareTestPeer::function_capture_quarantined(hardware, 3U));
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_cleanup_failed(hardware));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(!LibusbW3u3HardwareTestPeer::interrupted(hardware, 3U));
+    CHECK(hardware.stop_receiver(3U).has_value());
+    CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 2U));
+    CHECK(hardware.stop_receiver(2U).has_value());
+    CHECK(!hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_cleanup_failed(hardware));
+    CHECK(hardware.close_receiver(0U).has_value());
+    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.close_receiver(2U).has_value());
+    CHECK(hardware.close_receiver(3U).has_value());
+    return true;
+}
+
 bool test_paired_capture_routes_select_each_function_handle()
 {
     FakeUsb fake;
@@ -2773,6 +2881,10 @@ int main()
          test_w3u2_capture_state_is_independent_across_sibling_receivers},
         {"test_w3u2_same_function_peer_release_preserves_shared_seed",
          test_w3u2_same_function_peer_release_preserves_shared_seed},
+        {"test_w3u2_four_receiver_capture_and_function_seed_lifecycles",
+         test_w3u2_four_receiver_capture_and_function_seed_lifecycles},
+        {"test_w3u2_seed_cleanup_quarantine_is_function_scoped",
+         test_w3u2_seed_cleanup_quarantine_is_function_scoped},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
          test_s3u_combined_receiver_uses_lane0_for_both_systems},
         {"test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases",
