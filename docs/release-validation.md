@@ -375,7 +375,7 @@ sed -e "s|@ASICEN_RUNTIME_DIR@|$RT|g" \
     packaging/pcsc/reader.conf.d/asicen-userland.conf.in > "$CONF/asicen-userland.conf"
 ```
 
-Create `$WORK/bcas_safe_probe.c` with the following existing diagnostic source, then build it against the pinned `libaribb25` and this isolated pcsc-lite client library. This probe only reports operation success labels; it does not print ATR, card ID, status fields, or APDU response bytes.
+次の既存診断sourceを`$WORK/bcas_safe_probe.c`へ保存し、固定した`libaribb25`と隔離pcsc-lite client libraryへリンクする。このprobeは操作成功ラベルだけを出力し、ATR、card ID、status field、APDU response bytesは表示しない。
 
 ```c
 #include <stdio.h>
@@ -461,16 +461,18 @@ $capture.ExitCode
 Get-FileHash -Algorithm SHA256 .\t27.ts
 ```
 
-T07はdaemonを維持したままclientなしの状態でUSBを抜くidle runと、有限受信中のstream runを別々に行う。抜去を依頼する前にstatus/listとdaemon PIDを記録し、依頼から最大5分待つ。stream runでは`--time`を観測窓より長くしたclientを前景実行し、抜去時の実終了値を保存する。選択した観測窓内に自然終了しない場合はclient consoleでCtrl+Cを入力して終了値を保存し、その試行はtimeout未達として記録する。抜去後にdaemonを通常停止し、再接続後は`--list-json`で同じUSB pathを確認して新しいruntimeで起動し、status/listと30秒受信を再実行する。T08のPID/終了値/process確認をこのWindows手順にも適用する。
+T07はdaemonを維持したままclientなしの状態でUSBを抜くidle runと、有限受信中のstream runを別々に行う。抜去を依頼する前にstatus/listとdaemon PIDを記録し、依頼から最大5分待つ。stream runでは`--time`を観測窓より長くしたclientを起動し、観測窓内の抜去終了を確認する。窓内に自然終了しない場合はtimeout未達として記録し、有限`--time`の終了まで待って実終了値を保存する。指定時間満了exit 0は切断合格ではない。抜去後にdaemonを通常停止し、再接続後は`--list-json`で同じUSB pathを確認して新しいruntimeで起動し、status/listと30秒受信を再実行する。T08のPID/終了値/process確認をこのWindows手順にも適用する。
 
 ```powershell
 $B = (Resolve-Path .\asicen-ts.exe).Path
 $RT = 'C:\asicen-rc-<run-id>'
 $LOG = 'C:\asicen-e17-<run-id>-logs'
 $R1 = '<receiver-1>'
-$CAPTURE_SECONDS = 3600
-& $B --instance rc --runtime-dir $RT --receiver $R1 --channel T27 --time $CAPTURE_SECONDS --output (Join-Path $LOG 'usb-cut.ts')
-$LASTEXITCODE
+$CAPTURE_SECONDS = '<finite-capture-duration-seconds-from-release-matrix>'
+$OBSERVATION_LIMIT_SECONDS = '<finite-cut-observation-window-seconds>'
+$client = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver',$R1,'--channel','T27','--time',$CAPTURE_SECONDS,'--output',(Join-Path $LOG 'usb-cut.ts')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $LOG 'usb-cut.out') -RedirectStandardError (Join-Path $LOG 'usb-cut.err')
+if (-not $client.WaitForExit([int]$OBSERVATION_LIMIT_SECONDS * 1000)) { 'timeout: capture still active at observation limit' | Out-File (Join-Path $LOG 'usb-cut-observation.txt'); $client.WaitForExit() }
+$client.Refresh(); $client.ExitCode | Out-File (Join-Path $LOG 'usb-cut.rc')
 ```
 
 WindowsではT03–T06も候補directoryの3 executableで行う。T03はW3U2/W3U3の公開最低要求である4 receiverを別TSへ同時起動し、他機種は公開receiver数を全て同時起動する。T04は現地channel planの各無料channelを個別に有限受信する。T05は受信中に別consoleからstatus/listと対応CARD controlを実行する。T06はdaemonを維持したまま利用者に物理挿抜を依頼し、status/ATR/reset/APDUを各段階で保存する。
@@ -495,7 +497,15 @@ $clients = foreach ($job in $jobs) {
   if ($job.Lnb) { $captureArgs += @('--lnb-voltage','0') }
   Start-Process -FilePath $B -ArgumentList $captureArgs -PassThru -NoNewWindow
 }
-foreach ($client in $clients) { $client.WaitForExit(); $client.Refresh(); [pscustomobject]@{ PID=$client.Id; ExitCode=$client.ExitCode } }
+while ($clients.Where({ -not $_.HasExited }).Count -gt 0) {
+  & $C --instance rc --runtime-dir $RT status 2>&1 | Tee-Object -Append (Join-Path $LOG 't05-status.txt')
+  $LASTEXITCODE | Out-File -Append (Join-Path $LOG 't05-status.rc')
+  & $C --instance rc --runtime-dir $RT list 2>&1 | Tee-Object -Append (Join-Path $LOG 't05-list.txt')
+  $LASTEXITCODE | Out-File -Append (Join-Path $LOG 't05-list.rc')
+  foreach ($client in $clients) { $client.Refresh() }
+  Start-Sleep -Seconds 2
+}
+foreach ($client in $clients) { $client.Refresh(); [pscustomobject]@{ PID=$client.Id; ExitCode=$client.ExitCode } | Tee-Object -Append (Join-Path $LOG 't05-client-exit.txt') }
 Get-FileHash -Algorithm SHA256 (Join-Path $LOG 'r1.ts'), (Join-Path $LOG 'r2.ts'), (Join-Path $LOG 'r3.ts'), (Join-Path $LOG 'r4.ts')
 
 foreach ($channel in $CHANNEL_PLAN) {
@@ -520,16 +530,40 @@ $D = (Resolve-Path .\asicend.exe).Path
 $FW = (Resolve-Path '.\firmware\<model-firmware>').Path
 $RTA = 'C:\asicen-e17-<run-id>-a'; $RTB = 'C:\asicen-e17-<run-id>-b'
 New-Item -ItemType Directory -Path $RTA, $RTB | Out-Null
+$LOG = 'C:\asicen-e17-<run-id>-logs'
 & $D --device 'usb:<PORT_A>' --instance a --firmware $FW --runtime-dir $RTA
 ```
 
 別console Bでdaemonを起動する。
 
 ```powershell
+$D = (Resolve-Path .\asicend.exe).Path
+$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$RTB = 'C:\asicen-e17-<run-id>-b'
 & $D --device 'usb:<PORT_B>' --instance b --firmware $FW --runtime-dir $RTB
 ```
 
-両daemonの停止後、client/endpoint cleanupを記録する。
+両daemonがreadyになったら、3つ目のclient consoleから同じcandidateのclientを同時起動し、A抜去中もBのcaptureを続ける。各clientの実終了値を保存してから両daemonを通常停止し、client/endpoint cleanupを記録する。
+
+```powershell
+$B = (Resolve-Path .\asicen-ts.exe).Path
+$LOG = 'C:\asicen-e17-<run-id>-logs'
+$SA = '<finite-seconds-from-release-matrix>'; $SB = '<finite-seconds-from-release-matrix>'
+$clientA = Start-Process -FilePath $B -ArgumentList @('--instance','a','--runtime-dir','C:\asicen-e17-<run-id>-a','--receiver','<receiver-a>','--channel','T27','--time',$SA,'--output',(Join-Path $LOG 'a.ts')) -PassThru -NoNewWindow
+$clientB = Start-Process -FilePath $B -ArgumentList @('--instance','b','--runtime-dir','C:\asicen-e17-<run-id>-b','--receiver','<receiver-b>','--channel','T27','--time',$SB,'--output',(Join-Path $LOG 'b.ts')) -PassThru -NoNewWindow
+```
+
+別consoleで両instanceのstatus/listを保存してstreamingを確認し、A側deviceを抜去する。A/Bの実終了値を個別に保存する。
+
+```powershell
+$C = (Resolve-Path .\asicenctl.exe).Path
+& $C --instance a --runtime-dir 'C:\asicen-e17-<run-id>-a' status 2>&1 | Tee-Object (Join-Path $LOG 'status-a.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'status-a.rc')
+& $C --instance a --runtime-dir 'C:\asicen-e17-<run-id>-a' list 2>&1 | Tee-Object (Join-Path $LOG 'list-a.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'list-a.rc')
+& $C --instance b --runtime-dir 'C:\asicen-e17-<run-id>-b' status 2>&1 | Tee-Object (Join-Path $LOG 'status-b.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'status-b.rc')
+& $C --instance b --runtime-dir 'C:\asicen-e17-<run-id>-b' list 2>&1 | Tee-Object (Join-Path $LOG 'list-b.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'list-b.rc')
+$clientA.WaitForExit(); $clientA.Refresh(); $clientA.ExitCode | Out-File (Join-Path $LOG 'a.rc')
+$clientB.WaitForExit(); $clientB.Refresh(); $clientB.ExitCode | Out-File (Join-Path $LOG 'b.rc')
+```
 
 ```powershell
 Get-Process asicend,asicen-ts -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,WorkingSet64,HandleCount
