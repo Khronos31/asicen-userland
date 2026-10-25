@@ -9,7 +9,7 @@
 | 区分 | 適用頻度 | ASICENでの確認 |
 |---|---|---|
 | 機種初回 | PX-W3U3を代表機で2時間連続受信し、毎releaseの回帰項目を代表機だけで行う。必要時項目も通し、結果は[`release-validation/initial-model-checks.md`](release-validation/initial-model-checks.md)へ記録する。 | READMEのW3U3能力に従い、地上波/衛星、CARD、対応LNBを確認。 |
-| 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、最大能力の同時受信とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | W3U3の公開receiver slotは0/1の2つ。同時stream上限はREADME記載の1本なので最大試験は1 streamで行い、地上/衛星receiver配置を使って不足する波を個別確認する。WinSCard/PCSCはnative stackを別経路で確認。 |
+| 回帰（毎release） | 代表機2時間連続受信。全配布archiveの各OS/ABIで短時間実機回帰、`--list-json`、機種の最大能力による同時受信とTS/counter/終了値を確認する。最大試験で地上/衛星3波が不足する場合は不足分を短時間取得する。受信中status、反復APDU、正常停止とprocess/FD/IPC残留なし、CARD挿抜、USB抜去/再挿入を確認する。Windows/WinSCard・Linux/macOS PC/SC経路も各対象OSで行う。 | W3U3の公開receiver slotは0/1の2つ。README記載の現行実装上限は同時stream 1本だが、これは機種本来の最大能力を示す根拠ではない。最大能力を確認したうえで試験し、候補がその能力を出せない場合は未達として記録する。WinSCard/PCSCはnative stackを別経路で確認。 |
 | 必要に応じて | LNB電圧実測と非対応機種の拒否、複数チューナー列挙/daemon並列、変更機能に応じた機種×OS/ABIの追加確認。 | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種へsoftware要求を送らない。 |
 | 初回/major | 必要時項目を通し、代表機で全無料channelを各10秒TS取得。macOS/Windows各30分連続、残るOS/ABI各10分連続で取得する。全channel取得は代表機だけ。別途指示されたソークは別記する。 | 現地channel planとmodel receiver割当を記録。Windows ZIPは通常aggregate外でも同候補の`win-candidate`を使う。 |
 
@@ -57,10 +57,13 @@ statusがready、listにreceiverが存在すること、client終了値0、TSが
 asicenctl --runtime-dir "$RT" --instance rc card-status
 asicenctl --runtime-dir "$RT" --instance rc card-atr
 asicenctl --runtime-dir "$RT" --instance rc card-reset
-asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00 --repeat 10
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if asicenctl --runtime-dir "$RT" --instance rc card-apdu 90:30:00:00:00 > "$LOG/card-$i.apdu"; then rc=0; else rc=$?; fi
+  echo "$rc" > "$LOG/card-$i.rc"
+done
 ```
 
-カードreaderを公開する実機でstatus present、ATR取得、reset後のATR、10回のAPDU交換が成功することを確認する。カード抜去を依頼してからstatusが不在となり、ATR/APDUがCARD_REMOVED/NO_CARD (exit 9) となること、再挿入後にstatus/ATR/reset/APDUが戻ることを確認する。生ATR、カードID、APDU応答本文は公開記録に保存しない。未対応またはreaderなしprofileでのエラーはそのprofileの実測として記録し、製品全体の未実装と一般化しない。
+現行の公開`asicenctl`は pinned Coreの`card-apdu HEX`単発送信を使う。カードreaderを公開する実機でstatus present、ATR取得、reset後のATR、上の通常コマンド10回それぞれの終了値を確認する。カード抜去を依頼してからstatusが不在となり、ATR/APDUがCARD_REMOVED/NO_CARD (exit 9) となること、再挿入後にstatus/ATR/reset/APDUが戻ることを確認する。生ATR、カードID、APDU応答本文は公開記録に保存しない。未対応またはreaderなしprofileでのエラーはそのprofileの実測として記録し、製品全体の未実装と一般化しない。
 
 hardware pathは `W3u3CardMailboxHardware` によるmodel-specific mailbox adapterである。過去のphysical CARD remove/reinsert記録はPX-W3U3上のlinux-glibc-x86_64候補であり、他model/OSの認定を意味しない。Linux/macOSの配布IFDをnative OSのPC/SC stackへ設定し、reader/card列挙、reset/ATR、通常APDU交換まで別経路で確認する。AndroidにはIFDなし。Windows WinSCardは該当版で検証対象の場合、CLIのCARD_*とは別経路として確認する。各OS/platform routeの未実施を未確認として残す。
 
