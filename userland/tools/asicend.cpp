@@ -118,11 +118,16 @@ int list_devices()
             observation.port_path.assign(ports, ports + port_count);
         libusb_device* parent = libusb_get_parent(device);
         libusb_device_descriptor parent_descriptor{};
-        if (parent != nullptr && libusb_get_device_descriptor(parent, &parent_descriptor) == 0) {
+        const bool parent_available = parent != nullptr;
+        const bool parent_descriptor_read = parent_available &&
+            libusb_get_device_descriptor(parent, &parent_descriptor) == 0;
+        if (parent_descriptor_read) {
             observation.parent_hub_vid = parent_descriptor.idVendor;
             observation.parent_hub_pid = parent_descriptor.idProduct;
             observation.parent_hub_known = true;
-        } else {
+        }
+        if (asicen::cli::discovery_detail::parent_observation_incomplete(
+                parent_available, parent_descriptor_read)) {
             scan_complete = false;
         }
         observations.push_back(std::move(observation));

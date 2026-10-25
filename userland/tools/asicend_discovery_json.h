@@ -18,6 +18,12 @@ namespace discovery_detail {
 
 namespace wire = dtv::userland::wire;
 
+inline bool parent_observation_incomplete(bool parent_available,
+                                         bool descriptor_read) noexcept
+{
+    return parent_available && !descriptor_read;
+}
+
 template <std::size_t N>
 wire::WString<N> text(const char* value)
 {

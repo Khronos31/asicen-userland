@@ -232,9 +232,13 @@ bool list_formats_share_observed_identity()
           ambiguous_models.find("\"receivers\"") == std::string::npos);
     UsbFunctionObservation missing_parent = first;
     missing_parent.parent_hub_known = false;
+    CHECK(!asicen::cli::discovery_detail::parent_observation_incomplete(false, false));
+    CHECK(asicen::cli::discovery_detail::parent_observation_incomplete(true, false));
+    CHECK(!asicen::cli::discovery_detail::parent_observation_incomplete(true, true));
     const std::string unknown_parent = asicen::cli::format_discovery_json(
         {missing_parent, second});
-    CHECK(unknown_parent.find("\"model\":\"PX-W3U3\"") != std::string::npos &&
+    CHECK(unknown_parent.find("\"scan\":{\"complete\":true,\"issues\":[]}") != std::string::npos &&
+          unknown_parent.find("\"model\":\"PX-W3U3\"") != std::string::npos &&
           unknown_parent.find("\"status\":\"ready\"") == std::string::npos &&
           unknown_parent.find("\"receiver\":2,\"device\":2") != std::string::npos &&
           unknown_parent.find("\"receiver\":0,\"device\":1") == std::string::npos);
