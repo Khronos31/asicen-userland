@@ -121,6 +121,13 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return hardware.startup_event_count_;
     }
+    static bool startup_has_stage(const LibusbW3u3Hardware& hardware, const char* stage)
+    {
+        for (std::size_t index = 0U; index < hardware.startup_event_count_; ++index) {
+            if (std::strcmp(hardware.startup_events_[index].stage, stage) == 0) return true;
+        }
+        return false;
+    }
     static void enable_startup_trace(LibusbW3u3Hardware& hardware)
     {
         hardware.startup_trace_active_.store(true);
@@ -1556,6 +1563,24 @@ bool test_startup_control_trace_records_metadata_without_write_payload()
         }
     }
     CHECK(traced_legacy_function);
+
+    FakeUsb capture_fake;
+    capture_fake.controller[0x09U] = 0x20U;
+    LibusbW3u3Hardware capture(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks capture_hooks{};
+    configure(capture, capture_fake, capture_hooks, 0U);
+    LibusbW3u3HardwareTestPeer::startup_diagnostic(capture, "0");
+    CHECK(capture.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::startup_has_stage(capture, "satellite_tune_result"));
+    std::atomic<bool> cancelled{false};
+    CHECK(capture.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::startup_has_stage(capture, "capture_prepare_begin"));
+    CHECK(LibusbW3u3HardwareTestPeer::startup_has_stage(capture, "capture_link_snapshot_complete"));
+    CHECK(LibusbW3u3HardwareTestPeer::startup_has_stage(capture, "capture_cf_snapshot_complete"));
+    CHECK(LibusbW3u3HardwareTestPeer::startup_has_stage(capture, "capture_nonce_complete"));
+    CHECK(capture.stop().has_value());
+    CHECK(capture.close_receiver(0U).has_value());
+    CHECK(capture.shutdown().has_value());
     return true;
 }
 

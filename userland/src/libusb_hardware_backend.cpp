@@ -1568,6 +1568,8 @@ Result<void> LibusbW3u3Hardware::tune_satellite(std::uint8_t receiver, std::uint
     reset_startup_diagnostic(receiver);
     startup_trace_active_.store(startup_config_.enabled);
     const SatelliteOperationResult tuned = run_model_satellite_tune(rf_khz);
+    record_startup("satellite_tune_result", static_cast<int>(tuned),
+                   first_transport_error_.load(), frequency_khz);
     deadline_ = previous_deadline;
     deadline_active_ = previous_deadline_active;
     const Error error = satellite_error(tuned, first_transport_error_.load());
@@ -2794,8 +2796,12 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     capture.output_start_attempted = false;
     capture_interrupted_[receiver].store(false);
     capture.link_diagnostic = LinkSeedDiagnostic{};
+    record_startup("capture_prepare_begin", receiver, local, static_cast<int>(system));
     const auto fail_prepare = [this, receiver](Error error) {
+        const Error original_error = error;
         error = transport_failure(error);
+        record_startup("capture_prepare_failed", static_cast<int>(original_error),
+                       static_cast<int>(error), receiver);
         const CaptureRunResult cleanup = stop_and_drain(
             receiver, receiver_capture_states_[receiver].dsc_attempted);
         if (cleanup == CaptureRunResult::fatal_drain) {
@@ -2823,11 +2829,13 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         return fail_prepare(Error::NOT_READY);
     }
     capture.link_snapshot_valid = true;
+    record_startup("capture_link_snapshot_complete", receiver);
     capture.cf_snapshot_valid = read_cf_block(local, capture.cf_snapshot.data(),
                                                capture.cf_snapshot.size());
     if (!capture.cf_snapshot_valid) {
         return fail_prepare(Error::USB_IO);
     }
+    record_startup("capture_cf_snapshot_complete", receiver);
 #if defined(_WIN32)
     px4::userland::ipc::windows::WindowsTunerNonceSource nonce;
 #else
@@ -2839,6 +2847,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         return fail_prepare(seed.error());
     }
     capture.link_seed = seed.value();
+    record_startup("capture_nonce_complete", receiver);
     record_startup("filter_reset_begin");
     if (!run_plan(plan_stream_setup(local, 1U), 5000U, nullptr, receiver)) {
         return fail_prepare(plan_error_);
