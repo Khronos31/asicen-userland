@@ -64,8 +64,8 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 ### T00 候補/配布物固定
 
 - **適用対象/頻度:** 毎releaseのcandidate作成時。
-- **準備:** source SHA、CI run/attempt、archive targetとhashを固定。POSIX git rev-parse HEAD/sha256sum、Windows Get-FileHashを保存。
-- **実操作/利用者への依頼:** 固定したsource commitとCI runから候補archiveを取得し、POSIXではsha256sum -c SHA256SUMS、WindowsではGet-FileHashでarchive hashを照合する。archiveのmanifest/source refがcandidate commit/runと一致することを確認する。
+- **準備:** source SHA、CI run/attempt、archive targetとhashを固定。POSIXではgit rev-parse HEADを保存し、macOSはshasum -a 256、Linuxはsha256sum、WindowsはGet-FileHashでhashを確認する。
+- **実操作/利用者への依頼:** 固定したsource commitとCI runから候補archiveを取得し、macOSでは`shasum -a 256 -c SHA256SUMS`、Linuxでは`sha256sum -c SHA256SUMS`、WindowsではGet-FileHashでarchive hashを照合する。対象archive個別のdigestもmacOSでは`shasum -a 256 "$ARCHIVE"`、Linuxでは`sha256sum "$ARCHIVE"`で表示し、manifest entryと一致することを確認する。archiveのmanifest/source refがcandidate commit/runと一致することを確認する。
 - **期待値/終了値:** provenance/hash一致の候補だけ次へ進む。候補不在は未完了。
 - **停止/cleanup:** deviceを開かず、archive/logを保持。
 - **記録:** source SHA、CI run/attempt、artifact ID/target/hash、取得日時、未取得理由。
@@ -162,7 +162,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 
 - **適用対象/頻度:** 対応OS/APIのみ。非対応製品は理由付きN/A。
 - **準備:** native OS adapter/consumerとcandidate IFD/DLL pathを用意。
-- **実操作/利用者への依頼:** Linux Appendix Aのisolated pcsc-liteでpcsc_scan -r/-cと既存bcas-safe-probe。macOS既存isolated stack。Windowsは既存native transaction consumerがある場合のみ。
+- **実操作/利用者への依頼:** Linux Appendix Aのisolated pcsc-liteでpcsc_scan -r/-cと既存bcas-safe-probe。macOSはE04「native PC/SC手順」でcandidate bundle/reader template、Homebrew pcsc-lite、reader指定SCard consumerを実行する。Windowsは既存native transaction consumerがある場合のみ。
 - **期待値/終了値:** CLI CARD/CI smokeをnative transaction合格にしない。実consumer/adapter/path/exitが必要。
 - **停止/cleanup:** consumer/isolated pcscd通常停止。system PCSC serviceを変更しない。
 - **記録:** OS/ABI、module/DLL absolute path、consumer、reader/card、operation/exit。
@@ -424,7 +424,112 @@ ldd "$WORK/bcas-safe-probe" | grep 'libpcsclite.so.1'
 
 最後の`ldd`出力が`$PREFIX/lib/libpcsclite.so.1`を指すことを確認する。reader templateは実際の候補IFD/daemon runtime/instanceへ展開済みである。実行時はこのdoc本文の手順で`$PREFIX/sbin/pcscd`をbackground起動しPIDを保存する。`pcsc_scan`と`bcas-safe-probe`には専用libraryと`$IPC/pcscd.comm`を指すclient environmentを設定し、system serviceへの接続を避ける。candidateに対応するASICEN IFD buildと`bcas-safe-probe`のcompile/linkだけではCARD gateを満たさず、reader/card実行結果を別途記録する。
 
-macOSでもnative `.bundle`を使うが、system PC/SC serviceをreload/restartしてcandidate IFDを加える操作はしない。`pcsc-tools`由来のnative `pcsc_scan`、safe probe、既存isolated native stackがすべて用意された専用test hostに限って実行する。いずれかがなければ未実施として記録し、host/system PCSCへ接続せず、Linux結果も代用しない。AndroidにはIFDがない。
+AndroidにはIFDがない。
+
+#### E04 macOS native PC/SC
+
+T10のnative consumerは以下を今回candidateごとに実施する。過去E04 recordは環境例であり、今回candidate合格へ流用しない。T00で固定した`release-candidate` runから配布archiveとmanifestを取得する。
+
+```sh
+set -eu
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/asicen-pcsc.XXXXXX"); chmod 700 "$WORK"
+RUN_ID='<candidate-release-run-id>'
+gh run download "$RUN_ID" --repo Khronos31/asicen-userland --name release-candidate --dir "$WORK/download"
+cd "$WORK/download"; shasum -a 256 -c SHA256SUMS
+ARCHIVE='<darwin-arm64 archive filename from this candidate>'
+mkdir "$WORK/candidate"; tar -xzf "$ARCHIVE" -C "$WORK/candidate"; D="$WORK/candidate"
+brew list --versions pcsc-lite >/dev/null 2>&1 || brew install pcsc-lite
+brew list --versions pcsc-tools >/dev/null 2>&1 || brew install pcsc-tools
+brew list --versions pkgconf >/dev/null 2>&1 || brew install pkgconf
+BREW_PREFIX=$(brew --prefix); PCSC_PREFIX=$(brew --prefix pcsc-lite); PCSC_TOOLS_PREFIX=$(brew --prefix pcsc-tools); IPC_ROOT="$BREW_PREFIX/var/run"
+if [ -d "$IPC_ROOT" ] && find "$IPC_ROOT" -maxdepth 1 \( -type s -o -name 'pcscd.pid' \) -print | grep -q .; then
+  echo 'Homebrew PC/SC IPC is occupied; stop without touching that service.' >&2; exit 1
+fi
+if lsof -nU 2>/dev/null | grep -F "$IPC_ROOT/"; then
+  echo 'Homebrew PC/SC IPC has an owner; stop without service intervention.' >&2; exit 1
+fi
+export LIBPCSCLITE_DELEGATE="$PCSC_PREFIX/lib/libpcsclite_real.1.dylib"
+test -f "$LIBPCSCLITE_DELEGATE"
+export DYLD_LIBRARY_PATH="$PCSC_PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+export PKG_CONFIG_PATH="$PCSC_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+mkdir -m 700 "$WORK/runtime" "$WORK/reader.conf.d" "$WORK/log"
+RT="$WORK/runtime"; LOG="$WORK/log"; TOKEN="pcsc-$(date +%s)"; PORT='<BUS-PORT-from-asicend-list-json>'; FW='<candidate firmware path for the selected model>'
+"$D/asicend" --list-json > "$LOG/discovery.json"
+"$D/asicend" --device "usb:$PORT" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT" > "$LOG/asicend.log" 2>&1 & ASICEND_PID=$!
+printf '%s\n' "$ASICEND_PID" > "$LOG/asicend.pid"
+sed -e "s|@ASICEN_RUNTIME_DIR@|$RT|g" -e "s|@ASICEN_INSTANCE@|$TOKEN|g" \
+  -e "s|@ASICEN_IFD_LIBRARY@|$D/ifd/asicen-userland-ifd.bundle|g" -e 's|@ASICEN_ACCESS@|user|g' \
+  "$D/reader.conf.d/asicen-userland.conf" > "$WORK/reader.conf.d/asicen-userland.conf"
+"$PCSC_PREFIX/sbin/pcscd" --foreground --debug --config "$WORK/reader.conf.d" > "$LOG/pcscd.log" 2>&1 & PCSC_PID=$!
+printf '%s\n' "$PCSC_PID" > "$LOG/pcscd.pid"
+```
+
+Homebrew `pcsc-lite`の固定IPCが占有されている場合は既存process/socketに介入せず未実施で止める。Apple PCSC.framework / launchd serviceは停止・変更しない。Homebrew clientとdaemonを使い、別socket名指定だけでdaemon IPCを隔離できるとは扱わない。
+
+次のhere-docでreader指定可能なnative consumerを作成する。標準APIでreader列挙、接続、status、APDU送信を行い、raw ATR、card ID、APDU response本文は出力しない。
+
+```sh
+cat > "$WORK/pcsc-probe.cpp" <<'CPP'
+#include <PCSC/winscard.h>
+#include <cstring>
+#include <iostream>
+#include <string>
+int main(int argc, char **argv) {
+  SCARDCONTEXT c = 0; SCARDHANDLE h = 0; int result = 1;
+  if (argc != 2) return 64;
+  do {
+    if (SCardEstablishContext(SCARD_SCOPE_USER, nullptr, nullptr, &c) != SCARD_S_SUCCESS) break;
+    DWORD n = SCARD_AUTOALLOCATE; LPSTR names = nullptr;
+    if (SCardListReaders(c, nullptr, (LPSTR)&names, &n) != SCARD_S_SUCCESS) break;
+    std::string reader; int matches = 0;
+    for (char *p = names; *p; p += std::strlen(p) + 1) if (std::string(p).find(argv[1]) != std::string::npos) { reader = p; ++matches; }
+    SCardFreeMemory(c, names);
+    if (matches != 1) { result = 2; break; }
+    DWORD active = 0;
+    if (SCardConnect(c, reader.c_str(), SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &h, &active) != SCARD_S_SUCCESS) { result = 3; break; }
+    DWORD state = 0, protocol = 0, rn = 256, an = 64; char r[256]; BYTE atr[64];
+    if (SCardStatus(h, r, &rn, &state, &protocol, atr, &an) != SCARD_S_SUCCESS || state != SCARD_STATE_PRESENT || an == 0) { result = 4; break; }
+    const BYTE cmd[] = {0x90,0x30,0x00,0x00,0x00}; BYTE response[258];
+    const SCARD_IO_REQUEST *pci = active == SCARD_PROTOCOL_T0 ? SCARD_PCI_T0 : SCARD_PCI_T1;
+    result = 0;
+    for (int i = 0; i < 10; ++i) { DWORD len = sizeof(response); if (SCardTransmit(h, pci, cmd, sizeof(cmd), nullptr, response, &len) != SCARD_S_SUCCESS) { result = 5; break; } if (len < 2 || response[len-2] != 0x90 || response[len-1] != 0x00) { result = 6; break; } }
+    if (result == 0) std::cout << "reader_match=1 card_present=1 apdu_sw9000=10\n";
+  } while (false);
+  if (h && SCardDisconnect(h, SCARD_LEAVE_CARD) != SCARD_S_SUCCESS && result == 0) result = 7;
+  if (c && SCardReleaseContext(c) != SCARD_S_SUCCESS && result == 0) result = 7;
+  std::cout << "probe_exit=" << result << "\n"; return result;
+}
+CPP
+```
+
+```sh
+c++ -std=c++17 $(pkg-config --cflags libpcsclite) "$WORK/pcsc-probe.cpp" $(pkg-config --libs libpcsclite) -o "$WORK/pcsc-probe"
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  if "$PCSC_TOOLS_PREFIX/bin/pcsc_scan" -r > "$LOG/readers.txt" 2>&1 && grep -Fq 'ASICEN PLEX Internal Card Reader' "$LOG/readers.txt"; then break; fi
+  sleep 1
+done
+grep -F 'ASICEN PLEX Internal Card Reader' "$LOG/readers.txt"
+if "$WORK/pcsc-probe" 'ASICEN PLEX Internal Card Reader' > "$LOG/probe.txt" 2>&1; then PROBE_RC=0; else PROBE_RC=$?; fi
+printf '%s\n' "$PROBE_RC" > "$LOG/probe.rc"
+```
+
+合格は今回candidate bundle pathがpcscd logにあり、readerが一意、probe exit 0、card present、APDU 10回全てSW `90 00`、出力`reader_match=1 card_present=1 apdu_sw9000=10`を満たすこと。exit 1=API/context、2=reader不一致、3=connect、4=status/card、5=transmit、6=SW不一致、7=release/disconnect、64=引数不正で、0以外は未達とする。reader名・終了値・成功件数のみ保存する。
+
+```sh
+date -u +%FT%TZ > "$LOG/pcscd.stop-requested-at"
+if kill -INT "$PCSC_PID" 2>/dev/null; then :; fi
+if wait "$PCSC_PID"; then PCSC_RC=0; else PCSC_RC=$?; fi
+printf '%s\n' "$PCSC_RC" > "$LOG/pcscd.rc"
+date -u +%FT%TZ > "$LOG/asicend.stop-requested-at"
+if kill -INT "$ASICEND_PID" 2>/dev/null; then :; fi
+if wait "$ASICEND_PID"; then ASICEND_RC=0; else ASICEND_RC=$?; fi
+printf '%s\n' "$ASICEND_RC" > "$LOG/asicend.rc"
+if ps -p "$PCSC_PID,$ASICEND_PID" -o pid=,stat=,command= > "$LOG/processes-after-stop.txt"; then PROCESS_RC=0; else PROCESS_RC=$?; fi
+printf '%s\n' "$PROCESS_RC" > "$LOG/processes-after-stop.rc"
+find "$WORK" \( -type s -o -type p \) -print > "$LOG/ipc-remnants.txt"
+```
+
+consumer終了後、記録済みの自分のPIDだけを停止し、各終了値を別記録する。process/socket/runtimeが残った場合は削除せずcleanup未達とする。正常cleanup確認後もcandidate、log、probe sourceは結果保存まで保持する。
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
 
@@ -666,7 +771,7 @@ using System.Runtime.InteropServices;
 public struct ScardIoRequest { public uint Protocol; public uint Length; }
 public static class WinSCardProbe {
   [DllImport("WinSCard.dll", EntryPoint="SCardEstablishContext", ExactSpelling=true)] public static extern int SCardEstablishContext(uint scope, IntPtr r1, IntPtr r2, out IntPtr context);
-  [DllImport("WinSCard.dll", EntryPoint="SCardListReadersW", ExactSpelling=true, CharSet=CharSet.Unicode)] public static extern int SCardListReadersW(IntPtr context, string groups, System.Text.StringBuilder readers, ref uint length);
+  [DllImport("WinSCard.dll", EntryPoint="SCardListReadersW", ExactSpelling=true, CharSet=CharSet.Unicode)] public static extern int SCardListReadersW(IntPtr context, IntPtr groups, System.Text.StringBuilder readers, ref uint length);
   [DllImport("WinSCard.dll", EntryPoint="SCardConnectW", ExactSpelling=true, CharSet=CharSet.Unicode)] public static extern int SCardConnectW(IntPtr context, string reader, uint share, uint protocols, out IntPtr card, out uint activeProtocol);
   [DllImport("WinSCard.dll", EntryPoint="SCardStatusW", ExactSpelling=true, CharSet=CharSet.Unicode)] public static extern int SCardStatusW(IntPtr card, System.Text.StringBuilder readers, ref uint readerLength, out uint state, out uint protocol, byte[] atr, ref uint atrLength);
   [DllImport("WinSCard.dll", EntryPoint="SCardTransmit", ExactSpelling=true)] public static extern int SCardTransmit(IntPtr card, ref ScardIoRequest sendPci, byte[] send, uint sendLength, IntPtr recvPci, byte[] recv, ref uint recvLength);
@@ -678,10 +783,10 @@ public static class WinSCardProbe {
   $rc = [WinSCardProbe]::SCardEstablishContext(2, [IntPtr]::Zero, [IntPtr]::Zero, [ref]$ctx)
   if ($rc -ne 0) { throw ('SCardEstablishContext rc=' + $rc) }
   [uint32]$length = 0
-  $rc = [WinSCardProbe]::SCardListReadersW($ctx, $null, $null, [ref]$length)
+  $rc = [WinSCardProbe]::SCardListReadersW($ctx, [IntPtr]::Zero, $null, [ref]$length)
   if ($rc -ne 0 -and $rc -ne -2146435064) { throw ('SCardListReadersW size rc=' + $rc) }
   $names = New-Object System.Text.StringBuilder ([int]$length)
-  $rc = [WinSCardProbe]::SCardListReadersW($ctx, $null, $names, [ref]$length)
+  $rc = [WinSCardProbe]::SCardListReadersW($ctx, [IntPtr]::Zero, $names, [ref]$length)
   if ($rc -ne 0 -or $names.ToString() -notlike ('*' + $reader + '*')) { throw ('reader missing; rc=' + $rc) }
   $rc = [WinSCardProbe]::SCardConnectW($ctx, $reader, 2, 3, [ref]$card, [ref]$active)
   if ($rc -ne 0) { throw ('SCardConnectW rc=' + $rc) }
