@@ -54,6 +54,24 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return hardware.profile_;
     }
+    static bool capture_prepared(const LibusbW3u3Hardware& hardware, std::uint8_t receiver)
+    {
+        return receiver < hardware.source_prepared_.size() &&
+               hardware.source_prepared_[receiver] && hardware.async_states_[receiver] != nullptr;
+    }
+    static bool capture_storage_is_distinct(const LibusbW3u3Hardware& hardware,
+                                            std::uint8_t first, std::uint8_t second)
+    {
+        return first < hardware.receiver_capture_states_.size() &&
+               second < hardware.receiver_capture_states_.size() && first != second &&
+               &hardware.receiver_capture_states_[first] !=
+                   &hardware.receiver_capture_states_[second] &&
+               hardware.async_states_[first] != nullptr && hardware.async_states_[second] != nullptr &&
+               hardware.async_states_[first] != hardware.async_states_[second] &&
+               hardware.capture_decoder(first) != nullptr &&
+               hardware.capture_decoder(second) != nullptr &&
+               hardware.capture_decoder(first) != hardware.capture_decoder(second);
+    }
     static bool verify_v2_roles(LibusbW3u3Hardware& hardware)
     {
         return hardware.verify_v2_pair_roles();
@@ -125,7 +143,10 @@ struct LibusbW3u3HardwareTestPeer {
     static void set_link_seed(LibusbW3u3Hardware& hardware,
                               const std::array<std::uint8_t, 16>& seed)
     {
-        hardware.link_seed_ = seed;
+        const auto receiver = hardware.current_receiver();
+        if (receiver < hardware.receiver_capture_states_.size()) {
+            hardware.receiver_capture_states_[receiver].link_seed = seed;
+        }
     }
     static bool gpio_snapshot_valid(const LibusbW3u3Hardware& hardware)
     {
@@ -246,6 +267,8 @@ struct FakeUsb {
     FakeFunction primary;
     FakeFunction sibling;
     std::array<std::uint8_t, 256> controller{};
+    std::array<std::array<std::uint8_t, 256>, 2> function_controllers{};
+    bool function_local_controller = false;
     std::array<std::array<std::uint8_t, 0x45>, 2> cf{};
     std::vector<ControlEvent> controls;
     std::vector<std::uint8_t> control_functions;
@@ -328,6 +351,9 @@ struct FakeUsb {
         v2_registers[{0x22U, false, 0xcfU}] = 0x10U;
         controller[0x05] = 0U;
         controller[0x09] = 0x1eU;
+        for (auto& function_controller : function_controllers) {
+            function_controller = controller;
+        }
         for (std::size_t local = 0; local < cf.size(); ++local) {
             for (std::size_t offset = 0; offset < cf[local].size(); ++offset) {
                 cf[local][offset] = static_cast<std::uint8_t>(0x30U + local + offset);
@@ -565,7 +591,9 @@ struct FakeUsb {
                 const std::uint8_t reg = static_cast<std::uint8_t>(first + i);
                 response[i + 1U] =
                     slave == 0x30U && first == 0xb0U ? terrestrial_b0 :
-                    slave == 0x4aU ? controller[reg]
+                    slave == 0x4aU ? (function_local_controller
+                                          ? function_controllers[current_function][reg]
+                                          : controller[reg])
                     : slave == 0xa8U && first == 0xb0U
                         ? static_cast<std::uint8_t>(
                               0x50U + i + (identity_mismatch && current_function == 1U ? 1U : 0U))
@@ -620,9 +648,12 @@ struct FakeUsb {
                         return static_cast<int>(transfer.length);
                     }
                 }
-                controller[first] = value;
+                auto& registers = function_local_controller
+                                      ? function_controllers[current_function]
+                                      : controller;
+                registers[first] = value;
                 if (transfer.length > 2U) {
-                    controller[static_cast<std::uint8_t>(first + 1U)] =
+                    registers[static_cast<std::uint8_t>(first + 1U)] =
                         static_cast<std::uint8_t>(transfer.index >> 8U);
                 }
             }
@@ -1994,6 +2025,35 @@ bool test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints()
     return true;
 }
 
+bool test_w3u2_capture_state_is_independent_across_sibling_receivers()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(hardware.open_receiver(3U).has_value());
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.prepare(3U, System::ISDB_T, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_storage_is_distinct(hardware, 1U, 3U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(hardware.stop_receiver(1U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(hardware.stop_receiver(3U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.close_receiver(3U).has_value());
+    CHECK(hardware.shutdown().has_value());
+    return true;
+}
+
 bool test_paired_capture_routes_select_each_function_handle()
 {
     FakeUsb fake;
@@ -2558,6 +2618,8 @@ int main()
          test_paired_capture_routes_select_each_function_handle},
         {"test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints",
          test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints},
+        {"test_w3u2_capture_state_is_independent_across_sibling_receivers",
+         test_w3u2_capture_state_is_independent_across_sibling_receivers},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
          test_s3u_combined_receiver_uses_lane0_for_both_systems},
         {"test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases",

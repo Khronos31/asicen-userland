@@ -252,8 +252,9 @@ private:
                   std::uint8_t* output) noexcept;
     bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value) noexcept;
     bool set_cf_bit(std::uint8_t local, std::uint8_t mask, bool value) noexcept;
-    CaptureRunResult stop_and_drain(bool dsc_was_attempted) noexcept;
-    CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept;
+    CaptureRunResult stop_and_drain(std::uint8_t receiver, bool dsc_was_attempted) noexcept;
+    CaptureRunResult cleanup_after_drain(std::uint8_t receiver, bool dsc_stopped,
+                                         bool dsc_attempted) noexcept;
     bool handle_events(unsigned timeout_ms) noexcept;
     bool wait_capture_events(std::uint8_t receiver, unsigned timeout_ms,
                              const std::atomic<bool>& cancelled) noexcept;
@@ -285,6 +286,7 @@ private:
     TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) noexcept;
     const TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) const noexcept;
     bool any_source_prepared() const noexcept;
+    px4::userland::Result<void> stop_source_receiver(std::uint8_t receiver) noexcept;
     libusb_device_handle* capture_handle(std::uint8_t receiver) const noexcept;
     bool receiver_initialized(std::uint8_t receiver) const noexcept;
     std::uint8_t current_receiver() const noexcept;
@@ -337,12 +339,18 @@ private:
     void flush_startup_trace() noexcept;
     void reset_startup_diagnostic(std::uint8_t receiver) noexcept;
     std::array<bool, 4U> source_prepared_{};
-    bool dsc_attempted_ = false;
-    bool dsc_stopped_ = true;
-    bool cf_snapshot_valid_ = false;
-    bool link_snapshot_valid_ = false;
-    bool link_apply_attempted_ = false;
-    bool output_start_attempted_ = false;
+    struct ReceiverCaptureState {
+        bool dsc_attempted = false;
+        bool dsc_stopped = true;
+        bool cf_snapshot_valid = false;
+        bool link_snapshot_valid = false;
+        bool link_apply_attempted = false;
+        bool output_start_attempted = false;
+        std::array<std::uint8_t, 0x45> cf_snapshot{};
+        std::array<std::uint8_t, 16> link_seed{};
+        LinkSeedDiagnostic link_diagnostic;
+    };
+    std::array<ReceiverCaptureState, 4U> receiver_capture_states_{};
     std::atomic<bool> cleanup_failed_{false};
     std::atomic<int> cleanup_failure_error_{0};
     static constexpr std::uint8_t kNoActiveReceiver = 0xffU;
@@ -386,9 +394,6 @@ private:
                              std::memory_order_release);
     }
     std::uint8_t lnb_transaction_receiver_ = kNoActiveReceiver;
-    std::array<std::uint8_t, 0x45> cf_snapshot_{};
-    std::array<std::uint8_t, 16> link_seed_{};
-    LinkSeedDiagnostic link_diagnostic_{};
     std::array<AsyncState*, 4U> async_states_{};
     bool abandoned_ = false;
     void quarantine_capture() noexcept;

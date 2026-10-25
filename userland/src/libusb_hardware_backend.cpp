@@ -462,20 +462,23 @@ struct LibusbW3u3Hardware::SplitPump {
 };
 
 struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupOps {
-    explicit DrainAdapter(LibusbW3u3Hardware& owner) : owner_(owner) {}
+    DrainAdapter(LibusbW3u3Hardware& owner, std::uint8_t receiver)
+        : owner_(owner), receiver_(receiver)
+    {
+    }
     bool stop_dsc() noexcept override
     {
-        if (owner_.source_receiver_ >= owner_.receiver_count()) {
+        if (receiver_ >= owner_.receiver_count()) {
             return false;
         }
-        const std::uint8_t local = receiver_local(owner_.source_receiver_);
+        const std::uint8_t local = receiver_local(receiver_);
         const bool ok = owner_.dsc_stop(local);
-        owner_.dsc_stopped_ = ok;
+        owner_.receiver_capture_states_[receiver_].dsc_stopped = ok;
         return ok;
     }
     void cancel_pending() noexcept override
     {
-        AsyncState* const async = owner_.capture_async(owner_.source_receiver_);
+        AsyncState* const async = owner_.capture_async(receiver_);
         if (async == nullptr) {
             return;
         }
@@ -497,7 +500,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     bool has_pending() const noexcept override
     {
-        const AsyncState* const async = owner_.capture_async(owner_.source_receiver_);
+        const AsyncState* const async = owner_.capture_async(receiver_);
         if (async == nullptr) {
             return false;
         }
@@ -515,7 +518,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     void release_transfers() noexcept override
     {
-        AsyncState* const async = owner_.capture_async(owner_.source_receiver_);
+        AsyncState* const async = owner_.capture_async(receiver_);
         if (async == nullptr) {
             return;
         }
@@ -541,7 +544,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
 #if defined(_WIN32)
         if (async->raw_io_enabled) {
             const int result = finish_libusb_stream(
-                owner_.capture_handle(owner_.source_receiver_), async->endpoint);
+                owner_.capture_handle(receiver_), async->endpoint);
             async->raw_io_enabled = false;
             if (result != 0) {
                 owner_.mark_cleanup_failed(map_libusb_error(result));
@@ -551,7 +554,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept override
     {
-        return owner_.cleanup_after_drain(dsc_stopped, dsc_attempted);
+        return owner_.cleanup_after_drain(receiver_, dsc_stopped, dsc_attempted);
     }
     bool disconnected() const noexcept override { return owner_.disconnected_.load(); }
     bool clear_seed_and_verify_output() noexcept override
@@ -564,22 +567,24 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     }
     bool restore_cf_and_verify() noexcept override
     {
-        if (!owner_.cf_snapshot_valid_) {
+        const auto& source = owner_.receiver_capture_states_[receiver_];
+        if (!source.cf_snapshot_valid) {
             return true;
         }
-        if (owner_.source_receiver_ >= owner_.receiver_count()) {
+        if (receiver_ >= owner_.receiver_count()) {
             return false;
         }
-        const std::uint8_t local = receiver_local(owner_.source_receiver_);
+        const std::uint8_t local = receiver_local(receiver_);
         const bool written =
-            owner_.write_cf_block(local, owner_.cf_snapshot_.data(), owner_.cf_snapshot_.size());
+            owner_.write_cf_block(local, source.cf_snapshot.data(), source.cf_snapshot.size());
         std::array<std::uint8_t, 0x45> verify{};
         return written && owner_.read_cf_block(local, verify.data(), verify.size()) &&
-               verify == owner_.cf_snapshot_;
+               verify == source.cf_snapshot;
     }
 
 private:
     LibusbW3u3Hardware& owner_;
+    std::uint8_t receiver_;
 };
 
 LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, UsbLocation primary,
@@ -1270,7 +1275,8 @@ LegacyFrontendProfile LibusbW3u3Hardware::legacy_frontend() const noexcept
 
 Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
 {
-    if (!runtime_model_supported() || receiver >= receiver_count()) {
+    if (!runtime_model_supported() || receiver >= receiver_count() ||
+        receiver >= source_prepared_.size()) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     if (cleanup_io_active_.load(std::memory_order_acquire)) {
@@ -1744,7 +1750,7 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
     if (!active_receiver_.owns(receiver)) {
         return Result<void>::failure(Error::NOT_FOUND);
     }
-    if (any_source_prepared() && !cleanup_failed_.load()) {
+    if (source_prepared_[receiver] && !cleanup_failed_.load()) {
         return Result<void>::failure(Error::BUSY);
     }
     flush_startup_trace();
@@ -2340,10 +2346,15 @@ Result<void> LibusbW3u3Hardware::shutdown() noexcept
     const bool gpio_snapshot_valid =
         std::any_of(gpio_snapshot_valid_functions_.begin(), gpio_snapshot_valid_functions_.end(),
                     [](bool valid) { return valid; });
-    const AsyncState* const active_async = capture_async(source_receiver_);
-    const bool needs_stop = any_source_prepared() || cf_snapshot_valid_ || link_snapshot_valid_ ||
-                            (active_async != nullptr && active_async->prepared) ||
-                            gpio_snapshot_valid;
+    bool capture_cleanup_pending = false;
+    for (std::uint8_t receiver = 0U; receiver < receiver_count(); ++receiver) {
+        const auto& capture = receiver_capture_states_[receiver];
+        const AsyncState* const async = capture_async(receiver);
+        capture_cleanup_pending = capture_cleanup_pending || source_prepared_[receiver] ||
+            capture.cf_snapshot_valid || capture.link_snapshot_valid ||
+            (async != nullptr && async->prepared);
+    }
+    const bool needs_stop = capture_cleanup_pending || gpio_snapshot_valid;
     // OFF is independent of controller/CF restoration and receives its own
     // cleanup budget even when a previous step has quarantined the backend.
     (void)clear_lnb_power();
@@ -2760,7 +2771,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     first_transport_error_.store(0);
     if (!receiver_supports(receiver, system) || !claimed_ || !active_receiver_.owns(receiver) ||
         !receiver_initialized(receiver) || !receiver_tune_states_[receiver].tuned ||
-        receiver_tune_states_[receiver].system != system || any_source_prepared() ||
+        receiver_tune_states_[receiver].system != system || source_prepared_[receiver] ||
         stop_requested_.load()) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -2773,15 +2784,19 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     source_receiver_ = receiver;
     routed_source_receiver_.store(receiver, std::memory_order_release);
     counters_receiver_ = receiver;
-    dsc_attempted_ = false;
-    dsc_stopped_ = true;
+    auto& capture = receiver_capture_states_[receiver];
+    capture.dsc_attempted = false;
+    capture.dsc_stopped = true;
+    capture.cf_snapshot_valid = false;
+    capture.link_snapshot_valid = false;
+    capture.link_apply_attempted = false;
+    capture.output_start_attempted = false;
     capture_interrupted_[receiver].store(false);
-    link_diagnostic_ = LinkSeedDiagnostic{};
-    link_apply_attempted_ = false;
-    output_start_attempted_ = false;
-    const auto fail_prepare = [this](Error error) {
+    capture.link_diagnostic = LinkSeedDiagnostic{};
+    const auto fail_prepare = [this, receiver](Error error) {
         error = transport_failure(error);
-        const CaptureRunResult cleanup = stop_and_drain(dsc_attempted_);
+        const CaptureRunResult cleanup = stop_and_drain(
+            receiver, receiver_capture_states_[receiver].dsc_attempted);
         if (cleanup == CaptureRunResult::fatal_drain) {
             return Result<void>::failure(Error::USB_IO);
         }
@@ -2806,9 +2821,10 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     if (!snapshot_link_diagnostic()) {
         return fail_prepare(Error::NOT_READY);
     }
-    link_snapshot_valid_ = true;
-    cf_snapshot_valid_ = read_cf_block(local, cf_snapshot_.data(), cf_snapshot_.size());
-    if (!cf_snapshot_valid_) {
+    capture.link_snapshot_valid = true;
+    capture.cf_snapshot_valid = read_cf_block(local, capture.cf_snapshot.data(),
+                                               capture.cf_snapshot.size());
+    if (!capture.cf_snapshot_valid) {
         return fail_prepare(Error::USB_IO);
     }
 #if defined(_WIN32)
@@ -2818,10 +2834,10 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
 #endif
     const auto seed = nonce.generate();
     if (!seed) {
-        link_seed_.fill(0U);
+        capture.link_seed.fill(0U);
         return fail_prepare(seed.error());
     }
-    link_seed_ = seed.value();
+    capture.link_seed = seed.value();
     record_startup("filter_reset_begin");
     if (!run_plan(plan_stream_setup(local, 1U), 5000U, nullptr, receiver)) {
         return fail_prepare(plan_error_);
@@ -2901,29 +2917,30 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
         }
     }
     record_startup("initial_urbs_submitted", kQueueDepth, kChunkSize);
-    dsc_attempted_ = true;
-    dsc_stopped_ = false;
+    capture.dsc_attempted = true;
+    capture.dsc_stopped = false;
     if (!dsc_start(local)) {
         return fail_prepare(Error::USB_IO);
     }
     record_startup("dsc_started");
-    output_start_attempted_ = true;
+    capture.output_start_attempted = true;
     if (!set_cf_bit(local, 0x08U, true)) {
         return fail_prepare(Error::USB_IO);
     }
     record_startup("cf40_started");
-    link_apply_attempted_ = true;
+    capture.link_apply_attempted = true;
     if (!apply_link_seed()) {
         return fail_prepare(Error::USB_IO);
     }
     record_startup("controller_output_enabled");
     if (!decoders_[receiver]) {
         decoders_[receiver].reset(
-            new (std::nothrow) TransportCaptureDecoderV7(link_seed_.data(), link_seed_.size()));
+            new (std::nothrow) TransportCaptureDecoderV7(capture.link_seed.data(),
+                                                         capture.link_seed.size()));
     } else {
         decoders_[receiver]->clear();
         *decoders_[receiver] =
-            TransportCaptureDecoderV7(link_seed_.data(), link_seed_.size());
+            TransportCaptureDecoderV7(capture.link_seed.data(), capture.link_seed.size());
     }
     if (!capture_decoder(receiver) || !capture_decoder(receiver)->valid()) {
         return fail_prepare(Error::INTERNAL);
@@ -2931,7 +2948,7 @@ Result<void> LibusbW3u3Hardware::prepare(std::uint8_t receiver, System system,
     source_prepared_[receiver] = true;
     capture_sync_errors_[receiver].store(0U);
     capture_empty_intervals_[receiver].store(0U);
-    link_seed_.fill(0);
+    capture.link_seed.fill(0);
     return Result<void>::success();
 }
 
@@ -3086,7 +3103,7 @@ CaptureRunResult LibusbW3u3Hardware::run_split_usb_pump(
     if (cleanup_failed_.load(std::memory_order_acquire)) outcome = CaptureRunResult::usb_error;
     // Consumer use has ended before transfer release, decoder clear,
     // bounded drain or callback-storage quarantine.
-    const auto cleanup = stop_and_drain(dsc_attempted_);
+    const auto cleanup = stop_and_drain(receiver, receiver_capture_states_[receiver].dsc_attempted);
     if (cleanup == CaptureRunResult::fatal_drain) return cleanup;
     if (cleanup != CaptureRunResult::cancelled) {
         mark_cleanup_failed(Error::USB_IO);
@@ -3117,9 +3134,7 @@ CaptureRunResult LibusbW3u3Hardware::run_for_receiver(
     std::uint8_t receiver, const std::atomic<bool>& cancelled_flag,
     bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
 {
-    return receiver == routed_source_receiver_.load(std::memory_order_acquire)
-               ? run_split_usb_pump(receiver, cancelled_flag, emit, context)
-               : CaptureRunResult::usb_error;
+    return run_split_usb_pump(receiver, cancelled_flag, emit, context);
 }
 
 void LibusbW3u3Hardware::interrupt() noexcept
@@ -3184,10 +3199,43 @@ Result<void> LibusbW3u3Hardware::stop() noexcept
     if (!claimed_) {
         return Result<void>::failure(Error::NOT_READY);
     }
-    const AsyncState* const active_async = capture_async(source_receiver_);
-    if (any_source_prepared() || (active_async != nullptr && active_async->prepared) || cf_snapshot_valid_ ||
-        link_snapshot_valid_) {
-        const auto result = stop_and_drain(dsc_attempted_);
+    Error first_error = Error::OK;
+    for (std::uint8_t receiver = 0U; receiver < receiver_count(); ++receiver) {
+        const auto stopped = stop_source_receiver(receiver);
+        if (!stopped && first_error == Error::OK) {
+            first_error = stopped.error();
+        }
+    }
+    if (!cleanup_failed_.load()) {
+        source_receiver_ = kNoActiveReceiver;
+        routed_source_receiver_.store(kNoActiveReceiver, std::memory_order_release);
+    }
+    if (!cleanup_failed_.load() && first_error == Error::OK) {
+        return Result<void>::success();
+    }
+    const int stored = cleanup_failure_error_.load(std::memory_order_acquire);
+    return Result<void>::failure(stored == 0 ? first_error : static_cast<Error>(stored));
+}
+
+Result<void> LibusbW3u3Hardware::stop_receiver(std::uint8_t receiver) noexcept
+{
+    return stop_source_receiver(receiver);
+}
+
+Result<void> LibusbW3u3Hardware::stop_source_receiver(std::uint8_t receiver) noexcept
+{
+    if (!runtime_model_supported() || receiver >= receiver_count() ||
+        receiver >= source_prepared_.size()) {
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
+    if (!claimed_) {
+        return Result<void>::failure(Error::NOT_READY);
+    }
+    const auto& capture = receiver_capture_states_[receiver];
+    const AsyncState* const async = capture_async(receiver);
+    if (source_prepared_[receiver] || (async != nullptr && async->prepared) ||
+        capture.cf_snapshot_valid || capture.link_snapshot_valid) {
+        const auto result = stop_and_drain(receiver, capture.dsc_attempted);
         if (result == CaptureRunResult::fatal_drain) {
             return Result<void>::failure(Error::USB_IO);
         }
@@ -3195,33 +3243,19 @@ Result<void> LibusbW3u3Hardware::stop() noexcept
             mark_cleanup_failed(Error::USB_IO);
             return Result<void>::failure(Error::USB_IO);
         }
-        source_prepared_.fill(false);
+        source_prepared_[receiver] = false;
     }
-    if (!cleanup_failed_.load()) {
-        source_receiver_ = kNoActiveReceiver;
-        routed_source_receiver_.store(kNoActiveReceiver, std::memory_order_release);
-    }
-    if (!cleanup_failed_.load()) {
-        return Result<void>::success();
-    }
-    const int stored = cleanup_failure_error_.load(std::memory_order_acquire);
-    return Result<void>::failure(stored == 0 ? Error::USB_IO : static_cast<Error>(stored));
+    return cleanup_failed_.load() ? Result<void>::failure(Error::USB_IO)
+                                  : Result<void>::success();
 }
 
-Result<void> LibusbW3u3Hardware::stop_receiver(std::uint8_t receiver) noexcept
-{
-    if (receiver != routed_source_receiver_.load(std::memory_order_acquire)) {
-        return Result<void>::failure(Error::NOT_FOUND);
-    }
-    return stop();
-}
-
-CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noexcept
+CaptureRunResult LibusbW3u3Hardware::stop_and_drain(std::uint8_t receiver,
+                                                   bool dsc_was_attempted) noexcept
 {
     if (abandoned_) {
         return CaptureRunResult::fatal_drain;
     }
-    if (auto* const async = capture_async(source_receiver_); async != nullptr) {
+    if (auto* const async = capture_async(receiver); async != nullptr) {
         std::lock_guard<std::mutex> lock(async->mutex);
         async->split_draining = true;
     }
@@ -3232,11 +3266,12 @@ CaptureRunResult LibusbW3u3Hardware::stop_and_drain(bool dsc_was_attempted) noex
     // Like PX4's command event gate, join the bounded control operation before
     // beginning cancellation. Never abandon an owner that still uses `this`.
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_);
-    ReceiverRouteScope route_scope(cleanup_route_receiver_, source_receiver_);
+    ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     AtomicFlagScope cleanup_scope(cleanup_io_active_);
-    DrainAdapter ops(*this);
+    DrainAdapter ops(*this, receiver);
     const CaptureRunResult result =
-        drain_capture_callbacks(ops, dsc_was_attempted, dsc_stopped_, kDrainLimit);
+        drain_capture_callbacks(ops, dsc_was_attempted,
+                                receiver_capture_states_[receiver].dsc_stopped, kDrainLimit);
     if (result == CaptureRunResult::fatal_drain) {
         quarantine_capture();
     }
@@ -3325,7 +3360,7 @@ void LibusbW3u3Hardware::quarantine_capture() noexcept
     claimed_ = false;
 }
 
-CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(bool dsc_ok,
+CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(std::uint8_t receiver, bool dsc_ok,
                                                          bool dsc_was_attempted) noexcept
 {
     const auto gate_deadline = steady_now() + std::chrono::seconds(5);
@@ -3335,24 +3370,36 @@ CaptureRunResult LibusbW3u3Hardware::cleanup_after_drain(bool dsc_ok,
     }
     std::unique_lock<std::recursive_timed_mutex> gate(control_gate_, std::adopt_lock);
     AtomicFlagScope cleanup_scope(cleanup_io_active_);
-    DrainAdapter ops(*this);
+    auto& capture = receiver_capture_states_[receiver];
+    DrainAdapter ops(*this, receiver);
     const CaptureRunResult result =
-        cleanup_capture_state(ops, dsc_ok, dsc_was_attempted, link_apply_attempted_,
-                              output_start_attempted_, cf_snapshot_valid_);
+        cleanup_capture_state(ops, dsc_ok, dsc_was_attempted, capture.link_apply_attempted,
+                              capture.output_start_attempted, capture.cf_snapshot_valid);
     const bool cleaned = result == CaptureRunResult::cancelled;
-    if (auto* const decoder = capture_decoder(source_receiver_); decoder != nullptr) {
+    if (auto* const decoder = capture_decoder(receiver); decoder != nullptr) {
         decoder->clear();
     }
-    link_seed_.fill(0U);
+    capture.link_seed.fill(0U);
     if (cleaned || disconnected_.load()) {
-        link_snapshot_valid_ = false;
-        cf_snapshot_valid_ = false;
-        link_apply_attempted_ = false;
-        output_start_attempted_ = false;
-        link_diagnostic_ = LinkSeedDiagnostic{};
-        source_receiver_ = kNoActiveReceiver;
-        dsc_attempted_ = false;
-        dsc_stopped_ = true;
+        capture.link_snapshot_valid = false;
+        capture.cf_snapshot_valid = false;
+        capture.link_apply_attempted = false;
+        capture.output_start_attempted = false;
+        capture.link_diagnostic = LinkSeedDiagnostic{};
+        capture.dsc_attempted = false;
+        capture.dsc_stopped = true;
+        if (source_receiver_ == receiver) {
+            source_receiver_ = kNoActiveReceiver;
+            for (std::uint8_t active = 0U; active < receiver_count(); ++active) {
+                if (source_prepared_[active] ||
+                    receiver_capture_states_[active].link_snapshot_valid ||
+                    receiver_capture_states_[active].cf_snapshot_valid) {
+                    source_receiver_ = active;
+                    break;
+                }
+            }
+            routed_source_receiver_.store(source_receiver_, std::memory_order_release);
+        }
     } else {
         mark_cleanup_failed(Error::USB_IO);
     }
@@ -3596,10 +3643,14 @@ bool LibusbW3u3Hardware::set_cf_bit(std::uint8_t local, std::uint8_t mask, bool 
 }
 bool LibusbW3u3Hardware::snapshot_link_diagnostic()
 {
+    const auto receiver = current_receiver();
+    if (receiver >= receiver_capture_states_.size()) {
+        return false;
+    }
     std::uint8_t type_reg = 0;
     return verify_device_revision() && read_i2c(0x4aU, 0x09U, 1U, &type_reg) &&
            powered_controller_type_supported(profile_, type_reg) &&
-           link_diagnostic_.snapshot_idle(this);
+           receiver_capture_states_[receiver].link_diagnostic.snapshot_idle(this);
 }
 bool LibusbW3u3Hardware::verify_device_revision() noexcept
 {
@@ -3633,11 +3684,17 @@ LibusbW3u3Hardware::PoweredControllerCheck LibusbW3u3Hardware::verify_powered_co
 }
 bool LibusbW3u3Hardware::apply_link_seed()
 {
-    return link_diagnostic_.apply(this, link_seed_.data(), link_seed_.size());
+    const auto receiver = current_receiver();
+    return receiver < receiver_capture_states_.size() &&
+           receiver_capture_states_[receiver].link_diagnostic.apply(
+               this, receiver_capture_states_[receiver].link_seed.data(),
+               receiver_capture_states_[receiver].link_seed.size());
 }
 bool LibusbW3u3Hardware::clear_link_seed_and_verify_controller()
 {
-    return link_diagnostic_.clear_and_verify_controller(this);
+    const auto receiver = current_receiver();
+    return receiver < receiver_capture_states_.size() &&
+           receiver_capture_states_[receiver].link_diagnostic.clear_and_verify_controller(this);
 }
 bool LibusbW3u3Hardware::read_controller05(std::uint8_t* value)
 {
