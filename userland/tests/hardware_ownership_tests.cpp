@@ -88,7 +88,9 @@ asicen::UsbFunctionSnapshot sibling_snapshot()
     auto s = primary_snapshot();
     s.address = 6;
     s.port_path = {1, 2, 2};
-    s.endpoint82_in_alt0 = false;
+    s.endpoint81_in_alt0 = true;
+    s.endpoint81_bulk_in_alt0 = true;
+    s.endpoint82_in_alt0 = true;
     return s;
 }
 
@@ -200,6 +202,11 @@ bool primary_endpoint81_capability_is_optional_and_measured()
           "lane 1 capability follows the original contract");
     CHECK(owner.primary_supports_bulk_endpoint(0x81U),
           "lane 0 is reported only when endpoint 81 is present and bulk");
+    CHECK(owner.function_supports_bulk_endpoint(1U, 0x81U) &&
+              owner.function_supports_bulk_endpoint(1U, 0x82U),
+          "sibling local lane endpoints are reported from its own descriptor");
+    CHECK(!owner.function_supports_bulk_endpoint(2U, 0x81U),
+          "unknown runtime function has no endpoint capability");
     owner.release();
 
     primary_state.endpoint81_bulk_in_alt0 = false;
@@ -227,8 +234,12 @@ bool receiver_lane_reservation_rejects_cross_lane_ownership()
     CHECK(reservation.release(0U), "owner releases the lane after cleanup");
     CHECK(reservation.reserve(1U) == asicen::ReceiverReservationResult::reserved,
           "terrestrial lane can acquire after prior release");
-    CHECK(reservation.reserve(2U) == asicen::ReceiverReservationResult::invalid,
-          "unsupported receiver cannot reserve shared frontend state");
+    CHECK(reservation.release(1U), "terrestrial lane releases after cleanup");
+    CHECK(reservation.reserve(2U) == asicen::ReceiverReservationResult::reserved,
+          "sibling receiver can reserve after the previous lane is released");
+    CHECK(reservation.release(2U), "sibling receiver releases after cleanup");
+    CHECK(reservation.reserve(4U) == asicen::ReceiverReservationResult::invalid,
+          "unknown receiver cannot reserve shared frontend state");
     return true;
 }
 

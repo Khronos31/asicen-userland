@@ -10,6 +10,8 @@ void EnclosureOwnership::abandon() noexcept
     required_function_count_ = 0U;
     primary_endpoint81_bulk_ = false;
     primary_endpoint82_bulk_ = false;
+    sibling_endpoint81_bulk_ = false;
+    sibling_endpoint82_bulk_ = false;
 }
 namespace {
 
@@ -139,6 +141,8 @@ OwnershipError EnclosureOwnership::claim_profile(const DeviceProfile& profile,
     required_function_count_ = profile.expected_runtime_functions;
     primary_endpoint81_bulk_ = p.endpoint81_in_alt0 && p.endpoint81_bulk_in_alt0;
     primary_endpoint82_bulk_ = p.endpoint82_in_alt0 && p.endpoint82_bulk_in_alt0;
+    sibling_endpoint81_bulk_ = s.endpoint81_in_alt0 && s.endpoint81_bulk_in_alt0;
+    sibling_endpoint82_bulk_ = s.endpoint82_in_alt0 && s.endpoint82_bulk_in_alt0;
     return OwnershipError::none;
 }
 
@@ -171,6 +175,8 @@ OwnershipError EnclosureOwnership::release() noexcept
         required_function_count_ = 0U;
         primary_endpoint81_bulk_ = false;
         primary_endpoint82_bulk_ = false;
+        sibling_endpoint81_bulk_ = false;
+        sibling_endpoint82_bulk_ = false;
     }
     return result;
 }
@@ -188,21 +194,32 @@ bool EnclosureOwnership::owns_both() const noexcept
 
 bool EnclosureOwnership::primary_supports_bulk_endpoint(std::uint8_t endpoint) const noexcept
 {
+    return function_supports_bulk_endpoint(0U, endpoint);
+}
+
+bool EnclosureOwnership::function_supports_bulk_endpoint(std::uint8_t function,
+                                                         std::uint8_t endpoint) const noexcept
+{
     if (!owns_required_functions()) {
         return false;
     }
+    const bool endpoint81 = function == 0U ? primary_endpoint81_bulk_ : sibling_endpoint81_bulk_;
+    const bool endpoint82 = function == 0U ? primary_endpoint82_bulk_ : sibling_endpoint82_bulk_;
+    if (function > 1U || (function == 1U && sibling_ == nullptr)) {
+        return false;
+    }
     if (endpoint == 0x81U) {
-        return primary_endpoint81_bulk_;
+        return endpoint81;
     }
     if (endpoint == 0x82U) {
-        return primary_endpoint82_bulk_;
+        return endpoint82;
     }
     return false;
 }
 
 ReceiverReservationResult ReceiverLaneReservation::reserve(std::uint8_t receiver) noexcept
 {
-    if (receiver > 1U) {
+    if (receiver > 3U) {
         return ReceiverReservationResult::invalid;
     }
     std::uint8_t expected = kNone;
@@ -215,7 +232,7 @@ ReceiverReservationResult ReceiverLaneReservation::reserve(std::uint8_t receiver
 
 bool ReceiverLaneReservation::release(std::uint8_t receiver) noexcept
 {
-    if (receiver > 1U) {
+    if (receiver > 3U) {
         return false;
     }
     return owner_.compare_exchange_strong(receiver, kNone, std::memory_order_acq_rel);
@@ -223,7 +240,7 @@ bool ReceiverLaneReservation::release(std::uint8_t receiver) noexcept
 
 bool ReceiverLaneReservation::owns(std::uint8_t receiver) const noexcept
 {
-    return receiver <= 1U && owner_.load(std::memory_order_acquire) == receiver;
+    return receiver <= 3U && owner_.load(std::memory_order_acquire) == receiver;
 }
 
 std::uint8_t ReceiverLaneReservation::owner() const noexcept

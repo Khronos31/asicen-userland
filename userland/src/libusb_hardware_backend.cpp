@@ -413,7 +413,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
     explicit DrainAdapter(LibusbW3u3Hardware& owner) : owner_(owner) {}
     bool stop_dsc() noexcept override
     {
-        if (owner_.source_receiver_ > 1U) {
+        if (owner_.source_receiver_ >= owner_.receiver_count()) {
             return false;
         }
         const std::uint8_t local = receiver_local(owner_.source_receiver_);
@@ -512,7 +512,7 @@ struct LibusbW3u3Hardware::DrainAdapter final : CaptureDrainOps, CaptureCleanupO
         if (!owner_.cf_snapshot_valid_) {
             return true;
         }
-        if (owner_.source_receiver_ > 1U) {
+        if (owner_.source_receiver_ >= owner_.receiver_count()) {
             return false;
         }
         const std::uint8_t local = receiver_local(owner_.source_receiver_);
@@ -941,11 +941,13 @@ bool LibusbW3u3Hardware::runtime_model_supported() const noexcept
 
 std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
 {
-    // Routing for every physical receiver is known, but simultaneous DSC
-    // sessions need an evidenced transition for the shared write-only seed
-    // and controller05 output bit. The recovered stop path clears both.
-    // Keep the public capability limited until that peer-lane lifecycle is proven.
-    return runtime_model_supported() ? (profile_->combined_isdb_ts ? 1U : 2U) : 0U;
+    if (!runtime_model_supported()) {
+        return 0U;
+    }
+    if (profile_->model_id == ModelId::W3u2 || profile_->model_id == ModelId::W3u3) {
+        return profile_->enclosure_receiver_count;
+    }
+    return profile_->combined_isdb_ts ? 1U : 2U;
 }
 
 V2FrontendTarget LibusbW3u3Hardware::frontend_target(std::uint8_t receiver) const noexcept
@@ -958,11 +960,20 @@ V2FrontendTarget LibusbW3u3Hardware::frontend_target(std::uint8_t receiver) cons
 }
 bool LibusbW3u3Hardware::receiver_supports(std::uint8_t receiver, System system) const noexcept
 {
-    return runtime_model_supported() && receiver < receiver_count() &&
-           ((profile_->combined_isdb_ts &&
-             (system == System::ISDB_S || system == System::ISDB_T)) ||
-            (receiver == 0U && system == System::ISDB_S) ||
-            (receiver == 1U && system == System::ISDB_T));
+    if (!runtime_model_supported() || receiver >= receiver_count()) {
+        return false;
+    }
+    if (profile_->combined_isdb_ts) {
+        return system == System::ISDB_S || system == System::ISDB_T;
+    }
+    if (profile_->model_id != ModelId::W3u2 && profile_->model_id != ModelId::W3u3) {
+        return (receiver == 0U && system == System::ISDB_S) ||
+               (receiver == 1U && system == System::ISDB_T);
+    }
+    const auto route = receiver_address(*profile_, receiver);
+    return route && system == (route.value().system == BroadcastSystem::IsdbS
+                                   ? System::ISDB_S
+                                   : System::ISDB_T);
 }
 bool LibusbW3u3Hardware::selects_satellite_stream_before_tune() const noexcept
 {
@@ -1219,7 +1230,10 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
     if (!frontend_io_allowed_after_cleanup(cleanup_failed_.load())) {
         return fail_open(Error::USB_IO);
     }
-    if (receiver == 0U && !ownership_.primary_supports_bulk_endpoint(kBulkEndpointLane0)) {
+    const auto route = receiver_address(*profile_, receiver);
+    if (!route || !ownership_.function_supports_bulk_endpoint(
+                      route.value().function_index,
+                      bulk_endpoint_for_local(route.value().local_lane))) {
         return fail_open(Error::UNSUPPORTED);
     }
     if (initialized_) {

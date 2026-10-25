@@ -57,10 +57,9 @@ struct CardProbeRequest {
 
 // Source-gated in-process backend. S3U exposes one combined receiver; other
 // supported models expose primary satellite0/terrestrial1. W3U2/W3U3 share
-// their frontend path, while S3U/S3U2/V2 use model-specific plans. Physical
-// enclosure capacity is in device_profile(); receiver_count() reports only
-// operational lanes. A paired model claims both functions before writes, but
-// the secondary function stays reserved and never receives frontend I/O.
+// their local lanes on each function, while S3U/S3U2/V2 use model-specific
+// plans. Physical enclosure capacity is in device_profile(); receiver_count()
+// reports routable lanes. Paired models claim both functions before writes.
 // The shared frontend permits one active receiver lease/capture at a time.
 class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
                                  public StreamCaptureSource,

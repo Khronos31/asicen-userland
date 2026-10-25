@@ -33,8 +33,8 @@ struct LibusbW3u3HardwareTestPeer {
         hardware.tuned_ = true;
         hardware.tuned_receiver_ = receiver;
         hardware.tuned_frequency_khz_ = 557142U;
-        hardware.tuned_system_ = receiver == 0U ? px4::userland::ipc::System::ISDB_S
-                                                : px4::userland::ipc::System::ISDB_T;
+        hardware.tuned_system_ = receiver % 2U == 0U ? px4::userland::ipc::System::ISDB_S
+                                                     : px4::userland::ipc::System::ISDB_T;
         (void)hardware.active_receiver_.reserve(receiver);
     }
 
@@ -114,8 +114,8 @@ struct LibusbW3u3HardwareTestPeer {
         hardware.tuned_ = true;
         hardware.tuned_receiver_ = receiver;
         hardware.tuned_frequency_khz_ = 557142U;
-        hardware.tuned_system_ = receiver == 0U ? px4::userland::ipc::System::ISDB_S
-                                                : px4::userland::ipc::System::ISDB_T;
+        hardware.tuned_system_ = receiver % 2U == 0U ? px4::userland::ipc::System::ISDB_S
+                                                     : px4::userland::ipc::System::ISDB_T;
     }
 
     static void set_cleanup_failed(LibusbW3u3Hardware& hardware)
@@ -1792,13 +1792,11 @@ bool test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity()
     Hooks hooks{};
     configure(hardware, fake, hooks, 1U);
     CHECK(hardware.device_profile()->enclosure_receiver_count == 4U);
-    CHECK(hardware.receiver_count() == 2U);
+    CHECK(hardware.receiver_count() == 4U);
     CHECK(hardware.receiver_supports(0U, System::ISDB_S));
     CHECK(hardware.receiver_supports(1U, System::ISDB_T));
-    CHECK(!hardware.receiver_supports(2U, System::ISDB_S));
-    CHECK(!hardware.receiver_supports(3U, System::ISDB_T));
-    CHECK(hardware.open_receiver(2U).error() == Error::UNSUPPORTED);
-    CHECK(fake.controls.empty());
+    CHECK(hardware.receiver_supports(2U, System::ISDB_S));
+    CHECK(hardware.receiver_supports(3U, System::ISDB_T));
     LibusbW3u3HardwareTestPeer::require_initialization(hardware);
     CHECK(hardware.open_receiver(1U).has_value());
     CHECK(saw_gpio_mask(fake, 0x20U));  // Explicit OFF initialization is allowed.
@@ -1816,6 +1814,42 @@ bool test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity()
     CHECK(hardware.shutdown().has_value());
     CHECK(fake.cf[1] == fake.initial_cf(1U));
     CHECK(fake.gpio == 0xa5U);
+    return true;
+}
+
+bool test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints()
+{
+    FakeUsb fake;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 2U);
+    CHECK(hardware.receiver_count() == 4U);
+    CHECK(hardware.open_receiver(2U).has_value());
+    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
+    CHECK(std::all_of(fake.transfer_handles.begin(), fake.transfer_handles.end(), [](auto* handle) {
+        return handle == reinterpret_cast<libusb_device_handle*>(static_cast<std::uintptr_t>(2U));
+    }));
+    CHECK(std::all_of(fake.endpoints.begin(), fake.endpoints.end(),
+                      [](std::uint8_t endpoint) { return endpoint == 0x81U; }));
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.close_receiver(2U).has_value());
+    fake.transfer_handles.clear();
+    fake.endpoints.clear();
+    CHECK(hardware.open_receiver(3U).has_value());
+    CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
+    CHECK(hardware.prepare(3U, System::ISDB_T, cancelled).has_value());
+    CHECK(std::all_of(fake.transfer_handles.begin(), fake.transfer_handles.end(), [](auto* handle) {
+        return handle == reinterpret_cast<libusb_device_handle*>(static_cast<std::uintptr_t>(2U));
+    }));
+    CHECK(std::all_of(fake.endpoints.begin(), fake.endpoints.end(),
+                      [](std::uint8_t endpoint) { return endpoint == 0x82U; }));
+    CHECK(hardware.stop().has_value());
+    CHECK(hardware.close_receiver(3U).has_value());
+    CHECK(!fake.control_functions.empty() &&
+          std::all_of(fake.control_functions.begin(), fake.control_functions.end(),
+                      [](std::uint8_t function) { return function == 1U; }));
     return true;
 }
 
@@ -2379,6 +2413,8 @@ int main()
          test_w3u2_reuses_guarded_primary_path_and_reports_operational_capacity},
         {"test_paired_capture_routes_select_each_function_handle",
          test_paired_capture_routes_select_each_function_handle},
+        {"test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints",
+         test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
          test_s3u_combined_receiver_uses_lane0_for_both_systems},
         {"test_s3u2_powers_off_gpioex_and_retains_single_capture_lease",
