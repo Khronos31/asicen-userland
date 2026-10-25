@@ -22,8 +22,8 @@ struct LibusbW3u3HardwareTestPeer {
     }
     static void snapshot(LibusbW3u3Hardware& hw, std::uint8_t gpio)
     {
-        hw.gpio_snapshot_ = gpio;
-        hw.gpio_snapshot_valid_ = true;
+        hw.gpio_snapshots_[0U] = gpio;
+        hw.gpio_snapshot_valid_functions_[0U] = true;
     }
     static void failed_capture(LibusbW3u3Hardware& hw)
     {
