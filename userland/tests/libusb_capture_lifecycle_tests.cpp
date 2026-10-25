@@ -59,6 +59,10 @@ struct LibusbW3u3HardwareTestPeer {
         return receiver < hardware.source_prepared_.size() &&
                hardware.source_prepared_[receiver] && hardware.async_states_[receiver] != nullptr;
     }
+    static bool capture_cleanup_failed(const LibusbW3u3Hardware& hardware)
+    {
+        return hardware.cleanup_failed_.load();
+    }
     static bool capture_storage_is_distinct(const LibusbW3u3Hardware& hardware,
                                             std::uint8_t first, std::uint8_t second)
     {
@@ -2065,6 +2069,34 @@ bool test_w3u2_capture_state_is_independent_across_sibling_receivers()
     return true;
 }
 
+bool test_w3u2_same_function_second_capture_failure_preserves_peer_state()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(hardware.open_receiver(0U).has_value());
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    std::atomic<bool> cancelled{false};
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(hardware.begin_tune_power(0U, System::ISDB_S, 0U).has_value());
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(hardware.commit_tune_power(0U).has_value());
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).error() == Error::NOT_READY);
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_cleanup_failed(hardware));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(hardware.stop_receiver(0U).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(hardware.stop_receiver(1U).has_value());
+    CHECK(hardware.close_receiver(0U).has_value());
+    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.shutdown().has_value());
+    return true;
+}
+
 bool test_paired_capture_routes_select_each_function_handle()
 {
     FakeUsb fake;
@@ -2631,6 +2663,8 @@ int main()
          test_w3u2_sibling_receivers_use_secondary_handle_and_local_endpoints},
         {"test_w3u2_capture_state_is_independent_across_sibling_receivers",
          test_w3u2_capture_state_is_independent_across_sibling_receivers},
+        {"test_w3u2_same_function_second_capture_failure_preserves_peer_state",
+         test_w3u2_same_function_second_capture_failure_preserves_peer_state},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
          test_s3u_combined_receiver_uses_lane0_for_both_systems},
         {"test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases",

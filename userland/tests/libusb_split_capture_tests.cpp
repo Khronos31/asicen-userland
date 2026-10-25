@@ -64,7 +64,10 @@ struct LibusbW3u3HardwareTestPeer {
     static void set_link_seed(LibusbW3u3Hardware& hardware,
                               const std::array<std::uint8_t, 16>& seed)
     {
-        hardware.link_seed_ = seed;
+        const auto receiver = hardware.current_receiver();
+        if (receiver < hardware.receiver_capture_states_.size()) {
+            hardware.receiver_capture_states_[receiver].link_seed = seed;
+        }
     }
 };
 }
