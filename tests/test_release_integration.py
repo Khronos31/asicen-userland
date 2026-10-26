@@ -116,7 +116,7 @@ class FullPipelineTests(unittest.TestCase):
                          asset_count * 2)
         self.assertEqual(api.latest["body"].encode(), fixture.notes)
         self.assertEqual({asset["name"] for asset in api.assets}, set(publisher.names))
-        self.assertEqual(product == "px4-userland", any("windows" in a["name"] for a in api.assets))
+        self.assertTrue(any("windows" in a["name"] for a in api.assets))
         # Retry repeats the complete verifier then observes the published release
         # read-only. It cannot repair or overwrite already-public assets.
         api.mutations.clear()
