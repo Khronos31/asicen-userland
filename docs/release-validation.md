@@ -23,7 +23,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 |---|---|
 | 機種初回 | PX-W3U2とPX-W3U3は4番組同時録画、地上波/衛星、CARD、対応LNBを確認する。ほかの機種はREADME記載の機種別能力に従う。 |
 | 回帰（毎release） | PX-W3U2とPX-W3U3は4番組を同時録画し、各TS/counter/終了値を確認する。W3U3のtuner path数、discovery route数、公開slot数は録画数と別々に記録する。WinSCard/PCSCはnative stackを別経路で確認する。 |
-| 必要に応じて | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種へsoftware要求を送らない。 |
+| 必要に応じて | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種では公開APIの拒否（`UNSUPPORTED`/exit 3）を確認する。GPIO/端子給電は切り替えない。 |
 | 初回/major | 現地channel planとmodel receiver割当を記録。Windows ZIPは通常aggregate外でも同候補の`win-candidate`を使う。 |
 
 ## 共通実行環境表
@@ -106,9 +106,9 @@ ASICENではruntime stageの`TARGET_USB`を機種表から設定する: PX-S3U `
 
 結果が期待数と完全一致した場合だけ、JSONの`selected`に記録された各pathへ`termux-usb -r <path>`（または製品固有の`-r -e`）を実行する。USB permission後にdaemonを開始する。再接続時は古いpath/FDを使わず、同じ列挙・sysfs照合を再実行する。sysfs未読・node未対応・無許可候補複数は合格ではなく未達として記録する。
 
-環境依存状態を変える前に、承認済みの試験用account/add-on、保護されたrun専用LOG、復元可能な退避を用意する。次は手順を記載したものであり、今回の作業では実行しない。
+正式検証でE02/E03/E07等により環境状態を変更する場合は、ユーザー承認済みの対象・値・影響範囲を確定し、保護されたrun専用LOGと復元可能な状態保存を準備してから実行する。適用後に必要な試験を行い、終了時に保存値へ戻してreadback/比較する。承認範囲を超える変更やHA Core/mirakcの再起動は行わない。
 
-- **E02 HAOS/Supervisor options:** `/addons/self/info`の`options`は対象addon自身のapp recordに保存されたraw optionsで、`/options/config`のdefaults・secret解決後の値とは異なる。Supervisor APIの実装は[apps.py](https://github.com/home-assistant/supervisor/blob/main/supervisor/api/apps.py#L1620-L1700)および[options endpoints](https://github.com/home-assistant/supervisor/blob/main/supervisor/api/apps.py#L1832-L2015)を参照。対象addon内で認可済みtokenを使い、raw表現はmode 600のprivate backupにだけ保存する。値を画面・共有log・evidenceへ出さない。validateの`valid`がtrue以外、または読み出し/HTTP/JSON処理が失敗した場合はoptions POST前に終了する。Supervisorは本試験で操作しない。
+- **E02 HAOS/Supervisor options:** `/addons/self/info`の`options`は対象addon自身のapp recordに保存されたraw optionsで、`/options/config`のdefaults・secret解決後の値とは異なる。Supervisor APIの実装は[apps.py](https://github.com/home-assistant/supervisor/blob/main/supervisor/api/apps.py#L1620-L1700)および[options endpoints](https://github.com/home-assistant/supervisor/blob/main/supervisor/api/apps.py#L1832-L2015)を参照。対象addon内で認可済みtokenを使い、raw表現はmode 600のprivate backupにだけ保存する。値を画面・共有log・evidenceへ出さない。validateの`valid`がtrue以外、または読み出し/HTTP/JSON処理が失敗した場合はoptions POST前に終了する。承認済み範囲内で対象addonの起動・停止とoptions復元/比較を行い、HA Core/mirakcは再起動しない。
   ```sh
   set -eu
   umask 077
@@ -239,7 +239,7 @@ ha addons restart "$ADDON_SLUG"
   if [ "$RESTORE_RC" -ne 0 ]; then echo 'access state restoration incomplete; retain evidence and stop' >&2; exit "$RESTORE_RC"; fi
   ```
 
-- **E07 Android stay-awake:**初回ADB readが非0/空/不正値なら書込み前に停止する。`null`は未設定、十進整数は保存値として区別する。権限・readback失敗を無視しない。次は端末設定に触れないsynthetic確認用の状態遷移であり、実Androidへは実行しない。
+- **E07 Android stay-awake:**初回ADB readが非0/空/不正値なら書込み前に停止する。`null`は未設定、十進整数は保存値として区別する。権限・readback失敗を無視しない。正式検証では承認済み端末で設定を適用し、試験後に保存値へ戻してreadback/比較する。synthetic fixtureは局所確認に限り、実端末での検証を代替しない。
   ```sh
   set -eu
   LOG='<private-run-log>'
@@ -507,9 +507,9 @@ if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
 
 - **適用対象/頻度:** 必要時。給電対応profileだけ実測。
 - **準備:** 対応profile、meter、独立給電の状態を確認。
-- **実操作/利用者への依頼:** 対応機は`asicend --device usb:<BUS-PORT> --instance rc --runtime-dir "$RT" --allow-lnb-power`でdaemonを起動し、`asicenctl --device usb:<BUS-PORT> --runtime-dir "$RT" --instance rc lnb-on` / `lnb-off`を各実行してmeter測定する。将来、LNB制御非対応profileを持つ実機が利用可能になった場合だけ、sourceで非対応と確認した機器を選び、誤選択時に出力がないことをmeterで確認してから、同じdaemon commandと公開`asicenctl` commandを使う。`--allow-lnb-power`付きで`lnb-on`を一度呼び、未許可フラグによる一般拒否とprofile拒否を区別する。非対応profileを一意に確認できない候補では実行しない。
-- **期待値/終了値:** 対応機はmeter実測を記録する。非対応profileの公開APIは`UNSUPPORTED`・exit 3を返し、GPIO/物理給電は切り替わらずmeter値も変化しないことを確認する。API拒否だけでは物理給電不変の確認にならない。
-- **停止/cleanup:** daemonを通常停止し、非対応profileでは給電要求を追加せず0Vと通常配線復帰を確認する。
+- **実操作/利用者への依頼:** 対応機は`asicend --device usb:<BUS-PORT> --instance rc --runtime-dir "$RT" --allow-lnb-power`でdaemonを起動し、`asicenctl --device usb:<BUS-PORT> --runtime-dir "$RT" --instance rc lnb-on` / `lnb-off`を各実行してmeter測定する。非対応profileは機種/profileを一意に確認し、独立給電設備を接続せず開始時のGPIO/端子電圧を記録してから、同じdaemon commandと公開`asicenctl ... lnb-on` command（`--allow-lnb-power`を含む）を1回実行する。公開APIの`UNSUPPORTED`/exit 3とGPIO/端子電圧不変を確認する。非対応profileを一意に確認できない候補では実行しない。現所持機で実施できない場合は未実施と記録し、要件を削除しない。
+- **期待値/終了値:** 対応機はmeter実測を記録する。非対応profileの公開APIは`UNSUPPORTED`・exit 3を返し、GPIO/物理給電は切り替わらずmeter値も変化しないことを確認する。API拒否とGPIO/端子電圧不変の両方を記録する。
+- **停止/cleanup:** daemonを通常停止し、対応機は0Vと通常配線復帰を確認する。非対応profileは給電を切り替えず状態不変を確認する。
 - **記録:** model/profile、command/response/exit、meter値と条件、cleanup。現所持ASICEN機器は全てLNB対応のため非対応profile拒否の実機確認は未実施・現在実行不可と記録する。対応機試験やmockを代替合格にしない。
 
 ### T12 複数device・daemon・access
@@ -526,7 +526,7 @@ if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
 - **適用対象/頻度:** 毎releaseおよび全model初回/major。
 - **準備:** 確定頻度表の対象archive/model/timeをmatrixへ展開する。
 - **実操作/利用者への依頼:** 毎release代表Linux x86_64 glibc 2h/全archive native short; 初回全modelは代表機all-free-channel 10s、macOS/Windows 30m、他ABI 10m。
-- **期待値/終了値:** 指定連続時間完了かつTS条件合格。追加soakは明示ユーザー決定分のみ。
+- **期待値/終了値:** 指定連続時間完了かつTS条件合格。FD/RSSに数値閾値は設けず、最終観測まで安定化しない持続増加で外部要因を特定できない場合は判定保留とし公開しない。追加soakは明示ユーザー決定分のみ。
 - **停止/cleanup:** T08通常stopと全resource cleanup。
 - **記録:** model/OS/ABI/archive、時間、TS/counter、FD/RSS、未実施理由。
 
@@ -535,7 +535,7 @@ if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
 - **適用対象/頻度:** 全candidate gate完了後。
 - **準備:** source/archive SHAと全T-IDの結果を版別記録へ用意。
 - **実操作/利用者への依頼:** version recordで全T-IDをpass/fail/未実施/対象外分類。未完了を公開passにしない。
-- **期待値/終了値:** failure/unsupported/未実施/環境不能/candidate欠落をpassにしない。
+- **期待値/終了値:** failure/unsupported/未実施/環境不能/candidate欠落をpassにしない。soakのFD/RSSが判定保留の場合は公開gate未完了とする。
 - **停止/cleanup:** candidateと失敗証拠を保持。tag/releaseは別依頼。
 - **記録:** T-ID、candidate/host/model、state、log、blocker、判定根拠。
 
@@ -1660,9 +1660,9 @@ finally {
 
 ## 5. LNB・連続受信・cleanup
 
-PX-W3U2/W3U3/V2などREADMEで15V対応が明示された機種のみ、壁設備と他給電源を分離し、衛星端子へテスターを接続する。停止状態から `--allow-lnb-power` を付けてdaemonを起動し、`asicenctl --runtime-dir "$RT" --instance rc lnb-on` 後に実測15V、`asicenctl --runtime-dir "$RT" --instance rc lnb-off` 後に要求0と実測0Vを確認する。独立要求と受信部 `--lnb-voltage` は別の状態として記録する。非対応機はsoftware要求も試さない。daemon停止後0Vと通常配線への復帰を確認する。
+PX-W3U2/W3U3/V2などREADMEで15V対応が明示された機種のみ、壁設備と他給電源を分離し、衛星端子へテスターを接続する。停止状態から `--allow-lnb-power` を付けてdaemonを起動し、`asicenctl --runtime-dir "$RT" --instance rc lnb-on` 後に実測15V、`asicenctl --runtime-dir "$RT" --instance rc lnb-off` 後に要求0と実測0Vを確認する。独立要求と受信部 `--lnb-voltage` は別の状態として記録する。非対応profileでは公開APIの拒否（`UNSUPPORTED`/exit 3）を確認するが、給電要求は拒否されGPIO/端子電圧が変化しない。daemon停止後は対応機で0Vと通常配線への復帰、非対応profileで状態不変を確認する。
 
-Soakでは代表Linux x86_64機の2時間連続受信を実施する。開始・定期・終了時にTS/counters、process/FD/RSS、channel、終了値を記録する。終了後はclient/daemonを正常停止し、status/process/runtime socketを確認して後始末する。候補SHA/archive hash、host/OS/arch/model、firmware、channel、操作、実コマンド、期待/実測、エラー、未確認事項をrelease recordへ保存する。全gateを終えた後にだけ結果文書をcommitし、code/build inputsが候補と同一であることを確認する。正式tag/releaseは別途の承認対象。
+Soakでは代表Linux x86_64機の2時間連続受信を実施する。開始・定期・終了時にTS/counters、process/FD/RSS、channel、終了値を記録する。FD/RSSの数値合否閾値は設けない。最終観測まで安定化しない持続増加を示し、外部要因を特定できない場合は判定保留とし、公開しない。終了後はclient/daemonを正常停止し、status/process/runtime socketを確認して後始末する。候補SHA/archive hash、host/OS/arch/model、firmware、channel、操作、実コマンド、期待/実測、エラー、未確認事項をrelease recordへ保存する。全gateを終えた後にだけ結果文書をcommitし、code/build inputsが候補と同一であることを確認する。正式tag/releaseは別途の承認対象。
 
 ## 6. 製品固有の適用範囲
 
