@@ -121,7 +121,10 @@ with temporary_runtime_root() as temp:
         assert len(status_json["receivers"]) == 4
         no_daemon = run(str(CTL), "--runtime-dir", str(root / "missing"),
                         "--instance", instance, "list", capture_output=True, text=True)
-        assert no_daemon.returncode == 3 and "connect failed" in no_daemon.stderr
+        assert no_daemon.returncode == 3 and \
+            "runtime namespace is missing" in no_daemon.stderr and \
+            "check --runtime-dir and --instance" in no_daemon.stderr, \
+            (no_daemon.returncode, no_daemon.stderr)
         card = run(str(CTL), "--runtime-dir", str(runtime), "--instance",
                    instance, "card-status", capture_output=True, text=True)
         assert card.returncode == 3 and "remote=11" in card.stderr
