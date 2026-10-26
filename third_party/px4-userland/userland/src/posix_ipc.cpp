@@ -156,17 +156,29 @@ bool append_path(std::array<char, kStoredPathCapacity>& output,
     return true;
 }
 
-Result<Layout> make_layout(const EndpointConfig& config) noexcept
+Result<Layout> make_layout(const EndpointConfig& config,
+                           EndpointDiagnostic* diagnostic = nullptr) noexcept
 {
+    if (diagnostic != nullptr) *diagnostic = EndpointDiagnostic{};
     const char* runtime = config.runtime_directory;
     if (runtime == nullptr) {
         runtime = std::getenv("XDG_RUNTIME_DIR");
     }
     const std::size_t runtime_length = bounded_length(runtime, kStoredPathCapacity);
     if (runtime_length == 0U || runtime_length == kStoredPathCapacity ||
-        runtime[0] != '/' || !valid_component(config.instance) ||
-        bounded_length(config.instance, 81U) > 80U ||
-        !valid_component(config.endpoint_name)) {
+        runtime[0] != '/') {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory;
+        return Result<Layout>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (!valid_component(config.instance) || bounded_length(config.instance, 81U) > 80U) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::instance;
+        return Result<Layout>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (!valid_component(config.endpoint_name)) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::endpoint_name;
         return Result<Layout>::failure(Error::INVALID_ARGUMENT);
     }
 
@@ -174,6 +186,23 @@ Result<Layout> make_layout(const EndpointConfig& config) noexcept
     while (normalized_runtime_length > 1U &&
            runtime[normalized_runtime_length - 1U] == '/') {
         --normalized_runtime_length;
+    }
+
+    const std::size_t product_length = std::strlen(kProductDirectoryName);
+    const std::size_t instance_length = std::strlen(config.instance);
+    const std::size_t endpoint_length = std::strlen(config.endpoint_name);
+    const std::size_t path_bytes = normalized_runtime_length +
+        (normalized_runtime_length == 1U ? 0U : 1U) + product_length + 1U +
+        instance_length + 1U + endpoint_length;
+    if (diagnostic != nullptr) {
+        diagnostic->path_bytes = path_bytes;
+        diagnostic->native_capacity = sizeof(sockaddr_un{}.sun_path);
+        diagnostic->required_bytes = path_bytes + 1U;
+    }
+    if (path_bytes >= sizeof(sockaddr_un{}.sun_path)) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::path_too_long;
+        return Result<Layout>::failure(Error::INVALID_ARGUMENT);
     }
 
     Layout layout{};
@@ -196,11 +225,10 @@ Result<Layout> make_layout(const EndpointConfig& config) noexcept
         return Result<Layout>::failure(Error::INVALID_ARGUMENT);
     }
 
-    const std::size_t product_length = used;
+    const std::size_t product_directory_length = used;
     std::memcpy(layout.instance_directory.data(), layout.product_directory.data(),
-                product_length + 1U);
-    used = product_length;
-    const std::size_t instance_length = std::strlen(config.instance);
+                product_directory_length + 1U);
+    used = product_directory_length;
     if (!append_path(layout.instance_directory, used, config.instance,
                      instance_length, true)) {
         return Result<Layout>::failure(Error::INVALID_ARGUMENT);
@@ -210,7 +238,6 @@ Result<Layout> make_layout(const EndpointConfig& config) noexcept
     std::memcpy(layout.endpoint_path.data(), layout.instance_directory.data(),
                 directory_length + 1U);
     used = directory_length;
-    const std::size_t endpoint_length = std::strlen(config.endpoint_name);
     if (!append_path(layout.endpoint_path, used, config.endpoint_name,
                      endpoint_length, true) ||
         used >= sizeof(sockaddr_un{}.sun_path)) {
@@ -287,15 +314,26 @@ bool ownership_allowed(const struct stat& status, bool group_access) noexcept
 }
 
 Result<NativeIdentity> validate_directory(const char* path, mode_t expected_mode,
-                                          bool group_access = false) noexcept
+                                          bool group_access = false,
+                                          EndpointDiagnostic* diagnostic = nullptr) noexcept
 {
     struct stat status {};
     if (::lstat(path, &status) != 0) {
         return Result<NativeIdentity>::failure(map_errno(errno));
     }
-    if (!S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
-        !ownership_allowed(status, group_access) ||
-        (status.st_mode & 07777) != expected_mode) {
+    if (!S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode)) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory_type;
+        return Result<NativeIdentity>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (!ownership_allowed(status, group_access)) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory_owner;
+        return Result<NativeIdentity>::failure(Error::INVALID_ARGUMENT);
+    }
+    if ((status.st_mode & 07777) != expected_mode) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory_mode;
         return Result<NativeIdentity>::failure(Error::INVALID_ARGUMENT);
     }
     return Result<NativeIdentity>::success(identity_of(status));
@@ -540,17 +578,33 @@ SerialEndpointLease& SerialEndpointLease::operator=(SerialEndpointLease&& other)
 Result<SerialEndpointLease> SerialEndpointLease::acquire(
     const EndpointConfig& endpoint, std::string_view observed_serial) noexcept
 {
+    return acquire(endpoint, observed_serial, nullptr);
+}
+
+Result<SerialEndpointLease> SerialEndpointLease::acquire(
+    const EndpointConfig& endpoint, std::string_view observed_serial,
+    EndpointDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr) *diagnostic = EndpointDiagnostic{};
     if ((observed_serial.size() != 14U && observed_serial.size() != 15U) ||
         !std::all_of(observed_serial.begin(), observed_serial.end(),
                      [](char character) { return character >= '0' && character <= '9'; })) {
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
     }
-    return acquire_validated(endpoint, observed_serial, false);
+    return acquire_validated(endpoint, observed_serial, false, diagnostic);
 }
 
 Result<SerialEndpointLease> SerialEndpointLease::acquire_identity(
     const EndpointConfig& endpoint, std::string_view observed_identity) noexcept
 {
+    return acquire_identity(endpoint, observed_identity, nullptr);
+}
+
+Result<SerialEndpointLease> SerialEndpointLease::acquire_identity(
+    const EndpointConfig& endpoint, std::string_view observed_identity,
+    EndpointDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr) *diagnostic = EndpointDiagnostic{};
     std::array<char, kStoredPathCapacity> identity{};
     if (observed_identity.empty() || observed_identity.size() >= identity.size()) {
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
@@ -560,18 +614,18 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire_identity(
         std::strlen(identity.data()) != observed_identity.size()) {
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
     }
-    return acquire_validated(endpoint, observed_identity, true);
+    return acquire_validated(endpoint, observed_identity, true, diagnostic);
 }
 
 Result<SerialEndpointLease> SerialEndpointLease::acquire_validated(
     const EndpointConfig& endpoint, std::string_view observed_serial,
-    bool force_exclusive) noexcept
+    bool force_exclusive, EndpointDiagnostic* diagnostic) noexcept
 {
-    const auto layout_result = make_layout(endpoint);
+    const auto layout_result = make_layout(endpoint, diagnostic);
     if (!layout_result) return Result<SerialEndpointLease>::failure(layout_result.error());
     const Layout& layout = layout_result.value();
     const auto runtime = validate_directory(layout.runtime_directory.data(),
-                                            layout.directory_mode);
+                                            layout.directory_mode, false, diagnostic);
     if (!runtime) return Result<SerialEndpointLease>::failure(runtime.error());
 
     SerialEndpointLease lease;
@@ -614,9 +668,27 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire_validated(
         if (fd < 0) return Result<SerialEndpointLease>::failure(map_errno(errno));
 
         struct stat lock_status {};
-        if (::fstat(fd, &lock_status) != 0 || !S_ISREG(lock_status.st_mode) ||
-            lock_status.st_uid != ::geteuid() ||
-            (lock_status.st_mode & 07777) != 0600 || lock_status.st_nlink != 1) {
+        if (::fstat(fd, &lock_status) != 0 || !S_ISREG(lock_status.st_mode)) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = EndpointDiagnosticReason::lease_file_type;
+            close_fd(fd);
+            return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+        }
+        if (lock_status.st_uid != ::geteuid()) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = EndpointDiagnosticReason::lease_file_owner;
+            close_fd(fd);
+            return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+        }
+        if ((lock_status.st_mode & 07777) != 0600) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = EndpointDiagnosticReason::lease_file_mode;
+            close_fd(fd);
+            return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+        }
+        if (lock_status.st_nlink != 1) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = EndpointDiagnosticReason::lease_file_links;
             close_fd(fd);
             return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
         }

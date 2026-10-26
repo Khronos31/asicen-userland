@@ -69,6 +69,44 @@ int exit_status(Error error) noexcept
     return 70;
 }
 
+void print_listener_diagnostic(
+    const dtv::userland::host_listener_context::ListenerDiagnostic& diagnostic) noexcept
+{
+    using Reason = dtv::userland::host_listener_context::ListenerDiagnosticReason;
+    if (diagnostic.reason == Reason::endpoint_path) {
+        if (diagnostic.endpoint.reason ==
+            dtv::userland::host_runtime::EndpointDiagnosticReason::path_too_long) {
+            std::fprintf(stderr,
+                "asicend endpoint: %.*s path is too long (%zu UTF-8 bytes; %zu bytes including NUL required, this build's native sun_path capacity is %zu bytes including NUL); shorten --runtime-dir or --instance consistently for daemon and clients\n",
+                static_cast<int>(diagnostic.endpoint_name.size()),
+                diagnostic.endpoint_name.data(), diagnostic.endpoint.path_bytes,
+                diagnostic.endpoint.required_bytes,
+                diagnostic.endpoint.native_capacity);
+        } else {
+            std::fprintf(stderr,
+                "asicend endpoint: invalid runtime/instance/endpoint path configuration for %.*s; check --runtime-dir and --instance\n",
+                static_cast<int>(diagnostic.endpoint_name.size()),
+                diagnostic.endpoint_name.data());
+        }
+        return;
+    }
+    if (diagnostic.reason == Reason::runtime_directory_security) {
+        std::fprintf(stderr,
+            "asicend endpoint: runtime namespace security check failed; the configured runtime and its product/version/instance directories must satisfy the current-user ownership and private access checks\n");
+        return;
+    }
+    if (diagnostic.reason == Reason::runtime_directory_missing)
+        std::fprintf(stderr, "asicend endpoint: runtime directory does not exist\n");
+    else if (diagnostic.reason == Reason::runtime_directory_lookup)
+        std::fprintf(stderr, "asicend endpoint: runtime directory lookup failed; check path traversal access\n");
+    else if (diagnostic.reason == Reason::runtime_directory_type)
+        std::fprintf(stderr, "asicend endpoint: runtime directory type check failed; the runtime path must be a real directory, not a symlink\n");
+    else if (diagnostic.reason == Reason::runtime_directory_owner)
+        std::fprintf(stderr, "asicend endpoint: runtime directory owner check failed; it must be owned by the current user\n");
+    else if (diagnostic.reason == Reason::runtime_directory_mode)
+        std::fprintf(stderr, "asicend endpoint: runtime directory mode check failed; private runtime directories must not grant group or other access\n");
+}
+
 int core_exit_status(dtv::userland::Error error) noexcept
 {
     switch (error) {
@@ -411,8 +449,14 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
                                                  std::move(owned_nonce), config);
     if (!assembled) return core_exit_status(assembled.error());
     std::unique_ptr<EnclosureContext> context = std::move(assembled.value());
-    const auto reserved = context->reserve_namespace();
-    if (!reserved) return core_exit_status(reserved.error());
+    dtv::userland::host_listener_context::ListenerDiagnostic listener_diagnostic{};
+    const auto reserved = context->reserve_namespace(&listener_diagnostic);
+    if (!reserved) {
+        if (listener_diagnostic.reason !=
+            dtv::userland::host_listener_context::ListenerDiagnosticReason::none)
+            print_listener_diagnostic(listener_diagnostic);
+        return core_exit_status(reserved.error());
+    }
     const auto published = context->publish();
     if (!published) return core_exit_status(published.error());
 

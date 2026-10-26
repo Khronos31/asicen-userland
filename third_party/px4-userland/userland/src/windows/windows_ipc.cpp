@@ -454,16 +454,24 @@ bool set_endpoint_security(const wchar_t* path) noexcept
     return status == ERROR_SUCCESS && verify_existing_security(path);
 }
 
-Result<Layout> make_layout(const EndpointConfig& config) noexcept
+Result<Layout> make_layout(const EndpointConfig& config,
+                           EndpointDiagnostic* diagnostic = nullptr) noexcept
 {
+    if (diagnostic != nullptr) *diagnostic = EndpointDiagnostic{};
     if (config.access == EndpointAccess::shared_group) {
         // shared_group has no tested Windows equivalent; fail argument
         // validation instead of silently inheriting broad access.
         return Result<Layout>::failure(Error::UNSUPPORTED);
     }
     if (!valid_component(config.instance) ||
-        bounded_length(config.instance, 81U) > 80U ||
-        !valid_component(config.endpoint_name)) {
+        bounded_length(config.instance, 81U) > 80U) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::instance;
+        return Result<Layout>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (!valid_component(config.endpoint_name)) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::endpoint_name;
         return Result<Layout>::failure(Error::INVALID_ARGUMENT);
     }
 
@@ -474,6 +482,8 @@ Result<Layout> make_layout(const EndpointConfig& config) noexcept
             static_cast<DWORD>(layout.runtime_directory.size()));
         if (length == 0U ||
             length >= layout.runtime_directory.size()) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = EndpointDiagnosticReason::runtime_directory;
             return Result<Layout>::failure(Error::INVALID_ARGUMENT);
         }
     } else {
@@ -482,10 +492,14 @@ Result<Layout> make_layout(const EndpointConfig& config) noexcept
         if (runtime_length == 0U || runtime_length == kStoredPathCapacity ||
             !utf8_to_wide(config.runtime_directory, runtime_length,
                           layout.runtime_directory)) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = EndpointDiagnosticReason::runtime_directory;
             return Result<Layout>::failure(Error::INVALID_ARGUMENT);
         }
     }
     if (!is_local_absolute_path(layout.runtime_directory.data())) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory;
         return Result<Layout>::failure(Error::INVALID_ARGUMENT);
     }
 
@@ -525,8 +539,15 @@ Result<Layout> make_layout(const EndpointConfig& config) noexcept
     const int endpoint_bytes = ::WideCharToMultiByte(
         CP_UTF8, WC_ERR_INVALID_CHARS, layout.endpoint_path.data(), -1, nullptr,
         0, nullptr, nullptr);
+    if (diagnostic != nullptr && endpoint_bytes > 0) {
+        diagnostic->path_bytes = static_cast<std::size_t>(endpoint_bytes - 1);
+        diagnostic->native_capacity = kMaxEndpointPathBytes;
+        diagnostic->required_bytes = static_cast<std::size_t>(endpoint_bytes);
+    }
     if (endpoint_bytes <= 0 ||
         endpoint_bytes > static_cast<int>(kMaxEndpointPathBytes)) {
+        if (diagnostic != nullptr && endpoint_bytes > 0)
+            diagnostic->reason = EndpointDiagnosticReason::path_too_long;
         return Result<Layout>::failure(Error::INVALID_ARGUMENT);
     }
     return Result<Layout>::success(std::move(layout));
@@ -700,7 +721,8 @@ bool is_current_user_owner(const std::array<wchar_t, kStoredPathCapacity>& path)
 
 Result<FileIdentity> validate_directory(const std::array<wchar_t, kStoredPathCapacity>& path,
                                         bool require_existing,
-                                        SecurityPolicy policy) noexcept
+                                        SecurityPolicy policy,
+                                        EndpointDiagnostic* diagnostic = nullptr) noexcept
 {
     const DWORD attributes = ::GetFileAttributesW(path.data());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
@@ -709,12 +731,16 @@ Result<FileIdentity> validate_directory(const std::array<wchar_t, kStoredPathCap
     }
     if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory_type;
         return Result<FileIdentity>::failure(Error::INVALID_ARGUMENT);
     }
     const bool secure = policy == SecurityPolicy::private_user ?
                             verify_existing_security(path.data()) :
                             verify_runtime_security(path.data());
     if (!secure) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory_security;
         return Result<FileIdentity>::failure(Error::INVALID_ARGUMENT);
     }
     return identity_of_path(path, FILE_FLAG_BACKUP_SEMANTICS);
@@ -923,6 +949,14 @@ SerialEndpointLease& SerialEndpointLease::operator=(SerialEndpointLease&& other)
 Result<SerialEndpointLease> SerialEndpointLease::acquire(
     const EndpointConfig& endpoint, std::string_view observed_serial) noexcept
 {
+    return acquire(endpoint, observed_serial, nullptr);
+}
+
+Result<SerialEndpointLease> SerialEndpointLease::acquire(
+    const EndpointConfig& endpoint, std::string_view observed_serial,
+    EndpointDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr) *diagnostic = EndpointDiagnostic{};
     if (!ensure_winsock()) {
         return Result<SerialEndpointLease>::failure(Error::INTERNAL);
     }
@@ -931,12 +965,20 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire(
                      [](char character) { return character >= '0' && character <= '9'; })) {
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
     }
-    return acquire_validated(endpoint, observed_serial, false);
+    return acquire_validated(endpoint, observed_serial, false, diagnostic);
 }
 
 Result<SerialEndpointLease> SerialEndpointLease::acquire_identity(
     const EndpointConfig& endpoint, std::string_view observed_identity) noexcept
 {
+    return acquire_identity(endpoint, observed_identity, nullptr);
+}
+
+Result<SerialEndpointLease> SerialEndpointLease::acquire_identity(
+    const EndpointConfig& endpoint, std::string_view observed_identity,
+    EndpointDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr) *diagnostic = EndpointDiagnostic{};
     if (!ensure_winsock()) {
         return Result<SerialEndpointLease>::failure(Error::INTERNAL);
     }
@@ -949,20 +991,21 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire_identity(
         std::strlen(identity.data()) != observed_identity.size()) {
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
     }
-    return acquire_validated(endpoint, observed_identity, true);
+    return acquire_validated(endpoint, observed_identity, true, diagnostic);
 }
 
 Result<SerialEndpointLease> SerialEndpointLease::acquire_validated(
     const EndpointConfig& endpoint, std::string_view observed_serial,
-    bool force_exclusive) noexcept
+    bool force_exclusive, EndpointDiagnostic* diagnostic) noexcept
 {
-    const auto layout_result = make_layout(endpoint);
+    const auto layout_result = make_layout(endpoint, diagnostic);
     if (!layout_result) {
         return Result<SerialEndpointLease>::failure(layout_result.error());
     }
     const Layout& layout = layout_result.value();
     const auto runtime =
-        validate_directory(layout.runtime_directory, true, SecurityPolicy::runtime_parent);
+        validate_directory(layout.runtime_directory, true, SecurityPolicy::runtime_parent,
+                           diagnostic);
     if (!runtime) {
         return Result<SerialEndpointLease>::failure(runtime.error());
     }
@@ -1029,6 +1072,8 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire_validated(
     if (::GetFileInformationByHandle(file, &info) == 0 ||
         (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U ||
         (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::lease_file_type;
         (void)::CloseHandle(file);
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
     }
@@ -1037,6 +1082,8 @@ Result<SerialEndpointLease> SerialEndpointLease::acquire_validated(
                                 nullptr, nullptr, &owner_descriptor) !=
             ERROR_SUCCESS ||
         owner == nullptr || ::EqualSid(owner, current_sid) == 0) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::lease_file_owner;
         (void)::LocalFree(owner_descriptor);
         (void)::CloseHandle(file);
         return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
