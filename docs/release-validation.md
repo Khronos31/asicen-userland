@@ -108,34 +108,60 @@ ASICENではruntime stageの`TARGET_USB`を機種表から設定する: PX-S3U `
 
 環境依存状態を変える前に、承認済みの試験用account/add-on、保護されたrun専用LOG、復元可能な退避を用意する。次は手順を記載したものであり、今回の作業では実行しない。
 
-- **E02 HAOS/Supervisor options:** 対象addon自身のcontainer内にある認可済み`SUPERVISOR_TOKEN`で`/addons/self`だけを使う。SCS host等でtokenが得られない場合は停止する。APIのvalidated optionsはdefaultsとsecret解決値を含むためmode 600のprivate LOGだけに保存し、共有recordへコピーしない。options変更は次回addon startで有効になる。
+- **E02 HAOS/Supervisor options:** `/addons/self/info`の`options`は対象addon自身のapp recordに保存されたraw optionsで、`/options/config`のdefaults・secret解決後の値とは異なる。Supervisor APIの実装は[apps.py](https://github.com/home-assistant/supervisor/blob/main/supervisor/api/apps.py#L1620-L1700)および[options endpoints](https://github.com/home-assistant/supervisor/blob/main/supervisor/api/apps.py#L1832-L2015)を参照。対象addon内で認可済みtokenを使い、raw表現はmode 600のprivate backupにだけ保存する。値を画面・共有log・evidenceへ出さない。validateの`valid`がtrue以外、または読み出し/HTTP/JSON処理が失敗した場合はoptions POST前に終了する。Supervisorは本試験で操作しない。
   ```sh
+  set -eu
   umask 077
   mkdir -m 700 -p "$LOG/private"
   : "${SUPERVISOR_TOKEN:?run inside the target add-on with its token}"
   API=http://supervisor/addons/self
-  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" "$API/options/config" -o "$LOG/private/options-get.before.json"
-  python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); json.dump(x.get("data",x),open(sys.argv[2],"w"),sort_keys=True)' "$LOG/private/options-get.before.json" "$LOG/private/addon-options.before.json"
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" "$API/info" -o "$LOG/private/info.before.json"
+  python3 - "$LOG/private/info.before.json" "$LOG/private/options.before.json" <<'PY'
+  import json, sys
+  x=json.load(open(sys.argv[1], encoding="utf-8")); x=x.get("data", x)
+  options=x.get("options")
+  if not isinstance(options, dict): raise SystemExit("raw app options unavailable")
+  json.dump(options, open(sys.argv[2], "w", encoding="utf-8"), sort_keys=True)
+  PY
   chmod 600 "$LOG/private/"*.json
-  cp "$LOG/private/addon-options.before.json" "$LOG/private/addon-options.restore.json"
-  cp "$LOG/private/addon-options.before.json" "$LOG/private/addon-options.trial.json"
-  # 承認済みoptionsだけ編集し、schema validationを通す:
-  ${EDITOR:-vi} "$LOG/private/addon-options.trial.json"
-  python3 -m json.tool "$LOG/private/addon-options.trial.json" > /dev/null
-  python3 -c 'import json,sys; json.dump({"options":json.load(open(sys.argv[1]))},open(sys.argv[2],"w"))' "$LOG/private/addon-options.trial.json" "$LOG/private/options-trial.request.json"
-  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/addon-options.trial.json" "$API/options/validate" -o "$LOG/private/options-trial.validate.json"
-  python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x=x.get("data",x); assert x.get("valid") is True' "$LOG/private/options-trial.validate.json"
-  curl -sS -o "$LOG/private/options-trial.post.json" -w '%{http_code}\n' -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-trial.request.json" "$API/options" > "$LOG/private/options-trial.status"
-  grep -Eq '^2[0-9][0-9]$' "$LOG/private/options-trial.status"
-  # run終了後、承認済み停止手順で元optionsを復元:
-  python3 -c 'import json,sys; json.dump({"options":json.load(open(sys.argv[1]))},open(sys.argv[2],"w"))' "$LOG/private/addon-options.restore.json" "$LOG/private/options-restore.request.json"
-  curl -sS -o "$LOG/private/options-restore.post.json" -w '%{http_code}\n' -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-restore.request.json" "$API/options" > "$LOG/private/options-restore.status"
-  grep -Eq '^2[0-9][0-9]$' "$LOG/private/options-restore.status"
-  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" "$API/options/config" -o "$LOG/private/options-get.after.json"
-  python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); json.dump(x.get("data",x),open(sys.argv[2],"w"),sort_keys=True)' "$LOG/private/options-get.after.json" "$LOG/private/addon-options.after.json"
-  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))' "$LOG/private/addon-options.restore.json" "$LOG/private/addon-options.after.json"
+  cp "$LOG/private/options.before.json" "$LOG/private/options.restore.json"
+  cp "$LOG/private/options.before.json" "$LOG/private/options.trial.json"
+  : "${TRIAL_OPTION_KEY:?set one approved non-secret top-level option key}"
+  : "${TRIAL_OPTION_JSON:?set its approved JSON value}"
+  python3 - "$LOG/private/options.trial.json" "$TRIAL_OPTION_KEY" "$TRIAL_OPTION_JSON" <<'PY'
+  import json, sys
+  p, key, value=sys.argv[1:]
+  options=json.load(open(p, encoding="utf-8"))
+  if key not in options: raise SystemExit("trial key is not an existing option")
+  options[key]=json.loads(value)
+  json.dump(options, open(p, "w", encoding="utf-8"), sort_keys=True)
+  PY
+  python3 -m json.tool "$LOG/private/options.trial.json" > /dev/null
+  python3 - "$LOG/private/options.trial.json" "$LOG/private/options-trial.request.json" <<'PY'
+  import json, sys
+  json.dump({"options":json.load(open(sys.argv[1], encoding="utf-8"))}, open(sys.argv[2], "w", encoding="utf-8"))
+  PY
+  chmod 600 "$LOG/private/"*.json
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-trial.request.json" "$API/options/validate" -o "$LOG/private/options-trial.validate.json"
+  if ! python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x=x.get("data",x); sys.exit(0 if x.get("valid") is True else 1)' "$LOG/private/options-trial.validate.json"; then echo 'options validation rejected; no trial POST was sent' >&2; exit 1; fi
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-trial.request.json" "$API/options" -o "$LOG/private/options-trial.post.json"
   ```
-
+  run終了後、保存したraw optionsを同じ`/options` endpointへ戻し、`/info`のraw `options`とprivate backupの完全一致を確認する。`/options/config`のvalidated値との比較で復元を判定しない。
+  ```sh
+  set -eu
+  python3 - "$LOG/private/options.restore.json" "$LOG/private/options-restore.request.json" <<'PY'
+  import json, sys
+  json.dump({"options":json.load(open(sys.argv[1], encoding="utf-8"))}, open(sys.argv[2], "w", encoding="utf-8"))
+  PY
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-restore.request.json" "$API/options" -o "$LOG/private/options-restore.post.json"
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" "$API/info" -o "$LOG/private/info.after.json"
+  python3 - "$LOG/private/info.after.json" "$LOG/private/options.after.json" <<'PY'
+  import json, sys
+  x=json.load(open(sys.argv[1], encoding="utf-8")); x=x.get("data", x)
+  json.dump(x.get("options"), open(sys.argv[2], "w", encoding="utf-8"), sort_keys=True)
+  PY
+  cmp "$LOG/private/options.restore.json" "$LOG/private/options.after.json"
+  ```
 
 
 optionsを適用した後と元値へ戻した後に、それぞれ別の認可済みHAOS CLI sessionから対象add-onだけを再起動する。HA Core/mirakcは再起動しない。
@@ -145,31 +171,47 @@ ADDON_SLUG='<target-addon-slug>'
 ha addons restart "$ADDON_SLUG"
 ```
 
-- **E03 Linux module/udev/group:** 対象fileを決め、存在状態、内容、権限、所有者、video group membershipをLOGへ保存する。適用・udev reload・rebootは個別に承認された場合だけ行う。restoreは各ファイルの元内容または「元は不在」を復元し、対象userの元supplementary groupsを戻す。module再bind等が必要なら承認なしに行わず未達にする。
+- **E03 Linux module/udev/group:**対象udev rule fileの元内容/不在状態、対象userのsupplementary groups、対象USB nodeのmode/UID/GIDを保存する。`DEVICE_NODE`と`TARGET_USB`は同一候補機器の実値に限定し、sysfs pathとVID/PIDが一致しない場合は何も適用せず停止する。rule再読込時のtriggerはそのsysfs device pathだけへ指定する。変更は別途承認された試験でのみ実施する。
   ```sh
   set -eu
   TEST_USER='<non-root-test-user>'; LOG='<private-run-log>'
+  DEVICE_NODE='/dev/bus/usb/BBB/AAA'; TARGET_USB='<selected-vid>:<selected-pid>'
   for f in /etc/modprobe.d/smsusb-blacklist.conf /etc/udev/rules.d/99-usb-access.rules; do
     n=$(basename "$f")
     if [ -e "$f" ]; then cp -a "$f" "$LOG/$n.before"; printf 'present\n' > "$LOG/$n.state"; else printf 'absent\n' > "$LOG/$n.state"; fi
   done
   id "$TEST_USER" > "$LOG/test-user.before.txt"; PRIMARY_GROUP=$(id -gn "$TEST_USER")
   id -nG "$TEST_USER" | python3 -c 'import sys; p=sys.argv[1]; print(",".join(g for g in sys.stdin.read().split() if g != p))' "$PRIMARY_GROUP" > "$LOG/groups.before.txt"
+  test -c "$DEVICE_NODE"
+  SYSFS_PATH=$(udevadm info --query=path --name="$DEVICE_NODE")
+  SYSFS_DEVICE="/sys$SYSFS_PATH"
+  test -f "$SYSFS_DEVICE/idVendor" -a -f "$SYSFS_DEVICE/idProduct"
+  ACTUAL_USB="$(cat "$SYSFS_DEVICE/idVendor"):$(cat "$SYSFS_DEVICE/idProduct")"
+  test "$(printf '%s' "$ACTUAL_USB" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$TARGET_USB" | tr '[:upper:]' '[:lower:]')"
+  stat -c '%a %u %g' "$DEVICE_NODE" > "$LOG/usb-node.before.txt"
+  printf '%s\n' "$SYSFS_PATH" > "$LOG/usb-sysfs-path.before.txt"
   # 承認済みrunでのみ適用する。対象driver ruleとgroupを確定してから実行:
   : "${BLACKLIST_MODULES:?set only the modules required by the selected product/model}"
-  : "${TARGET_USB:?set selected VID:PID}"
   : > /etc/modprobe.d/smsusb-blacklist.conf
   for module in $BLACKLIST_MODULES; do printf 'blacklist %s\n' "$module" >> /etc/modprobe.d/smsusb-blacklist.conf; done
   VID=${TARGET_USB%:*}; PID=${TARGET_USB#*:}
   printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", ATTR{idProduct}=="%s", MODE="0660", GROUP="video"\n' "$VID" "$PID" > /etc/udev/rules.d/99-usb-access.rules
-  udevadm control --reload-rules; udevadm trigger --subsystem-match=usb; usermod -aG video "$TEST_USER"
-  # 承認済み復元後にudev ruleを再読込する。既存driverのlive unbindはしない:
+  udevadm control --reload-rules; udevadm trigger --action=change "$SYSFS_DEVICE"; udevadm settle
+  usermod -aG video "$TEST_USER"
+  # 承認済み復元後、同じUSB nodeだけへ元ruleを再適用してnode mode/ownerも復元:
   for f in /etc/modprobe.d/smsusb-blacklist.conf /etc/udev/rules.d/99-usb-access.rules; do
     n=$(basename "$f")
     if [ "$(cat "$LOG/$n.state")" = present ]; then cp -a "$LOG/$n.before" "$f"; cmp "$LOG/$n.before" "$f"; else rm -f "$f"; test ! -e "$f"; fi
   done
-  # restore exact supplementary-group list using an authorized admin shell:
   udevadm control --reload-rules
+  test -c "$DEVICE_NODE"
+  test "$(udevadm info --query=path --name="$DEVICE_NODE")" = "$SYSFS_PATH"
+  test "$(cat "$SYSFS_DEVICE/idVendor"):$(cat "$SYSFS_DEVICE/idProduct")" = "$ACTUAL_USB"
+  udevadm trigger --action=change "$SYSFS_DEVICE"; udevadm settle
+  set -- $(cat "$LOG/usb-node.before.txt"); test "$#" -eq 3
+  chown "$2:$3" "$DEVICE_NODE"; chmod "$1" "$DEVICE_NODE"
+  stat -c '%a %u %g' "$DEVICE_NODE" > "$LOG/usb-node.after.txt"
+  cmp "$LOG/usb-node.before.txt" "$LOG/usb-node.after.txt"
   GROUPS_BEFORE=$(cat "$LOG/groups.before.txt")
   if [ -n "$GROUPS_BEFORE" ]; then usermod -G "$GROUPS_BEFORE" "$TEST_USER"; else usermod -G '' "$TEST_USER"; fi
   id "$TEST_USER" > "$LOG/test-user.after.txt"
@@ -178,17 +220,25 @@ ha addons restart "$ADDON_SLUG"
   cmp "$LOG/groups.before.txt" "$LOG/groups.after.txt"
   ```
 
-- **E07 Android stay-awake:** ADB shellの認可済みcontextで元値（nullを含む）を退避してから、明示された試験値だけを適用する。完了後、元値がnullならkeyを削除し、それ以外は元値を書戻して読戻す。権限不足なら変更せず停止する。
+- **E07 Android stay-awake:**初回ADB readが非0/空/不正値なら書込み前に停止する。`null`は未設定、十進整数は保存値として区別する。権限・readback失敗を無視しない。次は端末設定に触れないsynthetic確認用の状態遷移であり、実Androidへは実行しない。
   ```sh
-  adb shell settings get global stay_on_while_plugged_in > "$LOG/stay-awake.before.txt"
-  BEFORE=$(cat "$LOG/stay-awake.before.txt")
-  # 承認済み試験値を使う場合のみ。
-  TRIAL_VALUE='<approved-trial-value>'
-  adb shell settings put global stay_on_while_plugged_in "$TRIAL_VALUE"
-  # cleanup: Android settings getのnullを未設定として復元
+  set -eu
+  LOG='<private-run-log>'
+  if ! BEFORE=$(adb shell settings get global stay_on_while_plugged_in); then echo 'initial Android settings read failed; no write attempted' >&2; exit 1; fi
+  BEFORE=$(printf '%s' "$BEFORE" | tr -d '\r')
+  case "$BEFORE" in null) printf 'absent\n' > "$LOG/stay-awake.before-state.txt";; ''|*[!0-9]*) echo 'initial Android settings value is invalid; no write attempted' >&2; exit 1;; *) printf 'present\n' > "$LOG/stay-awake.before-state.txt";; esac
+  printf '%s\n' "$BEFORE" > "$LOG/stay-awake.before.txt"
+  : "${TRIAL_VALUE:?set an approved decimal test value}"
+  case "$TRIAL_VALUE" in ''|*[!0-9]*) echo 'trial value must be decimal' >&2; exit 2;; esac
+  if adb shell settings put global stay_on_while_plugged_in "$TRIAL_VALUE"; then TRIAL_RC=0; else TRIAL_RC=$?; fi
   if [ "$BEFORE" = null ]; then adb shell settings delete global stay_on_while_plugged_in; else adb shell settings put global stay_on_while_plugged_in "$BEFORE"; fi
-  adb shell settings get global stay_on_while_plugged_in > "$LOG/stay-awake.after.txt"
-  test "$(cat "$LOG/stay-awake.after.txt")" = "$BEFORE"
+  if ! AFTER=$(adb shell settings get global stay_on_while_plugged_in); then echo 'Android settings readback failed' >&2; exit 1; fi
+  AFTER=$(printf '%s' "$AFTER" | tr -d '\r')
+  case "$AFTER" in null) printf 'absent\n' > "$LOG/stay-awake.after-state.txt";; ''|*[!0-9]*) echo 'Android settings readback is invalid' >&2; exit 1;; *) printf 'present\n' > "$LOG/stay-awake.after-state.txt";; esac
+  printf '%s\n' "$AFTER" > "$LOG/stay-awake.after.txt"
+  cmp "$LOG/stay-awake.before-state.txt" "$LOG/stay-awake.after-state.txt"
+  cmp "$LOG/stay-awake.before.txt" "$LOG/stay-awake.after.txt"
+  test "$TRIAL_RC" -eq 0
   ```
 
 ## 共通試験シナリオ T00–T14
@@ -227,7 +277,7 @@ python3 -c 'import json,sys; m=json.load(open("manifest.json")); assert m.get("s
 FW="$D/firmware/asicen-loader.bin"
 if [ ! -f "$FW" ]; then printf '%s\n' 'canonical firmware missing from this candidate archive; archive supply unconfirmed' > "$LOG/firmware-supply.txt"; exit 3; fi
 test "$(wc -c < "$FW" | tr -d ' ')" = 16384
-printf '%s  %s\n' 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a "$FW" | sha256sum -c -
+  if command -v sha256sum >/dev/null 2>&1; then printf '%s  %s\n' 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a "$FW" | sha256sum -c -; else printf '%s  %s\n' 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a "$FW" | shasum -a 256 -c -; fi
 printf '%s\n' 'firmware/asicen-loader.bin 16384 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a load-address=0x55d6' > "$LOG/firmware-supply.txt"
 ```
 
@@ -236,9 +286,9 @@ Windows対象版は同runの`win-candidate` artifactを別に取得し、`Get-Fi
 ```powershell
 $ErrorActionPreference = 'Stop'
 $RunId = '<successful-candidate-run-id>'; $Version = '<candidate-version>'; $CandidateSourceSha = '<candidate-source-sha>'
-$Work = Join-Path $HOME "asicen-win-$RunId"; $Download = Join-Path $Work 'download'; $D = Join-Path $Work 'candidate'
+$Work = Join-Path $HOME "asicen-win-$RunId"; $Download = Join-Path $Work 'download'; $D = Join-Path $Work 'candidate'; $LOG = Join-Path $Work 'log'; $RT = Join-Path $Work 'runtime'
 if (Test-Path $Work) { throw "refusing to reuse $Work" }
-New-Item -ItemType Directory -Path $Download,$D,(Join-Path $Work 'log'),(Join-Path $Work 'runtime') | Out-Null
+New-Item -ItemType Directory -Path $Download,$D,$LOG,$RT | Out-Null
 gh run view $RunId --repo Khronos31/asicen-userland --json headSha,attempt,conclusion
 gh api "repos/Khronos31/asicen-userland/actions/runs/$RunId/artifacts" --jq '.artifacts[] | [.id,.name,.expired] | @tsv'
 gh run download $RunId --repo Khronos31/asicen-userland --name win-candidate --dir $Download
@@ -262,7 +312,9 @@ if (-not (Test-Path -LiteralPath $FW)) { 'canonical firmware missing; archive su
 $FirmwareHash = (Get-FileHash -LiteralPath $FW -Algorithm SHA256).Hash.ToLowerInvariant()
 if ((Get-Item -LiteralPath $FW).Length -ne 16384 -or $FirmwareHash -ne '5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a') { throw 'canonical candidate firmware mismatch' }
 'firmware/asicen-loader.bin 16384 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a load-address=0x55d6' | Set-Content (Join-Path $Work 'log\firmware-supply.txt')
-$LOG = Join-Path $Work 'log'; $RT = Join-Path $Work 'runtime'
+$D = (Resolve-Path -LiteralPath $D).Path
+$D | Set-Content (Join-Path $LOG 'candidate-dir.txt')
+Set-Location -LiteralPath $D
 ```
 
 job名/ID・head SHAとsource refが当該candidate一致しない場合、またはhash行がない場合は未達で停止する。sourceで確定したimageのcandidate archive供給確認は別項目であり、ここで確認済みにしない。
@@ -367,8 +419,9 @@ printf '%s' 'USB抜去完了後にEnter (300秒以内): '
 if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/idle-human-wait.txt"; exit 1; fi
 # 操作後の状態と実終了値を記録する。
 "$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" status > "$LOG/idle-removed.txt" 2>&1 || :
-kill -INT "$IDLE_PID"; if wait "$IDLE_PID"; then IDLE_RC=0; else IDLE_RC=$?; fi
+kill -INT "$IDLE_PID" 2>/dev/null || :; if wait "$IDLE_PID"; then IDLE_RC=0; else IDLE_RC=$?; fi
 printf '%s\n' "$IDLE_RC" > "$LOG/idle-daemon.rc"
+IDLE_PID=
 printf '%s' 'USB再接続完了後にEnter (300秒以内): '
 if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/reconnect-human-wait.txt"; exit 1; fi
 # 再列挙で新しいPORTを選んでから続ける。
@@ -384,9 +437,38 @@ if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-human-wait
 # 物理切断後、有限観測後にclientをwaitする。
 if wait "$CLIENT_PID"; then CLIENT_RC=0; else CLIENT_RC=$?; fi
 printf '%s\n' "$CLIENT_RC" > "$LOG/stream-client.rc"
+CLIENT_PID=
+if [ "$CLIENT_RC" -ne 7 ]; then
+  printf 'expected client exit 7, got %s\n' "$CLIENT_RC" > "$LOG/stream-client-expectation.txt"
+  if [ "$PRIMARY_RC" -eq 0 ]; then PRIMARY_RC=1; CURRENT_STEP=stream-client-exit; fi
+fi
 "$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-after-cut.txt" 2>&1 || :
-kill -INT "$STREAM_PID"; if wait "$STREAM_PID"; then STREAM_RC=0; else STREAM_RC=$?; fi
+kill -INT "$STREAM_PID" 2>/dev/null || :; if wait "$STREAM_PID"; then STREAM_RC=0; else STREAM_RC=$?; fi
 printf '%s\n' "$STREAM_RC" > "$LOG/stream-daemon.rc"
+STREAM_PID=
+printf '%s' '同じUSBを再接続完了後にEnter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-reconnect-human-wait.txt"; exit 1; fi
+"$D/asicend" --list-json > "$LOG/discovery-stream-reconnected.json"
+PORT='<new-listed-usb-port-for-the-same-physical-device>'; ID="usb:$PORT"; TOKEN='recovered'
+RT_RECOVERY="$WORK/runtime-recovery"; mkdir -m 700 "$RT_RECOVERY"
+"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_RECOVERY" > "$LOG/recovery-daemon.log" 2>&1 & RECOVERY_PID=$!
+printf '%s\n' "$RECOVERY_PID" > "$LOG/recovery-daemon.pid"
+READY=0
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  if "$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" status > "$LOG/recovery-ready.txt" 2>&1; then READY=1; break; fi
+  sleep 1
+done
+test "$READY" -eq 1
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" list > "$LOG/recovery-list.txt" 2>&1
+"$D/asicen-ts" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" --receiver '<listed-receiver>' --channel T27 --time 30 --output "$LOG/recovery.ts" > "$LOG/recovery.out" 2> "$LOG/recovery.err" & RECOVERY_CLIENT_PID=$!
+if wait "$RECOVERY_CLIENT_PID"; then RECOVERY_CLIENT_RC=0; else RECOVERY_CLIENT_RC=$?; fi
+printf '%s\n' "$RECOVERY_CLIENT_RC" > "$LOG/recovery-client.rc"
+RECOVERY_CLIENT_PID=
+test "$RECOVERY_CLIENT_RC" -eq 0
+python3 "$TOOL/ts-check.py" "$LOG/recovery.ts" > "$LOG/recovery-ts-check.json"
+kill -INT "$RECOVERY_PID" 2>/dev/null || :; if wait "$RECOVERY_PID"; then RECOVERY_RC=0; else RECOVERY_RC=$?; fi
+printf '%s\n' "$RECOVERY_RC" > "$LOG/recovery-daemon.rc"
+RECOVERY_PID=
 ```
 
 stream clientの期待値はUSB切断診断とexit 7であり、時間満了exit 0は不合格。idleでdaemonが生存する場合は状態/診断を残してからowned daemonを通常停止する。物理復帰後の新daemonで再列挙・ready・短TS成功を別の新runtimeで記録する。物理操作待ちが上限を超える場合は未完了として停止し、切断・再取得成功に読み替えない。
@@ -415,10 +497,10 @@ test ! -s "$LOG/processes-after-stop.txt"; test ! -s "$LOG/ipc-remnants.txt"
 
 ### T09 helperの固定取得
 
-候補sourceとは独立した共通runbook helperを、Siano runbookのimmutable commit `a61e185ac3ae8a9c03b1efcd261bcef7d1a2043e`から取得する。candidate checkout/archive内のhelper有無に依存しない。POSIX/Termuxでは次を一度実行し、以後の全captureで`$TOOL/ts-check.py`を使う。
+候補sourceとは独立した共通runbook helperを、Siano runbookのimmutable commit `4fa86d0a51253bc0da99178f63a46e5dfbd927d0`から取得する。candidate checkout/archive内のhelper有無に依存しない。POSIX/Termuxでは次を一度実行し、以後の全captureで`$TOOL/ts-check.py`を使う。
 
 ```sh
-RUNBOOK_REF='a61e185ac3ae8a9c03b1efcd261bcef7d1a2043e'; HELPER_SHA256='fabe54eeb1188db4faf5ba6cbf81d8552b3386f73f58b3dd7a42641e23ac076d'
+RUNBOOK_REF='4fa86d0a51253bc0da99178f63a46e5dfbd927d0'; HELPER_SHA256='3224747ccf74d752fd70e0fd5599418cfa20d6d4bfafc8e8220a002c1dcbcffd'
 TOOL="$WORK/tooling"; mkdir -m 700 -p "$TOOL"
 gh api -H 'Accept: application/vnd.github.raw' "repos/Khronos31/siano-userland/contents/docs/release-validation/ts-check.py?ref=$RUNBOOK_REF" > "$TOOL/ts-check.py"
 if command -v sha256sum >/dev/null 2>&1; then printf '%s  %s\n' "$HELPER_SHA256" "$TOOL/ts-check.py" | sha256sum -c -; else printf '%s  %s\n' "$HELPER_SHA256" "$TOOL/ts-check.py" | shasum -a 256 -c -; fi
@@ -428,7 +510,7 @@ printf '%s\n' "$RUNBOOK_REF $HELPER_SHA256" > "$LOG/ts-helper-version.txt"
 Windows PowerShell 5.1でも同じ固定版を新しいtooling directoryへ取得し、hash一致後にのみ使う。
 
 ```powershell
-$RunbookRef = 'a61e185ac3ae8a9c03b1efcd261bcef7d1a2043e'; $HelperSha256 = 'fabe54eeb1188db4faf5ba6cbf81d8552b3386f73f58b3dd7a42641e23ac076d'
+$RunbookRef = '4fa86d0a51253bc0da99178f63a46e5dfbd927d0'; $HelperSha256 = '3224747ccf74d752fd70e0fd5599418cfa20d6d4bfafc8e8220a002c1dcbcffd'
 $Tool = Join-Path $Work 'tooling'; New-Item -ItemType Directory -Path $Tool | Out-Null
 $Helper = Join-Path $Tool 'ts-check.py'
 Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Khronos31/siano-userland/$RunbookRef/docs/release-validation/ts-check.py" -OutFile $Helper
@@ -444,9 +526,9 @@ helperのversionはrunbook Git commitとSHA-256の組で固定する。candidate
 - **適用対象/頻度:** 全capture/soak。
 - **準備:** Python 3.11以上を`python3 --version`で確認し、固定取得した`$TOOL/ts-check.py`（Windowsは`$Helper`）を使う。候補ごとに新規作成した`$LOG`を使う。
 - **実操作/利用者への依頼:** POSIXでは各TSに`python3 $TOOL/ts-check.py "$LOG/<receiver>.ts" > "$LOG/<receiver>.ts-check.json"`を実行する。Windowsは同じhelperを`python $Helper "$LOG\<receiver>.ts"`で実行し、標準出力を`$LOG`へ保存する。全capture/soakの各TSで実行し、候補daemonのdrop/USB counterも記録する。
-- **期待値/終了値:** 全TSが製品SPEC基準を満たし通常取得exit 0。非空file/counter 0だけでpassにしない。
+- **期待値/終了値:** null PIDはcontinuity判定から除外する。同一PIDの隣接payload duplicate pairはPCR timestamp以外の全byte一致時だけ1組を許容し、duplicate indexをJSONへ記録する。3個目、内容差、非連続再送はcontinuity error。PCR reserved bits/extension違反とinvalid adaptationはfail。全TSが製品SPEC基準を満たし通常取得exit 0。非空file/counter 0だけでpassにしない。
 - **停止/cleanup:** 元TS/hash/logを残してT08 cleanup。
-- **記録:** `python3 --version`、helperのGit SHA、TS hash、helperのJSON/終了値、sync/TEI/continuity/drop/counter、client exit。
+- **記録:** `python3 --version`、helperのGit SHA/hash、TS hash、helperのJSON/終了値、duplicate/null/invalid packet index、sync/TEI/continuity/drop/counter、client exit。
 
 Windowsで各TSを確認するcommand:
 
@@ -462,7 +544,7 @@ if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
 
 - **適用対象/頻度:** 対応OS/APIのみ。非対応製品は理由付きN/A。
 - **準備:** native OS adapter/consumerとcandidate IFD/DLL pathを用意。
-- **実操作/利用者への依頼:** Linux Appendix Aのisolated pcsc-liteでpcsc_scan -r/-cと既存bcas-safe-probe。macOSはE04 [native PC/SC](#e04-macos-native-pcsc)でcandidate bundle/reader template、Homebrew pcsc-lite、reader指定SCard consumerを実行する。Windowsは既存native transaction consumerがある場合のみ。
+- **実操作/利用者への依頼:** Linux Appendix Aのisolated pcsc-liteでpcsc_scan -r/-cと既存bcas-safe-probe。macOS E04 native PC/SCはApple PCSC.frameworkを使ってcandidate bundle/reader template、reader指定SCard consumerを確認する。Homebrew pcsc-lite recipeは任意の別stack確認であり必須前提ではない。Windowsは既存native transaction consumerがある場合のみ。
 - **期待値/終了値:** CLI CARD/CI smokeをnative transaction合格にしない。実consumer/adapter/path/exitが必要。
 - **停止/cleanup:** consumer/isolated pcscd通常停止。system PCSC serviceを変更しない。
 - **記録:** OS/ABI、module/DLL absolute path、consumer、reader/card、operation/exit。
@@ -728,7 +810,7 @@ AndroidにはIFDがない。
 
 #### E04 macOS native PC/SC
 
-T10のnative consumerは以下を今回candidateごとに実施する。過去E04 recordは環境例であり、今回candidate合格へ流用しない。T00で固定した`release-candidate` runから配布archiveとmanifestを取得する。
+T10のnative consumerはApple PCSC.frameworkを使って今回candidateごとに実施する。reader列挙だけでは合格にせず、接続、ATR、card operationまで確認する。以下のHomebrew `pcsc-lite`手順は任意の隔離alternate stackであり、標準経路の前提ではない。T00で固定した`release-candidate` runから配布archiveとmanifestを取得する。
 
 ```sh
 set -eu
@@ -936,27 +1018,45 @@ USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream client
 Windows x86_64は回帰対象である。通常release aggregateにWindows ZIPがない場合は同じcandidate source runの`win-candidate` artifactを展開し、hash/manifest/provenanceを照合する。native Windows hostでUSB driverを自動変更せず、既に許可済みのlibusb access pathを記録する。実時間は共通頻度表に従い、初回/majorの30分連続受信は全無料channel取得とは別に記録する。
 
 ```powershell
-$D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$FW = Join-Path $D 'firmware\asicen-loader.bin'
 $RT = 'C:\asicen-rc-<run-id>'
 if (Test-Path $RT) { throw "refusing to reuse existing runtime path: $RT" }
 New-Item -ItemType Directory -Path $RT | Out-Null
-$LOG = 'C:\asicen-e17-<run-id>-logs'
-if (Test-Path $LOG) { throw "refusing to reuse existing log path: $LOG" }
-New-Item -ItemType Directory -Path $LOG | Out-Null
-& $D --list-json
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+& (Join-Path $D 'asicend.exe') --list-json
 $selector = 'usb:BUS-PORT[,BUS-PORT]'
-& $D --device $selector --instance rc --firmware $FW --runtime-dir $RT
+& (Join-Path $D 'asicend.exe') --device $selector --instance rc --firmware $FW --runtime-dir $RT
 ```
 
 daemonはこのPowerShellで維持し、別のPowerShellを同じcandidate directoryで開いて同一instance/runtimeから照会・受信する。
 
 ```powershell
-$D = (Resolve-Path .\asicend.exe).Path
-$C = (Resolve-Path .\asicenctl.exe).Path
-$B = (Resolve-Path .\asicen-ts.exe).Path
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$C = Join-Path $D 'asicenctl.exe'
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$B = Join-Path $D 'asicen-ts.exe'
 $RT = 'C:\asicen-rc-<run-id>'
-$LOG = 'C:\asicen-e17-<run-id>-logs'
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
 & $C --instance rc --runtime-dir $RT status
 & $C --instance rc --runtime-dir $RT list
 $capture = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver','<ID>','--channel','T27','--time','30','--output',(Join-Path $PWD 't27.ts')) -PassThru -NoNewWindow -Wait
@@ -967,25 +1067,165 @@ Get-FileHash -Algorithm SHA256 .\t27.ts
 T07はdaemonを維持したままclientなしの状態でUSBを抜くidle runと、有限受信中のstream runを別々に行う。抜去を依頼する前にstatus/listとdaemon PIDを記録し、依頼から最大5分待つ。stream runでは`--time`を観測窓より長くしたclientを起動し、観測窓内の抜去終了を確認する。窓内に自然終了しない場合はtimeout未達として記録し、有限`--time`の終了まで待って実終了値を保存する。指定時間満了exit 0は切断合格ではない。抜去後にdaemonを通常停止し、再接続後は`--list-json`で同じUSB pathを確認して新しいruntimeで起動し、status/listと30秒受信を再実行する。T08のPID/終了値/process確認をこのWindows手順にも適用する。
 
 ```powershell
-$B = (Resolve-Path .\asicen-ts.exe).Path
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$B = Join-Path $D 'asicen-ts.exe'
 $RT = 'C:\asicen-rc-<run-id>'
-$LOG = 'C:\asicen-e17-<run-id>-logs'
 $R1 = '<receiver-1>'
-$CAPTURE_SECONDS = '<finite-capture-duration-seconds-from-release-matrix>'
 $OBSERVATION_LIMIT_SECONDS = '<finite-cut-observation-window-seconds>'
-$client = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver',$R1,'--channel','T27','--time',$CAPTURE_SECONDS,'--output',(Join-Path $LOG 'usb-cut.ts')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $LOG 'usb-cut.out') -RedirectStandardError (Join-Path $LOG 'usb-cut.err')
-if (-not $client.WaitForExit([int]$OBSERVATION_LIMIT_SECONDS * 1000)) { 'timeout: capture still active at observation limit' | Out-File (Join-Path $LOG 'usb-cut-observation.txt'); $client.WaitForExit() }
-$client.Refresh(); $client.ExitCode | Out-File (Join-Path $LOG 'usb-cut.rc')
+$CAPTURE_SECONDS = '<capture-duration-longer-than-observation-window>'
+$RT_IDLE = Join-Path $Work 'runtime-t07-idle'
+$RT_STREAM = Join-Path $Work 'runtime-t07-stream'
+$RT_RECOVERY = Join-Path $Work 'runtime-t07-recovery'
+foreach ($path in @($RT_IDLE,$RT_STREAM,$RT_RECOVERY)) { if (Test-Path $path) { throw "refusing to reuse runtime path: $path" } }
+New-Item -ItemType Directory -Path $RT_IDLE,$RT_STREAM,$RT_RECOVERY | Out-Null
+$DAEMON = Join-Path $D 'asicend.exe'; $CTL = Join-Path $D 'asicenctl.exe'
+$TOKEN = 't07-idle'; $IDLE_PORT = '<listed-usb-port>'
+& $DAEMON --list-json | Set-Content (Join-Path $LOG 't07-idle-discovery.json')
+function Wait-UsbAction([string]$message) {
+  if ([Console]::IsInputRedirected) { throw 'USB action requires an interactive PowerShell console.' }
+  Write-Host "$message 完了後Enter (最大300秒): " -NoNewline
+  $deadline = [DateTime]::UtcNow.AddSeconds(300)
+  while ([DateTime]::UtcNow -lt $deadline) { if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq [ConsoleKey]::Enter) { Write-Host; return }; Start-Sleep -Milliseconds 250 }
+  throw 'USB action was not confirmed within 300 seconds; record the gate as incomplete.'
+}
+```
+
+各PowerShell consoleでT00の`candidate-dir.txt`から`$D`を読み直し、`$FW = Join-Path $D 'firmware\asicen-loader.bin'`とrun固有の`$LOG`を設定する。idle runではdaemon commandを専用consoleでforeground実行する。clientを起動せずdaemonがUSBを保持した状態で、別consoleから抜去依頼・status/list・再接続後の列挙を記録する。抜去応答後、daemon consoleでCtrl+Cし、直後に`$LASTEXITCODE`を保存する。
+
+```powershell
+$RunId = '<same-candidate-run-id-as-T00>'; $Work = Join-Path $HOME "asicen-win-$RunId"; $LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $FW = Join-Path $D 'firmware\asicen-loader.bin'
+$DAEMON = Join-Path $D 'asicend.exe'; $RT_IDLE = Join-Path $Work 'runtime-t07-idle'; $TOKEN = 't07-idle'; $IDLE_PORT = '<listed-usb-port>'
+& $DAEMON --device "usb:$IDLE_PORT" --instance $TOKEN --firmware $FW --runtime-dir $RT_IDLE
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-idle-daemon.rc')
+```
+
+```powershell
+$RunId = '<same-candidate-run-id-as-T00>'; $Work = Join-Path $HOME "asicen-win-$RunId"; $LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $RT_IDLE = Join-Path $Work 'runtime-t07-idle'; $TOKEN = 't07-idle'
+$CTL = Join-Path $D 'asicenctl.exe'
+& $CTL --instance $TOKEN --runtime-dir $RT_IDLE status 2>&1 | Tee-Object (Join-Path $LOG 't07-idle-before-status.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-idle-before-status.rc')
+& $CTL --instance $TOKEN --runtime-dir $RT_IDLE list 2>&1 | Tee-Object (Join-Path $LOG 't07-idle-before-list.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-idle-before-list.rc')
+$idleProcess = @(Get-CimInstance Win32_Process -Filter "Name='asicend.exe'" | Where-Object { $_.ExecutablePath -eq (Join-Path $D 'asicend.exe') -and $_.CommandLine -match ("--instance\s+" + [regex]::Escape($TOKEN) + '(\s|$)') })
+if ($idleProcess.Count -ne 1) { throw 'could not identify exactly one owned idle daemon PID' }
+$idleProcess.ProcessId | Set-Content (Join-Path $LOG 't07-idle-daemon.pid')
+Wait-UsbAction 'idle daemonがUSBを保持中に抜去'
+& $CTL --instance $TOKEN --runtime-dir $RT_IDLE status 2>&1 | Tee-Object (Join-Path $LOG 't07-idle-after-status.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-idle-after-status.rc')
+Wait-UsbAction '抜去状態を記録後、daemon consoleでCtrl+Cして通常停止'
+```
+
+```powershell
+Wait-UsbAction 'daemon通常停止後、同じ機器を再接続'
+& $DAEMON --list-json | Set-Content (Join-Path $LOG 't07-idle-reconnected-discovery.json')
+```
+
+stream runは新runtimeでdaemon consoleを再度foreground起動し、別consoleでstatus/listを保存してから有限clientを起動する。USB切断後は窓内終了の有無と実終了値を保存し、daemon consoleで通常停止する。
+
+```powershell
+$RunId = '<same-candidate-run-id-as-T00>'; $Work = Join-Path $HOME "asicen-win-$RunId"; $LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $FW = Join-Path $D 'firmware\asicen-loader.bin'
+$DAEMON = Join-Path $D 'asicend.exe'; $RT_STREAM = Join-Path $Work 'runtime-t07-stream'
+$TOKEN = 't07-stream'; $STREAM_PORT = '<re-enumerated-usb-port>'
+& $DAEMON --device "usb:$STREAM_PORT" --instance $TOKEN --firmware $FW --runtime-dir $RT_STREAM
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-stream-daemon.rc')
+```
+
+```powershell
+$RunId = '<same-candidate-run-id-as-T00>'; $Work = Join-Path $HOME "asicen-win-$RunId"; $LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $RT_STREAM = Join-Path $Work 'runtime-t07-stream'
+$CTL = Join-Path $D 'asicenctl.exe'; $B = Join-Path $D 'asicen-ts.exe'; $TOKEN = 't07-stream'
+$R1 = '<receiver-1>'; $CAPTURE_SECONDS = '<capture-duration-longer-than-observation-window>'; $OBSERVATION_LIMIT_SECONDS = '<finite-cut-observation-window-seconds>'
+function Wait-UsbAction([string]$message) {
+  if ([Console]::IsInputRedirected) { throw 'USB action requires an interactive PowerShell console.' }
+  Write-Host "$message 完了後Enter (最大300秒): " -NoNewline
+  $deadline = [DateTime]::UtcNow.AddSeconds(300)
+  while ([DateTime]::UtcNow -lt $deadline) { if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq [ConsoleKey]::Enter) { Write-Host; return }; Start-Sleep -Milliseconds 250 }
+  throw 'USB action was not confirmed within 300 seconds; record the gate as incomplete.'
+}
+& $CTL --instance $TOKEN --runtime-dir $RT_STREAM status 2>&1 | Tee-Object (Join-Path $LOG 't07-stream-before-status.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-stream-before-status.rc')
+& $CTL --instance $TOKEN --runtime-dir $RT_STREAM list 2>&1 | Tee-Object (Join-Path $LOG 't07-stream-before-list.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-stream-before-list.rc')
+$streamProcess = @(Get-CimInstance Win32_Process -Filter "Name='asicend.exe'" | Where-Object { $_.ExecutablePath -eq (Join-Path $D 'asicend.exe') -and $_.CommandLine -match ("--instance\s+" + [regex]::Escape($TOKEN) + '(\s|$)') })
+if ($streamProcess.Count -ne 1) { throw 'could not identify exactly one owned stream daemon PID' }
+$streamProcess.ProcessId | Set-Content (Join-Path $LOG 't07-stream-daemon.pid')
+$client = Start-Process -FilePath $B -ArgumentList @('--instance',$TOKEN,'--runtime-dir',$RT_STREAM,'--receiver',$R1,'--channel','T27','--time',$CAPTURE_SECONDS,'--output',(Join-Path $LOG 't07-stream-cut.ts')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $LOG 't07-stream-cut.out') -RedirectStandardError (Join-Path $LOG 't07-stream-cut.err')
+$client.Id | Set-Content (Join-Path $LOG 't07-stream-client.pid')
+Wait-UsbAction '受信中にUSBを抜去'
+if (-not $client.WaitForExit([int]$OBSERVATION_LIMIT_SECONDS * 1000)) { 'not exited inside observation window' | Set-Content (Join-Path $LOG 't07-stream-observation.txt'); $client.WaitForExit() } else { 'exited inside observation window' | Set-Content (Join-Path $LOG 't07-stream-observation.txt') }
+$client.Refresh(); $client.ExitCode | Set-Content (Join-Path $LOG 't07-stream-client.rc')
+& $CTL --instance $TOKEN --runtime-dir $RT_STREAM status 2>&1 | Tee-Object (Join-Path $LOG 't07-stream-after-cut-status.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-stream-after-cut-status.rc')
+if ($client.ExitCode -ne 7) { throw "stream USB-cut exit was $($client.ExitCode), expected 7" }
+Wait-UsbAction 'stream切断記録後、daemon consoleでCtrl+Cして通常停止'
+```
+
+再接続後は同じ物理機器の新pathをlist-jsonで識別し、さらに新しいruntime/instanceでdaemonを起動する。status/list、30秒capture、TS helper、各client/daemon終了値を保存して通常停止する。
+
+```powershell
+$RunId = '<same-candidate-run-id-as-T00>'; $Work = Join-Path $HOME "asicen-win-$RunId"; $LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $FW = Join-Path $D 'firmware\asicen-loader.bin'
+$DAEMON = Join-Path $D 'asicend.exe'; $RT_RECOVERY = Join-Path $Work 'runtime-t07-recovery'
+function Wait-UsbAction([string]$message) {
+  if ([Console]::IsInputRedirected) { throw 'USB action requires an interactive PowerShell console.' }
+  Write-Host "$message 完了後Enter (最大300秒): " -NoNewline
+  $deadline = [DateTime]::UtcNow.AddSeconds(300)
+  while ([DateTime]::UtcNow -lt $deadline) { if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq [ConsoleKey]::Enter) { Write-Host; return }; Start-Sleep -Milliseconds 250 }
+  throw 'USB action was not confirmed within 300 seconds; record the gate as incomplete.'
+}
+Wait-UsbAction 'stream daemon通常停止後、同じ機器を再接続'
+$RECOVERY_DISCOVERY = Join-Path $LOG 't07-recovery-discovery.json'
+& $DAEMON --list-json | Set-Content $RECOVERY_DISCOVERY
+$RECOVERY_PORT = '<same-physical-device-re-enumerated-port>'; $RECOVERY_TOKEN = 't07-recovery'
+& $DAEMON --device "usb:$RECOVERY_PORT" --instance $RECOVERY_TOKEN --firmware $FW --runtime-dir $RT_RECOVERY
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-recovery-daemon.rc')
+```
+
+```powershell
+$RunId = '<same-candidate-run-id-as-T00>'; $Work = Join-Path $HOME "asicen-win-$RunId"; $LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $RT_RECOVERY = Join-Path $Work 'runtime-t07-recovery'
+$CTL = Join-Path $D 'asicenctl.exe'; $B = Join-Path $D 'asicen-ts.exe'; $RECOVERY_TOKEN = 't07-recovery'; $R1 = '<receiver-1>'
+& $CTL --instance $RECOVERY_TOKEN --runtime-dir $RT_RECOVERY status 2>&1 | Tee-Object (Join-Path $LOG 't07-recovery-status.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-recovery-status.rc')
+& $CTL --instance $RECOVERY_TOKEN --runtime-dir $RT_RECOVERY list 2>&1 | Tee-Object (Join-Path $LOG 't07-recovery-list.txt')
+$LASTEXITCODE | Set-Content (Join-Path $LOG 't07-recovery-list.rc')
+$recovery = Start-Process -FilePath $B -ArgumentList @('--instance',$RECOVERY_TOKEN,'--runtime-dir',$RT_RECOVERY,'--receiver',$R1,'--channel','T27','--time','30','--output',(Join-Path $LOG 't07-recovery.ts')) -PassThru -NoNewWindow -Wait
+$recovery.ExitCode | Set-Content (Join-Path $LOG 't07-recovery-client.rc')
+Get-FileHash -Algorithm SHA256 (Join-Path $LOG 't07-recovery.ts') | Set-Content (Join-Path $LOG 't07-recovery-ts.sha256')
+```
+
+再接続daemon consoleでCtrl+C後、`$LASTEXITCODE`を`t07-recovery-daemon.rc`へ保存する。各consoleのプロセス照合は候補exeのabsolute pathとinstance引数の両方が一意に一致した場合だけPIDを保存し、0件/複数件では推測しない。
 ```
 
 WindowsではT03–T06も候補directoryの3 executableで行う。T03はW3U2/W3U3の公開最低要求である4 receiverを別TSへ同時起動し、他機種は公開receiver数を全て同時起動する。T04は現地channel planの各無料channelを個別に有限受信する。T05は受信中に別consoleからstatus/listと対応CARD controlを実行する。T06はdaemonを維持したまま利用者に物理挿抜を依頼し、status/ATR/reset/APDUを各段階で保存する。
 
 ```powershell
-$D = (Resolve-Path .\asicend.exe).Path
-$C = (Resolve-Path .\asicenctl.exe).Path
-$B = (Resolve-Path .\asicen-ts.exe).Path
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$C = Join-Path $D 'asicenctl.exe'
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$B = Join-Path $D 'asicen-ts.exe'
 $RT = 'C:\asicen-rc-<run-id>'
-$LOG = 'C:\asicen-e17-<run-id>-logs'
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
 $R1 = '<receiver-1>'; $R2 = '<receiver-2>'; $R3 = '<receiver-3>'; $R4 = '<receiver-4>'
 $CHANNEL_PLAN = @('<free-channel-1>','<free-channel-2>')
 $CAPTURE_SECONDS = '30'
@@ -1041,28 +1281,42 @@ T08ではclientごとの`ExitCode`保存後にdaemon consoleでCtrl+Cを入力�
 T12では別consoleごとに次のdaemon commandを使い、各consoleでCtrl+C後の終了値を記録する。
 
 ```powershell
-$D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$FW = Join-Path $D 'firmware\asicen-loader.bin'
 $RTA = 'C:\asicen-e17-<run-id>-a'; $RTB = 'C:\asicen-e17-<run-id>-b'
 New-Item -ItemType Directory -Path $RTA, $RTB | Out-Null
-$LOG = 'C:\asicen-e17-<run-id>-logs'
-& $D --device 'usb:<PORT_A>' --instance a --firmware $FW --runtime-dir $RTA
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+& (Join-Path $D 'asicend.exe') --device 'usb:<PORT_A>' --instance a --firmware $FW --runtime-dir $RTA
 ```
 
 別console Bでdaemonを起動する。
 
 ```powershell
-$D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$FW = Join-Path $D 'firmware\asicen-loader.bin'
 $RTB = 'C:\asicen-e17-<run-id>-b'
-& $D --device 'usb:<PORT_B>' --instance b --firmware $FW --runtime-dir $RTB
+& (Join-Path $D 'asicend.exe') --device 'usb:<PORT_B>' --instance b --firmware $FW --runtime-dir $RTB
 ```
 
 両daemonがreadyになったら、3つ目のclient consoleから同じcandidateのclientを同時起動し、A抜去中もBのcaptureを続ける。各clientの実終了値を保存してから両daemonを通常停止し、client/endpoint cleanupを記録する。
 
 ```powershell
-$B = (Resolve-Path .\asicen-ts.exe).Path
-$LOG = 'C:\asicen-e17-<run-id>-logs'
+$B = Join-Path $D 'asicen-ts.exe'
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
 $SA = '<finite-seconds-from-release-matrix>'; $SB = '<finite-seconds-from-release-matrix>'
 $clientA = Start-Process -FilePath $B -ArgumentList @('--instance','a','--runtime-dir','C:\asicen-e17-<run-id>-a','--receiver','<receiver-a>','--channel','T27','--time',$SA,'--output',(Join-Path $LOG 'a.ts')) -PassThru -NoNewWindow
 $clientB = Start-Process -FilePath $B -ArgumentList @('--instance','b','--runtime-dir','C:\asicen-e17-<run-id>-b','--receiver','<receiver-b>','--channel','T27','--time',$SB,'--output',(Join-Path $LOG 'b.ts')) -PassThru -NoNewWindow
@@ -1071,7 +1325,7 @@ $clientB = Start-Process -FilePath $B -ArgumentList @('--instance','b','--runtim
 別consoleで両instanceのstatus/listを保存してstreamingを確認し、A側deviceを抜去する。A/Bの実終了値を個別に保存する。
 
 ```powershell
-$C = (Resolve-Path .\asicenctl.exe).Path
+$C = Join-Path $D 'asicenctl.exe'
 & $C --instance a --runtime-dir 'C:\asicen-e17-<run-id>-a' status 2>&1 | Tee-Object (Join-Path $LOG 'status-a.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'status-a.rc')
 & $C --instance a --runtime-dir 'C:\asicen-e17-<run-id>-a' list 2>&1 | Tee-Object (Join-Path $LOG 'list-a.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'list-a.rc')
 & $C --instance b --runtime-dir 'C:\asicen-e17-<run-id>-b' status 2>&1 | Tee-Object (Join-Path $LOG 'status-b.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'status-b.rc')
@@ -1153,14 +1407,19 @@ asicen-termux --usb-device "$primary_runtime" --usb-device "$sibling_runtime" --
 `win-candidate`の`WinSCard.dll`はconsumerと同じdirectoryに置く。候補はCI専用で正式配布archiveの代替ではない。最初のPowerShell consoleで専用runtimeを作り、daemonを前景起動する。probeは2つ目のconsoleから実行し、Coreの既存APIを呼ぶ。Coreが選ぶASICEN reader名は`DTV userland (asicen:rc/reader-0)`である。DLL load/export smokeやoffline fixtureは実機transactionの証明ではない。
 
 ```powershell
-$D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
+$RunId = '<same-candidate-run-id-as-T00>'
+$Work = Join-Path $HOME "asicen-win-$RunId"
+$LOG = Join-Path $Work 'log'
+$D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim()
+if (-not (Test-Path (Join-Path $D 'asicend.exe'))) { throw 'saved candidate directory is invalid' }
+Set-Location -LiteralPath $D
+$FW = Join-Path $D 'firmware\asicen-loader.bin'
 $RT = 'C:\asicen-e17-<run-id>'
 if (Test-Path $RT) { throw "refusing to reuse existing runtime path: $RT" }
 New-Item -ItemType Directory -Path $RT | Out-Null
 $env:DTV_USERLAND_RUNTIME_DIR = $RT
 $selector = 'usb:BUS-PORT[,BUS-PORT]'
-& $D --device $selector --instance rc --firmware $FW --runtime-dir $RT
+& (Join-Path $D 'asicend.exe') --device $selector --instance rc --firmware $FW --runtime-dir $RT
 ```
 
 このconsoleはprobe cleanupまで開いたままにする。
