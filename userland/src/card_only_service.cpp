@@ -95,16 +95,37 @@ void print_listener_diagnostic(
             "asicend endpoint: runtime namespace security check failed; the configured runtime and its product/version/instance directories must satisfy the current-user ownership and private access checks\n");
         return;
     }
+    const char* directory = "runtime directory";
+    switch (diagnostic.directory_layer) {
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::runtime_root:
+        directory = "runtime root";
+        break;
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::product:
+        directory = "product directory";
+        break;
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::version:
+        directory = "version directory";
+        break;
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::instance:
+        directory = "instance directory";
+        break;
+    }
     if (diagnostic.reason == Reason::runtime_directory_missing)
-        std::fprintf(stderr, "asicend endpoint: runtime directory does not exist\n");
+        std::fprintf(stderr, "asicend endpoint: %s does not exist\n", directory);
     else if (diagnostic.reason == Reason::runtime_directory_lookup)
-        std::fprintf(stderr, "asicend endpoint: runtime directory lookup failed; check path traversal access\n");
+        std::fprintf(stderr, "asicend endpoint: %s lookup failed; check path traversal access\n",
+                     directory);
     else if (diagnostic.reason == Reason::runtime_directory_type)
-        std::fprintf(stderr, "asicend endpoint: runtime directory type check failed; the runtime path must be a real directory, not a symlink\n");
+        std::fprintf(stderr, "asicend endpoint: %s type check failed; it must be a real directory, not a symlink\n",
+                     directory);
     else if (diagnostic.reason == Reason::runtime_directory_owner)
-        std::fprintf(stderr, "asicend endpoint: runtime directory owner check failed; it must be owned by the current user\n");
+        std::fprintf(stderr, "asicend endpoint: %s owner check failed; it must be owned by the current user\n",
+                     directory);
     else if (diagnostic.reason == Reason::runtime_directory_mode)
-        std::fprintf(stderr, "asicend endpoint: runtime directory mode check failed; private runtime directories must not grant group or other access\n");
+        std::fprintf(stderr, "asicend endpoint: %s mode check failed; private runtime directories must not grant group or other access\n",
+                     directory);
+    else if (diagnostic.reason == Reason::runtime_directory_encoding)
+        std::fprintf(stderr, "asicend endpoint: --runtime-dir must be valid UTF-8 on Windows\n");
 }
 
 int core_exit_status(dtv::userland::Error error) noexcept
