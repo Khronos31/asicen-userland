@@ -269,7 +269,10 @@ ha addons restart "$ADDON_SLUG"
 ```sh
 set -eu
 gh run list --repo Khronos31/asicen-userland --workflow build_userland.yml --limit 20
-RUN_ID='<successful-candidate-run-id>'; TARGET='<linux-glibc-x86_64|linux-musl-x86_64|linux-glibc-aarch64|linux-musl-aarch64|darwin-arm64|android-aarch64|android-armv7a|android-x86_64>'
+: "${RUN_ID:?export the exact successful candidate run ID from the version record}"
+: "${TARGET:?export the target archive name from the version matrix}"
+case "$RUN_ID" in ''|*[!0-9]*) echo 'RUN_ID must be a decimal workflow run ID' >&2; exit 2 ;; esac
+case "$TARGET" in linux-glibc-x86_64|linux-musl-x86_64|linux-glibc-aarch64|linux-musl-aarch64|darwin-arm64|android-aarch64|android-armv7a|android-x86_64) ;; *) echo 'TARGET is not a published POSIX archive target' >&2; exit 2 ;; esac
 RUN_JSON=$(gh run view "$RUN_ID" --repo Khronos31/asicen-userland --json headSha,attempt,conclusion)
 SOURCE_SHA=$(printf '%s\n' "$RUN_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["headSha"])')
 printf '%s\n' "$RUN_JSON" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["conclusion"] == "success" and r["headSha"] and r["attempt"] > 0'
@@ -375,16 +378,24 @@ job名/ID・head SHAとsource refが当該candidate一致しない場合、ま�
 - **準備:** 各公開receiver/deviceを一意に割り当て、各clientに別TS出力/ログを用意する。`CAPTURE_SECONDS`には正の有限秒数（例: `10`）を明示設定して記録する。
 - **実操作/利用者への依頼:** asicenctl --instance rc --runtime-dir "$RT" listで一意なR1–R4を選ぶ。次の4 clientを同時起動し各PIDを個別waitする。衛星channel/receiverはREADMEと現地割当へ置換する。
 
-    D='<extracted-candidate-dir>'; LOG='<new-private-run-log-dir>'; RT='<new-private-run-runtime-dir>'
-    mkdir -m 700 "$LOG" "$RT"; export PATH="$D:$PATH"; test -x "$D/asicen-ts"
-    R1='<listed-terrestrial-receiver-1>'; R2='<listed-terrestrial-receiver-2>'; R3='<listed-satellite-receiver-1>'; R4='<listed-satellite-receiver-2>'
-    CAPTURE_SECONDS=10
-    test -n "$R1" && test -n "$R2" && test -n "$R3" && test -n "$R4" && test "$CAPTURE_SECONDS" -gt 0
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R1" --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-1.ts" & P1=$!
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R2" --channel T30 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-2.ts" & P2=$!
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-1.ts" & P3=$!
-    asicen-ts --instance rc --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-2.ts" & P4=$!
-    for P in "$P1" "$P2" "$P3" "$P4"; do if wait "$P"; then RC=0; else RC=$?; fi; printf "%s %s\n" "$P" "$RC"; done
+    set -eu
+    D="$WORK/candidate"; LOG="$WORK/log"; RT="$WORK/runtime"; ID='usb:1-2.3'; INSTANCE='rc'
+    R1='1'; R2='2'; R3='3'; R4='4'; CAPTURE_SECONDS='10'
+    require_value() { name=$1 value=$2; case "$value" in ''|*'<'*|*'>'*) echo "invalid or unreplaced $name" >&2; return 1 ;; esac; }
+    require_value D "$D"; require_value LOG "$LOG"; require_value RT "$RT"; require_value ID "$ID"; require_value INSTANCE "$INSTANCE"
+    require_value R1 "$R1"; require_value R2 "$R2"; require_value R3 "$R3"; require_value R4 "$R4"; require_value CAPTURE_SECONDS "$CAPTURE_SECONDS"
+    case "$R1:$R2:$R3:$R4:$CAPTURE_SECONDS" in *[!0-9:]*|::::*) echo 'receiver/duration must be numeric' >&2; exit 1 ;; esac
+    test "$CAPTURE_SECONDS" -gt 0; test "$R1" != "$R2"; test "$R1" != "$R3"; test "$R1" != "$R4"
+    test "$R2" != "$R3"; test "$R2" != "$R4"; test "$R3" != "$R4"
+    test -x "$D/asicen-ts"; test -s "$LOG/list.txt"
+    for receiver in "$R1" "$R2" "$R3" "$R4"; do grep -F "receiver=$receiver" "$LOG/list.txt" >/dev/null || { echo "receiver $receiver absent from saved list" >&2; exit 1; }; done
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R1" --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-1.ts" > "$LOG/terrestrial-1.out" 2> "$LOG/terrestrial-1.err" & P1=$!
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R2" --channel T30 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-2.ts" > "$LOG/terrestrial-2.out" 2> "$LOG/terrestrial-2.err" & P2=$!
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-1.ts" > "$LOG/satellite-1.out" 2> "$LOG/satellite-1.err" & P3=$!
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-2.ts" > "$LOG/satellite-2.out" 2> "$LOG/satellite-2.err" & P4=$!
+    FAIL=0
+    for entry in "$P1:terrestrial-1" "$P2:terrestrial-2" "$P3:satellite-1" "$P4:satellite-2"; do pid=${entry%%:*}; name=${entry#*:}; if wait "$pid"; then RC=0; else RC=$?; FAIL=1; fi; printf '%s\n' "$RC" > "$LOG/$name.rc"; done
+    test "$FAIL" -eq 0 || { echo 'T03 client failure; inspect every client log and record incomplete' >&2; exit 1; }
 - **期待値/終了値:** 各clientの稼働時間が重なり、各exit 0とTS/counter合格。順次取得を同時試験の代用にしない。
 - **停止/cleanup:** 全client通常終了後daemon通常停止、残留なし。
 - **記録:** model/receiver/system/channel、各start/end/exit、TS/counter、cleanup。
@@ -596,18 +607,40 @@ gh run download <candidate-run-id> --name release-candidate --dir candidate
 
 ## 3. 配布アーカイブ別手順
 
-毎release、代表Linux x86_64機で2時間連続受信し、全配布archiveをnative OS/ABIで短時間回帰する。初回/major追加確認ではmacOS/Windowsは各30分、残るOS/ABIは各10分連続受信し、全無料channel各10秒は代表機だけで行う。Windows 11 x86_64は正式対象である。現行workflowではnative確認に同source candidateの `win-candidate` artifactを使うが、これは正式release archiveの生成・公開・実artifact検証を証明しない。
+毎release、代表Linux x86_64機で2時間連続受信し、全配布archiveをnative OS/ABIで短時間回帰する。初回/major追加確認ではmacOS/Windowsは各30分、残るOS/ABIは各10分連続受信し、全無料channel各10秒は代表機だけで行う。Windows 11 x86_64は正式対象である。現在のmainのrelease-candidate aggregateはPOSIX 8 binary archiveとsource archiveで、native Windows確認は同source candidateの `win-candidate` artifactを使う。別PR #63（head `d8f954f`）のarchive接続案は未mergeであり、現在のmainやこのdocs treeに反映済みとは扱わない。Windows native確認は正式対象のgateとして実施し、未接続の正式archiveと未実施の実artifact比較は未完了で記録する。
 
 候補archiveをnative hostに展開し、`asicend --list-json` でUSB位置とmodelを確認する。値は現地の `BUS-PORT`、firmware、runtimeへ置換する。USB複数機能機種では確認済み内部hubで相方が一意な場合以外、両positionを指定する。
 
-以下のT27単体commandは起動・TS出力のsmoke確認用であり、PX-W3U2/W3U3の4番組同時録画を満たす判定には使わない。4 client同時の開始・各TS/counter/終了値は共通シナリオAで確認する。
+以下はT00で取得・checksum確認・展開したcandidateの変数を引き継ぐ単体smokeであり、PX-W3U2/W3U3の4番組同時録画を満たす判定には使わない。4 client同時の開始・各TS/counter/終了値は共通シナリオT03で確認する。値は引用符付きで設定し、list-jsonで存在しないport/receiver、空値、未置換値を起動前に拒否する。
 
 ```sh
-RT=$(mktemp -d "${TMPDIR:-/tmp}/asicen-release.XXXXXX")
-asicend --device usb:<BUS-PORT[,BUS-PORT]> --instance rc --firmware <FIRMWARE> --runtime-dir "$RT" & P=$!
-asicenctl --instance rc --runtime-dir "$RT" status
-asicenctl --instance rc --runtime-dir "$RT" list
-asicen-ts --instance rc --runtime-dir "$RT" --receiver 1 --channel T27 --time <SECONDS> --output t27.ts
+set -eu
+PORT='1-2.3'; INSTANCE='rc'; RECEIVER='1'; CAPTURE_SECONDS='10'
+require_value() { name=$1 value=$2; case "$value" in ''|*'<'*|*'>'*) echo "invalid or unreplaced $name" >&2; return 1 ;; esac; }
+require_value PORT "$PORT"; require_value INSTANCE "$INSTANCE"; require_value RECEIVER "$RECEIVER"; require_value CAPTURE_SECONDS "$CAPTURE_SECONDS"
+case "$RECEIVER:$CAPTURE_SECONDS" in *[!0-9:]*|:*) echo 'receiver/duration must be numeric' >&2; exit 1 ;; esac
+ID="usb:$PORT"; RT=$(mktemp -d "${TMPDIR:-/tmp}/asicen-release.XXXXXX")
+"$D/asicend" --device "$ID" --instance "$INSTANCE" --firmware "$FW" --runtime-dir "$RT" > "$LOG/daemon.out" 2> "$LOG/daemon.err" & P=$!
+cleanup_asicend() {
+  original=$?; trap - EXIT
+  if kill -0 "$P" 2>/dev/null; then kill -INT "$P"; fi
+  if wait "$P"; then daemon_rc=0; else daemon_rc=$?; fi
+  echo "$daemon_rc" > "$LOG/daemon.rc"
+  if [ "$original" -eq 0 ] && [ "$daemon_rc" -ne 0 ]; then original=$daemon_rc; fi
+  exit "$original"
+}
+trap cleanup_asicend EXIT
+i=0; READY=0
+while [ "$i" -lt 60 ]; do
+  if "$D/asicenctl" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" status > "$LOG/status.txt" 2> "$LOG/status.err" && grep -q ready "$LOG/status.txt"; then READY=1; break; fi
+  kill -0 "$P" || { echo 'daemon exited before ready' >&2; exit 1; }
+  i=$((i + 1)); sleep 1
+done
+test "$READY" -eq 1 || { echo 'daemon did not become ready' >&2; exit 1; }
+"$D/asicenctl" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" list > "$LOG/list.txt" 2> "$LOG/list.err"
+grep -F "receiver=$RECEIVER" "$LOG/list.txt" >/dev/null || { echo 'receiver absent from list' >&2; exit 1; }
+"$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$RECEIVER" --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/t27.ts" > "$LOG/ts.out" 2> "$LOG/ts.err" || { RC=$?; echo "$RC" > "$LOG/ts.rc"; exit "$RC"; }
+echo 0 > "$LOG/ts.rc"
 ```
 
 statusがready、listにreceiverが存在すること、client終了値0、TSが188-byte packet列として同期すること、daemonのpacket/sync/TEI/continuity統計を確認する。変更に関係するchannel/receiverを受信し、チャンネル名・周波数・TSID等は現地channel planから列挙してログへ実値を記録する。衛星は実機のreceiver割当とREADMEに従い `--channel BS01_0 --lnb-voltage 0` を使う。出力非空だけをpassとせず、README/SPECのTS基準で判定し、失敗試行を消さない。
