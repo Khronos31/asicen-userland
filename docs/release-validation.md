@@ -57,11 +57,145 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 | E07 | Android (Termux) / x86_64 / Android NDK ABI | libusb: 静的1.0.30; USB access: Termux USB permission; FD handoff: daemonへ2 FD | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Android: なし | artifact: `android-x86_64`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
 | E17 | Windows 11 / x86_64 / Win32 | libusb: 静的1.0.30; USB access: 既存許可済みlibusb driver | firmware: loader image; 補助data: なし | system: 対応modelのISDB-T/ISDB-S; channel: 現地channel planから対応channelを選択 | CARD status/ATR/reset/APDU CLI; 操作対応はmodel依存 | Windows WinSCard: application-local DLL | artifact: `win-candidate`; procedure: [archive別手順](#3-配布アーカイブ別手順) |
 
+## 端末nodeと環境状態の退避・復元（T01前）
+
+Termuxの`termux-usb -l`はUSB node path文字列のJSON配列を返す（例: `["/dev/bus/usb/001/004"]`）。配列要素をVID/PID辞書として扱わない。次をbootstrap時と再接続後に毎回実行し、選択結果・一覧をLOGに残す。製品/機種ごとに`TARGET_USB`と`EXPECTED_NODES`を表のUSB IDと当該stage（loader/runtime、単機能/primary+sibling）から設定する。ASICENはstage遷移ごとに期待ID/数を切り替える。0件、JSON型不正、対象一致数の不一致、sysfsで対象pathを対応付けできない場合はpermissionを要求せず停止する。無関係nodeは一覧に記録して対象選択から除外する。
+
+```sh
+: "${TARGET_USB:?set model/stage VID:PID, e.g. 3275:0080}"
+: "${EXPECTED_NODES:?set exact node count from model/stage}"
+case "$TARGET_USB" in [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) ;; *) echo "invalid VID:PID" >&2; exit 2;; esac
+case "$EXPECTED_NODES" in ''|*[!0-9]*|0) echo "invalid expected node count" >&2; exit 2;; esac
+termux-usb -l > "$LOG/termux-usb-paths.json"
+SYSFS_ROOT=${SYSFS_ROOT:-/sys/bus/usb/devices}
+python - "$LOG/termux-usb-paths.json" "$TARGET_USB" "$EXPECTED_NODES" "$LOG/termux-usb-map.json" "$SYSFS_ROOT" <<'PY'
+import glob, json, os, re, sys
+src, target, expected, out, sysroot = sys.argv[1:]
+paths = json.load(open(src, encoding="utf-8"))
+if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
+    raise SystemExit("termux-usb -l must be a JSON array of USB path strings")
+matches, rows = [], []
+for path in paths:
+    m = re.fullmatch(r"/dev/bus/usb/(\d{3})/(\d{3})", path)
+    row = {"path": path, "vid_pid": None, "product": None}
+    if m:
+        bus, dev = (str(int(v)) for v in m.groups())
+        for node in glob.glob(sysroot + "/*"):
+            try:
+                if open(node + "/busnum").read().strip() == bus and open(node + "/devnum").read().strip() == dev:
+                    vid = open(node + "/idVendor").read().strip().lower()
+                    pid = open(node + "/idProduct").read().strip().lower()
+                    row["vid_pid"] = vid + ":" + pid
+                    product = node + "/product"
+                    row["product"] = open(product).read().strip() if os.path.exists(product) else ""
+                    break
+            except OSError:
+                continue
+    rows.append(row)
+    if row["vid_pid"] == target.lower():
+        matches.append(path)
+json.dump({"api_paths": paths, "mapped": rows, "target": target.lower(), "selected": matches}, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+if len(matches) != int(expected):
+    raise SystemExit(f"expected {expected} {target} node(s), found {len(matches)}; see {out}")
+PY
+cat "$LOG/termux-usb-map.json"
+python3 -c 'import json,sys; [print(p) for p in json.load(open(sys.argv[1]))["selected"]]' "$LOG/termux-usb-map.json" > "$LOG/termux-usb-selected-paths.txt"
+```
+
+ASICENではruntime stageの`TARGET_USB`を機種表から設定する: PX-S3U `0b06:0001` (1 node)、PX-S3U2 `0b06:0003` (1)、PX-W3U2 `0b06:0004` (primary+sibling 2)、PX-W3U3 `0b06:0005` (2)、PX-W3U3 V2 `0b06:0006` (sourceで指定されたstage/node count)。cold-loader stageのVID:PIDが当該候補の固定source/機種資料から確定できない場合はpermissionを求めず未達で停止する。
+
+結果が期待数と完全一致した場合だけ、JSONの`selected`に記録された各pathへ`termux-usb -r <path>`（または製品固有の`-r -e`）を実行する。USB permission後にdaemonを開始する。再接続時は古いpath/FDを使わず、同じ列挙・sysfs照合を再実行する。sysfs未読・node未対応・無許可候補複数は合格ではなく未達として記録する。
+
+環境依存状態を変える前に、承認済みの試験用account/add-on、保護されたrun専用LOG、復元可能な退避を用意する。次は手順を記載したものであり、今回の作業では実行しない。
+
+- **E02 HAOS/Supervisor options:** 対象addon自身のcontainer内にある認可済み`SUPERVISOR_TOKEN`で`/addons/self`だけを使う。SCS host等でtokenが得られない場合は停止する。APIのvalidated optionsはdefaultsとsecret解決値を含むためmode 600のprivate LOGだけに保存し、共有recordへコピーしない。options変更は次回addon startで有効になる。
+  ```sh
+  umask 077
+  mkdir -m 700 -p "$LOG/private"
+  : "${SUPERVISOR_TOKEN:?run inside the target add-on with its token}"
+  API=http://supervisor/addons/self
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" "$API/options/config" -o "$LOG/private/options-get.before.json"
+  python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); json.dump(x.get("data",x),open(sys.argv[2],"w"),sort_keys=True)' "$LOG/private/options-get.before.json" "$LOG/private/addon-options.before.json"
+  chmod 600 "$LOG/private/"*.json
+  cp "$LOG/private/addon-options.before.json" "$LOG/private/addon-options.restore.json"
+  cp "$LOG/private/addon-options.before.json" "$LOG/private/addon-options.trial.json"
+  # 承認済みoptionsだけ編集し、schema validationを通す:
+  ${EDITOR:-vi} "$LOG/private/addon-options.trial.json"
+  python3 -m json.tool "$LOG/private/addon-options.trial.json" > /dev/null
+  python3 -c 'import json,sys; json.dump({"options":json.load(open(sys.argv[1]))},open(sys.argv[2],"w"))' "$LOG/private/addon-options.trial.json" "$LOG/private/options-trial.request.json"
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/addon-options.trial.json" "$API/options/validate" -o "$LOG/private/options-trial.validate.json"
+  python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x=x.get("data",x); assert x.get("valid") is True' "$LOG/private/options-trial.validate.json"
+  curl -sS -o "$LOG/private/options-trial.post.json" -w '%{http_code}\n' -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-trial.request.json" "$API/options" > "$LOG/private/options-trial.status"
+  grep -Eq '^2[0-9][0-9]$' "$LOG/private/options-trial.status"
+  # run終了後、承認済み停止手順で元optionsを復元:
+  python3 -c 'import json,sys; json.dump({"options":json.load(open(sys.argv[1]))},open(sys.argv[2],"w"))' "$LOG/private/addon-options.restore.json" "$LOG/private/options-restore.request.json"
+  curl -sS -o "$LOG/private/options-restore.post.json" -w '%{http_code}\n' -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-restore.request.json" "$API/options" > "$LOG/private/options-restore.status"
+  grep -Eq '^2[0-9][0-9]$' "$LOG/private/options-restore.status"
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" "$API/options/config" -o "$LOG/private/options-get.after.json"
+  python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); json.dump(x.get("data",x),open(sys.argv[2],"w"),sort_keys=True)' "$LOG/private/options-get.after.json" "$LOG/private/addon-options.after.json"
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))' "$LOG/private/addon-options.restore.json" "$LOG/private/addon-options.after.json"
+  ```
+
+
+
+optionsを適用した後と元値へ戻した後に、それぞれ別の認可済みHAOS CLI sessionから対象add-onだけを再起動する。HA Core/mirakcは再起動しない。
+
+```sh
+ADDON_SLUG='<target-addon-slug>'
+ha addons restart "$ADDON_SLUG"
+```
+
+- **E03 Linux module/udev/group:** 対象fileを決め、存在状態、内容、権限、所有者、video group membershipをLOGへ保存する。適用・udev reload・rebootは個別に承認された場合だけ行う。restoreは各ファイルの元内容または「元は不在」を復元し、対象userの元supplementary groupsを戻す。module再bind等が必要なら承認なしに行わず未達にする。
+  ```sh
+  set -eu
+  TEST_USER='<non-root-test-user>'; LOG='<private-run-log>'
+  for f in /etc/modprobe.d/smsusb-blacklist.conf /etc/udev/rules.d/99-usb-access.rules; do
+    n=$(basename "$f")
+    if [ -e "$f" ]; then cp -a "$f" "$LOG/$n.before"; printf 'present\n' > "$LOG/$n.state"; else printf 'absent\n' > "$LOG/$n.state"; fi
+  done
+  id "$TEST_USER" > "$LOG/test-user.before.txt"; PRIMARY_GROUP=$(id -gn "$TEST_USER")
+  id -nG "$TEST_USER" | python3 -c 'import sys; p=sys.argv[1]; print(",".join(g for g in sys.stdin.read().split() if g != p))' "$PRIMARY_GROUP" > "$LOG/groups.before.txt"
+  # 承認済みrunでのみ適用する。対象driver ruleとgroupを確定してから実行:
+  : "${BLACKLIST_MODULES:?set only the modules required by the selected product/model}"
+  : "${TARGET_USB:?set selected VID:PID}"
+  : > /etc/modprobe.d/smsusb-blacklist.conf
+  for module in $BLACKLIST_MODULES; do printf 'blacklist %s\n' "$module" >> /etc/modprobe.d/smsusb-blacklist.conf; done
+  VID=${TARGET_USB%:*}; PID=${TARGET_USB#*:}
+  printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", ATTR{idProduct}=="%s", MODE="0660", GROUP="video"\n' "$VID" "$PID" > /etc/udev/rules.d/99-usb-access.rules
+  udevadm control --reload-rules; udevadm trigger --subsystem-match=usb; usermod -aG video "$TEST_USER"
+  # 承認済み復元後にudev ruleを再読込する。既存driverのlive unbindはしない:
+  for f in /etc/modprobe.d/smsusb-blacklist.conf /etc/udev/rules.d/99-usb-access.rules; do
+    n=$(basename "$f")
+    if [ "$(cat "$LOG/$n.state")" = present ]; then cp -a "$LOG/$n.before" "$f"; cmp "$LOG/$n.before" "$f"; else rm -f "$f"; test ! -e "$f"; fi
+  done
+  # restore exact supplementary-group list using an authorized admin shell:
+  udevadm control --reload-rules
+  GROUPS_BEFORE=$(cat "$LOG/groups.before.txt")
+  if [ -n "$GROUPS_BEFORE" ]; then usermod -G "$GROUPS_BEFORE" "$TEST_USER"; else usermod -G '' "$TEST_USER"; fi
+  id "$TEST_USER" > "$LOG/test-user.after.txt"
+  PRIMARY_AFTER=$(id -gn "$TEST_USER")
+  id -nG "$TEST_USER" | python3 -c 'import sys; p=sys.argv[1]; print(",".join(g for g in sys.stdin.read().split() if g != p))' "$PRIMARY_AFTER" > "$LOG/groups.after.txt"
+  cmp "$LOG/groups.before.txt" "$LOG/groups.after.txt"
+  ```
+
+- **E07 Android stay-awake:** ADB shellの認可済みcontextで元値（nullを含む）を退避してから、明示された試験値だけを適用する。完了後、元値がnullならkeyを削除し、それ以外は元値を書戻して読戻す。権限不足なら変更せず停止する。
+  ```sh
+  adb shell settings get global stay_on_while_plugged_in > "$LOG/stay-awake.before.txt"
+  BEFORE=$(cat "$LOG/stay-awake.before.txt")
+  # 承認済み試験値を使う場合のみ。
+  TRIAL_VALUE='<approved-trial-value>'
+  adb shell settings put global stay_on_while_plugged_in "$TRIAL_VALUE"
+  # cleanup: Android settings getのnullを未設定として復元
+  if [ "$BEFORE" = null ]; then adb shell settings delete global stay_on_while_plugged_in; else adb shell settings put global stay_on_while_plugged_in "$BEFORE"; fi
+  adb shell settings get global stay_on_while_plugged_in > "$LOG/stay-awake.after.txt"
+  test "$(cat "$LOG/stay-awake.after.txt")" = "$BEFORE"
+  ```
+
 ## 共通試験シナリオ T00–T14
 
 ### run別candidateの取得と作業directory
 
-この手順書commitとcandidate source SHAは一致不要。成功した`build_userland.yml` runについてhead SHA、attempt、結論、artifact ID/name/expiryを照合し、該当版matrixのtarget archiveだけを使う。手動dispatchや正式Releaseは実行しない。ASICEN firmwareの供給/同梱は別途確定したrepo配布物が用意されるまで未達として止め、候補取得だけで解決扱いしない。
+この手順書commitとcandidate source SHAは一致不要。成功した`build_userland.yml` runについてhead SHA、attempt、結論、artifact ID/name/expiryを照合し、該当版matrixのtarget archiveだけを使う。手動dispatchや正式Releaseは実行しない。ASICEN通常起動のcanonical firmware source pathは`firmware/asicen-loader.bin`、16,384 bytes、SHA-256 `5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`、load address `0x55d6`。PR #58 source `1e3d11ad61c21e300f9c628f6a7a309c60cce62c`のpush run `40247496987`では8つの`release-candidate` binary tarと別artifactのWindows ZIPにこのpathが各1 memberで含まれ、size/hashが一致した。対応source archiveにはimageが含まれない。この観測を次のcandidateへ流用せず、後続コマンドで毎回供給を再確認する。
 
 ```sh
 set -eu
@@ -75,11 +209,26 @@ gh api "repos/Khronos31/asicen-userland/actions/runs/$RUN_ID/artifacts" --jq '.a
 WORK=$(mktemp -d "${TMPDIR:-$HOME}/asicen-run-${RUN_ID}.XXXXXX"); chmod 700 "$WORK"; mkdir -m 700 "$WORK/download"
 gh run download "$RUN_ID" --repo Khronos31/asicen-userland --name release-candidate --dir "$WORK/download"
 cd "$WORK/download"; sha256sum -c SHA256SUMS || shasum -a 256 -c SHA256SUMS
+# 候補供給gate: source archiveには置かず、8 binary archiveは各1 memberで同じpath/bytesを供給する。
+for archive in "$WORK/download"/asicen-userland-*.tar.gz; do
+  case "${archive##*/}" in *-source.tar.gz) if tar -tzf "$archive" | grep -Fxq 'firmware/asicen-loader.bin'; then echo 'firmware must not enter source archive' >&2; exit 1; fi; continue;; esac
+  test "$(tar -tzf "$archive" | grep -Fxc 'firmware/asicen-loader.bin')" = 1
+  actual=$(tar -xOzf "$archive" firmware/asicen-loader.bin | sha256sum | awk '{print $1}')
+  bytes=$(tar -xOzf "$archive" firmware/asicen-loader.bin | wc -c | tr -d ' ')
+  test "$actual" = 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a
+  test "$bytes" = 16384
+  printf '%s %s %s\\n' "${archive##*/}" "$bytes" "$actual"
+done
 VERSION='<candidate-version>'; ARCHIVE="asicen-userland-$VERSION-$TARGET.tar.gz"
 mkdir "$WORK/candidate"; tar -xzf "$WORK/download/$ARCHIVE" -C "$WORK/candidate"
 D="$WORK/candidate"; LOG="$WORK/log"; RT="$WORK/runtime"; mkdir -m 700 "$LOG" "$RT"; cd "$D"; export PATH="$D:$PATH"
 test -x "$D/asicend"; test -x "$D/asicenctl"; test -x "$D/asicen-ts"
 python3 -c 'import json,sys; m=json.load(open("manifest.json")); assert m.get("source_ref")==sys.argv[1] and m.get("platform")==sys.argv[2]' "$SOURCE_SHA" "$TARGET"
+FW="$D/firmware/asicen-loader.bin"
+if [ ! -f "$FW" ]; then printf '%s\n' 'canonical firmware missing from this candidate archive; archive supply unconfirmed' > "$LOG/firmware-supply.txt"; exit 3; fi
+test "$(wc -c < "$FW" | tr -d ' ')" = 16384
+printf '%s  %s\n' 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a "$FW" | sha256sum -c -
+printf '%s\n' 'firmware/asicen-loader.bin 16384 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a load-address=0x55d6' > "$LOG/firmware-supply.txt"
 ```
 
 Windows対象版は同runの`win-candidate` artifactを別に取得し、`Get-FileHash -Algorithm SHA256`でZIPを照合して空のrun固有directoryへ展開する。通常`release-candidate`にはWindows ZIPがないので、欠落を通常archiveとして補わない。Linux/macOS/Termuxでは`gh`, `python3` (Termux: `pkg install gh python coreutils tar`), SHA-256 tool, `tar`を確認し、Windowsでは`gh`と`python --version`を確認する。追加installはhost管理者承認後に行う。
@@ -108,10 +257,15 @@ Expand-Archive -LiteralPath $ZIP -DestinationPath $D
 if (-not (Test-Path (Join-Path $D 'manifest.json'))) { throw 'candidate manifest missing' }
 $manifest = Get-Content (Join-Path $D 'manifest.json') -Raw | ConvertFrom-Json
 if ($manifest.source_ref -ne $CandidateSourceSha) { throw 'candidate source commit mismatch' }
+$FW = Join-Path $D 'firmware\asicen-loader.bin'
+if (-not (Test-Path -LiteralPath $FW)) { 'canonical firmware missing; archive supply unconfirmed' | Set-Content (Join-Path $Work 'log\firmware-supply.txt'); throw 'candidate firmware supply is unconfirmed' }
+$FirmwareHash = (Get-FileHash -LiteralPath $FW -Algorithm SHA256).Hash.ToLowerInvariant()
+if ((Get-Item -LiteralPath $FW).Length -ne 16384 -or $FirmwareHash -ne '5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a') { throw 'canonical candidate firmware mismatch' }
+'firmware/asicen-loader.bin 16384 5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a load-address=0x55d6' | Set-Content (Join-Path $Work 'log\firmware-supply.txt')
 $LOG = Join-Path $Work 'log'; $RT = Join-Path $Work 'runtime'
 ```
 
-job名/ID・head SHAとsource refが当該candidate一致しない場合、またはhash行がない場合は未達で停止する。firmware imageの取得・同梱は本レシピの対象外であり、別途確定した供給手順がない限りUSB試験へ進まない。
+job名/ID・head SHAとsource refが当該candidate一致しない場合、またはhash行がない場合は未達で停止する。sourceで確定したimageのcandidate archive供給確認は別項目であり、ここで確認済みにしない。
 
 `WORK`を作るOSでは`LOG`/`RT`もrun固有directoryとして先に生成する。Termuxは`$PREFIX/tmp`または`$HOME`配下を使い、OS `/tmp`を前提にしない。`termux-usb -l`で対象VID/PID/product nameを照合したnodeだけを`termux-usb -r <path>`へ渡す。権限不足はLinux `id`/`stat`/`lsusb -t`、Termux `termux-usb -l`で読み取り記録して停止し、udev/権限の変更は別途承認、変更前保存、試験後復元を記録する。HAOS/Supervisor stateをこの手順から変更しない。
 
@@ -259,11 +413,37 @@ test ! -s "$LOG/processes-after-stop.txt"; test ! -s "$LOG/ipc-remnants.txt"
 
 残留、wait非0、process所有者が識別できない場合はcleanup未達とし、外部processや既存socketを削除しない。
 
+### T09 helperの固定取得
+
+候補sourceとは独立した共通runbook helperを、Siano runbookのimmutable commit `a61e185ac3ae8a9c03b1efcd261bcef7d1a2043e`から取得する。candidate checkout/archive内のhelper有無に依存しない。POSIX/Termuxでは次を一度実行し、以後の全captureで`$TOOL/ts-check.py`を使う。
+
+```sh
+RUNBOOK_REF='a61e185ac3ae8a9c03b1efcd261bcef7d1a2043e'; HELPER_SHA256='fabe54eeb1188db4faf5ba6cbf81d8552b3386f73f58b3dd7a42641e23ac076d'
+TOOL="$WORK/tooling"; mkdir -m 700 -p "$TOOL"
+gh api -H 'Accept: application/vnd.github.raw' "repos/Khronos31/siano-userland/contents/docs/release-validation/ts-check.py?ref=$RUNBOOK_REF" > "$TOOL/ts-check.py"
+if command -v sha256sum >/dev/null 2>&1; then printf '%s  %s\n' "$HELPER_SHA256" "$TOOL/ts-check.py" | sha256sum -c -; else printf '%s  %s\n' "$HELPER_SHA256" "$TOOL/ts-check.py" | shasum -a 256 -c -; fi
+printf '%s\n' "$RUNBOOK_REF $HELPER_SHA256" > "$LOG/ts-helper-version.txt"
+```
+
+Windows PowerShell 5.1でも同じ固定版を新しいtooling directoryへ取得し、hash一致後にのみ使う。
+
+```powershell
+$RunbookRef = 'a61e185ac3ae8a9c03b1efcd261bcef7d1a2043e'; $HelperSha256 = 'fabe54eeb1188db4faf5ba6cbf81d8552b3386f73f58b3dd7a42641e23ac076d'
+$Tool = Join-Path $Work 'tooling'; New-Item -ItemType Directory -Path $Tool | Out-Null
+$Helper = Join-Path $Tool 'ts-check.py'
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Khronos31/siano-userland/$RunbookRef/docs/release-validation/ts-check.py" -OutFile $Helper
+$Actual = (Get-FileHash -LiteralPath $Helper -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($Actual -ne $HelperSha256) { throw 'runbook TS helper hash mismatch' }
+"$RunbookRef $Actual" | Set-Content (Join-Path $LOG 'ts-helper-version.txt')
+```
+
+helperのversionはrunbook Git commitとSHA-256の組で固定する。candidate source SHA、artifact digest、helper ref/hashを別々に記録する。
+
 ### T09 TS・counter・終了値判定
 
 - **適用対象/頻度:** 全capture/soak。
-- **準備:** Python 3.11以上を`python3 --version`で確認し、手順書checkoutの[`ts-check.py`](release-validation/ts-check.py)を使う。候補ごとに新規作成した`$LOG`を使う。
-- **実操作/利用者への依頼:** POSIXでは各TSに`python3 <runbook-checkout>/docs/release-validation/ts-check.py "$LOG/<receiver>.ts" > "$LOG/<receiver>.ts-check.json"`を実行する。Windowsは同じhelperを`python <runbook-checkout>\docs\release-validation\ts-check.py "$LOG\<receiver>.ts"`で実行し、標準出力を`$LOG`へ保存する。全capture/soakの各TSで実行し、候補daemonのdrop/USB counterも記録する。
+- **準備:** Python 3.11以上を`python3 --version`で確認し、固定取得した`$TOOL/ts-check.py`（Windowsは`$Helper`）を使う。候補ごとに新規作成した`$LOG`を使う。
+- **実操作/利用者への依頼:** POSIXでは各TSに`python3 $TOOL/ts-check.py "$LOG/<receiver>.ts" > "$LOG/<receiver>.ts-check.json"`を実行する。Windowsは同じhelperを`python $Helper "$LOG\<receiver>.ts"`で実行し、標準出力を`$LOG`へ保存する。全capture/soakの各TSで実行し、候補daemonのdrop/USB counterも記録する。
 - **期待値/終了値:** 全TSが製品SPEC基準を満たし通常取得exit 0。非空file/counter 0だけでpassにしない。
 - **停止/cleanup:** 元TS/hash/logを残してT08 cleanup。
 - **記録:** `python3 --version`、helperのGit SHA、TS hash、helperのJSON/終了値、sync/TEI/continuity/drop/counter、client exit。
@@ -271,7 +451,7 @@ test ! -s "$LOG/processes-after-stop.txt"; test ! -s "$LOG/ipc-remnants.txt"
 Windowsで各TSを確認するcommand:
 
 ```powershell
-$helper = '<runbook-checkout>\docs\release-validation\ts-check.py'; $ts = Join-Path $LOG '<receiver>.ts'
+$helper = Join-Path $Tool 'ts-check.py'; $ts = Join-Path $LOG '<receiver>.ts'
 $json = Join-Path $LOG '<receiver>.ts-check.json'; $err = Join-Path $LOG '<receiver>.ts-check.err'
 & python $helper $ts 1> $json 2> $err; $parserRc = $LASTEXITCODE
 $parserRc | Set-Content (Join-Path $LOG '<receiver>.ts-check.rc')
@@ -757,7 +937,7 @@ Windows x86_64は回帰対象である。通常release aggregateにWindows ZIP�
 
 ```powershell
 $D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
 $RT = 'C:\asicen-rc-<run-id>'
 if (Test-Path $RT) { throw "refusing to reuse existing runtime path: $RT" }
 New-Item -ItemType Directory -Path $RT | Out-Null
@@ -862,7 +1042,7 @@ T12では別consoleごとに次のdaemon commandを使い、各consoleでCtrl+C�
 
 ```powershell
 $D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
 $RTA = 'C:\asicen-e17-<run-id>-a'; $RTB = 'C:\asicen-e17-<run-id>-b'
 New-Item -ItemType Directory -Path $RTA, $RTB | Out-Null
 $LOG = 'C:\asicen-e17-<run-id>-logs'
@@ -873,7 +1053,7 @@ $LOG = 'C:\asicen-e17-<run-id>-logs'
 
 ```powershell
 $D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
 $RTB = 'C:\asicen-e17-<run-id>-b'
 & $D --device 'usb:<PORT_B>' --instance b --firmware $FW --runtime-dir $RTB
 ```
@@ -922,7 +1102,7 @@ asicen-termux --usb-device /dev/bus/usb/BBB/AAA --runtime-dir "$runtime_dir" --i
 cold loaderのfirmware転送はTermux:APIから渡されたFDを`asicen-termux`経由で既存daemon入口へ渡す。single-function機器では次を実行し、固定sourceのtransfer完了diagnosticとexit 3の両方を保存する。続いて`termux-usb -l`で同じUSB pathに戻ったruntime VID:PID nodeを確認し、`termux-usb -r`でそのnodeのpermissionを取得して、同じruntime/instanceで`--firmware`を外した上のruntime起動を行う。exit 3だけ、別pathのruntime、または再列挙なしを成功に読み替えない。`termux-usb -r`で古いloader nodeを再利用しない。
 
 ```sh
-firmware_path='./firmware/<model-firmware>'
+firmware_path='./firmware/asicen-loader.bin'
 termux-usb -l | tee "$runtime_dir/devices-loader.txt"
 termux-usb -r /dev/bus/usb/BBB/AAA
 if asicen-termux --usb-device /dev/bus/usb/BBB/AAA --firmware "$firmware_path" --runtime-dir "$runtime_dir" --instance rc > "$runtime_dir/firmware-stage.out" 2> "$runtime_dir/firmware-stage.err"; then stage_rc=0; else stage_rc=$?; fi
@@ -936,7 +1116,7 @@ termux-usb -l | tee "$runtime_dir/devices-runtime.txt"
 paired機の段階呼出しは次のとおり。各runで`$PRIMARY_LOADER`、`$PRIMARY_RUNTIME`、`$SIBLING_LOADER`、`$PRIMARY_RUNTIME`/`$SIBLING_RUNTIME`を、その直前の`termux-usb -l`出力から選び、path/PID/VID:PIDと各終了値を保存する。各一時daemon invocationはfailure-on-exitのshell環境でも続くように終了値を`if`で採取する。
 
 ```sh
-firmware_path='./firmware/<model-firmware>'
+firmware_path='./firmware/asicen-loader.bin'
 primary_loader='<primary-loader-usb-path>'
 runtime_dir="$PREFIX/tmp/asicen-<run-id>"
 mkdir -p "$runtime_dir" && chmod 700 "$runtime_dir"
@@ -974,7 +1154,7 @@ asicen-termux --usb-device "$primary_runtime" --usb-device "$sibling_runtime" --
 
 ```powershell
 $D = (Resolve-Path .\asicend.exe).Path
-$FW = (Resolve-Path '.\firmware\<model-firmware>').Path
+$FW = (Resolve-Path '.\firmware\asicen-loader.bin').Path
 $RT = 'C:\asicen-e17-<run-id>'
 if (Test-Path $RT) { throw "refusing to reuse existing runtime path: $RT" }
 New-Item -ItemType Directory -Path $RT | Out-Null
