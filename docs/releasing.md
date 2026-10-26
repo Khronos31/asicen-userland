@@ -20,13 +20,13 @@
 
 ## 公開アーティファクト
 
-公開対象は `build_userland.yml` の成功した **tag push run** が生成した `release-candidate` です。実機試験に使った候補 run とは別の run であり、候補をそのまま添付する手順ではありません。Windows 11 x86_64も正式対象で、Windows ZIPは通常の `release-candidate` aggregateに含めます。
+公開対象は `build_userland.yml` の成功した **tag push run** が生成した `release-candidate` です。実機試験に使った候補 run とは別の run であり、候補をそのまま添付する手順ではありません。Windows 11 x86_64は正式対象ですが、このdocs treeのworkflowではWindows ZIPを `win-candidate` に分離しており、`release-candidate` aggregateには未接続です。これは正式対象からの除外ではなく、配布経路の実装gapです。
 
 - バイナリアーカイブ 9 本
 - `asicen-userland-<version>-source.tar.gz` 1 本
 - 外側 `SHA256SUMS` 1 本（10 アーカイブの SHA-256）
 
-現行workflowは合計11ファイルを生成します。具体的な正式 target は [release-validation.md](release-validation.md) の配布 matrix を正本とし、Windows 11 x86_64を含む9 binary targetです。0.1.0 の実配布 inventory は Linux・macOS・Android の8 binary targetで、Windows binaryはその版に含まれません。firmware は既存の pinned loader を binary archive に含め、source archive から除きます。再配布権が未解決である旨の notice を維持します。
+正式配布の契約は、[release-validation.md](release-validation.md) のmatrixにあるWindows 11 x86_64を含む9 binary target、対応source archive 1本、計10 archiveと外側 `SHA256SUMS` です。したがって準拠するReleaseは11ファイルを添付し、checksumは10 archiveを列挙します。このdocs treeのworkflowはWindows ZIPをまだaggregateへ接続しておらず、現状のcandidateは8 binary + sourceの9 archiveと `SHA256SUMS` の計10ファイルで、正式matrixを満たしません。0.1.0 の実配布 inventory も歴史的にLinux・macOS・Androidの8 binary targetで、Windows binaryはその版に含まれません。firmware は既存の pinned loader を binary archive に含め、source archive から除きます。再配布権が未解決である旨の notice を維持します。
 
 ## 1. 候補の準備と固定
 
@@ -87,8 +87,8 @@ ASICEN Linux archive の既存 `evidence/linux-static-build.json` と `evidence/
 
 最初の検証 job は read-only です。公開 job だけが `contents: write` を持ち、再照合してから以下を実行します。
 
-1. `vX.Y.Z` をタイトル、コミット済み Markdown の正確な内容を本文とする Draft を作成し、tag run の 10 アセットを添付
-2. Draft から新しい空ディレクトリへ再取得し、全ファイルの byte 一致、10 件の checksum、タイトル・本文を確認
+1. `vX.Y.Z` をタイトル、コミット済み Markdown の正確な内容を本文とする Draft を作成し、正式集合を生成したtag runの11アセット（10 archive + `SHA256SUMS`）を添付
+2. Draft から新しい空ディレクトリへ再取得し、全ファイルの byte 一致、`SHA256SUMS` の10件、タイトル・本文を確認
 3. Draft を解除して Stable/Latest として公開
 4. 公開済みアセットを別の空ディレクトリへ再取得し、同じ照合と Latest 状態を確認
 
