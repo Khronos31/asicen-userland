@@ -1334,8 +1334,16 @@ foreach ($name in 'r1.ts','r2.ts','r3.ts','r4.ts') { $file = Join-Path $LOG $nam
 
 foreach ($channel in $CHANNEL_PLAN) {
   $file = Join-Path $LOG ($channel + '.ts')
-  $client = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver',$R1,'--channel',$channel,'--time','10','--output',$file) -PassThru -NoNewWindow -Wait
-  [pscustomobject]@{ Channel=$channel; ExitCode=$client.ExitCode; File=$file }
+  $client = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver',$R1,'--channel',$channel,'--time','10','--output',$file) -PassThru -NoNewWindow
+  if (-not $client.WaitForExit(90000)) {
+    $client.Id | Out-File (Join-Path $LOG "t04-$channel-timeout.txt")
+    Stop-Process -Id $client.Id -ErrorAction SilentlyContinue
+    if (-not $client.WaitForExit(5000)) { $client.Id | Out-File (Join-Path $LOG "t04-$channel-cleanup-timeout.txt") }
+  }
+  $client.Refresh()
+  if ($client.HasExited) { $client.ExitCode | Out-File (Join-Path $LOG "t04-$channel.rc") } else { 'unavailable: owned client did not exit' | Out-File (Join-Path $LOG "t04-$channel.rc") }
+  if ($client.HasExited -and $client.ExitCode -eq 0 -and (Test-Path $file) -and -not (Test-Path (Join-Path $LOG "t04-$channel-timeout.txt"))) { 'complete: client exited 0' | Set-Content (Join-Path $LOG "t04-$channel.state") } else { 'incomplete: client timeout/exit/output failure' | Set-Content (Join-Path $LOG "t04-$channel.state") }
+  if (Test-Path $file) { Get-FileHash -Algorithm SHA256 $file } else { "$channel output unavailable" | Out-File (Join-Path $LOG 't04-ts-missing.txt') }
 }
 function Wait-CardAction([string]$message) {
   if ([Console]::IsInputRedirected) { throw 'CARD action requires an interactive PowerShell console.' }
