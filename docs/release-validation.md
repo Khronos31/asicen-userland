@@ -450,6 +450,17 @@ PY
 - **停止/cleanup:** client wait/exit保存、daemon通常停止。
 - **記録:** model/system/channel/全channel list、TS解析/counter/exit、未取得理由。
 
+代表機の必須2時間runは単一receiverで行い、上記の短い全channel確認とは別runにする。初回/majorのmacOS・Windowsは1800秒、他OS/ABIは600秒をCAPTURE_SECONDSに設定する。候補daemonを同じ候補・selector・instanceでreadyにした同じBash shellで次を実行する。
+
+```sh
+CAPTURE_SECONDS='7200'
+case "$CAPTURE_SECONDS" in ''|*[!0-9]*|0) echo 'CAPTURE_SECONDS must be positive seconds' >&2; exit 2 ;; esac
+"$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R1" \
+  --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/representative-soak.ts" \
+  > "$LOG/representative-soak.out" 2> "$LOG/representative-soak.err" || { RC=$?; echo "$RC" > "$LOG/representative-soak.rc"; exit "$RC"; }
+echo 0 > "$LOG/representative-soak.rc"
+```
+
 ### T05 受信中の状態確認・制御
 
 - **適用対象/頻度:** 毎release。CARD/controlは製品能力に従う。
@@ -696,10 +707,25 @@ statusがready、listにreceiverが存在すること、client終了値0、TSが
 <a id="asicen-linux-posix-t07"></a>
 ### E03 Linux POSIX T07 recipe
 
-Linux native Bash runで使うidle/stream手順。各物理操作は利用者へ依頼しEnter応答を最大300秒待ち、daemon/client PIDと返却値を保存する。再接続後は必ず新しいruntimeを使う。
+Linux native Bash runで使うidle/stream手順。T00で設定した候補path、firmware、LOG、WORKを同じBash shellで保持する。各物理操作は利用者へ依頼しEnter応答を最大300秒待ち、daemon/client PIDと返却値を保存する。再接続後は必ず新しいruntimeを使う。
 
 ```sh
 PORT='<listed-usb-port>'; TOKEN='idle'; ID="usb:$PORT"
+require_value() { name=$1 value=$2; case "$value" in ''|*'<'*|*'>'*) echo "invalid or unreplaced $name" >&2; return 1 ;; esac; }
+require_value PORT "$PORT" || exit 2
+case "$PORT" in *[!A-Za-z0-9._-]*) echo 'invalid listed USB port' >&2; exit 2 ;; esac
+"$D/asicend" --list-json > "$LOG/discovery-before.json"
+python3 - "$LOG/discovery-before.json" "$PORT" <<'PY'
+import json,sys
+root=json.load(open(sys.argv[1],encoding='utf-8'))
+def ports(value):
+    if isinstance(value,dict):
+        if value.get('port') == sys.argv[2]: return True
+        return any(ports(v) for v in value.values())
+    if isinstance(value,list): return any(ports(v) for v in value)
+    return False
+if not ports(root): raise SystemExit('selected port absent from discovery JSON')
+PY
 RT_IDLE="$WORK/runtime-idle"; mkdir -m 700 "$RT_IDLE"
 "$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_IDLE" > "$LOG/idle-daemon.log" 2>&1 & IDLE_PID=$!
 printf '%s\n' "$IDLE_PID" > "$LOG/idle-daemon.pid"
@@ -716,7 +742,21 @@ printf '%s' 'USB再接続完了後にEnter (300秒以内): '
 if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/reconnect-human-wait.txt"; exit 1; fi
 # 再列挙で新しいPORTを選んでから続ける。
 "$D/asicend" --list-json > "$LOG/discovery-reconnected.json"
-PORT='<new-listed-usb-port>'; ID="usb:$PORT"; TOKEN='stream'; RT_STREAM="$WORK/runtime-stream"; mkdir -m 700 "$RT_STREAM"
+PORT='<new-listed-usb-port>'; ID="usb:$PORT"; TOKEN='stream'
+require_value PORT "$PORT" || exit 2
+case "$PORT" in *[!A-Za-z0-9._-]*) echo 'invalid listed USB port' >&2; exit 2 ;; esac
+python3 - "$LOG/discovery-reconnected.json" "$PORT" <<'PY'
+import json,sys
+root=json.load(open(sys.argv[1],encoding='utf-8'))
+def ports(value):
+    if isinstance(value,dict):
+        if value.get('port') == sys.argv[2]: return True
+        return any(ports(v) for v in value.values())
+    if isinstance(value,list): return any(ports(v) for v in value)
+    return False
+if not ports(root): raise SystemExit('reconnected port absent from discovery JSON')
+PY
+RT_STREAM="$WORK/runtime-stream"; mkdir -m 700 "$RT_STREAM"
 "$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_STREAM" > "$LOG/stream-daemon.log" 2>&1 & STREAM_PID=$!
 printf '%s\n' "$STREAM_PID" > "$LOG/stream-daemon.pid"
 "$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-ready.txt" 2>&1
@@ -1362,7 +1402,6 @@ if ($recoveryCheckRc -ne 0) { throw "recovery TS quality check exit was $recover
 ```
 
 再接続daemon consoleでCtrl+C後、`$LASTEXITCODE`を`t07-recovery-daemon.rc`へ保存する。各consoleのプロセス照合は候補exeのabsolute pathとinstance引数の両方が一意に一致した場合だけPIDを保存し、0件/複数件では推測しない。
-```
 
 WindowsではT03–T06も候補directoryの3 executableで行う。T03はW3U2/W3U3の公開最低要求である4 receiverを別TSへ同時起動し、他機種は公開receiver数を全て同時起動する。T04は現地channel planの各無料channelを個別に有限受信する。T05は受信中に別consoleからstatus/listと対応CARD controlを実行する。T06はdaemonを維持したまま利用者に物理挿抜を依頼し、status/ATR/reset/APDUを各段階で保存する。Windows T05はT03/T04とは別の60秒captureを起動し、CARD対応modelではstatus/listと`card-apdu 90:30:00:00:00`を同じcapture中に行う。各commandのresponse/exit/start/endおよびcapture start/endを保存する。T08の通常daemon停止/残留確認を適用する。
 
