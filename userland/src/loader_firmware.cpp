@@ -12,16 +12,7 @@ namespace asicen {
 
 const LoaderFirmwareManifest& loader_firmware_manifest() noexcept
 {
-    // Static provenance: the single FirmBin symbol in the 2013 PLEX Linux
-    // loader.ko is identical in both architecture packages. No blob is embedded.
-    static constexpr LoaderFirmwareManifest manifest{
-        "PLEX Linux 130109 shared loader",
-        kLoaderFirmwareBlobSize,
-        kLoaderFirmwareStartAddress,
-        {{0xb4, 0x5d, 0x51, 0x02, 0x00, 0xa1, 0x69, 0x0b, 0x3c, 0xa3, 0x58,
-          0xd9, 0x3d, 0xe1, 0x3f, 0x40, 0xe1, 0xd3, 0x56, 0x7b, 0x66, 0x3c,
-          0x17, 0xe7, 0x73, 0x34, 0x9a, 0xd9, 0x6f, 0x59, 0x7a, 0xa8}}};
-    return manifest;
+    return common_loader_firmware_manifest();
 }
 
 const LoaderFirmwareManifest& common_loader_firmware_manifest() noexcept
@@ -38,24 +29,13 @@ const LoaderFirmwareManifest& common_loader_firmware_manifest() noexcept
 
 const LoaderFirmwareManifest* loader_firmware_manifest(ModelId model) noexcept
 {
-    // The identical x64 Windows loaders in the W3U2, W3U3 and W3U3 V2
-    // packages decode a different static image. V2 is assigned that image
-    // only; its firmware compatibility does not imply frontend support.
-    static constexpr LoaderFirmwareManifest windows{
-        "PLEX Windows shared loader",
-        kLoaderFirmwareBlobSize,
-        0x55d6,
-        {{0x5d, 0xb3, 0x9f, 0xac, 0xda, 0x14, 0x0b, 0xdc, 0xb3, 0xa2, 0x38,
-          0xda, 0xd1, 0x0d, 0xa5, 0xaa, 0xc7, 0x52, 0xa1, 0xba, 0x3a, 0xaf,
-          0x17, 0xe2, 0x23, 0x9f, 0x8d, 0x79, 0xa0, 0xad, 0x6a, 0x2a}}};
     switch (model) {
     case ModelId::S3u:
     case ModelId::S3u2:
     case ModelId::W3u2:
     case ModelId::W3u3:
-        return &loader_firmware_manifest();
     case ModelId::W3u3V2:
-        return &windows;
+        return &common_loader_firmware_manifest();
     }
     return nullptr;
 }

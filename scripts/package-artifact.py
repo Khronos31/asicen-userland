@@ -247,15 +247,17 @@ def copy_libusb_license(repo_root: Path, stage: Path) -> None:
 
 
 def copy_firmware(repo_root: Path, stage: Path) -> None:
-    source = repo_root / FIRMWARE_MEMBER
-    if source.is_symlink() or not source.is_file():
-        fail(f"missing ordinary firmware input: {source}")
-    payload = source.read_bytes()
-    _audit.verify_firmware(payload, _audit.FIRMWARE_NOTICE.encode("utf-8"),
-                           {FIRMWARE_MEMBER: 0o644, FIRMWARE_NOTICE_MEMBER: 0o644})
-    destination = stage / FIRMWARE_MEMBER
-    copy_regular(source, destination)
-    destination.chmod(0o644)
+    sources = {name: repo_root / name for name in _audit.FIRMWARE_MEMBERS}
+    if any(source.is_symlink() or not source.is_file() for source in sources.values()):
+        fail("missing ordinary firmware input")
+    payloads = {name: source.read_bytes() for name, source in sources.items()}
+    _audit.verify_firmware(payloads[FIRMWARE_MEMBER], _audit.FIRMWARE_NOTICE.encode("utf-8"),
+                           {**{name: 0o644 for name in _audit.FIRMWARE_MEMBERS},
+                            FIRMWARE_NOTICE_MEMBER: 0o644})
+    for name, source in sources.items():
+        destination = stage / name
+        copy_regular(source, destination)
+        destination.chmod(0o644)
     write_text(stage / FIRMWARE_NOTICE_MEMBER, _audit.FIRMWARE_NOTICE)
 
 

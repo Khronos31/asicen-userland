@@ -318,8 +318,10 @@ class ReleaseTests(unittest.TestCase):
     def test_asicen_firmware_notice_and_source_exclusion(self):
         for i, (member, data, source) in enumerate((
                 (verify.FIRMWARE_MEMBER, b"changed firmware", False),
+                ("firmware/asicen-loader-common.bin", b"extra firmware", False),
                 ("licenses/VENDOR-FIRMWARE-NOTICE.txt", b"rights granted falsely", False),
-                ("repository/firmware/asicen-loader.bin", FIRMWARE, True))):
+                ("repository/firmware/asicen-loader.bin", FIRMWARE, True),
+                ("repository/firmware/asicen-loader-common.bin", FIRMWARE, True))):
             with self.subTest(member=member):
                 fixture = ReleaseFixture(self.root / str(i), "asicen-userland")
                 fixture.mutate(member, data, source=source)

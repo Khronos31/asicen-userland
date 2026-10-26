@@ -38,6 +38,29 @@ enum class EndpointAccess : std::uint8_t {
     shared_group,
 };
 
+enum class EndpointDiagnosticReason : std::uint8_t {
+    none,
+    runtime_directory,
+    instance,
+    endpoint_name,
+    path_too_long,
+    runtime_directory_type,
+    runtime_directory_owner,
+    runtime_directory_mode,
+    runtime_directory_security,
+    lease_file_type,
+    lease_file_owner,
+    lease_file_mode,
+    lease_file_links,
+};
+
+struct EndpointDiagnostic final {
+    EndpointDiagnosticReason reason = EndpointDiagnosticReason::none;
+    std::size_t path_bytes = 0U;
+    std::size_t native_capacity = 0U;
+    std::size_t required_bytes = 0U;
+};
+
 // A null runtime_directory selects $XDG_RUNTIME_DIR. instance and endpoint_name
 // are single path components. The resulting endpoint is:
 //   <runtime_directory>/px4-userland/<instance>/<endpoint_name>
@@ -64,17 +87,23 @@ public:
 
     static Result<SerialEndpointLease> acquire(
         const EndpointConfig& endpoint, std::string_view observed_serial) noexcept;
+    static Result<SerialEndpointLease> acquire(
+        const EndpointConfig& endpoint, std::string_view observed_serial,
+        EndpointDiagnostic* diagnostic) noexcept;
     // ASICEN serial-free enclosure identity. This is always exclusive across
     // endpoint instance names and uses the same checked lease implementation.
     static Result<SerialEndpointLease> acquire_identity(
         const EndpointConfig& endpoint, std::string_view observed_identity) noexcept;
+    static Result<SerialEndpointLease> acquire_identity(
+        const EndpointConfig& endpoint, std::string_view observed_identity,
+        EndpointDiagnostic* diagnostic) noexcept;
     bool valid() const noexcept { return lock_fd_ != kInvalidHandle; }
     void close() noexcept;
 
 private:
     static Result<SerialEndpointLease> acquire_validated(
         const EndpointConfig& endpoint, std::string_view observed_serial,
-        bool force_exclusive) noexcept;
+        bool force_exclusive, EndpointDiagnostic* diagnostic) noexcept;
     NativeHandle directory_fd_ = kInvalidHandle;
     NativeHandle lock_fd_ = kInvalidHandle;
     std::array<char, 64U> filename_{};

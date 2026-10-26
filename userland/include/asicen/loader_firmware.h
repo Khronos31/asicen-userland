@@ -25,7 +25,7 @@ struct LoaderTransfer {
 };
 
 constexpr std::uint8_t kLoaderRequestType = 0x40;
-constexpr std::uint16_t kLoaderFirmwareStartAddress = 0x5399;
+constexpr std::uint16_t kLoaderFirmwareStartAddress = 0x55d6;
 constexpr std::uint16_t kLoaderFirmwareChunkSize = 0x0200;
 constexpr std::size_t kLoaderFirmwareBlobSize = 0x4000;
 constexpr std::uint8_t kLoaderWriteRequest = 0xab;

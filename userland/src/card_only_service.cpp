@@ -69,6 +69,65 @@ int exit_status(Error error) noexcept
     return 70;
 }
 
+void print_listener_diagnostic(
+    const dtv::userland::host_listener_context::ListenerDiagnostic& diagnostic) noexcept
+{
+    using Reason = dtv::userland::host_listener_context::ListenerDiagnosticReason;
+    if (diagnostic.reason == Reason::endpoint_path) {
+        if (diagnostic.endpoint.reason ==
+            dtv::userland::host_runtime::EndpointDiagnosticReason::path_too_long) {
+            std::fprintf(stderr,
+                "asicend endpoint: %.*s path is too long (%zu UTF-8 bytes; %zu bytes including NUL required, this build's native sun_path capacity is %zu bytes including NUL); shorten --runtime-dir or --instance consistently for daemon and clients\n",
+                static_cast<int>(diagnostic.endpoint_name.size()),
+                diagnostic.endpoint_name.data(), diagnostic.endpoint.path_bytes,
+                diagnostic.endpoint.required_bytes,
+                diagnostic.endpoint.native_capacity);
+        } else {
+            std::fprintf(stderr,
+                "asicend endpoint: invalid runtime/instance/endpoint path configuration for %.*s; check --runtime-dir and --instance\n",
+                static_cast<int>(diagnostic.endpoint_name.size()),
+                diagnostic.endpoint_name.data());
+        }
+        return;
+    }
+    if (diagnostic.reason == Reason::runtime_directory_security) {
+        std::fprintf(stderr,
+            "asicend endpoint: runtime namespace security check failed; the configured runtime and its product/version/instance directories must satisfy the current-user ownership and private access checks\n");
+        return;
+    }
+    const char* directory = "runtime directory";
+    switch (diagnostic.directory_layer) {
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::runtime_root:
+        directory = "runtime root";
+        break;
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::product:
+        directory = "product directory";
+        break;
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::version:
+        directory = "version directory";
+        break;
+    case dtv::userland::host_listener_context::RuntimeDirectoryLayer::instance:
+        directory = "instance directory";
+        break;
+    }
+    if (diagnostic.reason == Reason::runtime_directory_missing)
+        std::fprintf(stderr, "asicend endpoint: %s does not exist\n", directory);
+    else if (diagnostic.reason == Reason::runtime_directory_lookup)
+        std::fprintf(stderr, "asicend endpoint: %s lookup failed; check path traversal access\n",
+                     directory);
+    else if (diagnostic.reason == Reason::runtime_directory_type)
+        std::fprintf(stderr, "asicend endpoint: %s type check failed; it must be a real directory, not a symlink\n",
+                     directory);
+    else if (diagnostic.reason == Reason::runtime_directory_owner)
+        std::fprintf(stderr, "asicend endpoint: %s owner check failed; it must be owned by the current user\n",
+                     directory);
+    else if (diagnostic.reason == Reason::runtime_directory_mode)
+        std::fprintf(stderr, "asicend endpoint: %s mode check failed; private runtime directories must not grant group or other access\n",
+                     directory);
+    else if (diagnostic.reason == Reason::runtime_directory_encoding)
+        std::fprintf(stderr, "asicend endpoint: --runtime-dir must be valid UTF-8 on Windows\n");
+}
+
 int core_exit_status(dtv::userland::Error error) noexcept
 {
     switch (error) {
@@ -286,7 +345,8 @@ bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
     list.enclosure.value.identity.serial_state = IdentitySerialState::unknown;
     list.enclosure.value.identity.uniqueness = Uniqueness::not_applicable;
     list.enclosure.value.limits.max_concurrent_streams.present = true;
-    list.enclosure.value.limits.max_concurrent_streams.value = 1U;
+    list.enclosure.value.limits.max_concurrent_streams.value =
+        profile.enclosure_receiver_count == 4U ? receiver_count : 1U;
     list.functions.count = profile.expected_runtime_functions;
     for (std::size_t index = 0U; index < list.functions.count; ++index) {
         UsbFunction& function = list.functions.items[index];
@@ -350,11 +410,12 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
     const auto* profile = hardware.device_profile();
     if (profile == nullptr || !profile_runtime_supported(*profile)) return 3;
     const std::uint8_t initial_receiver = profile->combined_isdb_ts ? 0U : 1U;
-    const auto opened = hardware.open_receiver(initial_receiver);
-    if (!opened) return exit_status(opened.error());
-    if (!card_only) {
-        const auto closed = hardware.close_receiver(initial_receiver);
-        if (!closed) return exit_status(closed.error());
+    if (card_only) {
+        const auto opened = hardware.open_receiver(initial_receiver);
+        if (!opened) return exit_status(opened.error());
+    } else {
+        const auto prepared = hardware.prepare_runtime_functions();
+        if (!prepared) return exit_status(prepared.error());
     }
 
     std::unique_ptr<AsicenEnclosureFamily> family(new (std::nothrow) AsicenEnclosureFamily(
@@ -409,8 +470,14 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
                                                  std::move(owned_nonce), config);
     if (!assembled) return core_exit_status(assembled.error());
     std::unique_ptr<EnclosureContext> context = std::move(assembled.value());
-    const auto reserved = context->reserve_namespace();
-    if (!reserved) return core_exit_status(reserved.error());
+    dtv::userland::host_listener_context::ListenerDiagnostic listener_diagnostic{};
+    const auto reserved = context->reserve_namespace(&listener_diagnostic);
+    if (!reserved) {
+        if (listener_diagnostic.reason !=
+            dtv::userland::host_listener_context::ListenerDiagnosticReason::none)
+            print_listener_diagnostic(listener_diagnostic);
+        return core_exit_status(reserved.error());
+    }
     const auto published = context->publish();
     if (!published) return core_exit_status(published.error());
 
@@ -438,6 +505,9 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
         }
         if (closed.value() == CloseState::quiesced) break;
     }
+    std::fprintf(stderr, "asicend daemon exit error=%s code=%u\n",
+                 dtv::userland::error_string(loop_error),
+                 static_cast<unsigned>(loop_error));
     return core_exit_status(loop_error);
 }
 

@@ -164,12 +164,13 @@ class LocalWorkflowTests(unittest.TestCase):
         exact = re.findall(r"^\| `([^`]+)` \| `[^`]+` \| `([0-9a-f]{64})` \| exact \|$",
                            provenance, re.MULTILINE)
         self.assertEqual({path for path, _ in exact}, {
-            "scripts/release_verify.py",
-            "tests/test_release_verify.py", "tests/test_release_integration.py",
             "tests/fixtures/release-upstream/release_tag.yml",
             "tests/fixtures/release-upstream/release_reusable.yml",
             "third_party/release-automation/LICENSE",
         })
+        for path in ("scripts/release_verify.py", "tests/test_release_verify.py",
+                     "tests/test_release_integration.py"):
+            self.assertRegex(provenance, rf"(?m)^\| `{re.escape(path)}` \| `[^`]+` \| `[0-9a-f]{{64}}` \| local ASICEN firmware checks \|$")
         for path, expected in exact:
             with self.subTest(path=path):
                 self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), expected)

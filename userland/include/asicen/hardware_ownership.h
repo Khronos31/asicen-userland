@@ -80,6 +80,8 @@ public:
     bool owns_both() const noexcept;
     bool owns_required_functions() const noexcept;
     bool primary_supports_bulk_endpoint(std::uint8_t endpoint) const noexcept;
+    bool function_supports_bulk_endpoint(std::uint8_t function,
+                                        std::uint8_t endpoint) const noexcept;
     int last_transport_error() const noexcept { return last_transport_error_; }
 
 private:
@@ -87,6 +89,8 @@ private:
     UsbFunctionClaim* sibling_ = nullptr;
     bool primary_endpoint81_bulk_ = false;
     bool primary_endpoint82_bulk_ = false;
+    bool sibling_endpoint81_bulk_ = false;
+    bool sibling_endpoint82_bulk_ = false;
     std::uint8_t required_function_count_ = 0;
     int last_transport_error_ = 0;
 };
@@ -98,8 +102,7 @@ enum class ReceiverReservationResult : std::uint8_t {
     invalid,
 };
 
-// The W3U3 frontend has two source lanes but a single mutable CF/DSC/link
-// state. A single owner prevents interleaved receiver leases/captures.
+// Per-receiver leases are independent; the backend may still serialize capture.
 class ReceiverLaneReservation final {
 public:
     ReceiverReservationResult reserve(std::uint8_t receiver) noexcept;
@@ -108,8 +111,7 @@ public:
     std::uint8_t owner() const noexcept;
 
 private:
-    static constexpr std::uint8_t kNone = 0xffU;
-    std::atomic<std::uint8_t> owner_{kNone};
+    std::atomic<std::uint8_t> owners_{0U};
 };
 
 }  // namespace asicen

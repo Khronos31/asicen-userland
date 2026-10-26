@@ -86,6 +86,8 @@ public:
     Result<void> prepare(std::uint8_t receiver, ipc::System system,
                          const std::atomic<bool>& cancelled) noexcept override
     {
+        if (receiver == 0U && system == ipc::System::ISDB_S)
+            return Result<void>::failure(Error::NOT_READY);
         return receiver == 1U && system == ipc::System::ISDB_T && !cancelled.load()
                    ? Result<void>::success()
                    : Result<void>::failure(Error::UNSUPPORTED);
@@ -179,12 +181,19 @@ w::ListResponse make_list(const w::Uuid& epoch)
     list.enclosure.value.id = 0U;
     list.enclosure.value.identity.serial_state = w::IdentitySerialState::absent;
     list.receivers.present = true;
-    list.receivers.value.count = 1U;
-    auto& receiver = list.receivers.value.items[0U];
+    list.receivers.value.count = 2U;
+    auto& satellite = list.receivers.value.items[0U];
+    satellite.id = 0U;
+    satellite.systems.mask = 2U;
+    satellite.binding.present = true;
+    satellite.binding.value.function_id = 1U;
+    satellite.binding.value.local_id = 0U;
+    auto& receiver = list.receivers.value.items[1U];
     receiver.id = 1U;
     receiver.systems.mask = 1U;
     receiver.binding.present = true;
     receiver.binding.value.function_id = 1U;
+    receiver.binding.value.local_id = 1U;
     list.readers.present = true;
     list.readers.value.count = 1U;
     list.readers.value.items[0U].id = 0U;
@@ -235,7 +244,7 @@ bool counter_value(const w::StreamCounters& counters, std::uint8_t id,
     return false;
 }
 
-bool run(bool hold_detach = false)
+bool run(bool hold_detach = false, bool fail_peer_attach = false)
 {
     std::fprintf(stderr, "hw-ipc: start hold=%d\n", hold_detach);
     std::string pattern = test::temporary_directory_template("asicen-hw-ipc-");
@@ -274,10 +283,18 @@ bool run(bool hold_detach = false)
     }
     auto context = std::move(assembled.value());
     std::atomic<bool> serving{true};
+    std::atomic<unsigned> poll_error{0U};
     std::thread poller([&] {
         report_current_stack("hw-ipc: listener");
         std::fprintf(stderr, "hw-ipc: poll-start\n");
-        while (serving.load(std::memory_order_acquire)) (void)context->poll_once(Timeout{10U});
+        while (serving.load(std::memory_order_acquire)) {
+            const auto polled = context->poll_once(Timeout{10U});
+            if (!polled) {
+                poll_error.store(static_cast<unsigned>(polled.error()),
+                                 std::memory_order_release);
+                break;
+            }
+        }
     });
 
     const EndpointConfig control_endpoint{root, "asicen-userland", "receiver1"};
@@ -333,6 +350,80 @@ bool run(bool hold_detach = false)
         const auto ts = w::decode_ts_data(frame.payload);
         if (!ts || ts.value().packets.size != 188U || ts.value().packets.data[0U] != 0x47U)
             return false;
+
+        if (fail_peer_attach) {
+            stage = "failed-peer-attach";
+            auto peer_control_result = connect_control(control_endpoint, Timeout{2000U});
+            if (!peer_control_result) return false;
+            auto peer_control = std::move(peer_control_result.value());
+            w::RecordingOptions peer_options;
+            peer_options.receiver_id = 0U;
+            peer_options.tune.epoch = config.server.epoch;
+            peer_options.tune.system = w::System::isdb_s;
+            peer_options.tune.frequency_hz = 1318000000U;
+            peer_options.tune.selection = w::Selection::tsid;
+            peer_options.tune.selection_value = 1U;
+            peer_options.tune.timeout_ms = 1000U;
+            auto peer_recording = w::begin_recording(
+                *peer_control, peer_options, Timeout{5000U});
+            if (!peer_recording) {
+                std::fprintf(stderr, "peer recording error=%u remote=%u\n",
+                             static_cast<unsigned>(peer_recording.error),
+                             peer_recording.remote_error_code);
+                return false;
+            }
+            const EndpointConfig peer_data_endpoint{root, "asicen-userland", "receiver1",
+                EndpointAccess::private_user, -1, "stream.sock"};
+            auto peer_data_result = connect_endpoint(peer_data_endpoint, Timeout{2000U});
+            if (!peer_data_result) return false;
+            auto peer_data = std::move(peer_data_result.value());
+            w::AttachRequest peer_attach;
+            peer_attach.epoch = peer_recording.session.epoch;
+            peer_attach.lease_id = peer_recording.session.lease_id;
+            peer_attach.stream_id = peer_recording.session.stream_id;
+            peer_attach.attach_token = peer_recording.session.attach_token;
+            std::array<std::uint8_t, w::kHeaderSize + w::kMaxControlPayload> peer_frame{};
+            const auto peer_size = w::encode_record_frame(
+                w::Kind::request, w::kOpcodeAttachStream, 1U, peer_attach,
+                &w::encode_attach_request, {peer_frame.data(), peer_frame.size()});
+            if (!peer_size || !peer_data->write_all(
+                    {peer_frame.data(), peer_size.value()}, Timeout{1000U})) {
+                std::fprintf(stderr, "peer attach write failed\n");
+                return false;
+            }
+            w::Frame peer_response;
+            if (!read_frame(*peer_data, peer_response) ||
+                peer_response.header.kind != w::Kind::error_response) {
+                std::fprintf(stderr, "peer response kind=%u opcode=%u\n",
+                             static_cast<unsigned>(peer_response.header.kind),
+                             peer_response.header.opcode);
+                return false;
+            }
+            const auto peer_error = w::decode_error_response(peer_response.payload);
+            if (!peer_error || peer_error.value().error.code !=
+                                   static_cast<std::uint32_t>(Error::NOT_READY)) {
+                std::fprintf(stderr, "peer error decode=%u code=%u\n",
+                             static_cast<unsigned>(peer_error.error()),
+                             static_cast<unsigned>(peer_error ? peer_error.value().error.code : 0U));
+                return false;
+            }
+            peer_data->close();
+            const auto peer_released = w::release_recording(
+                *peer_control, peer_recording.session, Timeout{2000U});
+            if (!peer_released && peer_released.error != Error::NOT_READY) {
+                std::fprintf(stderr, "peer release error=%u remote=%u\n",
+                             static_cast<unsigned>(peer_released.error),
+                             peer_released.remote_error_code);
+                return false;
+            }
+            peer_control->close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (poll_error.load(std::memory_order_acquire) != 0U) {
+                std::fprintf(stderr, "poll_error after failed attach cleanup=%u\n",
+                             poll_error.load(std::memory_order_acquire));
+                return false;
+            }
+        }
 
         stage = "stop-stream";
         w::StopControlResult stop;
@@ -411,5 +502,6 @@ int main()
 {
     if (!run()) return 1;
     if (!run(true)) return 1;
+    if (!run(false, true)) return 1;
     return 0;
 }
