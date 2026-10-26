@@ -141,9 +141,11 @@ ASICENではruntime stageの`TARGET_USB`を機種表から設定する: PX-S3U `
   import json, sys
   json.dump({"options":json.load(open(sys.argv[1], encoding="utf-8"))}, open(sys.argv[2], "w", encoding="utf-8"))
   PY
+  # /options/validate accepts the raw options object; only /options uses the {"options": ...} request schema.
+  cp "$LOG/private/options.trial.json" "$LOG/private/options-trial.validate.json"
   chmod 600 "$LOG/private/"*.json
-  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-trial.request.json" "$API/options/validate" -o "$LOG/private/options-trial.validate.json"
-  if ! python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x=x.get("data",x); sys.exit(0 if x.get("valid") is True else 1)' "$LOG/private/options-trial.validate.json"; then echo 'options validation rejected; no trial POST was sent' >&2; exit 1; fi
+  curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-trial.validate.json" "$API/options/validate" -o "$LOG/private/options-trial.validation-response.json"
+  if ! python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x=x.get("data",x); sys.exit(0 if x.get("valid") is True else 1)' "$LOG/private/options-trial.validation-response.json"; then echo 'options validation rejected; no trial POST was sent' >&2; exit 1; fi
   curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' --data-binary @"$LOG/private/options-trial.request.json" "$API/options" -o "$LOG/private/options-trial.post.json"
   ```
   run終了後、保存したraw optionsを同じ`/options` endpointへ戻し、`/info`のraw `options`とprivate backupの完全一致を確認する。`/options/config`のvalidated値との比較で復元を判定しない。
@@ -190,34 +192,51 @@ ha addons restart "$ADDON_SLUG"
   test "$(printf '%s' "$ACTUAL_USB" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$TARGET_USB" | tr '[:upper:]' '[:lower:]')"
   stat -c '%a %u %g' "$DEVICE_NODE" > "$LOG/usb-node.before.txt"
   printf '%s\n' "$SYSFS_PATH" > "$LOG/usb-sysfs-path.before.txt"
-  # 承認済みrunでのみ適用する。対象driver ruleとgroupを確定してから実行:
-  : "${BLACKLIST_MODULES:?set only the modules required by the selected product/model}"
-  : > /etc/modprobe.d/smsusb-blacklist.conf
-  for module in $BLACKLIST_MODULES; do printf 'blacklist %s\n' "$module" >> /etc/modprobe.d/smsusb-blacklist.conf; done
-  VID=${TARGET_USB%:*}; PID=${TARGET_USB#*:}
-  printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", ATTR{idProduct}=="%s", MODE="0660", GROUP="video"\n' "$VID" "$PID" > /etc/udev/rules.d/99-usb-access.rules
-  udevadm control --reload-rules; udevadm trigger --action=change "$SYSFS_DEVICE"; udevadm settle
-  usermod -aG video "$TEST_USER"
-  # 承認済み復元後、同じUSB nodeだけへ元ruleを再適用してnode mode/ownerも復元:
+  # 承認済みrunでのみ適用する。適用は隔離subshell内で行い、途中失敗でも親shellの復元へ戻る:
+  apply_trial_access() (
+    set -eu
+    : "${BLACKLIST_MODULES:?set only the modules required by the selected product/model}"
+    : > /etc/modprobe.d/smsusb-blacklist.conf || exit $?
+    for module in $BLACKLIST_MODULES; do printf 'blacklist %s\n' "$module" >> /etc/modprobe.d/smsusb-blacklist.conf || exit $?; done
+    VID=${TARGET_USB%:*}; PID=${TARGET_USB#*:}
+    printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", ATTR{idProduct}=="%s", MODE="0660", GROUP="video"\n' "$VID" "$PID" > /etc/udev/rules.d/99-usb-access.rules || exit $?
+    udevadm control --reload-rules || exit $?
+    udevadm trigger --action=change "$SYSFS_DEVICE" || exit $?
+    udevadm settle || exit $?
+    usermod -aG video "$TEST_USER" || exit $?
+  )
+  if apply_trial_access; then APPLY_RC=0; else APPLY_RC=$?; fi
+  printf '%s\n' "$APPLY_RC" > "$LOG/access-apply.rc"
+  RESTORE_RC=0
+  set +e
   for f in /etc/modprobe.d/smsusb-blacklist.conf /etc/udev/rules.d/99-usb-access.rules; do
     n=$(basename "$f")
-    if [ "$(cat "$LOG/$n.state")" = present ]; then cp -a "$LOG/$n.before" "$f"; cmp "$LOG/$n.before" "$f"; else rm -f "$f"; test ! -e "$f"; fi
+    if [ "$(cat "$LOG/$n.state")" = present ]; then
+      cp -a "$LOG/$n.before" "$f" || RESTORE_RC=1
+      cmp "$LOG/$n.before" "$f" || RESTORE_RC=1
+    else
+      rm -f "$f" || RESTORE_RC=1
+      test ! -e "$f" || RESTORE_RC=1
+    fi
   done
-  udevadm control --reload-rules
-  test -c "$DEVICE_NODE"
-  test "$(udevadm info --query=path --name="$DEVICE_NODE")" = "$SYSFS_PATH"
-  test "$(cat "$SYSFS_DEVICE/idVendor"):$(cat "$SYSFS_DEVICE/idProduct")" = "$ACTUAL_USB"
-  udevadm trigger --action=change "$SYSFS_DEVICE"; udevadm settle
-  set -- $(cat "$LOG/usb-node.before.txt"); test "$#" -eq 3
-  chown "$2:$3" "$DEVICE_NODE"; chmod "$1" "$DEVICE_NODE"
-  stat -c '%a %u %g' "$DEVICE_NODE" > "$LOG/usb-node.after.txt"
-  cmp "$LOG/usb-node.before.txt" "$LOG/usb-node.after.txt"
-  GROUPS_BEFORE=$(cat "$LOG/groups.before.txt")
-  if [ -n "$GROUPS_BEFORE" ]; then usermod -G "$GROUPS_BEFORE" "$TEST_USER"; else usermod -G '' "$TEST_USER"; fi
-  id "$TEST_USER" > "$LOG/test-user.after.txt"
-  PRIMARY_AFTER=$(id -gn "$TEST_USER")
-  id -nG "$TEST_USER" | python3 -c 'import sys; p=sys.argv[1]; print(",".join(g for g in sys.stdin.read().split() if g != p))' "$PRIMARY_AFTER" > "$LOG/groups.after.txt"
-  cmp "$LOG/groups.before.txt" "$LOG/groups.after.txt"
+  udevadm control --reload-rules || RESTORE_RC=1
+  if test -c "$DEVICE_NODE" && test "$(udevadm info --query=path --name="$DEVICE_NODE")" = "$SYSFS_PATH" && test "$(cat "$SYSFS_DEVICE/idVendor"):$(cat "$SYSFS_DEVICE/idProduct")" = "$ACTUAL_USB"; then :; else RESTORE_RC=1; fi
+  udevadm trigger --action=change "$SYSFS_DEVICE" || RESTORE_RC=1
+  udevadm settle || RESTORE_RC=1
+  if set -- $(cat "$LOG/usb-node.before.txt") && test "$#" -eq 3; then
+    chown "$2:$3" "$DEVICE_NODE" || RESTORE_RC=1
+    chmod "$1" "$DEVICE_NODE" || RESTORE_RC=1
+  else RESTORE_RC=1; fi
+  if stat -c '%a %u %g' "$DEVICE_NODE" > "$LOG/usb-node.after.txt"; then cmp "$LOG/usb-node.before.txt" "$LOG/usb-node.after.txt" || RESTORE_RC=1; else RESTORE_RC=1; fi
+  if GROUPS_BEFORE=$(cat "$LOG/groups.before.txt"); then
+    if [ -n "$GROUPS_BEFORE" ]; then usermod -G "$GROUPS_BEFORE" "$TEST_USER" || RESTORE_RC=1; else usermod -G '' "$TEST_USER" || RESTORE_RC=1; fi
+    id "$TEST_USER" > "$LOG/test-user.after.txt" || RESTORE_RC=1
+    if PRIMARY_AFTER=$(id -gn "$TEST_USER") && id -nG "$TEST_USER" | python3 -c 'import sys; p=sys.argv[1]; print(",".join(g for g in sys.stdin.read().split() if g != p))' "$PRIMARY_AFTER" > "$LOG/groups.after.txt"; then cmp "$LOG/groups.before.txt" "$LOG/groups.after.txt" || RESTORE_RC=1; else RESTORE_RC=1; fi
+  else RESTORE_RC=1; fi
+  printf '%s\n' "$RESTORE_RC" > "$LOG/access-restore.rc"
+  set -e
+  if [ "$APPLY_RC" -ne 0 ]; then exit "$APPLY_RC"; fi
+  if [ "$RESTORE_RC" -ne 0 ]; then echo 'access state restoration incomplete; retain evidence and stop' >&2; exit "$RESTORE_RC"; fi
   ```
 
 - **E07 Android stay-awake:**初回ADB readが非0/空/不正値なら書込み前に停止する。`null`は未設定、十進整数は保存値として区別する。権限・readback失敗を無視しない。次は端末設定に触れないsynthetic確認用の状態遷移であり、実Androidへは実行しない。
@@ -406,72 +425,7 @@ job名/ID・head SHAとsource refが当該candidate一致しない場合、ま�
 - **停止/cleanup:** idle/streamそれぞれでowned client/daemonを通常停止してwaitし、再接続後の新daemonも通常停止する。Androidはpermission/FD再取得。
 - **記録:** idle/stream、daemon USB owner状態、依頼/応答時刻、path、status/診断、各実終了値、再取得TS/counter、cleanup。
 
-Linux native Bash runで使うidle/stream手順。各物理操作は利用者へ依頼しEnter応答を最大300秒待ち、daemon/client PIDと返却値を保存する。再接続後は必ず新しいruntimeを使う。
-
-```sh
-PORT='<listed-usb-port>'; TOKEN='idle'; ID="usb:$PORT"
-RT_IDLE="$WORK/runtime-idle"; mkdir -m 700 "$RT_IDLE"
-"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_IDLE" > "$LOG/idle-daemon.log" 2>&1 & IDLE_PID=$!
-printf '%s\n' "$IDLE_PID" > "$LOG/idle-daemon.pid"
-"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" status > "$LOG/idle-before.txt" 2>&1
-"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" list > "$LOG/idle-list-before.txt" 2>&1
-printf '%s' 'USB抜去完了後にEnter (300秒以内): '
-if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/idle-human-wait.txt"; exit 1; fi
-# 操作後の状態と実終了値を記録する。
-"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" status > "$LOG/idle-removed.txt" 2>&1 || :
-kill -INT "$IDLE_PID" 2>/dev/null || :; if wait "$IDLE_PID"; then IDLE_RC=0; else IDLE_RC=$?; fi
-printf '%s\n' "$IDLE_RC" > "$LOG/idle-daemon.rc"
-IDLE_PID=
-printf '%s' 'USB再接続完了後にEnter (300秒以内): '
-if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/reconnect-human-wait.txt"; exit 1; fi
-# 再列挙で新しいPORTを選んでから続ける。
-"$D/asicend" --list-json > "$LOG/discovery-reconnected.json"
-PORT='<new-listed-usb-port>'; ID="usb:$PORT"; TOKEN='stream'; RT_STREAM="$WORK/runtime-stream"; mkdir -m 700 "$RT_STREAM"
-"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_STREAM" > "$LOG/stream-daemon.log" 2>&1 & STREAM_PID=$!
-printf '%s\n' "$STREAM_PID" > "$LOG/stream-daemon.pid"
-"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-ready.txt" 2>&1
-"$D/asicen-ts" --instance "$TOKEN" --runtime-dir "$RT_STREAM" --receiver '<listed-receiver>' --channel T27 --time 300 --output "$LOG/stream-cut.ts" > "$LOG/stream-cut.out" 2> "$LOG/stream-cut.err" & CLIENT_PID=$!
-printf '%s\n' "$CLIENT_PID" > "$LOG/stream-client.pid"
-printf '%s' 'stream中にUSB抜去完了後Enter (300秒以内): '
-if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-human-wait.txt"; exit 1; fi
-# 物理切断後、有限観測後にclientをwaitする。
-if wait "$CLIENT_PID"; then CLIENT_RC=0; else CLIENT_RC=$?; fi
-printf '%s\n' "$CLIENT_RC" > "$LOG/stream-client.rc"
-CLIENT_PID=
-if [ "$CLIENT_RC" -ne 7 ]; then
-  printf 'expected client exit 7, got %s\n' "$CLIENT_RC" > "$LOG/stream-client-expectation.txt"
-  if [ "$PRIMARY_RC" -eq 0 ]; then PRIMARY_RC=1; CURRENT_STEP=stream-client-exit; fi
-fi
-"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-after-cut.txt" 2>&1 || :
-kill -INT "$STREAM_PID" 2>/dev/null || :; if wait "$STREAM_PID"; then STREAM_RC=0; else STREAM_RC=$?; fi
-printf '%s\n' "$STREAM_RC" > "$LOG/stream-daemon.rc"
-STREAM_PID=
-printf '%s' '同じUSBを再接続完了後にEnter (300秒以内): '
-if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-reconnect-human-wait.txt"; exit 1; fi
-"$D/asicend" --list-json > "$LOG/discovery-stream-reconnected.json"
-PORT='<new-listed-usb-port-for-the-same-physical-device>'; ID="usb:$PORT"; TOKEN='recovered'
-RT_RECOVERY="$WORK/runtime-recovery"; mkdir -m 700 "$RT_RECOVERY"
-"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_RECOVERY" > "$LOG/recovery-daemon.log" 2>&1 & RECOVERY_PID=$!
-printf '%s\n' "$RECOVERY_PID" > "$LOG/recovery-daemon.pid"
-READY=0
-for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
-  if "$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" status > "$LOG/recovery-ready.txt" 2>&1; then READY=1; break; fi
-  sleep 1
-done
-test "$READY" -eq 1
-"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" list > "$LOG/recovery-list.txt" 2>&1
-"$D/asicen-ts" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" --receiver '<listed-receiver>' --channel T27 --time 30 --output "$LOG/recovery.ts" > "$LOG/recovery.out" 2> "$LOG/recovery.err" & RECOVERY_CLIENT_PID=$!
-if wait "$RECOVERY_CLIENT_PID"; then RECOVERY_CLIENT_RC=0; else RECOVERY_CLIENT_RC=$?; fi
-printf '%s\n' "$RECOVERY_CLIENT_RC" > "$LOG/recovery-client.rc"
-RECOVERY_CLIENT_PID=
-test "$RECOVERY_CLIENT_RC" -eq 0
-python3 "$TOOL/ts-check.py" "$LOG/recovery.ts" > "$LOG/recovery-ts-check.json"
-kill -INT "$RECOVERY_PID" 2>/dev/null || :; if wait "$RECOVERY_PID"; then RECOVERY_RC=0; else RECOVERY_RC=$?; fi
-printf '%s\n' "$RECOVERY_RC" > "$LOG/recovery-daemon.rc"
-RECOVERY_PID=
-```
-
-stream clientの期待値はUSB切断診断とexit 7であり、時間満了exit 0は不合格。idleでdaemonが生存する場合は状態/診断を残してからowned daemonを通常停止する。物理復帰後の新daemonで再列挙・ready・短TS成功を別の新runtimeで記録する。物理操作待ちが上限を超える場合は未完了として停止し、切断・再取得成功に読み替えない。
+Linux POSIXの具体コマンドは [E03 T07 recipe](#asicen-linux-posix-t07) を実行する。Windowsの手順は [Windows native WinSCard節](#asicen-windows-t07) を参照する。
 
 ### T08 通常停止・cleanup
 
@@ -495,12 +449,12 @@ test ! -s "$LOG/processes-after-stop.txt"; test ! -s "$LOG/ipc-remnants.txt"
 
 残留、wait非0、process所有者が識別できない場合はcleanup未達とし、外部processや既存socketを削除しない。
 
-### T09 helperの固定取得
+### 共通helperの固定取得（T09前提）
 
-候補sourceとは独立した共通runbook helperを、Siano runbookのimmutable commit `4fa86d0a51253bc0da99178f63a46e5dfbd927d0`から取得する。candidate checkout/archive内のhelper有無に依存しない。POSIX/Termuxでは次を一度実行し、以後の全captureで`$TOOL/ts-check.py`を使う。
+T09を実行する前に、候補sourceとは独立した共通runbook helperをSiano runbookのimmutable commit `c2378ea3c52b3e415ec6c7acfea4b8f758b46eda`から取得する。candidate checkout/archive内のhelper有無に依存しない。POSIX/Termuxでは次を一度実行し、以後の全captureで`$TOOL/ts-check.py`を使う。
 
 ```sh
-RUNBOOK_REF='4fa86d0a51253bc0da99178f63a46e5dfbd927d0'; HELPER_SHA256='3224747ccf74d752fd70e0fd5599418cfa20d6d4bfafc8e8220a002c1dcbcffd'
+RUNBOOK_REF='c2378ea3c52b3e415ec6c7acfea4b8f758b46eda'; HELPER_SHA256='dbb4826e3eb4f0cb13850b59864c7219b8929822976c9e213d3948edbe450f05'
 TOOL="$WORK/tooling"; mkdir -m 700 -p "$TOOL"
 gh api -H 'Accept: application/vnd.github.raw' "repos/Khronos31/siano-userland/contents/docs/release-validation/ts-check.py?ref=$RUNBOOK_REF" > "$TOOL/ts-check.py"
 if command -v sha256sum >/dev/null 2>&1; then printf '%s  %s\n' "$HELPER_SHA256" "$TOOL/ts-check.py" | sha256sum -c -; else printf '%s  %s\n' "$HELPER_SHA256" "$TOOL/ts-check.py" | shasum -a 256 -c -; fi
@@ -510,7 +464,7 @@ printf '%s\n' "$RUNBOOK_REF $HELPER_SHA256" > "$LOG/ts-helper-version.txt"
 Windows PowerShell 5.1でも同じ固定版を新しいtooling directoryへ取得し、hash一致後にのみ使う。
 
 ```powershell
-$RunbookRef = '4fa86d0a51253bc0da99178f63a46e5dfbd927d0'; $HelperSha256 = '3224747ccf74d752fd70e0fd5599418cfa20d6d4bfafc8e8220a002c1dcbcffd'
+$RunbookRef = 'c2378ea3c52b3e415ec6c7acfea4b8f758b46eda'; $HelperSha256 = 'dbb4826e3eb4f0cb13850b59864c7219b8929822976c9e213d3948edbe450f05'
 $Tool = Join-Path $Work 'tooling'; New-Item -ItemType Directory -Path $Tool | Out-Null
 $Helper = Join-Path $Tool 'ts-check.py'
 Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Khronos31/siano-userland/$RunbookRef/docs/release-validation/ts-check.py" -OutFile $Helper
@@ -526,7 +480,7 @@ helperのversionはrunbook Git commitとSHA-256の組で固定する。candidate
 - **適用対象/頻度:** 全capture/soak。
 - **準備:** Python 3.11以上を`python3 --version`で確認し、固定取得した`$TOOL/ts-check.py`（Windowsは`$Helper`）を使う。候補ごとに新規作成した`$LOG`を使う。
 - **実操作/利用者への依頼:** POSIXでは各TSに`python3 $TOOL/ts-check.py "$LOG/<receiver>.ts" > "$LOG/<receiver>.ts-check.json"`を実行する。Windowsは同じhelperを`python $Helper "$LOG\<receiver>.ts"`で実行し、標準出力を`$LOG`へ保存する。全capture/soakの各TSで実行し、候補daemonのdrop/USB counterも記録する。
-- **期待値/終了値:** null PIDはcontinuity判定から除外する。同一PIDの隣接payload duplicate pairはPCR timestamp以外の全byte一致時だけ1組を許容し、duplicate indexをJSONへ記録する。3個目、内容差、非連続再送はcontinuity error。PCR reserved bits/extension違反とinvalid adaptationはfail。全TSが製品SPEC基準を満たし通常取得exit 0。非空file/counter 0だけでpassにしない。
+- **期待値/終了値:** null PIDはcontinuity判定から除外する。同一PIDの隣接payload duplicate pairはPCR timestamp以外の全byte一致時だけ1組を許容し、duplicate indexをJSONへ記録する。3個目、内容差、非連続再送はcontinuity error。retune境界を確認できるrunはzero-basedの最初の出力packet indexを`--retune-boundary-at`へ渡し、境界後の各PID初回packetだけCC比較を除外する。TEI、sync、framing、invalid adaptationは除外しない。PCR reserved bits/extension違反とinvalid adaptationはfail。全TSが製品SPEC基準を満たし通常取得exit 0。非空file/counter 0だけでpassにしない。
 - **停止/cleanup:** 元TS/hash/logを残してT08 cleanup。
 - **記録:** `python3 --version`、helperのGit SHA/hash、TS hash、helperのJSON/終了値、duplicate/null/invalid packet index、sync/TEI/continuity/drop/counter、client exit。
 
@@ -661,6 +615,96 @@ asicen-ts --instance rc --runtime-dir "$RT" --receiver 1 --channel T27 --time <S
 statusがready、listにreceiverが存在すること、client終了値0、TSが188-byte packet列として同期すること、daemonのpacket/sync/TEI/continuity統計を確認する。変更に関係するchannel/receiverを受信し、チャンネル名・周波数・TSID等は現地channel planから列挙してログへ実値を記録する。衛星は実機のreceiver割当とREADMEに従い `--channel BS01_0 --lnb-voltage 0` を使う。出力非空だけをpassとせず、README/SPECのTS基準で判定し、失敗試行を消さない。
 
 受信停止後、同じdaemon/runtimeで同じ受信を再取得し、normal exitと再取得成功を確認する。機種差があるので使うreceiverとT/Sの排他条件を記録する。
+
+<a id="asicen-linux-posix-t07"></a>
+### E03 Linux POSIX T07 recipe
+
+Linux native Bash runで使うidle/stream手順。各物理操作は利用者へ依頼しEnter応答を最大300秒待ち、daemon/client PIDと返却値を保存する。再接続後は必ず新しいruntimeを使う。
+
+```sh
+PORT='<listed-usb-port>'; TOKEN='idle'; ID="usb:$PORT"
+RT_IDLE="$WORK/runtime-idle"; mkdir -m 700 "$RT_IDLE"
+"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_IDLE" > "$LOG/idle-daemon.log" 2>&1 & IDLE_PID=$!
+printf '%s\n' "$IDLE_PID" > "$LOG/idle-daemon.pid"
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" status > "$LOG/idle-before.txt" 2>&1
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" list > "$LOG/idle-list-before.txt" 2>&1
+printf '%s' 'USB抜去完了後にEnter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/idle-human-wait.txt"; exit 1; fi
+# 操作後の状態と実終了値を記録する。
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_IDLE" status > "$LOG/idle-removed.txt" 2>&1 || :
+kill -INT "$IDLE_PID" 2>/dev/null || :; if wait "$IDLE_PID"; then IDLE_RC=0; else IDLE_RC=$?; fi
+printf '%s\n' "$IDLE_RC" > "$LOG/idle-daemon.rc"
+IDLE_PID=
+printf '%s' 'USB再接続完了後にEnter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/reconnect-human-wait.txt"; exit 1; fi
+# 再列挙で新しいPORTを選んでから続ける。
+"$D/asicend" --list-json > "$LOG/discovery-reconnected.json"
+PORT='<new-listed-usb-port>'; ID="usb:$PORT"; TOKEN='stream'; RT_STREAM="$WORK/runtime-stream"; mkdir -m 700 "$RT_STREAM"
+"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_STREAM" > "$LOG/stream-daemon.log" 2>&1 & STREAM_PID=$!
+printf '%s\n' "$STREAM_PID" > "$LOG/stream-daemon.pid"
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-ready.txt" 2>&1
+"$D/asicen-ts" --instance "$TOKEN" --runtime-dir "$RT_STREAM" --receiver '<listed-receiver>' --channel T27 --time 300 --output "$LOG/stream-cut.ts" > "$LOG/stream-cut.out" 2> "$LOG/stream-cut.err" & CLIENT_PID=$!
+printf '%s\n' "$CLIENT_PID" > "$LOG/stream-client.pid"
+printf '%s' 'stream中にUSB抜去完了後Enter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-human-wait.txt"; exit 1; fi
+# 物理切断後、有限観測後にclientをwaitする。
+if wait "$CLIENT_PID"; then CLIENT_RC=0; else CLIENT_RC=$?; fi
+printf '%s\n' "$CLIENT_RC" > "$LOG/stream-client.rc"
+CLIENT_PID=
+if [ "$CLIENT_RC" -ne 7 ]; then
+  printf 'expected client exit 7, got %s\n' "$CLIENT_RC" > "$LOG/stream-client-expectation.txt"
+  if [ "$PRIMARY_RC" -eq 0 ]; then PRIMARY_RC=1; CURRENT_STEP=stream-client-exit; fi
+fi
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_STREAM" status > "$LOG/stream-after-cut.txt" 2>&1 || :
+kill -INT "$STREAM_PID" 2>/dev/null || :; if wait "$STREAM_PID"; then STREAM_RC=0; else STREAM_RC=$?; fi
+printf '%s\n' "$STREAM_RC" > "$LOG/stream-daemon.rc"
+STREAM_PID=
+printf '%s' '同じUSBを再接続完了後にEnter (300秒以内): '
+if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-reconnect-human-wait.txt"; exit 1; fi
+"$D/asicend" --list-json > "$LOG/discovery-stream-reconnected.json"
+PORT='<new-listed-usb-port-for-the-same-physical-device>'; ID="usb:$PORT"; TOKEN='recovered'
+RT_RECOVERY="$WORK/runtime-recovery"; mkdir -m 700 "$RT_RECOVERY"
+recovery_cleanup() {
+  RECOVERY_PRIMARY_RC=$?
+  trap - EXIT
+  set +e
+  RECOVERY_CLEANUP_RC=0
+  if [ -n "${RECOVERY_PID:-}" ]; then
+    kill -INT "$RECOVERY_PID" 2>/dev/null || :
+    if wait "$RECOVERY_PID"; then RECOVERY_RC=0; else RECOVERY_RC=$?; fi
+    printf '%s\n' "$RECOVERY_RC" > "$LOG/recovery-daemon.rc"
+    RECOVERY_PID=
+    if [ "$RECOVERY_RC" -ne 0 ]; then RECOVERY_CLEANUP_RC=1; fi
+  fi
+  printf '%s\n' "$RECOVERY_CLEANUP_RC" > "$LOG/recovery-cleanup.rc"
+  if [ "$RECOVERY_PRIMARY_RC" -ne 0 ]; then exit "$RECOVERY_PRIMARY_RC"; fi
+  exit "$RECOVERY_CLEANUP_RC"
+}
+trap recovery_cleanup EXIT
+"$D/asicend" --device "$ID" --instance "$TOKEN" --firmware "$FW" --runtime-dir "$RT_RECOVERY" > "$LOG/recovery-daemon.log" 2>&1 & RECOVERY_PID=$!
+printf '%s\n' "$RECOVERY_PID" > "$LOG/recovery-daemon.pid"
+READY=0
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  if "$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" status > "$LOG/recovery-ready.txt" 2>&1; then READY=1; break; fi
+  sleep 1
+done
+test "$READY" -eq 1
+"$D/asicenctl" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" list > "$LOG/recovery-list.txt" 2>&1
+"$D/asicen-ts" --instance "$TOKEN" --runtime-dir "$RT_RECOVERY" --receiver '<listed-receiver>' --channel T27 --time 30 --output "$LOG/recovery.ts" > "$LOG/recovery.out" 2> "$LOG/recovery.err" & RECOVERY_CLIENT_PID=$!
+if wait "$RECOVERY_CLIENT_PID"; then RECOVERY_CLIENT_RC=0; else RECOVERY_CLIENT_RC=$?; fi
+printf '%s\n' "$RECOVERY_CLIENT_RC" > "$LOG/recovery-client.rc"
+RECOVERY_CLIENT_PID=
+test "$RECOVERY_CLIENT_RC" -eq 0
+python3 "$TOOL/ts-check.py" "$LOG/recovery.ts" > "$LOG/recovery-ts-check.json"
+kill -INT "$RECOVERY_PID" 2>/dev/null || :; if wait "$RECOVERY_PID"; then RECOVERY_RC=0; else RECOVERY_RC=$?; fi
+printf '%s\n' "$RECOVERY_RC" > "$LOG/recovery-daemon.rc"
+RECOVERY_PID=
+trap - EXIT
+test "$RECOVERY_RC" -eq 0
+printf '%s\n' 0 > "$LOG/recovery-cleanup.rc"
+```
+
+stream clientの期待値はUSB切断診断とexit 7であり、時間満了exit 0は不合格。idleでdaemonが生存する場合は状態/診断を残してからowned daemonを通常停止する。物理復帰後の新daemonで再列挙・ready・短TS成功を別の新runtimeで記録する。物理操作待ちが上限を超える場合は未完了として停止し、切断・再取得成功に読み替えない。
 
 ## 4. CARD・PC/SC・USB
 
@@ -1013,6 +1057,7 @@ consumer終了後、記録済みの自分のPIDだけを停止し、各終了値
 
 USBはdaemon idleとTS受信中の両方で対象deviceを抜く。stream clientはUSB切断exit 7を確認し、戻した同一portの再列挙、旧daemonのcleanup、新daemonでのstatus/list、再受信を順に行う。自動hotplug復旧を期待しない。Termuxでは `termux-usb -l` と `termux-usb -r <usb-path>` で許可を取り、再列挙後にFDを再取得する。BUSYなら強制切断しない。
 
+<a id="asicen-windows-t07"></a>
 ### WindowsネイティブWinSCard
 
 Windows x86_64は回帰対象である。通常release aggregateにWindows ZIPがない場合は同じcandidate source runの`win-candidate` artifactを展開し、hash/manifest/provenanceを照合する。native Windows hostでUSB driverを自動変更せず、既に許可済みのlibusb access pathを記録する。実時間は共通頻度表に従い、初回/majorの30分連続受信は全無料channel取得とは別に記録する。
@@ -1195,11 +1240,24 @@ $D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $RT_RECOVER
 $CTL = Join-Path $D 'asicenctl.exe'; $B = Join-Path $D 'asicen-ts.exe'; $RECOVERY_TOKEN = 't07-recovery'; $R1 = '<receiver-1>'
 & $CTL --instance $RECOVERY_TOKEN --runtime-dir $RT_RECOVERY status 2>&1 | Tee-Object (Join-Path $LOG 't07-recovery-status.txt')
 $LASTEXITCODE | Set-Content (Join-Path $LOG 't07-recovery-status.rc')
+if ($LASTEXITCODE -ne 0) { throw 'recovery status failed; save evidence and stop the owned daemon normally.' }
 & $CTL --instance $RECOVERY_TOKEN --runtime-dir $RT_RECOVERY list 2>&1 | Tee-Object (Join-Path $LOG 't07-recovery-list.txt')
 $LASTEXITCODE | Set-Content (Join-Path $LOG 't07-recovery-list.rc')
-$recovery = Start-Process -FilePath $B -ArgumentList @('--instance',$RECOVERY_TOKEN,'--runtime-dir',$RT_RECOVERY,'--receiver',$R1,'--channel','T27','--time','30','--output',(Join-Path $LOG 't07-recovery.ts')) -PassThru -NoNewWindow -Wait
+if ($LASTEXITCODE -ne 0) { throw 'recovery list failed; save evidence and stop the owned daemon normally.' }
+$recoveryTs = Join-Path $LOG 't07-recovery.ts'
+$Tool = Join-Path $Work 'tooling'; $Helper = Join-Path $Tool 'ts-check.py'
+$HelperSha256 = '3224747ccf74d752fd70e0fd5599418cfa20d6d4bfafc8e8220a002c1dcbcffd'
+if (-not (Test-Path -LiteralPath $Helper -PathType Leaf)) { throw 'fixed runbook TS helper is missing; stop the owned daemon normally.' }
+if ((Get-FileHash -LiteralPath $Helper -Algorithm SHA256).Hash.ToLowerInvariant() -ne $HelperSha256) { throw 'fixed runbook TS helper hash mismatch; stop the owned daemon normally.' }
+$recovery = Start-Process -FilePath $B -ArgumentList @('--instance',$RECOVERY_TOKEN,'--runtime-dir',$RT_RECOVERY,'--receiver',$R1,'--channel','T27','--time','30','--output',$recoveryTs) -PassThru -NoNewWindow -Wait
 $recovery.ExitCode | Set-Content (Join-Path $LOG 't07-recovery-client.rc')
-Get-FileHash -Algorithm SHA256 (Join-Path $LOG 't07-recovery.ts') | Set-Content (Join-Path $LOG 't07-recovery-ts.sha256')
+$recoveryHash = Get-FileHash -LiteralPath $recoveryTs -Algorithm SHA256
+$recoveryHash | Set-Content (Join-Path $LOG 't07-recovery-ts.sha256')
+if ($recovery.ExitCode -ne 0) { throw "recovery capture exit was $($recovery.ExitCode), expected 0; save evidence and stop the owned daemon normally." }
+$recoveryCheck = Join-Path $LOG 't07-recovery-ts-check.json'; $recoveryCheckErr = Join-Path $LOG 't07-recovery-ts-check.err'
+& python $Helper $recoveryTs 1> $recoveryCheck 2> $recoveryCheckErr; $recoveryCheckRc = $LASTEXITCODE
+$recoveryCheckRc | Set-Content (Join-Path $LOG 't07-recovery-ts-check.rc')
+if ($recoveryCheckRc -ne 0) { throw "recovery TS quality check exit was $recoveryCheckRc; save evidence and stop the owned daemon normally." }
 ```
 
 再接続daemon consoleでCtrl+C後、`$LASTEXITCODE`を`t07-recovery-daemon.rc`へ保存する。各consoleのプロセス照合は候補exeのabsolute pathとinstance引数の両方が一意に一致した場合だけPIDを保存し、0件/複数件では推測しない。
