@@ -9,6 +9,7 @@
 #include "asicen/ts_framer.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -39,9 +40,19 @@ public:
     virtual CaptureRunResult run(const std::atomic<bool>& cancelled,
                                  bool (*emit)(void*, const std::uint8_t*, std::size_t),
                                  void* context) noexcept = 0;
+    virtual CaptureRunResult run_for_receiver(
+        std::uint8_t, const std::atomic<bool>& cancelled,
+        bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept
+    {
+        return run(cancelled, emit, context);
+    }
     virtual void interrupt() noexcept = 0;
+    virtual void interrupt_receiver(std::uint8_t) noexcept { interrupt(); }
     virtual px4::userland::Result<void> stop() noexcept = 0;
+    virtual px4::userland::Result<void> stop_receiver(std::uint8_t) noexcept { return stop(); }
     virtual px4::userland::TunerStreamCounters source_counters() const noexcept { return {}; }
+    virtual px4::userland::TunerStreamCounters
+    source_counters_for_receiver(std::uint8_t) const noexcept { return source_counters(); }
     // Inspect only after run() has returned; this is parser-owner state.
     virtual StreamCaptureFramingCounters source_framing_counters() const noexcept { return {}; }
 };
@@ -127,6 +138,14 @@ public:
     terminal(const px4::userland::TunerAttachment& attachment) const noexcept override;
 
 private:
+    struct ReceiverSessionTag {};
+    HardwareStreamService(px4::userland::TunerServiceBackend& frontend, StreamCaptureSource& source,
+                          TestQueueCapacityBytes queue_capacity,
+                          NativeThread::Start thread_launcher, std::uint8_t receiver,
+                          ReceiverSessionTag);
+    HardwareStreamService* session_for(std::uint8_t receiver) noexcept;
+    const HardwareStreamService* session_for(std::uint8_t receiver) const noexcept;
+    px4::userland::Result<void> shutdown_capture(bool shutdown_frontend) noexcept;
     enum class State : std::uint8_t { idle, preparing, running, detached, quarantined };
     static bool emit_trampoline(void* context, const std::uint8_t* bytes,
                                 std::size_t size) noexcept;
@@ -143,6 +162,9 @@ private:
     px4::userland::TunerServiceBackend& frontend_;
     StreamCaptureSource& source_;
     const std::size_t queue_capacity_bytes_;
+    std::array<std::unique_ptr<HardwareStreamService>, 4U> receiver_sessions_{};
+    std::uint8_t pinned_receiver_ = 0xffU;
+    bool dispatcher_ = true;
     mutable std::mutex mutex_;
     std::mutex lifecycle_mutex_;
     std::condition_variable condition_;
@@ -165,6 +187,7 @@ private:
     bool worker_done_ = false;
     bool source_prepared_ = false;
     bool source_stopped_ = true;
+    std::atomic<std::uint8_t> capture_receiver_{0xffU};
     px4::userland::TunerStreamTerminal terminal_ = px4::userland::TunerStreamTerminal::none;
     NativeThread worker_;
     NativeThread::Start thread_launcher_;

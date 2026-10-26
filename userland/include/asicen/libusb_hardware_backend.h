@@ -57,11 +57,11 @@ struct CardProbeRequest {
 
 // Source-gated in-process backend. S3U exposes one combined receiver; other
 // supported models expose primary satellite0/terrestrial1. W3U2/W3U3 share
-// their frontend path, while S3U/S3U2/V2 use model-specific plans. Physical
-// enclosure capacity is in device_profile(); receiver_count() reports only
-// operational lanes. A paired model claims both functions before writes, but
-// the secondary function stays reserved and never receives frontend I/O.
-// The shared frontend permits one active receiver lease/capture at a time.
+// their local lanes on each function, while S3U/S3U2/V2 use model-specific
+// plans. Physical enclosure capacity is in device_profile(); receiver_count()
+// reports routable lanes. Paired models claim both functions before writes.
+// Receiver lanes own their USB transfers and decoder state independently;
+// function coordinators own the shared link-seed/output lifecycle.
 class LibusbW3u3Hardware final : public px4::userland::TunerServiceBackend,
                                  public StreamCaptureSource,
                                  public CardOperationGuard,
@@ -106,6 +106,7 @@ public:
     bool selects_satellite_stream_before_tune() const noexcept override;
     bool requires_terrestrial_lock_settle() const noexcept override;
     px4::userland::Result<void> open_receiver(std::uint8_t) noexcept override;
+    px4::userland::Result<void> prepare_runtime_functions() noexcept;
     px4::userland::Result<void> tune_terrestrial(std::uint8_t, std::uint32_t,
                                                  std::uint32_t) noexcept override;
     px4::userland::Result<void> tune_satellite(std::uint8_t, std::uint32_t,
@@ -141,13 +142,22 @@ public:
     CaptureRunResult run(const std::atomic<bool>& cancelled,
                          bool (*emit)(void*, const std::uint8_t*, std::size_t),
                          void* context) noexcept override;
+    CaptureRunResult run_for_receiver(
+        std::uint8_t receiver, const std::atomic<bool>& cancelled,
+        bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept override;
     void interrupt() noexcept override;
+    void interrupt_receiver(std::uint8_t receiver) noexcept override;
     px4::userland::TunerStreamCounters source_counters() const noexcept override;
+    px4::userland::TunerStreamCounters
+    source_counters_for_receiver(std::uint8_t receiver) const noexcept override;
     StreamCaptureFramingCounters source_framing_counters() const noexcept override;
     px4::userland::Result<void> stop() noexcept override;
+    px4::userland::Result<void> stop_receiver(std::uint8_t receiver) noexcept override;
 
 private:
     friend struct LibusbW3u3HardwareTestPeer;
+    struct AsyncState;
+    struct DrainAdapter;
 
     friend int run_card_only_server(LibusbW3u3Hardware&, const char*, const char*, bool,
                                     const volatile std::sig_atomic_t*,
@@ -182,6 +192,7 @@ private:
         void (*interrupt_events)(void*) = nullptr;
         int (*control_function)(void*, std::uint8_t, const ControlTransfer&,
                                 unsigned char*) = nullptr;
+        libusb_device_handle* (*handle_for_function)(void*, std::uint8_t) = nullptr;
         // Test-only monotonic clock; production always uses steady_clock.
         std::chrono::steady_clock::time_point (*now)(void*) = nullptr;
         NativeThread::Start launch_thread = nullptr;
@@ -198,6 +209,8 @@ private:
                               const volatile std::sig_atomic_t* stop_flag = nullptr,
                               bool cleanup = false) noexcept;
     void mark_cleanup_failed(px4::userland::Error error) noexcept;
+    void mark_capture_cleanup_failed(std::uint8_t receiver,
+                                     px4::userland::Error error) noexcept;
     bool dsc_start(std::uint8_t) override;
     bool dsc_stop(std::uint8_t) override;
     CaptureIo bulk_read(std::uint8_t, unsigned char*, int, int*, unsigned) override;
@@ -220,7 +233,6 @@ private:
     select_model_satellite_tsid(std::size_t,
                                 const std::array<std::uint16_t, kW3u3SatelliteTsidSlots>&) noexcept;
     LegacyFrontendProfile legacy_frontend() const noexcept;
-    bool snapshot_gpio_state() noexcept;
     px4::userland::Result<void> set_lnb_power(bool on, bool cleanup) noexcept;
     px4::userland::Result<void> clear_lnb_power() noexcept;
     px4::userland::Result<void> check_v2_lnb_feedback() noexcept;
@@ -230,6 +242,7 @@ private:
     void monitor_lnb_power() noexcept;
     bool verify_device_revision() noexcept;
     PoweredControllerCheck verify_powered_controller() noexcept;
+    LinkSeedCaptureCoordinator* capture_coordinator(std::uint8_t) noexcept;
     bool apply_link_seed() override;
     bool clear_link_seed_and_verify_controller() override;
     bool read_controller05(std::uint8_t*) override;
@@ -238,17 +251,20 @@ private:
     bool write_link_seed_byte(std::uint8_t, std::uint8_t) override;
 
     bool run_plan(const FrontendPlan&, unsigned timeout_ms = 3000U,
-                  FrontendRunReport* report = nullptr) noexcept;
+                  FrontendRunReport* report = nullptr,
+                  std::uint8_t receiver = 0xffU) noexcept;
     bool read_i2c(std::uint8_t slave, std::uint8_t reg, std::uint16_t length,
                   std::uint8_t* output) noexcept;
     bool write_i2c_byte(std::uint8_t slave, std::uint8_t reg, std::uint8_t value) noexcept;
     bool set_cf_bit(std::uint8_t local, std::uint8_t mask, bool value) noexcept;
-    CaptureRunResult stop_and_drain(bool dsc_was_attempted) noexcept;
-    CaptureRunResult cleanup_after_drain(bool dsc_stopped, bool dsc_attempted) noexcept;
+    CaptureRunResult stop_and_drain(std::uint8_t receiver, bool dsc_was_attempted) noexcept;
+    CaptureRunResult cleanup_after_drain(std::uint8_t receiver, bool dsc_stopped,
+                                         bool dsc_attempted) noexcept;
     bool handle_events(unsigned timeout_ms) noexcept;
-    bool wait_capture_events(unsigned timeout_ms, const std::atomic<bool>& cancelled) noexcept;
+    bool wait_capture_events(std::uint8_t receiver, unsigned timeout_ms,
+                             const std::atomic<bool>& cancelled) noexcept;
     struct SplitPump;
-    CaptureRunResult run_split_usb_pump(const std::atomic<bool>& cancelled,
+    CaptureRunResult run_split_usb_pump(std::uint8_t receiver, const std::atomic<bool>& cancelled,
         bool (*emit)(void*, const std::uint8_t*, std::size_t), void* context) noexcept;
     bool stop_capture_safely() noexcept override;
     bool restore_gpio_snapshot_safely() noexcept override;
@@ -270,11 +286,22 @@ private:
     std::atomic<int> first_transport_error_{0};
     px4::userland::Error transport_failure(px4::userland::Error fallback) const noexcept;
     int control_function_impl(std::uint8_t function, const ControlTransfer&, unsigned char*);
+    AsyncState* capture_async(std::uint8_t receiver) noexcept;
+    const AsyncState* capture_async(std::uint8_t receiver) const noexcept;
+    TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) noexcept;
+    const TransportCaptureDecoderV7* capture_decoder(std::uint8_t receiver) const noexcept;
+    bool any_source_prepared() const noexcept;
+    px4::userland::Result<void> stop_source_receiver(std::uint8_t receiver) noexcept;
+    libusb_device_handle* capture_handle(std::uint8_t receiver) const noexcept;
+    bool receiver_initialized(std::uint8_t receiver) const noexcept;
+    std::uint8_t current_receiver() const noexcept;
+    bool snapshot_gpio_state(std::uint8_t receiver) noexcept;
+    bool restore_gpio_snapshot_for(std::uint8_t receiver) noexcept;
     px4::userland::Error plan_error_ = px4::userland::Error::OK;
     std::atomic<bool> disconnected_{false};
-    std::atomic<bool> capture_interrupted_{false};
-    std::atomic<std::uint64_t> capture_sync_errors_{0U};
-    std::atomic<std::uint64_t> capture_empty_intervals_{0U};
+    std::array<std::atomic<bool>, 4U> capture_interrupted_{};
+    std::array<std::atomic<std::uint64_t>, 4U> capture_sync_errors_{};
+    std::array<std::atomic<std::uint64_t>, 4U> capture_empty_intervals_{};
     bool allow_lnb_power_ = true;
     bool card_cleanup_active_ = false;
     std::chrono::steady_clock::time_point deadline_{};
@@ -283,48 +310,65 @@ private:
     std::atomic<bool> cleanup_io_active_{false};
     std::atomic<bool> claimed_{false};
     bool initialized_ = false;
+    std::array<bool, 2U> initialized_functions_{};
     bool fd_function_mismatch_ = false;
     bool sibling_runtime_required_ = false;
     bool v2_roles_verified_ = false;
     bool v2_identity_verified_ = false;
-    bool tuned_ = false;
-    bool gain_applied_ = false;
+    struct ReceiverTuneState {
+        bool tuned = false;
+        bool gain_applied = false;
+        px4::userland::ipc::System system = px4::userland::ipc::System::ISDB_T;
+        std::uint32_t frequency_khz = 0U;
+        PostGainReadiness readiness;
+    };
+    std::array<ReceiverTuneState, 4U> receiver_tune_states_{};
     PostGainDiagnosticConfig startup_config_ =
         parse_post_gain_diagnostic(std::getenv("ASICEN_DIAGNOSTIC_POST_GAIN_MS"));
-    PostGainReadiness post_gain_readiness_;
     struct StartupEvent {
         const char* stage = nullptr;
         std::chrono::steady_clock::time_point at{};
         std::int64_t first = 0;
         std::int64_t second = 0;
+        std::int64_t third = 0;
+        std::int64_t fourth = 0;
+        std::int64_t fifth = 0;
     };
     std::atomic<bool> startup_trace_active_{false};
     std::mutex startup_trace_mutex_;
     std::array<StartupEvent, 256> startup_events_{};
     std::size_t startup_event_count_ = 0U;
     std::size_t startup_events_dropped_ = 0U;
-    void record_startup(const char*, std::int64_t = 0, std::int64_t = 0) noexcept;
+    void record_startup(const char*, std::int64_t = 0, std::int64_t = 0,
+                        std::int64_t = 0, std::int64_t = 0, std::int64_t = 0) noexcept;
     void flush_startup_trace() noexcept;
-    void reset_startup_diagnostic() noexcept;
-    bool source_prepared_ = false;
-    bool dsc_attempted_ = false;
-    bool dsc_stopped_ = true;
-    bool cf_snapshot_valid_ = false;
-    bool link_snapshot_valid_ = false;
-    bool link_apply_attempted_ = false;
-    bool output_start_attempted_ = false;
+    void reset_startup_diagnostic(std::uint8_t receiver) noexcept;
+    std::array<bool, 4U> source_prepared_{};
+    struct ReceiverCaptureState {
+        bool dsc_attempted = false;
+        bool dsc_stopped = true;
+        bool cf_snapshot_valid = false;
+        bool link_snapshot_valid = false;
+        bool link_apply_attempted = false;
+        bool output_start_attempted = false;
+        std::array<std::uint8_t, 0x45> cf_snapshot{};
+        std::array<std::uint8_t, 16> link_seed{};
+    };
+    std::array<ReceiverCaptureState, 4U> receiver_capture_states_{};
+    std::array<LinkSeedCaptureCoordinator, 2U> function_capture_coordinators_{};
     std::atomic<bool> cleanup_failed_{false};
     std::atomic<int> cleanup_failure_error_{0};
     static constexpr std::uint8_t kNoActiveReceiver = 0xffU;
     ReceiverLaneReservation active_receiver_{};
-    std::uint8_t tuned_receiver_ = kNoActiveReceiver;
     std::uint8_t source_receiver_ = kNoActiveReceiver;
-    px4::userland::ipc::System tuned_system_ = px4::userland::ipc::System::ISDB_T;
+    std::atomic<std::uint8_t> routed_source_receiver_{kNoActiveReceiver};
+    std::atomic<std::uint8_t> counters_receiver_{kNoActiveReceiver};
     const volatile std::sig_atomic_t* diagnostic_stop_flag_ = nullptr;
     bool (*diagnostic_stop_callback_)() noexcept = nullptr;
-    bool gpio_snapshot_valid_ = false;
-    std::uint8_t gpio_snapshot_ = 0;
-    bool board_power_attempted_ = false;
+    std::array<bool, 2U> gpio_snapshot_valid_functions_{};
+    std::array<std::uint8_t, 2U> gpio_snapshots_{};
+    std::array<bool, 2U> board_power_attempted_functions_{};
+    std::atomic<std::uint8_t> cleanup_route_receiver_{0xffU};
     // LNB ownership is distinct from board-power snapshots: close/shutdown
     // must never restore an initially powered antenna feed. All fields below
     // are protected by control_gate_. Only set_lnb_power may bypass the
@@ -355,16 +399,10 @@ private:
                              std::memory_order_release);
     }
     std::uint8_t lnb_transaction_receiver_ = kNoActiveReceiver;
-    std::uint32_t tuned_frequency_khz_ = 0;
-    std::array<std::uint8_t, 0x45> cf_snapshot_{};
-    std::array<std::uint8_t, 16> link_seed_{};
-    LinkSeedDiagnostic link_diagnostic_{};
-    struct AsyncState;
-    struct DrainAdapter;
-    std::unique_ptr<AsyncState> async_;
+    std::array<AsyncState*, 4U> async_states_{};
     bool abandoned_ = false;
     void quarantine_capture() noexcept;
-    TransportCaptureDecoderV7 decoder_;
+    std::array<std::unique_ptr<TransportCaptureDecoderV7>, 4U> decoders_{};
     const CaptureUsbHooks* capture_usb_hooks_ = nullptr;
 };
 

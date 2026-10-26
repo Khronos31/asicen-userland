@@ -21,12 +21,24 @@
 #include <unistd.h>
 
 namespace asicen {
+struct FakeFunction final : UsbFunctionClaim {
+    UsbFunctionSnapshot state{};
+    UsbFunctionSnapshot snapshot() const override { return state; }
+    int claim_interface0() override { return 0; }
+    int release_interface0() noexcept override { return 0; }
+};
+
 struct LibusbW3u3HardwareTestPeer {
     using Hooks = LibusbW3u3Hardware::CaptureUsbHooks;
-    static void configure(LibusbW3u3Hardware& hw, const Hooks* hooks)
+    static bool configure(LibusbW3u3Hardware& hw, const Hooks* hooks,
+                          FakeFunction& primary, FakeFunction& sibling)
     {
+        hw.profile_ = find_profile(ModelId::W3u3);
         hw.capture_usb_hooks_ = hooks;
         hw.claimed_ = hw.initialized_ = true;
+        hw.initialized_functions_[0U] = true;
+        return hw.ownership_.claim_profile(*hw.profile_, primary, &sibling, {1U, 2U, 1U},
+                                           {1U, 2U, 2U}) == OwnershipError::none;
     }
 };
 }  // namespace asicen
@@ -54,6 +66,27 @@ struct FakeUsb {
     std::uint8_t gpio = 0xa5U;
     unsigned gpio_writes = 0U;
     bool fail_next_write = false;
+    FakeFunction primary;
+    FakeFunction sibling;
+    FakeUsb()
+    {
+        primary.state.vendor_id = sibling.state.vendor_id = 0x0b06U;
+        primary.state.product_id = sibling.state.product_id = 0x0005U;
+        primary.state.bus = sibling.state.bus = 1U;
+        primary.state.address = 2U;
+        sibling.state.address = 3U;
+        primary.state.port_path = {1U, 2U, 1U};
+        sibling.state.port_path = {1U, 2U, 2U};
+        for (auto* function : {&primary, &sibling}) {
+            function->state.interface0_present = true;
+            function->state.kernel_driver_state_known = true;
+            function->state.active_alt0 = 0;
+            function->state.endpoint81_in_alt0 = true;
+            function->state.endpoint81_bulk_in_alt0 = true;
+            function->state.endpoint82_in_alt0 = true;
+            function->state.endpoint82_bulk_in_alt0 = true;
+        }
+    }
     static int control(void* context, std::uint8_t, const ControlTransfer& transfer,
                        unsigned char* data)
     {
@@ -64,6 +97,12 @@ struct FakeUsb {
             data[0] = 1U;
             for (unsigned i = 1U; i < transfer.length; ++i) data[i] = 0U;
             if (transfer.value == 0x094aU) data[1] = 0x1eU;
+            return transfer.length;
+        }
+        if (transfer.request == Request::SysCtrlRead) {
+            data[0] = 1U;
+            data[1] = 0x11U;
+            data[2] = 0x52U;
             return transfer.length;
         }
         if (transfer.request == Request::Gpio || transfer.request == Request::GpioRead) {
@@ -219,12 +258,12 @@ bool test_ctl_lnb_on_off_reaches_the_gpio()
     FakeUsb usb;
     Hooks hooks = usb.hooks();
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3));
-    LibusbW3u3HardwareTestPeer::configure(hardware, &hooks);
+    CHECK(LibusbW3u3HardwareTestPeer::configure(hardware, &hooks, usb.primary, usb.sibling));
     {
         Daemon daemon(hardware, root.path);
         CHECK(daemon.ready());
         CHECK(advertises_lnb(daemon));
-        CHECK(lnb_state(daemon, false));  // Nothing verified yet: null, never a guessed false.
+        CHECK(lnb_state(daemon, true, false));  // Startup readback confirmed OFF.
         CHECK(daemon.ctl(root.path, "lnb-on") == 0);
         CHECK(usb.on());
         CHECK(lnb_state(daemon, true, true));
@@ -256,12 +295,13 @@ bool test_ctl_lnb_on_is_refused_without_allow_lnb_power()
     Hooks hooks = usb.hooks();
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3));
     hardware.set_allow_lnb_power(false);
-    LibusbW3u3HardwareTestPeer::configure(hardware, &hooks);
+    CHECK(LibusbW3u3HardwareTestPeer::configure(hardware, &hooks, usb.primary, usb.sibling));
     Daemon daemon(hardware, root.path);
     CHECK(daemon.ready());
+    const unsigned writes_before_request = usb.writes();
     CHECK(daemon.ctl(root.path, "lnb-on") == 3);  // UNSUPPORTED
-    CHECK(usb.writes() == 0U && !usb.on());
-    CHECK(lnb_state(daemon, false));
+    CHECK(usb.writes() == writes_before_request && !usb.on());
+    CHECK(lnb_state(daemon, true, false));
     CHECK(daemon.ctl(root.path, "lnb-off") == 0);  // OFF stays available and is verified.
     CHECK(lnb_state(daemon, true, false));
     CHECK(daemon.stop());
