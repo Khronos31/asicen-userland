@@ -46,6 +46,7 @@ void usage(FILE* output)
         "               may resolve an ASICEN sibling when its internal Hub is known.\n"
         "  --fd         granted USB descriptors; up to two, primary first.\n"
         "               Without --instance, use the observed usb-BUS-PORT identity.\n"
+        "  --runtime-dir endpoint path limits cover the complete runtime/product/instance/socket path and vary by OS; if diagnosed as too long, shorten this path or --instance\n"
         "  --allow-lnb-power  permit explicit ISDB-S 15 V requests; default off\n"
         "  --firmware   loader image; loaded before claiming\n"
         "  --models     list supported source-backed models and exit\n"
