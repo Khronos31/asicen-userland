@@ -1304,7 +1304,9 @@ $clients = foreach ($job in $jobs) {
   if ($job.Lnb) { $captureArgs += @('--lnb-voltage','0') }
   Start-Process -FilePath $B -ArgumentList $captureArgs -PassThru -NoNewWindow
 }
-while ($clients.Where({ -not $_.HasExited }).Count -gt 0) {
+$CLIENT_FINISH_LIMIT_SECONDS = 90
+$finishDeadline = [DateTime]::UtcNow.AddSeconds($CLIENT_FINISH_LIMIT_SECONDS)
+while ($clients.Where({ -not $_.HasExited }).Count -gt 0 -and [DateTime]::UtcNow -lt $finishDeadline) {
   & $C --instance rc --runtime-dir $RT status 2>&1 | Tee-Object -Append (Join-Path $LOG 't05-status.txt')
   $LASTEXITCODE | Out-File -Append (Join-Path $LOG 't05-status.rc')
   & $C --instance rc --runtime-dir $RT list 2>&1 | Tee-Object -Append (Join-Path $LOG 't05-list.txt')
@@ -1312,8 +1314,23 @@ while ($clients.Where({ -not $_.HasExited }).Count -gt 0) {
   foreach ($client in $clients) { $client.Refresh() }
   Start-Sleep -Seconds 2
 }
-foreach ($client in $clients) { $client.Refresh(); [pscustomobject]@{ PID=$client.Id; ExitCode=$client.ExitCode } | Tee-Object -Append (Join-Path $LOG 't05-client-exit.txt') }
-Get-FileHash -Algorithm SHA256 (Join-Path $LOG 'r1.ts'), (Join-Path $LOG 'r2.ts'), (Join-Path $LOG 'r3.ts'), (Join-Path $LOG 'r4.ts')
+$clientFailures = @()
+foreach ($client in $clients) {
+  $client.Refresh()
+  if (-not $client.HasExited) {
+    $client.Id | Out-File -Append (Join-Path $LOG 't03-client-timeout.txt')
+    $clientFailures += $client.Id
+    Stop-Process -Id $client.Id -ErrorAction SilentlyContinue
+    if (-not $client.WaitForExit(5000)) { $client.Id | Out-File -Append (Join-Path $LOG 't03-client-cleanup-timeout.txt') }
+  }
+  $client.Refresh()
+  if ($client.HasExited) {
+    [pscustomobject]@{ PID=$client.Id; ExitCode=$client.ExitCode } | Tee-Object -Append (Join-Path $LOG 't03-client-exit.txt')
+    if ($client.ExitCode -ne 0) { $clientFailures += $client.Id }
+  } else { [pscustomobject]@{ PID=$client.Id; ExitCode='unavailable' } | Tee-Object -Append (Join-Path $LOG 't03-client-exit.txt') }
+}
+if ($clientFailures.Count -gt 0) { 'incomplete: client timeout/exit failure' | Set-Content (Join-Path $LOG 't03-state.txt') } else { 'complete: all clients exited 0' | Set-Content (Join-Path $LOG 't03-state.txt') }
+foreach ($name in 'r1.ts','r2.ts','r3.ts','r4.ts') { $file = Join-Path $LOG $name; if (Test-Path $file) { Get-FileHash -Algorithm SHA256 $file } else { "$name unavailable" | Out-File -Append (Join-Path $LOG 't03-ts-missing.txt') } }
 
 foreach ($channel in $CHANNEL_PLAN) {
   $file = Join-Path $LOG ($channel + '.ts')
