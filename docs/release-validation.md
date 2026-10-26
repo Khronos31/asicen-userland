@@ -1107,7 +1107,7 @@ $capture.ExitCode
 Get-FileHash -Algorithm SHA256 .\t27.ts
 ```
 
-T07はdaemonを維持したままclientなしの状態でUSBを抜くidle runと、有限受信中のstream runを別々に行う。抜去を依頼する前にstatus/listとdaemon PIDを記録し、依頼から最大5分待つ。stream runでは`--time`を観測窓より長くしたclientを起動し、観測窓内の抜去終了を確認する。窓内に自然終了しない場合はtimeout未達として記録し、有限`--time`の終了まで待って実終了値を保存する。指定時間満了exit 0は切断合格ではない。抜去後にdaemonを通常停止し、再接続後は`--list-json`で同じUSB pathを確認して新しいruntimeで起動し、status/listと30秒受信を再実行する。T08のPID/終了値/process確認をこのWindows手順にも適用する。
+T07はdaemonを維持したままclientなしの状態でUSBを抜くidle runと、有限受信中のstream runを別々に行う。抜去を依頼する前にstatus/listとdaemon PIDを記録し、依頼から最大5分待つ。stream runでは`--time`を観測窓より長くしたclientを起動し、観測窓内の抜去終了を確認する。窓内に自然終了しない場合はtimeout未達として記録し、有限`--time`の終了まで待って実終了値を保存する。指定時間満了exit 0は切断合格ではない。Windowsではさらに有限`--time`+30秒の終了上限を設け、超過した場合はowned clientだけを停止してcleanupを試し、T07を未完了として記録する。抜去後にdaemonを通常停止し、再接続後は`--list-json`で同じUSB pathを確認して新しいruntimeで起動し、status/listと30秒受信を再実行する。T08のPID/終了値/process確認をこのWindows手順にも適用する。
 
 ```powershell
 $RunId = '<same-candidate-run-id-as-T00>'
@@ -1185,7 +1185,7 @@ $LASTEXITCODE | Set-Content (Join-Path $LOG 't07-stream-daemon.rc')
 $RunId = '<same-candidate-run-id-as-T00>'; $Work = Join-Path $HOME "asicen-win-$RunId"; $LOG = Join-Path $Work 'log'
 $D = (Get-Content (Join-Path $LOG 'candidate-dir.txt') -Raw).Trim(); $RT_STREAM = Join-Path $Work 'runtime-t07-stream'
 $CTL = Join-Path $D 'asicenctl.exe'; $B = Join-Path $D 'asicen-ts.exe'; $TOKEN = 't07-stream'
-$R1 = '<receiver-1>'; $CAPTURE_SECONDS = '<capture-duration-longer-than-observation-window>'; $OBSERVATION_LIMIT_SECONDS = '<finite-cut-observation-window-seconds>'
+$R1 = '<receiver-1>'; $CAPTURE_SECONDS = '<capture-duration-longer-than-observation-window>'; $OBSERVATION_LIMIT_SECONDS = '<finite-cut-observation-window-seconds>'; $CLIENT_FINISH_LIMIT_SECONDS = [int]$CAPTURE_SECONDS + 30
 function Wait-UsbAction([string]$message) {
   if ([Console]::IsInputRedirected) { throw 'USB action requires an interactive PowerShell console.' }
   Write-Host "$message 完了後Enter (最大300秒): " -NoNewline
@@ -1203,12 +1203,20 @@ $streamProcess.ProcessId | Set-Content (Join-Path $LOG 't07-stream-daemon.pid')
 $client = Start-Process -FilePath $B -ArgumentList @('--instance',$TOKEN,'--runtime-dir',$RT_STREAM,'--receiver',$R1,'--channel','T27','--time',$CAPTURE_SECONDS,'--output',(Join-Path $LOG 't07-stream-cut.ts')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $LOG 't07-stream-cut.out') -RedirectStandardError (Join-Path $LOG 't07-stream-cut.err')
 $client.Id | Set-Content (Join-Path $LOG 't07-stream-client.pid')
 Wait-UsbAction '受信中にUSBを抜去'
-if (-not $client.WaitForExit([int]$OBSERVATION_LIMIT_SECONDS * 1000)) { 'not exited inside observation window' | Set-Content (Join-Path $LOG 't07-stream-observation.txt'); $client.WaitForExit() } else { 'exited inside observation window' | Set-Content (Join-Path $LOG 't07-stream-observation.txt') }
-$client.Refresh(); $client.ExitCode | Set-Content (Join-Path $LOG 't07-stream-client.rc')
+if (-not $client.WaitForExit([int]$OBSERVATION_LIMIT_SECONDS * 1000)) {
+  'not exited inside observation window' | Set-Content (Join-Path $LOG 't07-stream-observation.txt')
+  if (-not $client.WaitForExit([int]$CLIENT_FINISH_LIMIT_SECONDS * 1000)) {
+    'client exceeded finite capture plus 30-second cleanup bound; terminate owned client and mark T07 incomplete' | Set-Content (Join-Path $LOG 't07-stream-client-timeout.txt')
+    Stop-Process -Id $client.Id -ErrorAction SilentlyContinue
+    if (-not $client.WaitForExit(5000)) { 'owned client did not exit within 5-second cleanup bound' | Set-Content (Join-Path $LOG 't07-stream-client-cleanup.txt') }
+  }
+} else { 'exited inside observation window' | Set-Content (Join-Path $LOG 't07-stream-observation.txt') }
+$client.Refresh()
+if ($client.HasExited) { $client.ExitCode | Set-Content (Join-Path $LOG 't07-stream-client.rc') } else { 'unavailable: owned client did not exit' | Set-Content (Join-Path $LOG 't07-stream-client.rc') }
 & $CTL --instance $TOKEN --runtime-dir $RT_STREAM status 2>&1 | Tee-Object (Join-Path $LOG 't07-stream-after-cut-status.txt')
 $LASTEXITCODE | Set-Content (Join-Path $LOG 't07-stream-after-cut-status.rc')
-if ($client.ExitCode -ne 7) { throw "stream USB-cut exit was $($client.ExitCode), expected 7" }
 Wait-UsbAction 'stream切断記録後、daemon consoleでCtrl+Cして通常停止'
+if (-not $client.HasExited -or $client.ExitCode -ne 7 -or (Test-Path (Join-Path $LOG 't07-stream-client-timeout.txt'))) { throw 'stream USB-cut client did not complete with expected exit 7 inside bounded cleanup; record T07 as incomplete' }
 ```
 
 再接続後は同じ物理機器の新pathをlist-jsonで識別し、さらに新しいruntime/instanceでdaemonを起動する。status/list、30秒capture、TS helper、各client/daemon終了値を保存して通常停止する。
