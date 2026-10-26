@@ -20,13 +20,13 @@
 
 ## 公開アーティファクト
 
-公開するのは `build_userland.yml` の成功した **tag push run** が生成した `release-candidate` です。実機試験に使った候補 run とは別の run であり、候補をそのまま添付する手順ではありません。
+公開対象は `build_userland.yml` の成功した **tag push run** が生成した `release-candidate` です。実機試験に使った候補 run とは別の run であり、候補をそのまま添付する手順ではありません。Windows 11 x86_64も正式対象ですが、現行workflowではWindows ZIPを `win-candidate` に分離し、`release-candidate` と公開aggregateへ含めていません。通常配布artifact数とWindows targetのこの差は未解消の実装gapです。
 
 - バイナリアーカイブ 8 本
 - `asicen-userland-<version>-source.tar.gz` 1 本
 - 外側 `SHA256SUMS` 1 本（9 アーカイブの SHA-256）
 
-合計 10 ファイルです。具体的な target は [release-validation.md](release-validation.md) の配布 matrix を正本とします。0.1.0 は Linux・macOS・Android の 8 binary target です。Windows の実装・build/offline test は残しますが、配布には含めません。正式対応は WinSCard を揃えた 0.2.x の予定です。firmware は既存の pinned loader を binary archive に含め、source archive から除きます。再配布権が未解決である旨の notice を維持します。
+現行workflowが生成するのは合計10ファイルです。具体的な正式 target は [release-validation.md](release-validation.md) の配布 matrix を正本とし、Windows 11 x86_64を含む9 binary targetです。0.1.0 の実配布 inventory は Linux・macOS・Android の8 binary targetで、Windows binaryはその版に含まれません。現行workflowの通常aggregateは8 binary archiveのままWindows ZIPを含めないため、正式対象との不整合を解消してから公開工程へ進みます。firmware は既存の pinned loader を binary archive に含め、source archive から除きます。再配布権が未解決である旨の notice を維持します。
 
 ## 1. 候補の準備と固定
 
@@ -47,9 +47,9 @@ gh run download <candidate-run-id> --name release-candidate --dir <new-empty-dir
 
 ## 2. 実機試験・仕様変更試験と再現性
 
-[release-validation.md](release-validation.md) の既存条件で、配布する 8 binary archive を各 OS/architecture の実機で確認します。model、host、access path、feature は独立の軸です。他機種・他 OS・他 ABI の成功や過去の候補で穴を埋めません。物理 USB/card/アンテナ/電源操作は利用者が行い、承認された範囲だけ試験します。
+[release-validation.md](release-validation.md) の既存条件で、正式matrixの全9 binary targetを各 OS/architecture の実機で確認します。Windows ZIPを通常release aggregateへ接続するworkflow実装は現状未完了であり、現在生成される8 binary archiveをもってmatrix完了とは扱いません。model、host、access path、feature は独立の軸です。他機種・他 OS・他 ABI の成功や過去の候補で穴を埋めません。物理 USB/card/アンテナ/電源操作は利用者が行い、承認された範囲だけ試験します。
 
-同じ source SHA/tree の独立した 2 回の clean candidate run を取得し、9 アーカイブ全体と外側 `SHA256SUMS` が byte-identical であることを確認します。run ID は別々でなければなりません。実効 build input/toolchain と runner image の観測値を両方残します。runner image が異なっても実効 build input の一致を確認できればよく、入力不明や入力差は合格にしません。UUID・署名・timestamp 等をマスクした比較で代替しません。
+同じ source SHA/tree の独立した 2 回の clean candidate run を取得し、Windows ZIPを含む正式対象9 binary archiveとsource archive（計10 archive）、および外側 `SHA256SUMS` が byte-identical であることを確認します。現行workflowが生成する9 archive（8 binaryとsource）の比較ではWindows targetを含む形式要件を満たしません。run ID は別々でなければなりません。実効 build input/toolchain と runner image の観測値を両方残します。runner image が異なっても実効 build input の一致を確認できればよく、入力不明や入力差は合格にしません。UUID・署名・timestamp 等をマスクした比較で代替しません。
 
 証拠の本文は [既存の実測記録](../HARDWARE-VALIDATION.md) へ日付付きで追記します。失敗試行、未認定、対象外、継承の根拠を残し、機械可読記録の `completed` を実測の代わりにしません。必須条件が未完了ならここで止めます。
 

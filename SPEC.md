@@ -6,8 +6,11 @@ This is not a release/support claim.
 
 Release-procedure change (2026-10-11): share PX4's release verification and
 publication implementation and matrix/record structure while preserving ASICEN's
-existing hardware acceptance, fixed 0.1.0 soak decisions, firmware policy and
-Windows distribution exclusion. For 0.1.0, embed the reviewed GPL-2.0-only
+existing hardware acceptance, fixed 0.1.0 soak decisions and firmware policy.
+Windows was absent from the historical 0.1.0 distribution inventory; it is a
+formal target in the current validation matrix. The current workflow still uploads
+its ZIP separately as `win-candidate` rather than adding it to the release aggregate.
+For 0.1.0, embed the reviewed GPL-2.0-only
 automation locally with recorded provenance; do not wait for PX4's next
 WinSCard release. A future external dependency must use the full commit SHA
 resolved from an official PX4 release tag. This change does not authorize a release or

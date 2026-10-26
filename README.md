@@ -39,7 +39,7 @@ LNB 給電に関する注意点は以下のとおりです。
 
 ## 動作環境
 
-バージョン 0.1.0 のバイナリ配布は Linux・macOS・Android の 8 種類です。Windows のコードとビルド検証は含みますが、Windows バイナリは配布しません。Windows の正式対応は WinSCard 対応を揃えた 0.2.x で予定しています。候補ごとの結果は[検証状況](docs/release-validation/0.1.0.md#現在の候補と検証状況)に記録します。アーカイブ名は `asicen-userland-0.1.0-` で始まります。
+バージョン 0.1.0 のバイナリ配布は Linux・macOS・Android の 8 種類で、Windows は当時の配布物に含まれていません。現在の正式検証対象には Windows 11 x86_64 を含みますが、現行 workflow は Windows ZIP を `win-candidate` として別生成し、通常の配布aggregateへ接続していません。これは配布経路の実装差であり、正式対象外を意味しません。候補ごとの結果は[検証状況](docs/release-validation/0.1.0.md#現在の候補と検証状況)に記録します。アーカイブ名は `asicen-userland-0.1.0-` で始まります。
 
 | 対象 OS / 環境 | 配布アーカイブ名 | ビルド方針 | 候補 6dbdba2 の実機確認 | 構成と備考 |
 |---|---|:---:|:---:|---|

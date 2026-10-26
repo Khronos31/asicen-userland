@@ -555,7 +555,7 @@ N/Aは製品機能上該当しない項目だけに使う。OS/ABI候補のunsup
 | `android-aarch64` / [E05](#4-cardpcscusb) / Android Termux/aarch64 |
 | `android-armv7a` / [E06](#4-cardpcscusb) / Android Termux/armv7a |
 | `android-x86_64` / [E07](#4-cardpcscusb) / Android Termux/x86_64 |
-| `win-candidate` / [E17](#windowsネイティブwinscard) / Windows 11 x86_64 candidate（正式配布archive外） |
+| `windows-x86_64` / [E17](#windowsネイティブwinscard) / Windows 11 x86_64（正式対象。現行workflow artifact: `win-candidate`） |
 
 ## 0. 共通配布アーカイブと共通手順
 
@@ -580,7 +580,7 @@ N/Aは製品機能上該当しない項目だけに使う。OS/ABI候補のunsup
 
 ## 1. 候補と配布物
 
-候補source commitの `build_userland.yml` によるcandidate artifactを使い、run/ref/SHA、artifact ID、全archive hash、source manifest、license/provenanceを保存する。通常release配布binaryはLinux glibc/musl x86_64/aarch64、macOS arm64、Android aarch64/armv7a/x86_64の8 target。Windows ZIPは通常release aggregateに接続されない。Windowsが該当版の検証対象なら同候補runの `win-candidate` artifactを使う。source archiveも検査する。空の作業directoryへ展開し、同梱checksumを確認する。
+候補source commitの `build_userland.yml` によるcandidate artifactを使い、run/ref/SHA、artifact ID、全archive hash、source manifest、license/provenanceを保存する。現在の通常release配布binaryはLinux glibc/musl x86_64/aarch64、macOS arm64、Android aarch64/armv7a/x86_64の8 targetで、正式検証matrixにあるWindows 11 x86_64は含まれない。現行workflowはWindows ZIPを同じrunの `win-candidate` artifactとして別生成するが、通常の `release-candidate` aggregateへ接続していない。これは正式対象の除外ではなく、配布経路の実装gapである。Windows検証には同候補runの `win-candidate` artifactを使う。source archiveも検査する。空の作業directoryへ展開し、同梱checksumを確認する。
 
 ```sh
 mkdir -p candidate
@@ -596,7 +596,7 @@ gh run download <candidate-run-id> --name release-candidate --dir candidate
 
 ## 3. 配布アーカイブ別手順
 
-毎release、代表Linux x86_64機で2時間連続受信し、全配布archiveをnative OS/ABIで短時間回帰する。初回/major追加確認ではmacOS/Windowsは各30分、残るOS/ABIは各10分連続受信し、全無料channel各10秒は代表機だけで行う。Windowsが対象の版ではnative確認に同source candidateの `win-candidate` artifactを使い、通常配布binaryの代替とは扱わない。
+毎release、代表Linux x86_64機で2時間連続受信し、全配布archiveをnative OS/ABIで短時間回帰する。初回/major追加確認ではmacOS/Windowsは各30分、残るOS/ABIは各10分連続受信し、全無料channel各10秒は代表機だけで行う。Windows 11 x86_64は正式対象である。現行workflowではnative確認に同source candidateの `win-candidate` artifactを使うが、これは正式release archiveの生成・公開・実artifact検証を証明しない。
 
 候補archiveをnative hostに展開し、`asicend --list-json` でUSB位置とmodelを確認する。値は現地の `BUS-PORT`、firmware、runtimeへ置換する。USB複数機能機種では確認済み内部hubで相方が一意な場合以外、両positionを指定する。
 
@@ -1573,7 +1573,7 @@ asicen-termux --usb-device "$primary_runtime" --usb-device "$sibling_runtime" --
 
 通常daemon起動後の各T本文にある`asicenctl`/`asicen-ts` client commandは別Termux sessionから候補archive内の同じclientを実行する。clientへUSB path/FDを渡さず、daemonの`--runtime-dir`/`--instance`を一致させる。終わりはlauncher sessionでCtrl+Cを送り、その終了値、daemon終了、process/FD/runtime cleanupを記録する。
 
-`win-candidate`の`WinSCard.dll`はconsumerと同じdirectoryに置く。候補はCI専用で正式配布archiveの代替ではない。最初のPowerShell consoleで専用runtimeを作り、daemonを前景起動する。probeは2つ目のconsoleから実行し、Coreの既存APIを呼ぶ。Coreが選ぶASICEN reader名は`DTV userland (asicen:rc/reader-0)`である。DLL load/export smokeやoffline fixtureは実機transactionの証明ではない。
+`win-candidate`の`WinSCard.dll`はconsumerと同じdirectoryに置く。Windowsは正式配布対象であり、このcandidate ZIPは現在のnative検証入力である。candidateの存在は正式release archiveへの接続や、そのexact archiveの検証完了を証明しない。最初のPowerShell consoleで専用runtimeを作り、daemonを前景起動する。probeは2つ目のconsoleから実行し、Coreの既存APIを呼ぶ。Coreが選ぶASICEN reader名は`DTV userland (asicen:rc/reader-0)`である。DLL load/export smokeやoffline fixtureは実機transactionの証明ではない。
 
 ```powershell
 $RunId = '<same-candidate-run-id-as-T00>'
@@ -1666,4 +1666,4 @@ Soakでは代表Linux x86_64機の2時間連続受信を実施する。開始・
 
 ## 6. 製品固有の適用範囲
 
-Windowsの配布経路は `win-candidate` が通常release aggregateへ接続されていない点を踏まえる。LNBは対応3機種のみ、receiver/T-S割当と再選局可能性は機種別README表に従う。カードや給電機能がないprofileに試験を要求せず、各claimを `今回再検証` / `継承` / `未認定` / `対象外` で記録する。
+Windowsは正式検証対象である。現行配布workflowでは `win-candidate` が通常release aggregateへ接続されておらず、配布経路は未接続のままである。LNBは対応3機種のみ、receiver/T-S割当と再選局可能性は機種別README表に従う。カードや給電機能がないprofileに試験を要求せず、各claimを `今回再検証` / `継承` / `未認定` / `対象外` で記録する。
