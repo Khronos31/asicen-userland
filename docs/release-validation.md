@@ -1285,7 +1285,7 @@ if ($recoveryCheckRc -ne 0) { throw "recovery TS quality check exit was $recover
 再接続daemon consoleでCtrl+C後、`$LASTEXITCODE`を`t07-recovery-daemon.rc`へ保存する。各consoleのプロセス照合は候補exeのabsolute pathとinstance引数の両方が一意に一致した場合だけPIDを保存し、0件/複数件では推測しない。
 ```
 
-WindowsではT03–T06も候補directoryの3 executableで行う。T03はW3U2/W3U3の公開最低要求である4 receiverを別TSへ同時起動し、他機種は公開receiver数を全て同時起動する。T04は現地channel planの各無料channelを個別に有限受信する。T05は受信中に別consoleからstatus/listと対応CARD controlを実行する。T06はdaemonを維持したまま利用者に物理挿抜を依頼し、status/ATR/reset/APDUを各段階で保存する。
+WindowsではT03–T06も候補directoryの3 executableで行う。T03はW3U2/W3U3の公開最低要求である4 receiverを別TSへ同時起動し、他機種は公開receiver数を全て同時起動する。T04は現地channel planの各無料channelを個別に有限受信する。T05は受信中に別consoleからstatus/listと対応CARD controlを実行する。T06はdaemonを維持したまま利用者に物理挿抜を依頼し、status/ATR/reset/APDUを各段階で保存する。Windows T05はT03/T04とは別の60秒captureを起動し、CARD対応modelではstatus/listと`card-apdu 90:30:00:00:00`を同じcapture中に行う。各commandのresponse/exit/start/endおよびcapture start/endを保存する。T08の通常daemon停止/残留確認を適用する。
 
 ```powershell
 $RunId = '<same-candidate-run-id-as-T00>'
@@ -1363,6 +1363,57 @@ foreach ($channel in $CHANNEL_PLAN) {
   if (Test-Path $file) { Get-FileHash -Algorithm SHA256 $file } else { "$channel output unavailable" | Out-File (Join-Path $LOG 't04-ts-missing.txt') }
   if (Test-Path (Join-Path $LOG "t04-$channel-timeout.txt")) { throw "T04 client timeout for $channel; stop the owned daemon normally, verify cleanup, record T04 incomplete, and do not start the next channel." }
 }
+function Invoke-T05Control([string]$operation, [string[]]$arguments, [string]$label, $capture) {
+  $capture.Refresh()
+  if ($capture.HasExited) { throw "T05 capture ended before $label; record T05 incomplete." }
+  $started = [DateTime]::UtcNow.ToString('o')
+  $controlArgs = @('--instance','rc','--runtime-dir',$RT,$operation) + $arguments
+  $client = Start-Process -FilePath $C -ArgumentList $controlArgs -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $LOG "$label.out") -RedirectStandardError (Join-Path $LOG "$label.err")
+  if (-not $client.WaitForExit(15000)) {
+    $client.Id | Set-Content (Join-Path $LOG "$label-timeout.txt")
+    Stop-Process -Id $client.Id -ErrorAction SilentlyContinue
+    if (-not $client.WaitForExit(5000)) { $client.Id | Set-Content (Join-Path $LOG "$label-cleanup-timeout.txt") }
+    'unavailable: owned control client exceeded 15-second bound' | Set-Content (Join-Path $LOG "$label.rc")
+    throw "$label timed out; record T05 incomplete and stop the owned daemon normally."
+  }
+  $client.Refresh()
+  $client.ExitCode | Set-Content (Join-Path $LOG "$label.rc")
+  $started | Set-Content (Join-Path $LOG "$label.started.txt")
+  [DateTime]::UtcNow.ToString('o') | Set-Content (Join-Path $LOG "$label.ended.txt")
+  $capture.Refresh()
+  if ($capture.HasExited) { throw "T05 capture ended before $label completed; record T05 incomplete." }
+  if ($client.ExitCode -ne 0) { throw "$label exited $($client.ExitCode); record T05 incomplete and stop the owned daemon normally." }
+}
+$T05_SECONDS = 60; $T05_TS = Join-Path $LOG 't05.ts'
+$t05CaptureStarted = [DateTime]::UtcNow.ToString('o')
+$capture = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver',$R1,'--channel','T27','--time',"$T05_SECONDS",'--output',$T05_TS) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $LOG 't05-capture.out') -RedirectStandardError (Join-Path $LOG 't05-capture.err')
+$t05Primary = $null; $t05TimedOut = $false
+try {
+  Invoke-T05Control 'status' @() 't05-status' $capture
+  Invoke-T05Control 'list' @() 't05-list' $capture
+  1..10 | ForEach-Object { Invoke-T05Control 'card-apdu' @('90:30:00:00:00') "t05-apdu-$($_)" $capture }
+  if (-not $capture.WaitForExit(150000)) {
+    $capture.Id | Set-Content (Join-Path $LOG 't05-capture-timeout.txt')
+    $t05TimedOut = $true
+    Stop-Process -Id $capture.Id -ErrorAction SilentlyContinue
+    if (-not $capture.WaitForExit(5000)) { $capture.Id | Set-Content (Join-Path $LOG 't05-capture-cleanup-timeout.txt') }
+  }
+} catch { $t05Primary = $_ }
+finally {
+  if (-not $capture.HasExited) {
+    $capture.Id | Set-Content (Join-Path $LOG 't05-capture-cleanup-requested.txt')
+    Stop-Process -Id $capture.Id -ErrorAction SilentlyContinue
+    if (-not $capture.WaitForExit(5000)) { $capture.Id | Set-Content (Join-Path $LOG 't05-capture-cleanup-timeout.txt') }
+  }
+  $capture.Refresh()
+  if ($capture.HasExited) { $capture.ExitCode | Set-Content (Join-Path $LOG 't05-capture.rc') } else { 'unavailable: owned capture did not exit' | Set-Content (Join-Path $LOG 't05-capture.rc') }
+  $t05CaptureStarted | Set-Content (Join-Path $LOG 't05-capture.started.txt')
+  [DateTime]::UtcNow.ToString('o') | Set-Content (Join-Path $LOG 't05-capture.ended.txt')
+  if ($t05Primary -or $t05TimedOut -or -not $capture.HasExited -or $capture.ExitCode -ne 0) { 'incomplete: control/capture timeout or failure' | Set-Content (Join-Path $LOG 't05-state.txt') } else { 'complete: status/list and ten APDU commands overlapped capture' | Set-Content (Join-Path $LOG 't05-state.txt') }
+  if (Test-Path $T05_TS) { Get-FileHash -Algorithm SHA256 $T05_TS | Set-Content (Join-Path $LOG 't05-capture.ts.sha256') } else { 'capture TS unavailable' | Set-Content (Join-Path $LOG 't05-capture-ts-missing.txt') }
+}
+if ($t05Primary) { throw $t05Primary }
+if ($t05TimedOut -or -not $capture.HasExited -or $capture.ExitCode -ne 0) { throw 'T05 capture timeout/exit failure; stop the owned daemon normally, verify cleanup, and record T05 incomplete.' }
 function Wait-CardAction([string]$message) {
   if ([Console]::IsInputRedirected) { throw 'CARD action requires an interactive PowerShell console.' }
   Write-Host "$message Enterキーで完了を記録 (最大300秒): " -NoNewline
