@@ -376,26 +376,67 @@ job名/ID・head SHAとsource refが当該candidate一致しない場合、ま�
 
 - **適用対象/頻度:** 毎release、各modelの公開最大能力。
 - **準備:** 各公開receiver/deviceを一意に割り当て、各clientに別TS出力/ログを用意する。`CAPTURE_SECONDS`には正の有限秒数（例: `10`）を明示設定して記録する。
-- **実操作/利用者への依頼:** asicenctl --instance rc --runtime-dir "$RT" listで一意なR1–R4を選ぶ。次の4 clientを同時起動し各PIDを個別waitする。衛星channel/receiverはREADMEと現地割当へ置換する。
+- **実操作/利用者への依頼:** `PORTS`は現地の`--list-json`にある選択対象位置、R1–R4は同じdaemonの`asicenctl list`にある異なるreceiverへ置換する。次の4 clientを同時起動し各PIDを個別waitする。衛星channel/receiverはREADMEと現地割当へ置換する。
 
+    ```sh
     set -eu
-    D="$WORK/candidate"; LOG="$WORK/log"; RT="$WORK/runtime"; ID='usb:1-2.3'; INSTANCE='rc'
+    D="$WORK/candidate"; LOG="$WORK/log"; RT="$WORK/runtime"; PORTS='1-2.3,1-2.4'; INSTANCE='rc'
     R1='1'; R2='2'; R3='3'; R4='4'; CAPTURE_SECONDS='10'
     require_value() { name=$1 value=$2; case "$value" in ''|*'<'*|*'>'*) echo "invalid or unreplaced $name" >&2; return 1 ;; esac; }
-    require_value D "$D"; require_value LOG "$LOG"; require_value RT "$RT"; require_value ID "$ID"; require_value INSTANCE "$INSTANCE"
+    require_value D "$D"; require_value LOG "$LOG"; require_value RT "$RT"; require_value PORTS "$PORTS"; require_value INSTANCE "$INSTANCE"
     require_value R1 "$R1"; require_value R2 "$R2"; require_value R3 "$R3"; require_value R4 "$R4"; require_value CAPTURE_SECONDS "$CAPTURE_SECONDS"
     case "$R1:$R2:$R3:$R4:$CAPTURE_SECONDS" in *[!0-9:]*|::::*) echo 'receiver/duration must be numeric' >&2; exit 1 ;; esac
+    ID="usb:$PORTS"
     test "$CAPTURE_SECONDS" -gt 0; test "$R1" != "$R2"; test "$R1" != "$R3"; test "$R1" != "$R4"
     test "$R2" != "$R3"; test "$R2" != "$R4"; test "$R3" != "$R4"
-    test -x "$D/asicen-ts"; test -s "$LOG/list.txt"
+    test -x "$D/asicend"; test -x "$D/asicenctl"; test -x "$D/asicen-ts"; test -d "$LOG"; test -d "$RT"
+    "$D/asicend" --list-json > "$LOG/discovery.json" 2> "$LOG/discovery.err"
+    python3 - "$LOG/discovery.json" "$PORTS" <<'PY'
+import json,sys
+root=json.load(open(sys.argv[1],encoding='utf-8')); selected=set(sys.argv[2].split(','))
+def ports(value):
+    if isinstance(value,dict):
+        if isinstance(value.get('port'),str): yield value['port']
+        for item in value.values(): yield from ports(item)
+    elif isinstance(value,list):
+        for item in value: yield from ports(item)
+found=set(ports(root))
+if not selected or '' in selected or not selected <= found: raise SystemExit('selected device port(s) absent from discovery JSON')
+PY
+    "$D/asicend" --device "$ID" --instance "$INSTANCE" --firmware "$FW" --runtime-dir "$RT" > "$LOG/daemon.out" 2> "$LOG/daemon.err" & DAEMON_PID=$!
+    cleanup_t03() {
+      original=$?; trap - EXIT
+      for name in P1 P2 P3 P4; do
+        eval "pid=\${$name-}"
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        if kill -0 "$pid" 2>/dev/null; then kill -INT "$pid"; fi
+        if wait "$pid"; then rc=0; else rc=$?; fi
+        printf '%s\n' "$rc" > "$LOG/$name.cleanup.rc"
+      done
+      if kill -0 "$DAEMON_PID" 2>/dev/null; then kill -INT "$DAEMON_PID"; fi
+      if wait "$DAEMON_PID"; then daemon_rc=0; else daemon_rc=$?; fi
+      printf '%s\n' "$daemon_rc" > "$LOG/daemon.rc"
+      if [ "$original" -eq 0 ] && [ "$daemon_rc" -ne 0 ]; then original=$daemon_rc; fi
+      exit "$original"
+    }
+    trap cleanup_t03 EXIT
+    i=0; READY=0
+    while [ "$i" -lt 60 ]; do
+      if "$D/asicenctl" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" status > "$LOG/status.txt" 2> "$LOG/status.err" && grep -q ready "$LOG/status.txt"; then READY=1; break; fi
+      kill -0 "$DAEMON_PID" || { echo 'daemon exited before ready' >&2; exit 1; }
+      i=$((i + 1)); sleep 1
+    done
+    test "$READY" -eq 1 || { echo 'daemon did not become ready' >&2; exit 1; }
+    "$D/asicenctl" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" list > "$LOG/list.txt" 2> "$LOG/list.err"
     for receiver in "$R1" "$R2" "$R3" "$R4"; do grep -F "receiver=$receiver" "$LOG/list.txt" >/dev/null || { echo "receiver $receiver absent from saved list" >&2; exit 1; }; done
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R1" --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-1.ts" > "$LOG/terrestrial-1.out" 2> "$LOG/terrestrial-1.err" & P1=$!
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R2" --channel T30 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-2.ts" > "$LOG/terrestrial-2.out" 2> "$LOG/terrestrial-2.err" & P2=$!
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-1.ts" > "$LOG/satellite-1.out" 2> "$LOG/satellite-1.err" & P3=$!
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-2.ts" > "$LOG/satellite-2.out" 2> "$LOG/satellite-2.err" & P4=$!
     FAIL=0
-    for entry in "$P1:terrestrial-1" "$P2:terrestrial-2" "$P3:satellite-1" "$P4:satellite-2"; do pid=${entry%%:*}; name=${entry#*:}; if wait "$pid"; then RC=0; else RC=$?; FAIL=1; fi; printf '%s\n' "$RC" > "$LOG/$name.rc"; done
+    for entry in "P1:terrestrial-1" "P2:terrestrial-2" "P3:satellite-1" "P4:satellite-2"; do pidvar=${entry%%:*}; name=${entry#*:}; eval "pid=\$$pidvar"; if wait "$pid"; then RC=0; else RC=$?; FAIL=1; fi; printf '%s\n' "$RC" > "$LOG/$name.rc"; unset "$pidvar"; done
     test "$FAIL" -eq 0 || { echo 'T03 client failure; inspect every client log and record incomplete' >&2; exit 1; }
+    ```
 - **期待値/終了値:** 各clientの稼働時間が重なり、各exit 0とTS/counter合格。順次取得を同時試験の代用にしない。
 - **停止/cleanup:** 全client通常終了後daemon通常停止、残留なし。
 - **記録:** model/receiver/system/channel、各start/end/exit、TS/counter、cleanup。
