@@ -192,7 +192,8 @@ acceptance remains unverified. WinSCard compatibility and Microsoft PC/SC IFD
 registration remain Phase 2; a cross-build does not complete hardware acceptance.
 The user's 2026-10-11 JST release decision explicitly excludes Windows binaries
 from 0.1.0 distribution while retaining the implementation and build checks.
-Formal Windows support is planned for 0.2.x after WinSCard support is ready.
+Windows x86_64 is a formal distribution target in the current matrix; its
+real-device acceptance remains unverified.
 
 - Distribute the three product commands `asicend`, `asicen-ts`, `asicenctl`,
   plus the applicable native card adapter and Android launcher. Research
