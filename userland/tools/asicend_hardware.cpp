@@ -2,6 +2,7 @@
 #include "asicend_args.h"
 #include "asicend_identity.h"
 #include "asicend_selector.h"
+#include "px4/endpoint_diagnostic.h"
 #include "loader_acquisition.h"
 #include "loader_diagnostic.h"
 #include "px4d_signals.h"
@@ -1105,11 +1106,18 @@ int run_asicend_hardware(int argc, char** argv) {
                       : px4::userland::ipc::posix::EndpointAccess::private_user};
     std::optional<px4::userland::ipc::posix::SerialEndpointLease> enclosure_lease;
     if (!identity.value().empty()) {
+        px4::userland::ipc::posix::EndpointDiagnostic endpoint_diagnostic{};
         auto acquired = px4::userland::ipc::posix::SerialEndpointLease::acquire_identity(
-            endpoint, identity.value());
+            endpoint, identity.value(), &endpoint_diagnostic);
         if (!acquired) {
-            std::fprintf(stderr, "enclosure endpoint: %s\n",
-                         px4::userland::error_string(acquired.error()));
+            if (endpoint_diagnostic.reason !=
+                px4::userland::ipc::posix::EndpointDiagnosticReason::none) {
+                asicen::cli::print_endpoint_diagnostic(stderr, endpoint_diagnostic,
+                                                        options.group);
+            } else {
+                std::fprintf(stderr, "enclosure endpoint: %s\n",
+                             px4::userland::error_string(acquired.error()));
+            }
             return exit_status(acquired.error());
         }
         enclosure_lease.emplace(std::move(acquired.value()));
