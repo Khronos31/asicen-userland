@@ -88,17 +88,21 @@ and [GCC 10.2.0](https://github.com/gcc-mirror/gcc/tree/releases/gcc-10.2.0).
 
 ## Vendor firmware in binary packages
 
-On 2026-10-09 the user selected inclusion of the Linux loader image in binary
+On 2026-10-09 the user selected inclusion of a Linux loader image in binary
 distribution archives, and later the same day directed that image into Git so
-GitHub-hosted runners can copy it. The file is `firmware/asicen-loader.bin`
-(16384 bytes, SHA-256
-`b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`).
-Corresponding-source archives and `git archive` omit `firmware/`.
+GitHub-hosted runners could copy it. On 2026-10-11 JST the user reaffirmed the
+then-current image preservation policy because continued availability from
+PLEX was uncertain. On 2026-10-26 the user selected a single common Windows
+image at the existing canonical path `firmware/asicen-loader.bin`; binary
+archives now contain that image only, while corresponding-source archives and
+`git archive` omit `firmware/`. The former Linux image remains in Git history,
+not in the current asset or binary archives.
 
-The user reaffirmed this ASICEN-specific preservation and redistribution policy
-on 2026-10-11 JST because continued availability from PLEX is uncertain.
-This is an explicit project-policy difference from px4-userland, not evidence
-of a redistribution grant. The existing image and provenance remain preserved.
+The current 16384-byte image SHA-256 is
+`5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`, extracted
+from the verified Windows BDA x64 loader described in the archive notice. This
+is an explicit project-policy difference from px4-userland, not evidence of a
+redistribution grant.
 
 The firmware is a separate vendor component: this project's GPL license and
 any licenses on newly written packaging code do not grant rights to it.

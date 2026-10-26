@@ -32,7 +32,7 @@ bool test_protocol()
 
     const auto& firmware_stages = asicen::loader_firmware_stages();
     CHECK(firmware_stages.size() == 4);
-    CHECK(asicen::kLoaderFirmwareStartAddress == 0x5399);
+    CHECK(asicen::kLoaderFirmwareStartAddress == 0x55d6);
     CHECK(asicen::kLoaderFirmwareChunkSize == 0x200);
     CHECK(firmware_stages[0].blob_offset == 0x0000 && firmware_stages[0].length == 0x0c00 &&
           firmware_stages[0].final_request == 0xab);
@@ -42,7 +42,7 @@ bool test_protocol()
     const auto loader_plan = asicen::build_loader_transfer_plan();
     CHECK(loader_plan.size() == 20);
     CHECK(loader_plan.front().request == 0xab && loader_plan.front().value == 0x0000 &&
-          loader_plan.front().index == 0x5399 && loader_plan.front().length == 0x0200);
+          loader_plan.front().index == 0x55d6 && loader_plan.front().length == 0x0200);
     CHECK(loader_plan[5].value == 0x0a00 && loader_plan[6].value == 0x2000);
     CHECK(loader_plan.back().request == 0xac && loader_plan.back().value == 0x3e00 &&
           loader_plan.back().length == 0x0200);

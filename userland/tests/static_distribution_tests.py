@@ -186,7 +186,7 @@ class StaticDistributionAuditTests(unittest.TestCase):
             firmware = root / audit.FIRMWARE_MEMBER
             firmware.parent.mkdir()
             firmware.write_bytes(b"x")
-            with self.assertRaisesRegex(package.AuditError, "vendor component"):
+            with self.assertRaisesRegex(package.AuditError, "differs from its pinned component"):
                 package.copy_firmware(root, root / "stage")
             firmware.unlink()
             firmware.symlink_to(ROOT / audit.FIRMWARE_MEMBER)
@@ -275,7 +275,7 @@ class CanonicalStaticDistributionTests(unittest.TestCase):
             self.assertEqual(len(payload), 16384)
             self.assertEqual(hashlib.sha256(payload).hexdigest(), canonical_audit.FIRMWARE_SHA256)
             self.assertEqual((stage / canonical_audit.FIRMWARE_NOTICE_MEMBER).read_text(), canonical_audit.FIRMWARE_NOTICE)
-            for name in (canonical_audit.FIRMWARE_MEMBER, canonical_audit.FIRMWARE_NOTICE_MEMBER):
+            for name in (*canonical_audit.FIRMWARE_MEMBERS, canonical_audit.FIRMWARE_NOTICE_MEMBER):
                 self.assertEqual((stage / name).stat().st_mode & 0o777, 0o644)
 
     def test_firmware_rejects_wrong_bytes_missing_input_and_symlink(self):
@@ -287,7 +287,7 @@ class CanonicalStaticDistributionTests(unittest.TestCase):
             source = root / canonical_audit.FIRMWARE_MEMBER
             source.parent.mkdir()
             source.write_bytes(b"x" * 16384)
-            with self.assertRaisesRegex(canonical_package.AuditError, "vendor component"):
+            with self.assertRaisesRegex(canonical_package.AuditError, "differs from its pinned component"):
                 canonical_package.copy_firmware(root, stage)
             source.unlink()
             source.symlink_to(SCRIPT.parent.parent / canonical_audit.FIRMWARE_MEMBER)
@@ -296,12 +296,14 @@ class CanonicalStaticDistributionTests(unittest.TestCase):
 
     def test_firmware_notice_and_modes_cannot_be_changed(self):
         payload = (SCRIPT.parent.parent / canonical_audit.FIRMWARE_MEMBER).read_bytes()
-        modes = {canonical_audit.FIRMWARE_MEMBER: 0o644, canonical_audit.FIRMWARE_NOTICE_MEMBER: 0o644}
+        modes = {**{name: 0o644 for name in canonical_audit.FIRMWARE_MEMBERS},
+                 canonical_audit.FIRMWARE_NOTICE_MEMBER: 0o644}
         with self.assertRaisesRegex(canonical_audit.AuditError, "unresolved rights"):
             canonical_audit.verify_firmware(payload, b"rights cleared\n", modes)
         modes[canonical_audit.FIRMWARE_MEMBER] = 0o755
         with self.assertRaisesRegex(canonical_audit.AuditError, "mode 644"):
-            canonical_audit.verify_firmware(payload, canonical_audit.FIRMWARE_NOTICE.encode(), modes)
+            canonical_audit.verify_firmware(payload,
+                                             canonical_audit.FIRMWARE_NOTICE.encode(), modes)
 
     def test_linux_runtime_licenses_are_exact_and_tamper_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -74,7 +74,7 @@ bool fingerprint_vectors()
 bool manifest_policy()
 {
     const auto& manifest = asicen::loader_firmware_manifest();
-    CHECK(manifest.size == 16384 && manifest.start_address == 0x5399);
+    CHECK(manifest.size == 16384 && manifest.start_address == 0x55d6);
     const std::array<asicen::ModelId, 5> supported{{asicen::ModelId::S3u, asicen::ModelId::S3u2,
                                                  asicen::ModelId::W3u2, asicen::ModelId::W3u3,
                                                  asicen::ModelId::W3u3V2}};
@@ -89,13 +89,13 @@ bool manifest_policy()
               asicen::LoaderFirmwareRead::WrongSize);
     }
     const auto* windows = asicen::loader_firmware_manifest(asicen::ModelId::W3u3V2);
-    CHECK(windows != nullptr && windows->size == manifest.size &&
-          windows->start_address == 0x55d6 && windows->sha256 != manifest.sha256);
+    CHECK(windows == &manifest && windows->size == manifest.size &&
+          windows->start_address == 0x55d6 && windows->sha256 == manifest.sha256);
     for (const auto model : supported) {
         const auto plan = asicen::build_loader_transfer_plan(model);
         CHECK(plan.size() == 20);
         for (const auto& transfer : plan) {
-            CHECK(transfer.index == (model == asicen::ModelId::W3u3V2 ? 0x55d6 : 0x5399));
+            CHECK(transfer.index == 0x55d6);
             CHECK(transfer.length == 512 && transfer.blob_offset + transfer.length <= manifest.size);
         }
         CHECK(!plan.empty() && plan.back().request == 0xac);
@@ -128,37 +128,24 @@ bool external_firmware_images(int argc, char** argv)
     // Optional positive verification reads bytes only. Firmware is not executed
     // or uploaded to a device by this test.
     if (argc >= 2) {
-        CHECK(!asicen::FirmwareProvider(argv[1]).load());
+        const auto default_image = asicen::FirmwareProvider(argv[1]).load();
+        CHECK(default_image.has_value() &&
+              default_image.value().manifest() == &asicen::common_loader_firmware_manifest());
         for (const auto model : {asicen::ModelId::S3u, asicen::ModelId::S3u2, asicen::ModelId::W3u2,
-                                 asicen::ModelId::W3u3}) {
+                                 asicen::ModelId::W3u3, asicen::ModelId::W3u3V2}) {
             const auto loaded = asicen::FirmwareProvider(argv[1], model).load();
             CHECK(loaded.has_value());
             const auto& image = loaded.value();
             std::vector<std::uint8_t> blob(image.data(), image.data() + image.size());
-            CHECK(asicen::validate_loader_firmware(asicen::ModelId::W3u3V2, blob.data(),
-                                                  blob.size()) ==
-                  asicen::LoaderFirmwareRead::FingerprintMismatch);
+            CHECK(image.manifest() == &asicen::common_loader_firmware_manifest());
+            CHECK(asicen::validate_loader_firmware(model, blob.data(), blob.size()) ==
+                  asicen::LoaderFirmwareRead::Ok);
             // Changes in skipped transfer regions must also be rejected.
             blob[0x1000] ^= 1U;
             CHECK(asicen::validate_loader_firmware(model, blob.data(), blob.size()) ==
                   asicen::LoaderFirmwareRead::FingerprintMismatch);
         }
     }
-    if (argc >= 3) {
-        const auto loaded = asicen::FirmwareProvider(argv[2], asicen::ModelId::W3u3V2).load();
-        CHECK(loaded.has_value());
-        const auto& image = loaded.value();
-        CHECK(asicen::validate_loader_firmware(asicen::ModelId::W3u3, image.data(), image.size()) ==
-              asicen::LoaderFirmwareRead::FingerprintMismatch);
-    }
-    if (argc >= 4) {
-        const auto loaded = asicen::FirmwareProvider(argv[3]).load();
-        CHECK(loaded.has_value() &&
-              loaded.value().manifest() == &asicen::common_loader_firmware_manifest() &&
-              loaded.value().manifest()->start_address == 0x55d6 &&
-              asicen::build_loader_transfer_plan(*loaded.value().manifest()).size() == 20U);
-    }
-
     return true;
 }
 

@@ -306,12 +306,12 @@ not a replacement for this contract.
 - Public source development is authorized by the user's 2026-10-09 instruction,
   superseding the initial plan to keep the repository private until 0.1.0.
 - Keep additional vendor binaries, TS samples and card data untracked.
-  The current repository already tracks the separately identified
-  `firmware/asicen-loader.bin`; binary archives include that exact pinned image,
-  while corresponding-source exports exclude it. Preserve the provenance and
-  unresolved-rights notice in `THIRD_PARTY_NOTICES.md`. Do not label the vendor
-  image as covered by the product's open-source license or infer permission
-  to add other images. This records the current tree, superseding the older
+  The current repository tracks the common image at
+  `firmware/asicen-loader.bin`; binary archives include the exact pinned
+  image, while corresponding-source exports exclude it. Preserve the
+  provenance and unresolved-rights notice in `THIRD_PARTY_NOTICES.md`. Do not
+  label the vendor image as covered by the product's open-source license or
+  infer permission to add other images. This records the current tree, superseding the older
   outside-the-repository loader description.
 - Preserve or strengthen existing test coverage when migrating tests to the
   canonical contracts. Do not weaken expectations, fixtures, mocks, or skips
@@ -392,6 +392,8 @@ Normal `asicend` startup uses the shared Windows-derived 16384-byte image
 (start/index `55d6`) for all five profiles and verifies the whole image before
 USB access. Cold startup infers the model from the runtime VID:PID that returns
 at the selected bus and port; loader VID:PID alone does not identify the model.
-The older model-specific Linux image (start/index `5399`) remains available to
-the diagnostic firmware interface. Image redistribution rights remain
-unresolved; the shared image is not added to this repository or its archives.
+The common image is tracked at `firmware/asicen-loader.bin`, included in every
+binary archive, and excluded from corresponding-source archives. Image
+redistribution rights remain unresolved; inclusion follows
+the existing user-directed distribution policy and does not assert that rights
+are cleared.

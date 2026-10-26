@@ -944,7 +944,8 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_executable(asicen-loader-firmware-tests userland/tests/loader_firmware_tests.cpp)
     target_link_libraries(asicen-loader-firmware-tests PRIVATE asicen_core)
     asicen_enable_project_warnings(asicen-loader-firmware-tests)
-    add_test(NAME asicen-loader-firmware-tests COMMAND asicen-loader-firmware-tests)
+    add_test(NAME asicen-loader-firmware-tests COMMAND asicen-loader-firmware-tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/firmware/asicen-loader.bin)
 
     add_executable(asicen-loader-diagnostic-tests
         userland/tests/loader_diagnostic_tests.cpp)
