@@ -78,10 +78,6 @@ class FullPipelineTests(unittest.TestCase):
         firmware = patch.object(verify, "FIRMWARE_SHA256", verify.digest(archive_fixture.FIRMWARE))
         firmware.start()
         self.addCleanup(firmware.stop)
-        common_firmware = patch.object(
-            verify, "COMMON_FIRMWARE_SHA256", verify.digest(archive_fixture.FIRMWARE))
-        common_firmware.start()
-        self.addCleanup(common_firmware.stop)
         self.assertIs(verify, archive_fixture.verify)
 
     def setup_product(self, product):

@@ -107,7 +107,8 @@ bool test_provider_errors_and_policy(const char* known_image)
     CHECK(check_rejected(FirmwareProvider(image, static_cast<ModelId>(255)),
                          Error::FIRMWARE_REJECTED));
     if (known_image != nullptr) {
-        for (const ModelId model : {ModelId::S3u, ModelId::S3u2, ModelId::W3u2, ModelId::W3u3}) {
+        for (const ModelId model : {ModelId::S3u, ModelId::S3u2, ModelId::W3u2, ModelId::W3u3,
+                                    ModelId::W3u3V2}) {
             const auto loaded = FirmwareProvider(known_image, model).load();
             CHECK(loaded && loaded.value().size() == kLoaderFirmwareBlobSize);
             CHECK(loaded.value().bytes().data == loaded.value().data());
@@ -116,8 +117,6 @@ bool test_provider_errors_and_policy(const char* known_image)
                                                &fingerprint));
             CHECK(fingerprint == loader_firmware_manifest(model)->sha256);
         }
-        CHECK(check_rejected(FirmwareProvider(known_image, ModelId::W3u3V2),
-                             Error::FIRMWARE_REJECTED));
         CHECK(check_rejected(FirmwareProvider(known_image, static_cast<ModelId>(255)),
                              Error::FIRMWARE_REJECTED));
     }

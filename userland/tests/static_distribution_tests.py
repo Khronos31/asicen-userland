@@ -140,7 +140,6 @@ class StaticDistributionAuditTests(unittest.TestCase):
         musl = audit.expected_binary_members("linux-musl-x86_64")
         self.assertEqual(glibc, musl)  # ABI identity is carried by platform and metadata.
         self.assertIn("firmware/asicen-loader.bin", glibc)
-        self.assertIn("firmware/asicen-loader-common.bin", glibc)
         self.assertIn("ifd/asicen-userland-ifd.so", musl)
         self.assertIn("toolchain/musl-1.2.5-COPYRIGHT", glibc)
         self.assertIn(audit.LINUX_IFD_METADATA_MEMBER, musl)
@@ -185,20 +184,16 @@ class StaticDistributionAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             firmware = root / audit.FIRMWARE_MEMBER
-            common_firmware = root / audit.COMMON_FIRMWARE_MEMBER
             firmware.parent.mkdir()
             firmware.write_bytes(b"x")
-            common_firmware.write_bytes(b"x")
             with self.assertRaisesRegex(package.AuditError, "differs from its pinned component"):
                 package.copy_firmware(root, root / "stage")
             firmware.unlink()
-            common_firmware.unlink()
             firmware.symlink_to(ROOT / audit.FIRMWARE_MEMBER)
             with self.assertRaisesRegex(package.AuditError, "firmware input"):
                 package.copy_firmware(root, root / "stage")
             expected = audit.expected_binary_members("linux-musl-x86_64")
-            self.assertTrue({audit.FIRMWARE_MEMBER, audit.COMMON_FIRMWARE_MEMBER,
-                             audit.FIRMWARE_NOTICE_MEMBER,
+            self.assertTrue({audit.FIRMWARE_MEMBER, audit.FIRMWARE_NOTICE_MEMBER,
                              *audit.LINUX_RUNTIME_LICENSE_SHA256}.issubset(expected))
             output = root / "out"
             output.mkdir()
@@ -279,10 +274,6 @@ class CanonicalStaticDistributionTests(unittest.TestCase):
             payload = (stage / canonical_audit.FIRMWARE_MEMBER).read_bytes()
             self.assertEqual(len(payload), 16384)
             self.assertEqual(hashlib.sha256(payload).hexdigest(), canonical_audit.FIRMWARE_SHA256)
-            common_payload = (stage / canonical_audit.COMMON_FIRMWARE_MEMBER).read_bytes()
-            self.assertEqual(len(common_payload), 16384)
-            self.assertEqual(hashlib.sha256(common_payload).hexdigest(),
-                             canonical_audit.COMMON_FIRMWARE_SHA256)
             self.assertEqual((stage / canonical_audit.FIRMWARE_NOTICE_MEMBER).read_text(), canonical_audit.FIRMWARE_NOTICE)
             for name in (*canonical_audit.FIRMWARE_MEMBERS, canonical_audit.FIRMWARE_NOTICE_MEMBER):
                 self.assertEqual((stage / name).stat().st_mode & 0o777, 0o644)
@@ -294,28 +285,24 @@ class CanonicalStaticDistributionTests(unittest.TestCase):
             with self.assertRaisesRegex(canonical_package.AuditError, "firmware input"):
                 canonical_package.copy_firmware(root, stage)
             source = root / canonical_audit.FIRMWARE_MEMBER
-            common_source = root / canonical_audit.COMMON_FIRMWARE_MEMBER
             source.parent.mkdir()
             source.write_bytes(b"x" * 16384)
-            common_source.write_bytes(b"x" * 16384)
             with self.assertRaisesRegex(canonical_package.AuditError, "differs from its pinned component"):
                 canonical_package.copy_firmware(root, stage)
             source.unlink()
-            common_source.unlink()
             source.symlink_to(SCRIPT.parent.parent / canonical_audit.FIRMWARE_MEMBER)
             with self.assertRaisesRegex(canonical_package.AuditError, "firmware input"):
                 canonical_package.copy_firmware(root, stage)
 
     def test_firmware_notice_and_modes_cannot_be_changed(self):
         payload = (SCRIPT.parent.parent / canonical_audit.FIRMWARE_MEMBER).read_bytes()
-        common_payload = (SCRIPT.parent.parent / canonical_audit.COMMON_FIRMWARE_MEMBER).read_bytes()
         modes = {**{name: 0o644 for name in canonical_audit.FIRMWARE_MEMBERS},
                  canonical_audit.FIRMWARE_NOTICE_MEMBER: 0o644}
         with self.assertRaisesRegex(canonical_audit.AuditError, "unresolved rights"):
-            canonical_audit.verify_firmware(payload, common_payload, b"rights cleared\n", modes)
+            canonical_audit.verify_firmware(payload, b"rights cleared\n", modes)
         modes[canonical_audit.FIRMWARE_MEMBER] = 0o755
         with self.assertRaisesRegex(canonical_audit.AuditError, "mode 644"):
-            canonical_audit.verify_firmware(payload, common_payload,
+            canonical_audit.verify_firmware(payload,
                                              canonical_audit.FIRMWARE_NOTICE.encode(), modes)
 
     def test_linux_runtime_licenses_are_exact_and_tamper_is_rejected(self):

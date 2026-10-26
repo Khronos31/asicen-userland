@@ -60,7 +60,7 @@ Windows 11 x86_64 は Phase 1（製品コマンドと CARD_* を含む同一ホ�
 
 ### ファームウェア
 
-既定の `firmware/asicen-loader-common.bin`（16,384 バイト）は全機種共通の Windows 由来イメージです。既存の Linux 由来 `firmware/asicen-loader.bin`（16,384 バイト）は互換用として維持し、全 binary archive に両方を同梱します。通常の model 省略起動では共通イメージを使用します。固定イメージの抽出・hash検査には既存の `scripts/extract-windows-loader-firmware.py` を使います。再配布権は未解決であり、vendor notice と由来情報を各 binary archive に含めます。
+`firmware/asicen-loader.bin`（16,384 バイト）は全機種共通の Windows 由来イメージです。通常の model 省略起動ではこのイメージを使用します。固定イメージの抽出・hash検査には既存の `scripts/extract-windows-loader-firmware.py` を使います。再配布権は未解決であり、vendor notice と由来情報を各 binary archive に含めます。
 
 通常起動は `asicend --device usb:BUS-PORT[,BUS-PORT...] --instance TOKEN --firmware PATH` です。cold loader へ共通イメージを転送した後、同じ USB 位置に戻る runtime VID:PID から機種を決めます。既に runtime なら転送を省略します。既知の内部 Hub で相方位置を一意に確認できる機種は1位置で選択でき、確認できない場合は複数位置を指定します。serial がない ASICEN 機器を `serial:` で選択した場合は一致なしになります。Termux の `--fd` は再列挙に追随できないため、転送と起動を分けます（転送後に runtime の fd を再取得して `--firmware` なしで起動）。runtime fd の VID:PID から機種を決めます。開発用の `asicen-probe load-firmware` も引き続き利用できます。
 

@@ -38,9 +38,9 @@ firmware=
 if [ -n "${ASICEN_FIRMWARE:-}" ]; then
     firmware=$ASICEN_FIRMWARE
 else
-    for candidate in ./asicen-loader-common.bin \
-        /usr/local/share/asicen-userland/asicen-loader-common.bin \
-        /usr/share/asicen-userland/asicen-loader-common.bin
+    for candidate in ./asicen-loader.bin \
+        /usr/local/share/asicen-userland/asicen-loader.bin \
+        /usr/share/asicen-userland/asicen-loader.bin
     do
         if [ -f "$candidate" ]; then
             firmware=$candidate

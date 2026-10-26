@@ -33,7 +33,6 @@ AuditError = _audit.AuditError
 LIBUSB_SHA256 = _audit.LIBUSB_SHA256
 LIBUSB_COPYING_SHA256 = _audit.LIBUSB_COPYING_SHA256
 FIRMWARE_MEMBER = _audit.FIRMWARE_MEMBER
-COMMON_FIRMWARE_MEMBER = _audit.COMMON_FIRMWARE_MEMBER
 FIRMWARE_NOTICE_MEMBER = _audit.FIRMWARE_NOTICE_MEMBER
 LINUX_RUNTIME_LICENSE_SHA256 = _audit.LINUX_RUNTIME_LICENSE_SHA256
 PLATFORMS = _audit.PLATFORMS
@@ -252,8 +251,7 @@ def copy_firmware(repo_root: Path, stage: Path) -> None:
     if any(source.is_symlink() or not source.is_file() for source in sources.values()):
         fail("missing ordinary firmware input")
     payloads = {name: source.read_bytes() for name, source in sources.items()}
-    _audit.verify_firmware(payloads[FIRMWARE_MEMBER], payloads[COMMON_FIRMWARE_MEMBER],
-                           _audit.FIRMWARE_NOTICE.encode("utf-8"),
+    _audit.verify_firmware(payloads[FIRMWARE_MEMBER], _audit.FIRMWARE_NOTICE.encode("utf-8"),
                            {**{name: 0o644 for name in _audit.FIRMWARE_MEMBERS},
                             FIRMWARE_NOTICE_MEMBER: 0o644})
     for name, source in sources.items():
@@ -360,14 +358,11 @@ def render_dependency_notice(repo_root: Path, version: str, platform: str,
     notice = template.read_text(encoding="utf-8")
     notice = notice.replace("@VERSION@", version).replace("@PLATFORM@", platform)
     dependency_text += (
-        f"\ndependency.firmware.path={COMMON_FIRMWARE_MEMBER}\n"
-        f"dependency.firmware.sha256={_audit.COMMON_FIRMWARE_SHA256}\n"
+        f"\ndependency.firmware.path={FIRMWARE_MEMBER}\n"
+        f"dependency.firmware.sha256={_audit.FIRMWARE_SHA256}\n"
         f"dependency.firmware.bytes={_audit.FIRMWARE_SIZE}\n"
         "dependency.firmware.redistribution-rights=unresolved\n"
         f"dependency.firmware.notice={FIRMWARE_NOTICE_MEMBER}\n"
-        f"dependency.firmware.compatibility.path={FIRMWARE_MEMBER}\n"
-        f"dependency.firmware.compatibility.sha256={_audit.FIRMWARE_SHA256}\n"
-        f"dependency.firmware.compatibility.bytes={_audit.FIRMWARE_SIZE}\n"
         "Vendor firmware is a separate component and is not covered by the project's GPL.\n"
         "The corresponding-source archive excludes firmware under the existing export-ignore policy.\n"
     )
@@ -525,7 +520,6 @@ def self_test_windows_archive(repo_root: Path) -> None:
             "THIRD_PARTY_NOTICES.md": (repo_root / "THIRD_PARTY_NOTICES.md").read_bytes(),
             "libusb/COPYING": (repo_root / "packaging" / "libusb" / "COPYING").read_bytes(),
             FIRMWARE_MEMBER: (repo_root / FIRMWARE_MEMBER).read_bytes(),
-            COMMON_FIRMWARE_MEMBER: (repo_root / COMMON_FIRMWARE_MEMBER).read_bytes(),
             FIRMWARE_NOTICE_MEMBER: _audit.FIRMWARE_NOTICE.encode("utf-8"),
         }
         for name in WINDOWS_TOOLCHAIN_LICENSE_SHA256:

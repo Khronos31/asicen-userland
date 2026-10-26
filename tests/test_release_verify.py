@@ -139,7 +139,6 @@ class ReleaseFixture:
                 b"#!/bin/sh\necho launcher\n", 0o755)
         if self.product == "asicen-userland":
             files[verify.FIRMWARE_MEMBER] = (FIRMWARE, 0o644)
-            files[verify.COMMON_FIRMWARE_MEMBER] = (FIRMWARE, 0o644)
             files["licenses/VENDOR-FIRMWARE-NOTICE.txt"] = (b"fixture vendor notice", 0o644)
             if platform.startswith("linux-"):
                 files["ifd/asicen-userland-ifd.so"] = (b"synthetic IFD", 0o755)
@@ -212,13 +211,9 @@ class ReleaseTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.synthetic_firmware = patch.object(verify, "FIRMWARE_SHA256", verify.digest(FIRMWARE))
         self.synthetic_firmware.start()
-        self.synthetic_common_firmware = patch.object(
-            verify, "COMMON_FIRMWARE_SHA256", verify.digest(FIRMWARE))
-        self.synthetic_common_firmware.start()
 
     def tearDown(self):
         self.synthetic_firmware.stop()
-        self.synthetic_common_firmware.stop()
         self.temp.cleanup()
 
     def fixture(self, product="px4-userland"):
@@ -323,7 +318,7 @@ class ReleaseTests(unittest.TestCase):
     def test_asicen_firmware_notice_and_source_exclusion(self):
         for i, (member, data, source) in enumerate((
                 (verify.FIRMWARE_MEMBER, b"changed firmware", False),
-                (verify.COMMON_FIRMWARE_MEMBER, b"changed common firmware", False),
+                ("firmware/asicen-loader-common.bin", b"extra firmware", False),
                 ("licenses/VENDOR-FIRMWARE-NOTICE.txt", b"rights granted falsely", False),
                 ("repository/firmware/asicen-loader.bin", FIRMWARE, True),
                 ("repository/firmware/asicen-loader-common.bin", FIRMWARE, True))):

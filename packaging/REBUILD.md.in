@@ -28,13 +28,10 @@ python3 repository/scripts/test-source-rebuild.py \
 The existing `firmware/` export-ignore policy excludes vendor firmware from
 this source archive. Building and LGPL relinking do not require firmware.
 To assemble a binary archive, supply the separately obtained, exact
-`repository/firmware/asicen-loader-common.bin` (16384 bytes, SHA-256
-`5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`) and
 `repository/firmware/asicen-loader.bin` (16384 bytes, SHA-256
-`b45d510200a1690b3ca358d93de13f40e1d3567b663c17e773349ad96f597aa8`). The
-common image is the default; the Linux image remains for compatibility. The
-packager rejects missing, changed, or symlinked images and includes their
-separate vendor-component notice. Redistribution rights remain unresolved;
+`5db39facda140bdcb3a238dad10da5aac752a1ba3aaf17e2239f8d79a0ad6a2a`). This
+common image is the default. The packager rejects a missing, changed, or
+symlinked image and includes its vendor-component notice. Redistribution rights remain unresolved;
 the project license does not grant firmware rights.
 
 All Linux binary archives retain the complete pinned musl and GCC runtime
