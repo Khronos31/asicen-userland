@@ -37,10 +37,24 @@
 候補の full source SHA を固定し、`build_userland.yml`（`portable userland foundation`）を実行します。この build workflow 自体はタグや Release を作成しません。
 
 ```sh
-gh workflow run build_userland.yml --ref <candidate-ref>
-gh run view <candidate-run-id> --json headSha,event,conclusion
-gh run download <candidate-run-id> --name release-candidate --dir <new-empty-dir>
-(cd <new-empty-dir> && sha256sum -c SHA256SUMS)
+set -eu
+: "${CANDIDATE_REF:?export the exact candidate source ref}"
+: "${ARTIFACT_DIR:?export a new empty artifact directory}"
+case "$CANDIDATE_REF" in ''|*'<'*|*'>'*) echo 'invalid or unreplaced candidate ref' >&2; exit 2 ;; esac
+case "$ARTIFACT_DIR" in ''|*'<'*|*'>'*) echo 'invalid or unreplaced artifact directory' >&2; exit 2 ;; esac
+test ! -e "$ARTIFACT_DIR" || { echo 'artifact directory must be new and empty' >&2; exit 1; }
+gh workflow run build_userland.yml --ref "$CANDIDATE_REF"
+gh run list --workflow build_userland.yml --limit 10
+: "${RUN_ID:?after confirming successful run, export its exact numeric ID}"
+case "$RUN_ID" in ''|*[!0-9]*) echo 'run ID must be decimal' >&2; exit 2 ;; esac
+mkdir -m 700 "$ARTIFACT_DIR"
+gh run view "$RUN_ID" --json headSha,event,conclusion
+gh run download "$RUN_ID" --name release-candidate --dir "$ARTIFACT_DIR"
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$ARTIFACT_DIR" && sha256sum -c SHA256SUMS)
+else
+  (cd "$ARTIFACT_DIR" && shasum -a 256 -c SHA256SUMS)
+fi
 ```
 
 実際の ref/run ID/空ディレクトリを使います。実機試験に使う archive 名・hash・source SHA・run ID/attempt を固定し、ローカル build や別 run へ置き換えません。CI の全必須 job、archive audit、source/relink、各 platform smoke が成功していることを確認します。
@@ -66,9 +80,14 @@ gh run download <candidate-run-id> --name release-candidate --dir <new-empty-dir
 利用者が対象版と結果コミットについてタグ付け・公開を依頼した後だけ、未使用の `vX.Y.Z` を作成します。以下の `<result-commit>` は試験結果コミットと後続のノートコミットの両方を含む最終コミットです。`VERSION` とタグの版を一致させ、既存タグを移動・上書きしません。
 
 ```sh
-git diff --stat <candidate-commit> <result-commit>
-git tag -a vX.Y.Z -m "asicen-userland vX.Y.Z" <result-commit>
-git push origin vX.Y.Z
+set -eu
+: "${CANDIDATE_COMMIT:?export the fixed candidate commit}"
+: "${RESULT_COMMIT:?export the final result and release-notes commit}"
+: "${VERSION:?export the confirmed release version}"
+for value in "$CANDIDATE_COMMIT" "$RESULT_COMMIT" "$VERSION"; do case "$value" in ''|*'<'*|*'>'*) echo 'replace all release values before continuing' >&2; exit 2 ;; esac; done
+git diff --stat "$CANDIDATE_COMMIT" "$RESULT_COMMIT"
+git tag -a "v$VERSION" -m "asicen-userland v$VERSION" "$RESULT_COMMIT"
+git push origin "v$VERSION"
 ```
 
 タグは注釈付き・署名なしです。タグ push により `build_userland.yml` の tag run と、公開用 `release_tag.yml` が始まります。通常の branch/PR CI や `workflow_dispatch` は Release を公開しません。

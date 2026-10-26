@@ -635,9 +635,14 @@ N/Aは製品機能上該当しない項目だけに使う。OS/ABI候補のunsup
 候補source commitの `build_userland.yml` によるcandidate artifactを使い、run/ref/SHA、artifact ID、全archive hash、source manifest、license/provenanceを保存する。現在の通常release配布binaryはLinux glibc/musl x86_64/aarch64、macOS arm64、Android aarch64/armv7a/x86_64の8 targetで、正式検証matrixにあるWindows 11 x86_64は含まれない。現行workflowはWindows ZIPを同じrunの `win-candidate` artifactとして別生成するが、通常の `release-candidate` aggregateへ接続していない。これは正式対象の除外ではなく、配布経路の実装gapである。Windows検証には同候補runの `win-candidate` artifactを使う。source archiveも検査する。空の作業directoryへ展開し、同梱checksumを確認する。
 
 ```sh
-mkdir -p candidate
-gh run download <candidate-run-id> --name release-candidate --dir candidate
-(cd candidate && sha256sum -c SHA256SUMS)
+set -eu
+: "${RUN_ID:?run T00 candidate acquisition first}"
+: "${WORK:?run T00 candidate acquisition first}"
+: "${D:?run T00 archive extraction first}"
+case "$RUN_ID" in ''|*[!0-9]*) echo 'candidate run ID must be decimal' >&2; exit 2 ;; esac
+test -d "$WORK/download"; test -d "$D"
+(cd "$WORK/download" && sha256sum -c SHA256SUMS)
+test -x "$D/asicend"; test -x "$D/asicenctl"; test -x "$D/asicen-ts"
 ```
 
 通常release aggregateに含まれないWindows ZIPは配布物として数えない。適用版にWindows native検証が含まれる場合はこの区別を保ち、通常配布物にないことを理由にnative確認を除外しない。欠落・hash不一致・source/licenseの不整合は候補失敗。
