@@ -715,7 +715,7 @@ require_value() { name=$1 value=$2; case "$value" in ''|*'<'*|*'>'*) echo "inval
 require_value PORT "$PORT" || exit 2
 case "$PORT" in *[!A-Za-z0-9._-]*) echo 'invalid listed USB port' >&2; exit 2 ;; esac
 "$D/asicend" --list-json > "$LOG/discovery-before.json"
-python3 - "$LOG/discovery-before.json" "$PORT" <<'PY'
+python3 - "$LOG/discovery-before.json" "$PORT" <<'PY' || exit $?
 import json,sys
 root=json.load(open(sys.argv[1],encoding='utf-8'))
 def ports(value):
@@ -745,7 +745,7 @@ if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/reconnect-human-w
 PORT='<new-listed-usb-port>'; ID="usb:$PORT"; TOKEN='stream'
 require_value PORT "$PORT" || exit 2
 case "$PORT" in *[!A-Za-z0-9._-]*) echo 'invalid listed USB port' >&2; exit 2 ;; esac
-python3 - "$LOG/discovery-reconnected.json" "$PORT" <<'PY'
+python3 - "$LOG/discovery-reconnected.json" "$PORT" <<'PY' || exit $?
 import json,sys
 root=json.load(open(sys.argv[1],encoding='utf-8'))
 def ports(value):
@@ -780,6 +780,19 @@ printf '%s' '同じUSBを再接続完了後にEnter (300秒以内): '
 if ! IFS= read -r -t 300 _; then printf '%s\n' timeout > "$LOG/stream-reconnect-human-wait.txt"; exit 1; fi
 "$D/asicend" --list-json > "$LOG/discovery-stream-reconnected.json"
 PORT='<new-listed-usb-port-for-the-same-physical-device>'; ID="usb:$PORT"; TOKEN='recovered'
+require_value PORT "$PORT" || exit 2
+case "$PORT" in *[!A-Za-z0-9._-]*) echo 'invalid listed USB port' >&2; exit 2 ;; esac
+python3 - "$LOG/discovery-stream-reconnected.json" "$PORT" <<'PY' || exit $?
+import json,sys
+root=json.load(open(sys.argv[1],encoding='utf-8'))
+def ports(value):
+    if isinstance(value,dict):
+        if value.get('port') == sys.argv[2]: return True
+        return any(ports(v) for v in value.values())
+    if isinstance(value,list): return any(ports(v) for v in value)
+    return False
+if not ports(root): raise SystemExit('recovery port absent from discovery JSON')
+PY
 RT_RECOVERY="$WORK/runtime-recovery"; mkdir -m 700 "$RT_RECOVERY"
 recovery_cleanup() {
   RECOVERY_PRIMARY_RC=$?
