@@ -1102,9 +1102,18 @@ $Work = Join-Path $HOME "asicen-win-$RunId"
 $LOG = Join-Path $Work 'log'
 & $C --instance rc --runtime-dir $RT status
 & $C --instance rc --runtime-dir $RT list
-$capture = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver','<ID>','--channel','T27','--time','30','--output',(Join-Path $PWD 't27.ts')) -PassThru -NoNewWindow -Wait
-$capture.ExitCode
-Get-FileHash -Algorithm SHA256 .\t27.ts
+$captureTs = Join-Path $LOG 't27.ts'
+$capture = Start-Process -FilePath $B -ArgumentList @('--instance','rc','--runtime-dir',$RT,'--receiver','<ID>','--channel','T27','--time','30','--output',$captureTs) -PassThru -NoNewWindow
+if (-not $capture.WaitForExit(90000)) {
+  $capture.Id | Set-Content (Join-Path $LOG 'winscard-capture-timeout.txt')
+  Stop-Process -Id $capture.Id -ErrorAction SilentlyContinue
+  if (-not $capture.WaitForExit(5000)) { $capture.Id | Set-Content (Join-Path $LOG 'winscard-capture-cleanup-timeout.txt') }
+}
+$capture.Refresh()
+if ($capture.HasExited) { $capture.ExitCode | Set-Content (Join-Path $LOG 'winscard-capture.rc') } else { 'unavailable: owned client did not exit' | Set-Content (Join-Path $LOG 'winscard-capture.rc') }
+if ($capture.HasExited -and $capture.ExitCode -eq 0 -and (Test-Path $captureTs) -and -not (Test-Path (Join-Path $LOG 'winscard-capture-timeout.txt'))) { 'complete: client exited 0' | Set-Content (Join-Path $LOG 'winscard-capture.state') } else { 'incomplete: client timeout/exit/output failure' | Set-Content (Join-Path $LOG 'winscard-capture.state') }
+if (Test-Path $captureTs) { Get-FileHash -Algorithm SHA256 $captureTs } else { 'capture TS unavailable' | Set-Content (Join-Path $LOG 'winscard-capture-ts-missing.txt') }
+if (Test-Path (Join-Path $LOG 'winscard-capture-timeout.txt')) { throw 'WinSCard client timeout; stop the owned daemon normally, verify cleanup, and record this run incomplete before any later capture.' }
 ```
 
 T07はdaemonを維持したままclientなしの状態でUSBを抜くidle runと、有限受信中のstream runを別々に行う。抜去を依頼する前にstatus/listとdaemon PIDを記録し、依頼から最大5分待つ。stream runでは`--time`を観測窓より長くしたclientを起動し、観測窓内の抜去終了を確認する。窓内に自然終了しない場合はtimeout未達として記録し、有限`--time`の終了まで待って実終了値を保存する。指定時間満了exit 0は切断合格ではない。Windowsではさらに有限`--time`+30秒の終了上限を設け、超過した場合はowned clientだけを停止してcleanupを試し、T07を未完了として記録する。抜去後にdaemonを通常停止し、再接続後は`--list-json`で同じUSB pathを確認して新しいruntimeで起動し、status/listと30秒受信を再実行する。T08のPID/終了値/process確認をこのWindows手順にも適用する。
@@ -1255,11 +1264,18 @@ $Tool = Join-Path $Work 'tooling'; $Helper = Join-Path $Tool 'ts-check.py'
 $HelperSha256 = '3224747ccf74d752fd70e0fd5599418cfa20d6d4bfafc8e8220a002c1dcbcffd'
 if (-not (Test-Path -LiteralPath $Helper -PathType Leaf)) { throw 'fixed runbook TS helper is missing; stop the owned daemon normally.' }
 if ((Get-FileHash -LiteralPath $Helper -Algorithm SHA256).Hash.ToLowerInvariant() -ne $HelperSha256) { throw 'fixed runbook TS helper hash mismatch; stop the owned daemon normally.' }
-$recovery = Start-Process -FilePath $B -ArgumentList @('--instance',$RECOVERY_TOKEN,'--runtime-dir',$RT_RECOVERY,'--receiver',$R1,'--channel','T27','--time','30','--output',$recoveryTs) -PassThru -NoNewWindow -Wait
-$recovery.ExitCode | Set-Content (Join-Path $LOG 't07-recovery-client.rc')
-$recoveryHash = Get-FileHash -LiteralPath $recoveryTs -Algorithm SHA256
-$recoveryHash | Set-Content (Join-Path $LOG 't07-recovery-ts.sha256')
-if ($recovery.ExitCode -ne 0) { throw "recovery capture exit was $($recovery.ExitCode), expected 0; save evidence and stop the owned daemon normally." }
+$recovery = Start-Process -FilePath $B -ArgumentList @('--instance',$RECOVERY_TOKEN,'--runtime-dir',$RT_RECOVERY,'--receiver',$R1,'--channel','T27','--time','30','--output',$recoveryTs) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $LOG 't07-recovery.out') -RedirectStandardError (Join-Path $LOG 't07-recovery.err')
+if (-not $recovery.WaitForExit(90000)) {
+  $recovery.Id | Set-Content (Join-Path $LOG 't07-recovery-client-timeout.txt')
+  Stop-Process -Id $recovery.Id -ErrorAction SilentlyContinue
+  if (-not $recovery.WaitForExit(5000)) { $recovery.Id | Set-Content (Join-Path $LOG 't07-recovery-client-cleanup-timeout.txt') }
+}
+$recovery.Refresh()
+if ($recovery.HasExited) { $recovery.ExitCode | Set-Content (Join-Path $LOG 't07-recovery-client.rc') } else { 'unavailable: owned client did not exit' | Set-Content (Join-Path $LOG 't07-recovery-client.rc') }
+if (-not $recovery.HasExited -or $recovery.ExitCode -ne 0 -or (Test-Path (Join-Path $LOG 't07-recovery-client-timeout.txt'))) { 'incomplete: recovery capture timeout/exit failure' | Set-Content (Join-Path $LOG 't07-recovery-state.txt') } else { 'complete: recovery capture exited 0' | Set-Content (Join-Path $LOG 't07-recovery-state.txt') }
+if (Test-Path $recoveryTs) { $recoveryHash = Get-FileHash -LiteralPath $recoveryTs -Algorithm SHA256; $recoveryHash | Set-Content (Join-Path $LOG 't07-recovery-ts.sha256') } else { 'recovery TS unavailable' | Set-Content (Join-Path $LOG 't07-recovery-ts-missing.txt') }
+if (Test-Path (Join-Path $LOG 't07-recovery-client-timeout.txt')) { throw 'recovery capture timeout; stop the owned daemon normally, verify cleanup, and record T07 incomplete.' }
+if (-not $recovery.HasExited -or $recovery.ExitCode -ne 0) { throw "recovery capture exit unavailable or nonzero; stop the owned daemon normally and record T07 incomplete." }
 $recoveryCheck = Join-Path $LOG 't07-recovery-ts-check.json'; $recoveryCheckErr = Join-Path $LOG 't07-recovery-ts-check.err'
 & python $Helper $recoveryTs 1> $recoveryCheck 2> $recoveryCheckErr; $recoveryCheckRc = $LASTEXITCODE
 $recoveryCheckRc | Set-Content (Join-Path $LOG 't07-recovery-ts-check.rc')
@@ -1331,6 +1347,7 @@ foreach ($client in $clients) {
 }
 if ($clientFailures.Count -gt 0) { 'incomplete: client timeout/exit failure' | Set-Content (Join-Path $LOG 't03-state.txt') } else { 'complete: all clients exited 0' | Set-Content (Join-Path $LOG 't03-state.txt') }
 foreach ($name in 'r1.ts','r2.ts','r3.ts','r4.ts') { $file = Join-Path $LOG $name; if (Test-Path $file) { Get-FileHash -Algorithm SHA256 $file } else { "$name unavailable" | Out-File -Append (Join-Path $LOG 't03-ts-missing.txt') } }
+if (Test-Path (Join-Path $LOG 't03-client-timeout.txt')) { throw 'T03 client timeout; stop both owned daemons normally, verify cleanup, and record T03 incomplete; do not start T04 captures.' }
 
 foreach ($channel in $CHANNEL_PLAN) {
   $file = Join-Path $LOG ($channel + '.ts')
@@ -1344,6 +1361,7 @@ foreach ($channel in $CHANNEL_PLAN) {
   if ($client.HasExited) { $client.ExitCode | Out-File (Join-Path $LOG "t04-$channel.rc") } else { 'unavailable: owned client did not exit' | Out-File (Join-Path $LOG "t04-$channel.rc") }
   if ($client.HasExited -and $client.ExitCode -eq 0 -and (Test-Path $file) -and -not (Test-Path (Join-Path $LOG "t04-$channel-timeout.txt"))) { 'complete: client exited 0' | Set-Content (Join-Path $LOG "t04-$channel.state") } else { 'incomplete: client timeout/exit/output failure' | Set-Content (Join-Path $LOG "t04-$channel.state") }
   if (Test-Path $file) { Get-FileHash -Algorithm SHA256 $file } else { "$channel output unavailable" | Out-File (Join-Path $LOG 't04-ts-missing.txt') }
+  if (Test-Path (Join-Path $LOG "t04-$channel-timeout.txt")) { throw "T04 client timeout for $channel; stop the owned daemon normally, verify cleanup, record T04 incomplete, and do not start the next channel." }
 }
 function Wait-CardAction([string]$message) {
   if ([Console]::IsInputRedirected) { throw 'CARD action requires an interactive PowerShell console.' }
@@ -1419,8 +1437,19 @@ $C = Join-Path $D 'asicenctl.exe'
 & $C --instance a --runtime-dir 'C:\asicen-e17-<run-id>-a' list 2>&1 | Tee-Object (Join-Path $LOG 'list-a.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'list-a.rc')
 & $C --instance b --runtime-dir 'C:\asicen-e17-<run-id>-b' status 2>&1 | Tee-Object (Join-Path $LOG 'status-b.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'status-b.rc')
 & $C --instance b --runtime-dir 'C:\asicen-e17-<run-id>-b' list 2>&1 | Tee-Object (Join-Path $LOG 'list-b.txt'); $LASTEXITCODE | Out-File (Join-Path $LOG 'list-b.rc')
-$clientA.WaitForExit(); $clientA.Refresh(); $clientA.ExitCode | Out-File (Join-Path $LOG 'a.rc')
-$clientB.WaitForExit(); $clientB.Refresh(); $clientB.ExitCode | Out-File (Join-Path $LOG 'b.rc')
+$clientTimeouts = @(); $clientFailures = @()
+foreach ($entry in @([pscustomobject]@{ Name='a'; Process=$clientA; Seconds=$SA; Expected=7 }, [pscustomobject]@{ Name='b'; Process=$clientB; Seconds=$SB; Expected=0 })) {
+  $client = $entry.Process
+  if (-not $client.WaitForExit(([int]$entry.Seconds + 90) * 1000)) {
+    $client.Id | Out-File (Join-Path $LOG "$($entry.Name)-timeout.txt")
+    $clientTimeouts += $entry.Name
+    Stop-Process -Id $client.Id -ErrorAction SilentlyContinue
+    if (-not $client.WaitForExit(5000)) { $client.Id | Out-File (Join-Path $LOG "$($entry.Name)-cleanup-timeout.txt") }
+  }
+  $client.Refresh()
+  if ($client.HasExited) { $client.ExitCode | Out-File (Join-Path $LOG "$($entry.Name).rc"); if ($client.ExitCode -ne $entry.Expected) { $clientFailures += $entry.Name } } else { 'unavailable: owned client did not exit' | Out-File (Join-Path $LOG "$($entry.Name).rc"); $clientFailures += $entry.Name }
+}
+if ($clientTimeouts.Count -gt 0 -or $clientFailures.Count -gt 0) { 'incomplete: client timeout/exit failure' | Set-Content (Join-Path $LOG 't12-state.txt'); throw 'T12 client timeout/exit failure; stop both owned daemons normally, verify cleanup, and record T12 incomplete.' } else { 'complete: both clients exited with expected values' | Set-Content (Join-Path $LOG 't12-state.txt') }
 ```
 
 ```powershell
