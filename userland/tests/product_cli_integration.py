@@ -32,6 +32,20 @@ def wait_socket(path, proc):
     raise AssertionError("daemon socket did not appear")
 
 
+def report_early_exit(phase, name, proc, stderr_path, returncode):
+    print(
+        f"failure diagnostic phase={phase} monotonic_ns={time.monotonic_ns()} "
+        f"process={name} pid={proc.pid} returncode={returncode}",
+        file=sys.stderr,
+    )
+    try:
+        stderr = Path(stderr_path).read_text(errors="replace")
+    except OSError as error:
+        stderr = f"<stderr unavailable: {error}>"
+    print(f"stderr[{name}]:\n{stderr}", file=sys.stderr)
+    sys.stderr.flush()
+
+
 @contextmanager
 def temporary_runtime_root():
     # Match the pinned C++ fixture policy: keep TMPDIR when the complete
@@ -192,10 +206,12 @@ with temporary_runtime_root() as temp:
         assert still_live.returncode == 0 and still_live.stdout.startswith("ready=1 ")
 
         # Closing a stream consumer must not wedge either client or daemon.
+        consumer_log = open(root / "consumer.stderr", "wb")
+        logs.append(consumer_log)
         consumer = subprocess.Popen(
             [str(TS), "--runtime-dir", str(runtime), "--instance", instance,
              "--receiver", "1", "--channel", "T27", "--packet-count", "100000",
-             "--output", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+             "--output", "-"], stdout=subprocess.PIPE, stderr=consumer_log)
         children.append(consumer)
         assert consumer.stdout is not None
         consumer.stdout.close()
@@ -205,17 +221,31 @@ with temporary_runtime_root() as temp:
             consumer.kill()
             consumer.wait()
             raise AssertionError("client stalled after consumer closed")
-        assert daemon.poll() is None
+        daemon_returncode = daemon.poll()
+        if daemon_returncode is not None:
+            report_early_exit("closed-consumer", "daemon", daemon,
+                              root / "daemon.log", daemon_returncode)
+            report_early_exit("closed-consumer", "consumer", consumer,
+                              root / "consumer.stderr", consumer.poll())
+        assert daemon_returncode is None
 
         # A blocked output pipe and partial control request must not hold
         # daemon shutdown. The client is deliberately left blocked on stdout.
+        slow_consumer_log = open(root / "slow-consumer.stderr", "wb")
+        logs.append(slow_consumer_log)
         slow_consumer = subprocess.Popen(
             [str(TS), "--runtime-dir", str(runtime), "--instance", instance,
              "--receiver", "1", "--channel", "T27", "--packet-count", "100000",
-             "--output", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+             "--output", "-"], stdout=subprocess.PIPE, stderr=slow_consumer_log)
         children.append(slow_consumer)
         time.sleep(0.1)
-        assert slow_consumer.poll() is None
+        slow_consumer_returncode = slow_consumer.poll()
+        if slow_consumer_returncode is not None:
+            report_early_exit("blocked-output-pipe", "slow_consumer", slow_consumer,
+                              root / "slow-consumer.stderr", slow_consumer_returncode)
+            report_early_exit("blocked-output-pipe", "daemon", daemon,
+                              root / "daemon.log", daemon.poll())
+        assert slow_consumer_returncode is None
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(str(endpoint))
         sock.sendall(b"\x01")

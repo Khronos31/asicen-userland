@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: GPL-2.0-only
+name: ASICEN main CI stderr diagnostic
+
+on:
+  push:
+    branches:
+      - codex/asicen-main-ci-stderr-diagnostic
+    paths:
+      - .github/workflows/asicen-main-ci-stderr-diagnostic.yml
+      - userland/tests/product_cli_integration.py
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: ${{ matrix.platform }} on ${{ matrix.base_name }}
+    timeout-minutes: 30
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x86_64 Alpine 3.22
+            runner: ubuntu-24.04
+            base_name: a87fb426
+            base_sha: a87fb426e0a4749dd7183081b30871b36279548d
+          - platform: Linux x86_64 Alpine 3.22
+            runner: ubuntu-24.04
+            base_name: 0de7b03b
+            base_sha: 0de7b03b5845ab8c9d2b65a9677a341ff5c8bd16
+          - platform: macOS 14 arm64
+            runner: macos-14
+            base_name: a87fb426
+            base_sha: a87fb426e0a4749dd7183081b30871b36279548d
+          - platform: macOS 14 arm64
+            runner: macos-14
+            base_name: 0de7b03b
+            base_sha: 0de7b03b5845ab8c9d2b65a9677a341ff5c8bd16
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ matrix.base_sha }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          path: .diag
+      - name: Apply failure-only test diagnostics
+        run: |
+          git -C .diag diff 0de7b03b5845ab8c9d2b65a9677a341ff5c8bd16 -- userland/tests/product_cli_integration.py > "$RUNNER_TEMP/diagnostic.patch"
+          git apply "$RUNNER_TEMP/diagnostic.patch"
+      - name: Build required targets and run CTest 35 in Alpine 3.22
+        if: startsWith(matrix.platform, 'Linux')
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src alpine:3.22 sh -euxc '
+            apk add --no-cache bash git cmake samurai gcc g++ make pkgconf libusb-dev pcsc-lite-dev python3 binutils curl tar bzip2 linux-headers;
+            git config --global --add safe.directory /src;
+            mkdir -p /dev/bus/usb/001;
+            cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_REQUIRE_PCSC_IFD=ON;
+            cmake --build build-userland --target asicend-mock asicenctl asicen-ts;
+            ctest --test-dir build-userland -R "^asicen-product-cli-integration$" --no-tests=error --output-on-failure'
+      - name: Build required targets and run CTest 35 on macOS
+        if: startsWith(matrix.platform, 'macOS')
+        run: |
+          brew install ninja pcsc-lite pkgconf
+          echo "runner ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
+          sw_vers
+          xcodebuild -version
+          xcrun --show-sdk-version
+          clang --version
+          cmake --version
+          ninja --version
+          pcsc_prefix="$(brew --prefix pcsc-lite)"
+          pcsc_include="$pcsc_prefix/include/PCSC"
+          export PKG_CONFIG_PATH="$pcsc_prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          pkg-config --modversion libpcsclite
+          work="$(mktemp -d "${TMPDIR:-/tmp}/asicen-macos-diagnostic.XXXXXX")"
+          trap 'find "$work" -depth -delete' EXIT HUP INT TERM
+          archive="$work/libusb-1.0.30.tar.bz2"
+          curl -fsSL --retry 2 -o "$archive" https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2
+          echo 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf  '"$archive" | shasum -a 256 -c -
+          mkdir -p "$work/libusb" build-userland/libusb-static
+          tar -xjf "$archive" -C "$work/libusb" --strip-components=1
+          . scripts/libusb-reproducibility.sh
+          libusb_cflags="$(libusb_reproducible_cflags "$work/libusb" "$work")"
+          prefix="$PWD/build-userland/libusb-static"
+          (cd "$work/libusb" && CFLAGS="$libusb_cflags" ./configure --prefix="$prefix" --disable-shared --enable-static --disable-examples-build --disable-tests-build --disable-dependency-tracking && make -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 2)" && make install)
+          libs_private="$(sed -n 's/^Libs\.private:[[:space:]]*//p' "$prefix/lib/pkgconfig/libusb-1.0.pc")"
+          cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_ENABLE_LIBUSB=ON -DASICEN_LIBUSB_INCLUDE_DIR="$prefix/include/libusb-1.0" -DASICEN_LIBUSB_LIBRARY="$prefix/lib/libusb-1.0.a" -DASICEN_LIBUSB_LINK_LIBRARIES="$libs_private" -DASICEN_BUILD_PCSC_IFD=OFF -DASICEN_REQUIRE_PCSC_IFD=ON -DASICEN_PCSC_IFD_INCLUDE_DIR:PATH="$pcsc_include"
+          test "$(sed -n 's/^ASICEN_PCSC_IFD_INCLUDE_DIR:PATH=//p' build-userland/CMakeCache.txt)" = "$pcsc_include"
+          cmake --build build-userland --target asicend-mock asicenctl asicen-ts
+          ctest --test-dir build-userland -R '^asicen-product-cli-integration$' --no-tests=error --output-on-failure
