@@ -315,6 +315,8 @@ Result<void> MockTunerStream::attach(const TunerAttachment& attachment) noexcept
     }
     State state;
     state.identity = attachment;
+    state.counters.availability[0U] = dtv::userland::wire::MeasureState::valid;
+    state.counters.availability[1U] = dtv::userland::wire::MeasureState::valid;
     streams_.emplace(attachment.attachment_id, state);
     return Result<void>::success();
 }

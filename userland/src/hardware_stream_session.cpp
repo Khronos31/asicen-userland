@@ -821,6 +821,7 @@ void HardwareStreamService::clear_attempt_locked() noexcept
         continuity_->reset();
     }
     counters_ = {};
+    counters_.availability.fill(dtv::userland::wire::MeasureState::valid);
     attachment_ = {};
     final_attachment_ = {};
     final_ = {};
@@ -853,6 +854,7 @@ px4::userland::TunerStreamCounters HardwareStreamService::counters_locked() cons
     const auto source = source_.source_counters_for_receiver(capture_receiver_.load());
     counters.sync_errors += source.sync_errors;
     counters.empty_intervals += source.empty_intervals;
+    counters.availability[7U] = source.availability[7U];
     return counters;
 }
 
