@@ -3271,6 +3271,8 @@ px4::userland::TunerStreamCounters LibusbW3u3Hardware::source_counters() const n
     if (receiver < capture_sync_errors_.size()) {
         counters.sync_errors = capture_sync_errors_[receiver].load();
         counters.empty_intervals = capture_empty_intervals_[receiver].load();
+        counters.availability[2U] = dtv::userland::wire::MeasureState::valid;
+        counters.availability[7U] = dtv::userland::wire::MeasureState::valid;
     }
     return counters;
 }
@@ -3284,6 +3286,8 @@ LibusbW3u3Hardware::source_counters_for_receiver(std::uint8_t receiver) const no
     px4::userland::TunerStreamCounters counters{};
     counters.sync_errors = capture_sync_errors_[receiver].load();
     counters.empty_intervals = capture_empty_intervals_[receiver].load();
+    counters.availability[2U] = dtv::userland::wire::MeasureState::valid;
+    counters.availability[7U] = dtv::userland::wire::MeasureState::valid;
     return counters;
 }
 
