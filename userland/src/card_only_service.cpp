@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/card_only_service.h"
+#include "dtv/userland/detail/diagnostic_log.h"
 
 #include "asicen/libusb_hardware_backend.h"
 #include "asicen/hardware_stream_session.h"
@@ -412,18 +413,37 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
     const std::uint8_t initial_receiver = profile->combined_isdb_ts ? 0U : 1U;
     if (card_only) {
         const auto opened = hardware.open_receiver(initial_receiver);
-        if (!opened) return exit_status(opened.error());
+        if (!opened) {
+            dtv::userland::detail::diagnostic_log(
+                "asicend_setup_failure stage=open_receiver receiver=%u error=%u",
+                static_cast<unsigned>(initial_receiver),
+                static_cast<unsigned>(opened.error()));
+            return exit_status(opened.error());
+        }
     } else {
         const auto prepared = hardware.prepare_runtime_functions();
-        if (!prepared) return exit_status(prepared.error());
+        if (!prepared) {
+            dtv::userland::detail::diagnostic_log(
+                "asicend_setup_failure stage=prepare_runtime_functions error=%u",
+                static_cast<unsigned>(prepared.error()));
+            return exit_status(prepared.error());
+        }
     }
 
     std::unique_ptr<AsicenEnclosureFamily> family(new (std::nothrow) AsicenEnclosureFamily(
         hardware, mailbox, stop_requested, card_only));
-    if (!family || !family->ready(card_only)) return 70;
+    if (!family || !family->ready(card_only)) {
+        dtv::userland::detail::diagnostic_log(
+            "asicend_first_fatal stage=family_ready reason=not_ready");
+        return 70;
+    }
 
     std::unique_ptr<PlatformTunerNonceSource> nonce(new (std::nothrow) PlatformTunerNonceSource());
-    if (!nonce) return 70;
+    if (!nonce) {
+        dtv::userland::detail::diagnostic_log(
+            "asicend_first_fatal stage=nonce_allocation reason=resource_limit");
+        return 70;
+    }
     const auto generated_epoch = nonce->generate();
     if (!generated_epoch) return exit_status(generated_epoch.error());
 
@@ -450,7 +470,11 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
     if (!make_list(*profile, hardware.receiver_count(), primary_location,
                    sibling_location, primary_path, sibling_path,
                    ASICEN_PROJECT_VERSION,
-                   !card_only && hardware.supports_lnb_control(), list)) return 70;
+                   !card_only && hardware.supports_lnb_control(), list)) {
+        dtv::userland::detail::diagnostic_log(
+            "asicend_first_fatal stage=make_list reason=invalid_profile_data");
+        return 70;
+    }
     list.epoch = config.server.epoch;
     config.server.producer = list.producer;
     config.canonical_list = list;
@@ -468,7 +492,12 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
     std::unique_ptr<host_runtime::TunerNonceSource> owned_nonce(nonce.release());
     auto assembled = EnclosureContext::assemble(std::move(owned_family),
                                                  std::move(owned_nonce), config);
-    if (!assembled) return core_exit_status(assembled.error());
+    if (!assembled) {
+        dtv::userland::detail::diagnostic_log(
+            "asicend_first_fatal stage=assemble error=%u",
+            static_cast<unsigned>(assembled.error()));
+        return core_exit_status(assembled.error());
+    }
     std::unique_ptr<EnclosureContext> context = std::move(assembled.value());
     dtv::userland::host_listener_context::ListenerDiagnostic listener_diagnostic{};
     const auto reserved = context->reserve_namespace(&listener_diagnostic);
@@ -476,10 +505,18 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
         if (listener_diagnostic.reason !=
             dtv::userland::host_listener_context::ListenerDiagnosticReason::none)
             print_listener_diagnostic(listener_diagnostic);
+        dtv::userland::detail::diagnostic_log(
+            "asicend_first_fatal stage=reserve_namespace error=%u",
+            static_cast<unsigned>(reserved.error()));
         return core_exit_status(reserved.error());
     }
     const auto published = context->publish();
-    if (!published) return core_exit_status(published.error());
+    if (!published) {
+        dtv::userland::detail::diagnostic_log(
+            "asicend_first_fatal stage=publish error=%u",
+            static_cast<unsigned>(published.error()));
+        return core_exit_status(published.error());
+    }
 
     const host_runtime::EndpointConfig endpoint{
         config.runtime_directory, config.product, config.instance, config.access};
@@ -493,6 +530,9 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
         const auto polled = context->poll_once(Timeout{100U});
         if (!polled) {
             loop_error = polled.error();
+            dtv::userland::detail::diagnostic_log(
+                "asicend_first_fatal stage=poll_once error=%u",
+                static_cast<unsigned>(loop_error));
             break;
         }
     }

@@ -7,6 +7,7 @@
 #include "asicen/powered_controller_type.h"
 #include "asicen/transport_transform.h"
 #include "asicen/write_protocol.h"
+#include "dtv/userland/detail/diagnostic_log.h"
 #if defined(_WIN32)
 #include "windows/libusb_stream_policy.h"
 #include "px4/windows_tuner_nonce.h"
@@ -1312,12 +1313,18 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
         return Result<void>::failure(Error::UNSUPPORTED);
     }
     if (cleanup_io_active_.load(std::memory_order_acquire)) {
+        dtv::userland::detail::diagnostic_log(
+            "asicen_open_busy receiver=%u reason=cleanup_io_active stage=entry",
+            static_cast<unsigned>(receiver));
         return Result<void>::failure(Error::BUSY);
     }
     const ReceiverReservationResult reservation = active_receiver_.reserve(receiver);
     const bool newly_reserved = reservation == ReceiverReservationResult::reserved;
     if (reservation == ReceiverReservationResult::busy ||
         reservation == ReceiverReservationResult::invalid) {
+        dtv::userland::detail::diagnostic_log(
+            "asicen_open_busy receiver=%u reason=receiver_reservation result=%u",
+            static_cast<unsigned>(receiver), static_cast<unsigned>(reservation));
         return Result<void>::failure(Error::BUSY);
     }
     const auto fail_open = [&](Error error) {
@@ -1334,6 +1341,9 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
     ReceiverRouteScope route_scope(cleanup_route_receiver_, receiver);
     first_transport_error_.store(0);
     if (cleanup_io_active_.load(std::memory_order_acquire)) {
+        dtv::userland::detail::diagnostic_log(
+            "asicen_open_busy receiver=%u reason=cleanup_io_active stage=control_gate",
+            static_cast<unsigned>(receiver));
         return fail_open(Error::BUSY);
     }
     // Reserve before reading mutable session/cleanup state so a competing
@@ -1361,6 +1371,11 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
         if (active_route && active_route.value().rf_function_index ==
                                 route.value().rf_function_index &&
             active_route.value().local_lane == route.value().local_lane) {
+            dtv::userland::detail::diagnostic_log(
+                "asicen_open_busy receiver=%u reason=rf_lane_owned active_receiver=%u function=%u lane=%u",
+                static_cast<unsigned>(receiver), static_cast<unsigned>(active),
+                static_cast<unsigned>(route.value().rf_function_index),
+                static_cast<unsigned>(route.value().local_lane));
             return fail_open(Error::BUSY);
         }
     }
@@ -1383,6 +1398,10 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
                          static_cast<unsigned>(receiver),
                          static_cast<unsigned>(route.value().rf_function_index), prepared_mask);
         }
+        dtv::userland::detail::diagnostic_log(
+            "asicen_open_busy receiver=%u reason=uninitialized_function_while_capture_active function=%u",
+            static_cast<unsigned>(receiver),
+            static_cast<unsigned>(route.value().rf_function_index));
         return fail_open(Error::BUSY);
     }
     if (!verify_device_revision()) {
@@ -1496,6 +1515,11 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
                 break;
             }
             std::fprintf(stderr, "asicend: %s\n", reason);
+            if (controller_check == PoweredControllerCheck::output_busy) {
+                dtv::userland::detail::diagnostic_log(
+                    "asicen_open_busy receiver=%u reason=powered_controller_output_busy stage=initialize_function",
+                    static_cast<unsigned>(receiver));
+            }
         }
         const bool restored = restore_gpio_snapshot_for(receiver);
         if (!restored) {
