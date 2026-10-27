@@ -220,7 +220,7 @@ class ReleaseTests(unittest.TestCase):
         return ReleaseFixture(self.root / product, product)
 
     def test_both_profiles_document_only_and_real_source_modes(self):
-        for product, asset_count in (("px4-userland", 11), ("asicen-userland", 10)):
+        for product, asset_count in (("px4-userland", 11), ("asicen-userland", 11)):
             with self.subTest(product=product):
                 fixture = self.fixture(product)
                 result = fixture.run()
@@ -228,17 +228,28 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(asset_count, len(result["assets_sha256"]))
                 self.assertEqual(100, result["candidate_run_id"])
                 self.assertEqual(101, result["reproduction_run_id"])
-                self.assertEqual(product == "px4-userland", any(
+                self.assertTrue(any(
                     "windows" in name for name in result["assets_sha256"]))
 
     def test_all_binary_platform_payloads_and_windows_are_protected(self):
         for index, platform in enumerate(verify.platforms("px4-userland")):
-            with self.subTest(platform=platform):
+            with self.subTest(product="px4-userland", platform=platform):
                 fixture = ReleaseFixture(self.root / str(index))
                 filename = "px4d.exe" if platform == "windows-x86_64" else "px4d"
                 fixture.mutate(filename, b"changed executable", platform=platform)
                 with self.assertRaisesRegex(verify.VerificationError, "payload changed"):
                     fixture.run()
+
+    def test_asicen_windows_archive_is_required(self):
+        fixture = self.fixture("asicen-userland")
+        name = f"asicen-userland-{VERSION}-windows-x86_64.zip"
+        (fixture.candidate / name).unlink()
+        with self.assertRaisesRegex(verify.VerificationError, "inventory"):
+            fixture.run()
+        fixture = ReleaseFixture(self.root / "asicen-windows-payload", "asicen-userland")
+        fixture.mutate("asicend.exe", b"changed executable", platform="windows-x86_64")
+        with self.assertRaisesRegex(verify.VerificationError, "payload changed"):
+            fixture.run()
 
     def test_payload_modes_inventory_launchers_notices_and_audit(self):
         attacks = [
@@ -357,7 +368,7 @@ class ReleaseTests(unittest.TestCase):
                     fixture.run()
 
     def test_outer_assets_extra_missing_symlink_and_checksum_tampering(self):
-        fixture = self.fixture()
+        fixture = self.fixture("asicen-userland")
         original = (fixture.tag_dir / "SHA256SUMS").read_bytes()
         (fixture.tag_dir / "SHA256SUMS").write_bytes(original + original.splitlines(keepends=True)[0])
         with self.assertRaises(verify.VerificationError):
