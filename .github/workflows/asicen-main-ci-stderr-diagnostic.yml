@@ -21,14 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: Linux x86_64 Alpine 3.22
-            runner: ubuntu-24.04
-            base_name: a87fb426
-            base_sha: a87fb426e0a4749dd7183081b30871b36279548d
-          - platform: Linux x86_64 Alpine 3.22
-            runner: ubuntu-24.04
-            base_name: 0de7b03b
-            base_sha: 0de7b03b5845ab8c9d2b65a9677a341ff5c8bd16
           - platform: macOS 14 arm64
             runner: macos-14
             base_name: a87fb426
@@ -87,7 +79,7 @@ jobs:
           prefix="$PWD/build-userland/libusb-static"
           (cd "$work/libusb" && CFLAGS="$libusb_cflags" ./configure --prefix="$prefix" --disable-shared --enable-static --disable-examples-build --disable-tests-build --disable-dependency-tracking && make -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 2)" && make install)
           libs_private="$(sed -n 's/^Libs\.private:[[:space:]]*//p' "$prefix/lib/pkgconfig/libusb-1.0.pc")"
-          cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_ENABLE_LIBUSB=ON -DASICEN_LIBUSB_INCLUDE_DIR="$prefix/include/libusb-1.0" -DASICEN_LIBUSB_LIBRARY="$prefix/lib/libusb-1.0.a" -DASICEN_LIBUSB_LINK_LIBRARIES="$libs_private" -DASICEN_BUILD_PCSC_IFD=OFF -DASICEN_REQUIRE_PCSC_IFD=ON -DASICEN_PCSC_IFD_INCLUDE_DIR:PATH="$pcsc_include"
+          cmake -S . -B build-userland -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON -DASICEN_ENABLE_LIBUSB=ON -DASICEN_LIBUSB_INCLUDE_DIR="$prefix/include/libusb-1.0" -DASICEN_LIBUSB_LIBRARY="$prefix/lib/libusb-1.0.a" -DASICEN_LIBUSB_LINK_LIBRARIES="$libs_private" -DASICEN_REQUIRE_PCSC_IFD=ON -DASICEN_PCSC_IFD_INCLUDE_DIR:PATH="$pcsc_include"
           test "$(sed -n 's/^ASICEN_PCSC_IFD_INCLUDE_DIR:PATH=//p' build-userland/CMakeCache.txt)" = "$pcsc_include"
           cmake --build build-userland --target asicend-mock asicenctl asicen-ts
           ctest --test-dir build-userland -R '^asicen-product-cli-integration$' --no-tests=error --output-on-failure
