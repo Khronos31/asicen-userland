@@ -376,7 +376,7 @@ job名/ID・head SHAとsource refが当該candidate一致しない場合、ま�
 
 - **適用対象/頻度:** 毎release、各modelの公開最大能力。
 - **準備:** 各公開receiver/deviceを一意に割り当て、各clientに別TS出力/ログを用意する。`CAPTURE_SECONDS`には正の有限秒数（例: `10`）を明示設定して記録する。
-- **実操作/利用者への依頼:** `PORTS`は現地の`--list-json`にある選択対象位置、R1–R4は同じdaemonの`asicenctl list`にある異なるreceiverへ置換する。次の4 clientを同時起動し各PIDを個別waitする。衛星channel/receiverはREADMEと現地割当へ置換する。
+- **実操作/利用者への依頼:** `PORTS`は現地の`--list-json`にある選択対象位置を使う。R1–R4は下の固定値（R1=1、R2=3、R3=0、R4=2）を変えず、同じdaemonの`asicenctl list`で地デジ1/3・衛星0/2の割当を確認する。次の4 clientを同時起動し各PIDを個別waitする。衛星channelはREADMEと現地割当へ置換する。
 
     ```sh
     set -eu
