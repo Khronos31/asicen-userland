@@ -4,6 +4,7 @@
 #include "asicen/device_profile.h"
 #include "asicen/enclosure.h"
 #include "asicen/hardware_gpio_guard.h"
+#include "asicen/prepare_operation_diagnostic.h"
 #include "asicen/powered_controller_type.h"
 #include "asicen/transport_transform.h"
 #include "asicen/write_protocol.h"
@@ -39,8 +40,6 @@ constexpr std::size_t kQueueDepth = 4U;
 constexpr std::size_t kChunkSize = 65536U;
 constexpr std::chrono::milliseconds kDrainLimit{8000};
 #if defined(DTV_USERLAND_DIAGNOSTICS)
-thread_local bool prepare_runtime_diagnostic_active = false;
-
 bool prepare_diagnostic_read_request(Request request) noexcept
 {
     switch (request) {
@@ -1059,13 +1058,15 @@ Result<void> LibusbW3u3Hardware::prepare_runtime_functions() noexcept
 {
 #if defined(DTV_USERLAND_DIAGNOSTICS)
     struct DiagnosticScope final {
-        bool& active;
-        explicit DiagnosticScope(bool& value) noexcept : active(value)
+        DiagnosticScope() noexcept
         {
-            active = true;
+            asicen::detail::prepare_diagnostic_active.store(true, std::memory_order_release);
         }
-        ~DiagnosticScope() { active = false; }
-    } diagnostic_scope(prepare_runtime_diagnostic_active);
+        ~DiagnosticScope()
+        {
+            asicen::detail::prepare_diagnostic_active.store(false, std::memory_order_release);
+        }
+    } diagnostic_scope;
 #endif
     if (!runtime_model_supported()) {
         return Result<void>::failure(Error::UNSUPPORTED);
@@ -1504,23 +1505,28 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
                 return false;
             }
             board_power_attempted_functions_[route.value().rf_function_index] = true;
-            if (run_frontend_plan(power_plan, this) != FrontendRunResult::Completed) {
+            const auto run_named_plan = [&](const FrontendPlan& plan, const char* phase) {
+                const detail::PrepareOperationScope diagnostic_scope(
+                    phase, "frontend_plan_gpio");
+                return run_frontend_plan(plan, this) == FrontendRunResult::Completed;
+            };
+            if (!run_named_plan(power_plan, "startup_power_plan")) {
                 return false;
             }
             if (uses_legacy_frontend()) {
                 // DTV_Init rechecks the silicon after DTV_Start's off phase.
                 return verify_device_revision() &&
-                       run_frontend_plan(plan_legacy_frontend_init_prelude(legacy_frontend()),
-                                         this) == FrontendRunResult::Completed &&
-                       run_frontend_plan(power, this) == FrontendRunResult::Completed;
+                       run_named_plan(
+                           plan_legacy_frontend_init_prelude(legacy_frontend()),
+                           "legacy_init_prelude") &&
+                       run_named_plan(power, "legacy_power_plan");
             }
             if (!uses_v2_frontend()) {
                 return true;
             }
             return verify_v2_pair_identity() &&
-                   run_frontend_plan(plan_v2_revision11_startup_tail(), this) ==
-                       FrontendRunResult::Completed &&
-                   run_frontend_plan(power, this) == FrontendRunResult::Completed;
+                   run_named_plan(plan_v2_revision11_startup_tail(), "v2_startup_tail") &&
+                   run_named_plan(power, "v2_power_plan");
         },
         [&] {
             controller_check = verify_powered_controller();
@@ -1528,6 +1534,8 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
         },
         [&] {
             if (!uses_v2_frontend()) {
+                const detail::PrepareOperationScope diagnostic_scope(
+                    "startup_init_plan", "frontend_plan_gpio");
                 return run_frontend_plan(init_plan, this) == FrontendRunResult::Completed;
             }
             // Role0 is the shared RF master for both role0/role1 frontends.
@@ -1979,6 +1987,7 @@ Result<void> LibusbW3u3Hardware::set_lnb_power(bool on, bool cleanup) noexcept
     lnb_state_known_ = false;
     publish_lnb_state();
     lnb_gpio_io_active_ = true;
+    const detail::PrepareOperationScope set_scope("lnb_power_transition", "gpio_set");
     const int written = control(transfer, response.data());
     lnb_gpio_io_active_ = false;
     if (written != transfer.length) {
@@ -1996,6 +2005,8 @@ Result<void> LibusbW3u3Hardware::set_lnb_power(bool on, bool cleanup) noexcept
                                                 Direction::In,
                                                 static_cast<std::uint16_t>(on ? 100U : 1000U)}
                               : make_gpio_set(0U, 0U, 1000U);
+    const detail::PrepareOperationScope readback_scope(
+        "lnb_power_transition", "gpio_readback");
     if (control(readback, response.data()) != readback.length) {
         return finish(transport_failure(expired() ? Error::TIMEOUT : Error::PROTOCOL_ERROR));
     }
@@ -2532,6 +2543,8 @@ bool LibusbW3u3Hardware::snapshot_gpio_state(std::uint8_t receiver) noexcept
         return false;
     }
     const auto function = route.value().rf_function_index;
+    const detail::PrepareOperationScope diagnostic_scope(
+        "receiver_snapshot", "snapshot_gpio_state");
     if (!snapshot_gpio_if_needed(&gpio_snapshot_valid_functions_[function],
                                  &gpio_snapshots_[function],
                                  [this](std::uint8_t* value) {
@@ -2737,12 +2750,14 @@ int LibusbW3u3Hardware::control_function(std::uint8_t function, const ControlTra
         const bool first_error =
             first_transport_error_.compare_exchange_strong(expected, result < 0 ? result : 1);
 #if defined(DTV_USERLAND_DIAGNOSTICS)
-        if (first_error && prepare_runtime_diagnostic_active) {
+        if (first_error &&
+            asicen::detail::prepare_diagnostic_active.load(std::memory_order_acquire)) {
             const Error normalized = result < 0 ? map_libusb_error(result) : Error::PROTOCOL_ERROR;
+            const auto& operation = asicen::detail::prepare_operation_context;
             if (prepare_diagnostic_read_request(original.request) &&
                 original.direction == Direction::In) {
                 dtv::userland::detail::diagnostic_log(
-                    "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=0x%04x index=0x%04x length=%u result=%d error=%u",
+                    "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=0x%04x index=0x%04x length=%u result=%d error=%u phase=%s operation=%s op_index=%u",
                     static_cast<unsigned>(cleanup_route_receiver_.load(std::memory_order_acquire)),
                     static_cast<unsigned>(function),
                     static_cast<unsigned>(original.direction == Direction::In ? kVendorIn : kVendorOut),
@@ -2750,16 +2765,18 @@ int LibusbW3u3Hardware::control_function(std::uint8_t function, const ControlTra
                     static_cast<unsigned>(original.tuner_num),
                     static_cast<unsigned>(original.value), static_cast<unsigned>(original.index),
                     static_cast<unsigned>(original.length), result,
-                    static_cast<unsigned>(normalized));
+                    static_cast<unsigned>(normalized), operation.phase, operation.operation,
+                    operation.index);
             } else {
                 dtv::userland::detail::diagnostic_log(
-                    "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=<redacted> index=<redacted> length=%u result=%d error=%u",
+                    "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=<redacted> index=<redacted> length=%u result=%d error=%u phase=%s operation=%s op_index=%u",
                     static_cast<unsigned>(cleanup_route_receiver_.load(std::memory_order_acquire)),
                     static_cast<unsigned>(function),
                     static_cast<unsigned>(original.direction == Direction::In ? kVendorIn : kVendorOut),
                     static_cast<unsigned>(original.request),
                     static_cast<unsigned>(original.tuner_num), static_cast<unsigned>(original.length),
-                    result, static_cast<unsigned>(normalized));
+                    result, static_cast<unsigned>(normalized), operation.phase,
+                    operation.operation, operation.index);
             }
         }
 #else

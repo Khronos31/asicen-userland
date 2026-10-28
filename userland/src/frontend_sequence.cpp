@@ -33,6 +33,7 @@
 #include <cstdlib>
 
 #include "asicen/frontend_facts.h"
+#include "asicen/prepare_operation_diagnostic.h"
 #include "asicen/write_protocol.h"
 
 namespace asicen {
@@ -1371,7 +1372,15 @@ namespace {
 FrontendRunResult run_plan_ops(const FrontendPlan& plan, FrontendTransport* transport,
                                FrontendRunReport* report)
 {
-    for (const FrontendOp& op : plan) {
+    for (std::size_t index = 0U; index < plan.size(); ++index) {
+        const FrontendOp& op = plan[index];
+        const detail::PrepareOperationScope diagnostic_scope(
+            nullptr,
+            op.kind == FrontendOpKind::Control && op.transfer.request == Request::Gpio
+                ? "frontend_plan_gpio"
+                : nullptr,
+            static_cast<unsigned>(index),
+            op.kind == FrontendOpKind::Control && op.transfer.request == Request::Gpio);
         if (transport->cancelled()) {
             return FrontendRunResult::Cancelled;
         }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "asicen/libusb_transport.h"
+#include "asicen/prepare_operation_diagnostic.h"
 
 #if !defined(_WIN32)
 #include <fcntl.h>
@@ -13,11 +14,28 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <new>
 
 namespace asicen {
 namespace {
+
+#if defined(__APPLE__) && defined(DTV_USERLAND_DIAGNOSTICS)
+void LIBUSB_CALL darwin_prepare_diagnostic_log(libusb_context*, enum libusb_log_level,
+                                                const char* message)
+{
+    if (!detail::prepare_diagnostic_active.load(std::memory_order_acquire) ||
+        message == nullptr) {
+        return;
+    }
+    constexpr char marker[] = "transfer error: ";
+    const char* error = std::strstr(message, marker);
+    if (error != nullptr) {
+        std::fprintf(stderr, "asicen_darwin_control_error %s\n", error);
+    }
+}
+#endif
 
 class NativeLibusbAcquisitionApi final : public LibusbAcquisitionApi {
 public:
@@ -148,7 +166,15 @@ int NativeLibusbAcquisitionApi::init(libusb_context** context, bool fd_mode) noe
     }
     libusb_context* created_context = nullptr;
     const int result = libusb_init(&created_context);
-    if (result == 0) process_context = created_context;
+    if (result == 0) {
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+        libusb_set_log_cb(created_context, darwin_prepare_diagnostic_log,
+                          LIBUSB_LOG_CB_CONTEXT);
+        (void)libusb_set_option(created_context, LIBUSB_OPTION_LOG_LEVEL,
+                                LIBUSB_LOG_LEVEL_WARNING);
+#endif
+        process_context = created_context;
+    }
     *context = created_context;
     return result;
 #elif defined(__FreeBSD__)
