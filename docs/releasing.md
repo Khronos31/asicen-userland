@@ -20,13 +20,13 @@
 
 ## 公開アーティファクト
 
-公開するのは `build_userland.yml` の成功した **tag push run** が生成した `release-candidate` です。実機試験に使った候補 run とは別の run であり、候補をそのまま添付する手順ではありません。
+公開対象は `build_userland.yml` の成功した **tag push run** が生成した `release-candidate` です。実機試験に使った候補 run とは別の run であり、候補をそのまま添付する手順ではありません。Windows 11 x86_64は正式対象ですが、このdocs treeのworkflowではWindows ZIPを `win-candidate` に分離しており、`release-candidate` aggregateには未接続です。これは正式対象からの除外ではなく、配布経路の実装gapです。
 
-- バイナリアーカイブ 8 本
+- バイナリアーカイブ 9 本
 - `asicen-userland-<version>-source.tar.gz` 1 本
-- 外側 `SHA256SUMS` 1 本（9 アーカイブの SHA-256）
+- 外側 `SHA256SUMS` 1 本（10 アーカイブの SHA-256）
 
-合計 10 ファイルです。具体的な target は [release-validation.md](release-validation.md) の配布 matrix を正本とします。0.1.0 は Linux・macOS・Android の 8 binary target です。Windows の実装・build/offline test は残しますが、配布には含めません。正式対応は WinSCard を揃えた 0.2.x の予定です。firmware は既存の pinned loader を binary archive に含め、source archive から除きます。再配布権が未解決である旨の notice を維持します。
+正式配布の契約は、[release-validation.md](release-validation.md) のmatrixにあるWindows 11 x86_64を含む9 binary target、対応source archive 1本、計10 archiveと外側 `SHA256SUMS` です。したがって準拠するReleaseは11ファイルを添付し、checksumは10 archiveを列挙します。このdocs treeのworkflowはWindows ZIPをまだaggregateへ接続しておらず、現状のcandidateは8 binary + sourceの9 archiveと `SHA256SUMS` の計10ファイルで、正式matrixを満たしません。0.1.0 の実配布 inventory も歴史的にLinux・macOS・Androidの8 binary targetで、Windows binaryはその版に含まれません。firmware は既存の pinned loader を binary archive に含め、source archive から除きます。再配布権が未解決である旨の notice を維持します。
 
 ## 1. 候補の準備と固定
 
@@ -37,19 +37,33 @@
 候補の full source SHA を固定し、`build_userland.yml`（`portable userland foundation`）を実行します。この build workflow 自体はタグや Release を作成しません。
 
 ```sh
-gh workflow run build_userland.yml --ref <candidate-ref>
-gh run view <candidate-run-id> --json headSha,event,conclusion
-gh run download <candidate-run-id> --name release-candidate --dir <new-empty-dir>
-(cd <new-empty-dir> && sha256sum -c SHA256SUMS)
+set -eu
+: "${CANDIDATE_REF:?export the exact candidate source ref}"
+: "${ARTIFACT_DIR:?export a new empty artifact directory}"
+case "$CANDIDATE_REF" in ''|*'<'*|*'>'*) echo 'invalid or unreplaced candidate ref' >&2; exit 2 ;; esac
+case "$ARTIFACT_DIR" in ''|*'<'*|*'>'*) echo 'invalid or unreplaced artifact directory' >&2; exit 2 ;; esac
+test ! -e "$ARTIFACT_DIR" || { echo 'artifact directory must be new and empty' >&2; exit 1; }
+gh workflow run build_userland.yml --ref "$CANDIDATE_REF"
+gh run list --workflow build_userland.yml --limit 10
+: "${RUN_ID:?after confirming successful run, export its exact numeric ID}"
+case "$RUN_ID" in ''|*[!0-9]*) echo 'run ID must be decimal' >&2; exit 2 ;; esac
+mkdir -m 700 "$ARTIFACT_DIR"
+gh run view "$RUN_ID" --json headSha,event,conclusion
+gh run download "$RUN_ID" --name release-candidate --dir "$ARTIFACT_DIR"
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$ARTIFACT_DIR" && sha256sum -c SHA256SUMS)
+else
+  (cd "$ARTIFACT_DIR" && shasum -a 256 -c SHA256SUMS)
+fi
 ```
 
 実際の ref/run ID/空ディレクトリを使います。実機試験に使う archive 名・hash・source SHA・run ID/attempt を固定し、ローカル build や別 run へ置き換えません。CI の全必須 job、archive audit、source/relink、各 platform smoke が成功していることを確認します。
 
 ## 2. 実機試験・仕様変更試験と再現性
 
-[release-validation.md](release-validation.md) の既存条件で、配布する 8 binary archive を各 OS/architecture の実機で確認します。model、host、access path、feature は独立の軸です。他機種・他 OS・他 ABI の成功や過去の候補で穴を埋めません。物理 USB/card/アンテナ/電源操作は利用者が行い、承認された範囲だけ試験します。
+[release-validation.md](release-validation.md) の既存条件で、正式matrixの全9 binary targetを各 OS/architecture の実機で確認します。Windows を含む正式対象の実機受入が未確認ならmatrix完了とは扱いません。model、host、access path、feature は独立の軸です。他機種・他 OS・他 ABI の成功や過去の候補で穴を埋めません。物理 USB/card/アンテナ/電源操作は利用者が行い、承認された範囲だけ試験します。
 
-同じ source SHA/tree の独立した 2 回の clean candidate run を取得し、9 アーカイブ全体と外側 `SHA256SUMS` が byte-identical であることを確認します。run ID は別々でなければなりません。実効 build input/toolchain と runner image の観測値を両方残します。runner image が異なっても実効 build input の一致を確認できればよく、入力不明や入力差は合格にしません。UUID・署名・timestamp 等をマスクした比較で代替しません。
+同じ source SHA/tree の独立した 2 回の clean candidate run を取得し、Windows ZIPを含む正式対象9 binary archiveとsource archive（計10 archive）、および外側 `SHA256SUMS` が byte-identical であることを確認します。run ID は別々でなければなりません。実効 build input/toolchain と runner image の観測値を両方残します。runner image が異なっても実効 build input の一致を確認できればよく、入力不明や入力差は合格にしません。UUID・署名・timestamp 等をマスクした比較で代替しません。
 
 証拠の本文は [既存の実測記録](../HARDWARE-VALIDATION.md) へ日付付きで追記します。失敗試行、未認定、対象外、継承の根拠を残し、機械可読記録の `completed` を実測の代わりにしません。必須条件が未完了ならここで止めます。
 
@@ -66,9 +80,14 @@ gh run download <candidate-run-id> --name release-candidate --dir <new-empty-dir
 利用者が対象版と結果コミットについてタグ付け・公開を依頼した後だけ、未使用の `vX.Y.Z` を作成します。以下の `<result-commit>` は試験結果コミットと後続のノートコミットの両方を含む最終コミットです。`VERSION` とタグの版を一致させ、既存タグを移動・上書きしません。
 
 ```sh
-git diff --stat <candidate-commit> <result-commit>
-git tag -a vX.Y.Z -m "asicen-userland vX.Y.Z" <result-commit>
-git push origin vX.Y.Z
+set -eu
+: "${CANDIDATE_COMMIT:?export the fixed candidate commit}"
+: "${RESULT_COMMIT:?export the final result and release-notes commit}"
+: "${VERSION:?export the confirmed release version}"
+for value in "$CANDIDATE_COMMIT" "$RESULT_COMMIT" "$VERSION"; do case "$value" in ''|*'<'*|*'>'*) echo 'replace all release values before continuing' >&2; exit 2 ;; esac; done
+git diff --stat "$CANDIDATE_COMMIT" "$RESULT_COMMIT"
+git tag -a "v$VERSION" -m "asicen-userland v$VERSION" "$RESULT_COMMIT"
+git push origin "v$VERSION"
 ```
 
 タグは注釈付き・署名なしです。タグ push により `build_userland.yml` の tag run と、公開用 `release_tag.yml` が始まります。通常の branch/PR CI や `workflow_dispatch` は Release を公開しません。
@@ -87,8 +106,8 @@ ASICEN Linux archive の既存 `evidence/linux-static-build.json` と `evidence/
 
 最初の検証 job は read-only です。公開 job だけが `contents: write` を持ち、再照合してから以下を実行します。
 
-1. `vX.Y.Z` をタイトル、コミット済み Markdown の正確な内容を本文とする Draft を作成し、tag run の 10 アセットを添付
-2. Draft から新しい空ディレクトリへ再取得し、全ファイルの byte 一致、9 件の checksum、タイトル・本文を確認
+1. `vX.Y.Z` をタイトル、コミット済み Markdown の正確な内容を本文とする Draft を作成し、正式集合を生成したtag runの11アセット（10 archive + `SHA256SUMS`）を添付
+2. Draft から新しい空ディレクトリへ再取得し、全ファイルの byte 一致、`SHA256SUMS` の10件、タイトル・本文を確認
 3. Draft を解除して Stable/Latest として公開
 4. 公開済みアセットを別の空ディレクトリへ再取得し、同じ照合と Latest 状態を確認
 
