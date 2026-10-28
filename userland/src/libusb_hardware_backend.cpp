@@ -2653,6 +2653,7 @@ int LibusbW3u3Hardware::control(const ControlTransfer& original, unsigned char* 
         }
         const bool stream_control = original.request == Request::ChannelFilterRead ||
                                     original.request == Request::ChannelFilterWrite ||
+                                    original.request == Request::ResetChannel ||
                                     original.request == Request::DscStart ||
                                     original.request == Request::DscStop;
         function = stream_control ? route.value().function_index
@@ -2705,6 +2706,7 @@ int LibusbW3u3Hardware::control_function_impl(std::uint8_t function,
     const bool v2_stream_control = original.direction == Direction::In &&
                                    (original.request == Request::ChannelFilterRead ||
                                     original.request == Request::ChannelFilterWrite ||
+                                    original.request == Request::ResetChannel ||
                                     original.request == Request::DscStart ||
                                     original.request == Request::DscStop);
     const bool v2_function_one_read = original.direction == Direction::In &&

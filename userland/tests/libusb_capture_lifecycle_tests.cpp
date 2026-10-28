@@ -2880,43 +2880,7 @@ bool test_v2_stream_controls_follow_usb_function()
     }
 
     const auto initial_function_cf = fake.function_cf;
-    const auto before_satellite_tune = fake.controls.size();
-    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
-    CHECK(std::any_of(fake.controls.begin() +
-                          static_cast<std::ptrdiff_t>(before_satellite_tune),
-                      fake.controls.end(), [&](const ControlEvent& event) {
-                          const auto index = static_cast<std::size_t>(
-                              &event - fake.controls.data());
-                          return event.request == Request::I2cBufferSend &&
-                                 event.value == 0x26U && fake.control_functions[index] == 0U;
-                      }));
-
     std::atomic<bool> cancelled{false};
-    const auto before_receiver2 = fake.controls.size();
-    CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
-    bool receiver2_cf_on_sibling = false;
-    bool receiver2_dsc_on_sibling = false;
-    for (std::size_t i = before_receiver2; i < fake.controls.size(); ++i) {
-        const auto& event = fake.controls[i];
-        if (event.request == Request::ChannelFilterRead ||
-            event.request == Request::ChannelFilterWrite) {
-            receiver2_cf_on_sibling = receiver2_cf_on_sibling ||
-                                      fake.control_functions[i] == 1U;
-        }
-        if (event.request == Request::DscStart) {
-            receiver2_dsc_on_sibling = fake.control_functions[i] == 1U;
-        }
-    }
-    const bool link_seed_on_primary = fake.seed_write_count == 16 &&
-                                      std::all_of(fake.seed_write_functions.begin(),
-                                                  fake.seed_write_functions.end(),
-                                                  [](std::uint8_t function) {
-                                                      return function == 0U;
-                                                  });
-    CHECK(receiver2_cf_on_sibling && receiver2_dsc_on_sibling && link_seed_on_primary);
-    CHECK(fake.function_cf[1U][0U] != initial_function_cf[1U][0U]);
-    CHECK(fake.function_controllers[0U][0x05U] == 0xa0U);
-    CHECK(fake.function_controllers[1U][0x05U] == 0U);
 
     const auto before_primary_tune = fake.controls.size();
     CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
@@ -2946,6 +2910,50 @@ bool test_v2_stream_controls_follow_usb_function()
     CHECK(receiver0_cf_on_primary && receiver0_dsc_on_primary);
     const auto primary_lane0_active = fake.function_cf[0U][0U];
 
+    const auto before_satellite_tune = fake.controls.size();
+    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
+    CHECK(std::any_of(fake.controls.begin() +
+                          static_cast<std::ptrdiff_t>(before_satellite_tune),
+                      fake.controls.end(), [&](const ControlEvent& event) {
+                          const auto index = static_cast<std::size_t>(
+                              &event - fake.controls.data());
+                          return event.request == Request::I2cBufferSend &&
+                                 event.value == 0x26U && fake.control_functions[index] == 0U;
+                      }));
+    const auto before_receiver2 = fake.controls.size();
+    CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
+    bool receiver2_cf_on_sibling = false;
+    bool receiver2_dsc_on_sibling = false;
+    std::size_t receiver2_reset_count = 0U;
+    bool receiver2_reset_on_sibling = false;
+    for (std::size_t i = before_receiver2; i < fake.controls.size(); ++i) {
+        const auto& event = fake.controls[i];
+        if (event.request == Request::ChannelFilterRead ||
+            event.request == Request::ChannelFilterWrite) {
+            receiver2_cf_on_sibling = receiver2_cf_on_sibling ||
+                                      fake.control_functions[i] == 1U;
+        }
+        if (event.request == Request::DscStart) {
+            receiver2_dsc_on_sibling = fake.control_functions[i] == 1U;
+        }
+        if (event.request == Request::ResetChannel) {
+            ++receiver2_reset_count;
+            receiver2_reset_on_sibling = fake.control_functions[i] == 1U;
+        }
+    }
+    const bool link_seed_on_primary = fake.seed_write_count == 16 &&
+                                      std::all_of(fake.seed_write_functions.begin(),
+                                                  fake.seed_write_functions.end(),
+                                                  [](std::uint8_t function) {
+                                                      return function == 0U;
+                                                  });
+    CHECK(receiver2_cf_on_sibling && receiver2_dsc_on_sibling && link_seed_on_primary);
+    CHECK(receiver2_reset_count == 1U && receiver2_reset_on_sibling);
+    CHECK(fake.function_cf[0U][0U] == primary_lane0_active);
+    CHECK(fake.function_cf[1U][0U] != initial_function_cf[1U][0U]);
+    CHECK(fake.function_controllers[0U][0x05U] == 0xa0U);
+    CHECK(fake.function_controllers[1U][0x05U] == 0U);
+
     const auto stream_requests_on = [&](std::size_t begin, std::uint8_t function) {
         bool cf_request = false;
         bool dsc_request = false;
@@ -2965,6 +2973,7 @@ bool test_v2_stream_controls_follow_usb_function()
     const auto before_receiver1 = fake.controls.size();
     CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
     CHECK(stream_requests_on(before_receiver1, 0U));
+    const auto primary_lane1_active = fake.function_cf[0U][1U];
     const auto before_receiver3_tune = fake.controls.size();
     CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
     CHECK(std::any_of(fake.controls.begin() +
@@ -2978,6 +2987,16 @@ bool test_v2_stream_controls_follow_usb_function()
     const auto before_receiver3 = fake.controls.size();
     CHECK(hardware.prepare(3U, System::ISDB_T, cancelled).has_value());
     CHECK(stream_requests_on(before_receiver3, 1U));
+    std::size_t receiver3_reset_count = 0U;
+    bool receiver3_reset_on_sibling = false;
+    for (std::size_t i = before_receiver3; i < fake.controls.size(); ++i) {
+        if (fake.controls[i].request == Request::ResetChannel) {
+            ++receiver3_reset_count;
+            receiver3_reset_on_sibling = fake.control_functions[i] == 1U;
+        }
+    }
+    CHECK(receiver3_reset_count == 1U && receiver3_reset_on_sibling);
+    CHECK(fake.function_cf[0U][1U] == primary_lane1_active);
     CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
     CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
     CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 2U));
