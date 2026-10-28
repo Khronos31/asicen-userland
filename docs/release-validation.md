@@ -453,8 +453,14 @@ PY
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver 0 --channel "$SATELLITE_CHANNEL" --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite.ts" > "$LOG/satellite.out" 2> "$LOG/satellite.err" & S_PID=$!
     ```
 
-  両方のclientが動作しTS出力が進んでいることを保存した後、地上波clientだけに`kill -INT "$T_PID"`を送り、`wait "$T_PID"`の実終了値を保存する。衛星clientのPIDが生存し衛星TSのbyte数が増え続けることを確認する。地上波clientを別TS出力`terrestrial-reacquired.ts`で同じreceiver/channelへ再起動し、`REACQUIRE_SECONDS`後のexitとTSを保存する。衛星clientは元の有限時間で終了させ、両clientのstart/end/exit、TS、counter、daemon cleanupを記録する。中断された最初の地上波clientの終了値は記録し、単独で合否を決めない。
-- **期待値/終了値:** 2 clientのcapture時間が重なり、地上波clientを止めても衛星clientとTS取得が続き、同じ地上波receiverを再取得できる。各完了clientのexitとTS/counterを個別に評価する。device-free fixtureの成功はこの手順の実機受入を代替しない。
+  両方のclientが動作しTS出力が進んでいること、衛星clientの実測経過時間と`CAPTURE_SECONDS`から見積もった残り時間が`REACQUIRE_SECONDS`より長いことを確認して記録する。再取得時間を収められない場合は地上波clientを止めず、そのrunを未完了とする。条件を満たした場合は地上波clientだけに`kill -INT "$T_PID"`を送り、`wait "$T_PID"`の実終了値を保存する。停止処理後にも衛星clientのPID生存と、再取得時間を収められる残り時間を確認する。どちらかを満たさなければ再取得を始めず、そのrunを未完了とする。地上波clientを別TS出力`terrestrial-reacquired.ts`で同じreceiver/channelへ再起動し、停止から再取得完了まで衛星TSのbyte数が進み続けることを確認する。
+
+    ```sh
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver 1 --channel "$TERRESTRIAL_CHANNEL" --time "$REACQUIRE_SECONDS" --output "$LOG/terrestrial-reacquired.ts" > "$LOG/terrestrial-reacquired.out" 2> "$LOG/terrestrial-reacquired.err" & TR_PID=$!
+    ```
+
+  再取得clientの有限時間終了まで衛星clientのPID生存とTS byte数の進行を監視し、両方のPID、開始/終了時刻、byte数の観測値を保存する。衛星clientが再取得完了前に終了するかTSが進まなくなった場合、その再取得は相方稼働中の成功として扱わずrunを未完了にする。再取得後も衛星clientは元の有限時間で終了させ、両clientのexit、TS、counter、daemon cleanupを記録する。中断された最初の地上波clientの終了値は記録し、単独で合否を決めない。
+- **期待値/終了値:** 2 clientのcapture時間が重なり、地上波clientを止めてから再取得clientが終了するまで衛星clientが生存しTS取得が進み、同じ地上波receiverを再取得できる。各完了clientのexitとTS/counterを個別に評価する。device-free fixtureの成功はこの手順の実機受入を代替しない。
 - **停止/cleanup:** 全clientを個別waitし、daemonを通常停止する。process/FD/IPC/socket残留を確認する。失敗時も所有するclient/daemonだけを通常停止し、そのrunを未完了として記録する。
 - **記録:** model/profile、固定source/candidate、receiver/channel、各clientのPID/start/end/exit、TS/counter/byte数、片側解放後の継続、再取得結果、cleanup、実機条件と未達理由。
 
