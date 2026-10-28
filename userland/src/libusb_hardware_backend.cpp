@@ -38,6 +38,9 @@ using px4::userland::ipc::System;
 constexpr std::size_t kQueueDepth = 4U;
 constexpr std::size_t kChunkSize = 65536U;
 constexpr std::chrono::milliseconds kDrainLimit{8000};
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+thread_local bool prepare_runtime_diagnostic_active = false;
+#endif
 // TC_SetLNB for original W3U2/W3U3 is active-low GPIO20. The V2
 // Windows LNBONOFF path is active-high on that same bit; its verified
 // primary role owns the control. S3U/S3U2 vendor setters are no-ops until
@@ -1035,6 +1038,16 @@ std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
 
 Result<void> LibusbW3u3Hardware::prepare_runtime_functions() noexcept
 {
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+    struct DiagnosticScope final {
+        bool& active;
+        explicit DiagnosticScope(bool& value) noexcept : active(value)
+        {
+            active = true;
+        }
+        ~DiagnosticScope() { active = false; }
+    } diagnostic_scope(prepare_runtime_diagnostic_active);
+#endif
     if (!runtime_model_supported()) {
         return Result<void>::failure(Error::UNSUPPORTED);
     }
@@ -1047,13 +1060,30 @@ Result<void> LibusbW3u3Hardware::prepare_runtime_functions() noexcept
         if (receiver >= receiver_count()) continue;
         const auto route = receiver_address(*profile_, receiver);
         if (!route || route.value().rf_function_index >= prepared.size()) {
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+            dtv::userland::detail::diagnostic_log(
+                "asicen_prepare_result stage=route receiver=%u error=%u",
+                static_cast<unsigned>(receiver), static_cast<unsigned>(Error::UNSUPPORTED));
+#endif
             return Result<void>::failure(Error::UNSUPPORTED);
         }
         const std::uint8_t function = route.value().rf_function_index;
         if (prepared[function]) continue;
         const auto opened = open_receiver(receiver);
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+        dtv::userland::detail::diagnostic_log(
+            "asicen_prepare_result stage=open receiver=%u function=%u error=%u",
+            static_cast<unsigned>(receiver), static_cast<unsigned>(function),
+            static_cast<unsigned>(opened ? Error::OK : opened.error()));
+#endif
         if (!opened) return opened;
         const auto closed = close_receiver(receiver);
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+        dtv::userland::detail::diagnostic_log(
+            "asicen_prepare_result stage=close receiver=%u function=%u error=%u",
+            static_cast<unsigned>(receiver), static_cast<unsigned>(function),
+            static_cast<unsigned>(closed ? Error::OK : closed.error()));
+#endif
         if (!closed) return closed;
         prepared[function] = true;
     }
@@ -2685,7 +2715,24 @@ int LibusbW3u3Hardware::control_function(std::uint8_t function, const ControlTra
     }
     if (result < 0 || result != original.length) {
         int expected = 0;
-        (void)first_transport_error_.compare_exchange_strong(expected, result < 0 ? result : 1);
+        const bool first_error =
+            first_transport_error_.compare_exchange_strong(expected, result < 0 ? result : 1);
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+        if (first_error && prepare_runtime_diagnostic_active) {
+            const Error normalized = result < 0 ? map_libusb_error(result) : Error::PROTOCOL_ERROR;
+            dtv::userland::detail::diagnostic_log(
+                "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=0x%04x index=0x%04x length=%u result=%d error=%u",
+                static_cast<unsigned>(cleanup_route_receiver_.load(std::memory_order_acquire)),
+                static_cast<unsigned>(function),
+                static_cast<unsigned>(original.direction == Direction::In ? kVendorIn : kVendorOut),
+                static_cast<unsigned>(original.request),
+                static_cast<unsigned>(original.tuner_num), static_cast<unsigned>(original.value),
+                static_cast<unsigned>(original.index), static_cast<unsigned>(original.length),
+                result, static_cast<unsigned>(normalized));
+        }
+#else
+        (void)first_error;
+#endif
     }
     return result;
 }

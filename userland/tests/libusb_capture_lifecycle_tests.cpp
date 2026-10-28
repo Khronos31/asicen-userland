@@ -17,8 +17,63 @@
 #include <tuple>
 #include <thread>
 #include <vector>
+#include <string>
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+#include <unistd.h>
+#endif
 
 namespace asicen {
+
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+class StderrCapture final {
+public:
+    StderrCapture() : file_(std::tmpfile()), saved_(::dup(STDERR_FILENO))
+    {
+        if (file_ != nullptr && saved_ >= 0) {
+            std::fflush(stderr);
+            active_ = ::dup2(::fileno(file_), STDERR_FILENO) >= 0;
+        }
+    }
+
+    ~StderrCapture()
+    {
+        restore();
+        if (file_ != nullptr) std::fclose(file_);
+    }
+
+    std::string finish()
+    {
+        std::fflush(stderr);
+        std::string result;
+        if (active_ && std::fseek(file_, 0L, SEEK_SET) == 0) {
+            int value = 0;
+            while ((value = std::fgetc(file_)) != EOF) result.push_back(static_cast<char>(value));
+        }
+        restore();
+        return result;
+    }
+
+    bool valid() const noexcept { return active_; }
+
+private:
+    void restore() noexcept
+    {
+        if (active_) {
+            std::fflush(stderr);
+            (void)::dup2(saved_, STDERR_FILENO);
+            active_ = false;
+        }
+        if (saved_ >= 0) {
+            (void)::close(saved_);
+            saved_ = -1;
+        }
+    }
+
+    std::FILE* file_ = nullptr;
+    int saved_ = -1;
+    bool active_ = false;
+};
+#endif
 
 struct LibusbW3u3HardwareTestPeer {
     using Hooks = LibusbW3u3Hardware::CaptureUsbHooks;
@@ -316,6 +371,7 @@ struct FakeUsb {
     int fail_submit_error = LIBUSB_ERROR_IO;
     int fail_control_once = 0;
     int fail_control_on_function_once = -1;
+    int short_control_on_function_once = -1;
     bool short_control_once = false;
     std::uint16_t fail_i2c_read_value_once = 0U;
     std::uint16_t short_i2c_read_value_once = 0U;
@@ -495,6 +551,10 @@ struct FakeUsb {
         if (fail_control_on_function_once == current_function) {
             fail_control_on_function_once = -1;
             return LIBUSB_ERROR_IO;
+        }
+        if (short_control_on_function_once == current_function) {
+            short_control_on_function_once = -1;
+            return static_cast<int>(transfer.length) - 1;
         }
         if (transfer.request == Request::I2cRead && fail_i2c_read_value_once == transfer.value) {
             fail_i2c_read_value_once = 0U;
@@ -2283,10 +2343,63 @@ bool test_w3u2_startup_function_failure_releases_receiver_before_ready()
     configure(hardware, fake, hooks, 1U);
     LibusbW3u3HardwareTestPeer::require_initialization(hardware);
     fake.fail_control_on_function_once = 1;
-    CHECK(hardware.prepare_runtime_functions().error() == Error::USB_IO);
+    Error prepare_error = Error::OK;
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+    StderrCapture diagnostics;
+    CHECK(diagnostics.valid());
+#endif
+    prepare_error = hardware.prepare_runtime_functions().error();
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+    const std::string diagnostic_output = diagnostics.finish();
+#endif
+    CHECK(prepare_error == Error::USB_IO);
     CHECK(LibusbW3u3HardwareTestPeer::function_initialized(hardware, 0U));
     CHECK(!LibusbW3u3HardwareTestPeer::function_initialized(hardware, 1U));
     CHECK(!LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 2U));
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+    CHECK(diagnostic_output.find("asicen_prepare_result stage=open receiver=1 function=0 error=0") !=
+          std::string::npos);
+    CHECK(diagnostic_output.find("asicen_prepare_control_error receiver=2 function=1") !=
+          std::string::npos);
+    CHECK(diagnostic_output.find("request_type=0x40") != std::string::npos);
+    CHECK(diagnostic_output.find("result=-1 error=7") != std::string::npos);
+    CHECK(diagnostic_output.find("asicen_prepare_result stage=open receiver=2 function=1 error=7") !=
+          std::string::npos);
+#endif
+    CHECK(hardware.shutdown().has_value());
+    return true;
+}
+
+bool test_w3u2_startup_short_control_is_reported_as_protocol_error()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    fake.controller[0x09U] = 0x20U;
+    fake.function_controllers[1U][0x09U] = 0x20U;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 1U);
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    fake.short_control_on_function_once = 1;
+    Error prepare_error = Error::OK;
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+    StderrCapture diagnostics;
+    CHECK(diagnostics.valid());
+#endif
+    prepare_error = hardware.prepare_runtime_functions().error();
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+    const std::string diagnostic_output = diagnostics.finish();
+#endif
+    CHECK(prepare_error == Error::PROTOCOL_ERROR);
+    CHECK(!LibusbW3u3HardwareTestPeer::function_initialized(hardware, 1U));
+    CHECK(!LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 2U));
+#if defined(DTV_USERLAND_DIAGNOSTICS)
+    CHECK(diagnostic_output.find("asicen_prepare_control_error receiver=2 function=1") !=
+          std::string::npos);
+    CHECK(diagnostic_output.find("error=9") != std::string::npos);
+    CHECK(diagnostic_output.find("asicen_prepare_result stage=open receiver=2 function=1 error=9") !=
+          std::string::npos);
+#endif
     CHECK(hardware.shutdown().has_value());
     return true;
 }
@@ -2947,6 +3060,8 @@ int main()
          test_w3u2_startup_prepares_other_function_before_capture},
         {"test_w3u2_startup_function_failure_releases_receiver_before_ready",
          test_w3u2_startup_function_failure_releases_receiver_before_ready},
+        {"test_w3u2_startup_short_control_is_reported_as_protocol_error",
+         test_w3u2_startup_short_control_is_reported_as_protocol_error},
         {"test_w3u2_seed_cleanup_quarantine_is_function_scoped",
          test_w3u2_seed_cleanup_quarantine_is_function_scoped},
         {"test_s3u_combined_receiver_uses_lane0_for_both_systems",
