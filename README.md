@@ -9,12 +9,14 @@
 | 機種 | USB ID | 受信部 | ソフトウェアによる LNB 15V 給電 |
 |---|---|---|---|
 | PX-S3U | `0b06:0001` | 1 つ（地デジと衛星で排他） | 非対応（要求 `15` は拒否。`0` は給電要求を出さない設定であり、端子が 0V とは限りません） |
-| PX-S3U2 | `0b06:0003` | 0: 衛星、1: 地デジ（同時は 1 系統のみ） | 同上 |
+| PX-S3U2 | `0b06:0003` | 0: 衛星、1: 地デジ（地デジ 1 + 衛星 1 を同時取得） | 同上 |
 | PX-W3U2 | `0b06:0004` | 物理仕様は地デジ 2 + 衛星 2。バックエンドは primary の 2 系統（0: 衛星、1: 地デジ）のみ公開 | GPIO20 active-low。`--lnb-voltage 15` を受理 |
 | PX-W3U3 | `0b06:0005` | 同上 | 同上 |
 | PX-W3U3 V2 | `0b06:0006` | 条件付きの primary（[仕様上の制限](SPEC.md#010-source-supported-model-boundary)） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
 
 候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
+
+PX-S3U2 は製品仕様に基づき地デジ 1 + 衛星 1 の同時取得経路を公開します。device-free fixture で個別captureの継続・解放・再取得を確認していますが、実機での同時受信は未確認です。
 
 4 チューナー機（PX-W3U2、PX-W3U3、PX-W3U3 V2）は sibling 側の USB 機能も認識して確保しますが、現行のバックエンドが公開している受信部は primary 側の 2 つ（0: 衛星、1: 地デジ）のみです。同時受信可能なストリームは 1 本であり、製品カタログ上の 4 系統同時受信には対応していません。
 
