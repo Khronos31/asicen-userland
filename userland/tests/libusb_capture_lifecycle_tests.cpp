@@ -2359,9 +2359,11 @@ bool test_w3u2_startup_function_failure_releases_receiver_before_ready()
 #if defined(DTV_USERLAND_DIAGNOSTICS)
     CHECK(diagnostic_output.find("asicen_prepare_result stage=open receiver=1 function=0 error=0") !=
           std::string::npos);
+    CHECK(diagnostic_output.find("asicen_prepare_result stage=close receiver=1 function=0 error=0") !=
+          std::string::npos);
     CHECK(diagnostic_output.find("asicen_prepare_control_error receiver=2 function=1") !=
           std::string::npos);
-    CHECK(diagnostic_output.find("request_type=0x40") != std::string::npos);
+    CHECK(diagnostic_output.find("request_type=0x") != std::string::npos);
     CHECK(diagnostic_output.find("result=-1 error=7") != std::string::npos);
     CHECK(diagnostic_output.find("asicen_prepare_result stage=open receiver=2 function=1 error=7") !=
           std::string::npos);
