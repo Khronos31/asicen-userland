@@ -2012,8 +2012,12 @@ bool test_unsupported_models_fail_before_any_usb_io()
     const auto* v2_profile = find_profile(ModelId::W3u3V2);
     LibusbW3u3Hardware v2(nullptr, {}, {}, {}, {}, v2_profile);
     LibusbW3u3HardwareTestPeer::install_hooks_only(v2, &hooks);
-    CHECK(v2.device_profile() == v2_profile && v2.receiver_count() == 2U);
+    CHECK(v2.device_profile() == v2_profile && v2.receiver_count() == 4U);
     CHECK(v2.receiver_supports(0U, System::ISDB_S));
+    CHECK(v2.receiver_supports(1U, System::ISDB_T));
+    CHECK(v2.receiver_supports(2U, System::ISDB_S));
+    CHECK(v2.receiver_supports(3U, System::ISDB_T));
+    CHECK(!v2.receiver_supports(2U, System::ISDB_T));
     CHECK(v2.claim().error() == Error::DISCONNECTED);
     CHECK(v2.open_receiver(0U).error() == Error::UNSUPPORTED);
     std::array<unsigned char, 1> data{};
@@ -2787,8 +2791,13 @@ bool test_v2_master_routing_tune_capture_and_tsid()
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3V2));
     Hooks hooks{};
     configure(hardware, fake, hooks, 1U);
-    CHECK(hardware.receiver_count() == 2U &&
+    CHECK(hardware.receiver_count() == 4U &&
           hardware.device_profile()->enclosure_receiver_count == 4U);
+    CHECK(hardware.receiver_supports(0U, System::ISDB_S));
+    CHECK(hardware.receiver_supports(1U, System::ISDB_T));
+    CHECK(hardware.receiver_supports(2U, System::ISDB_S));
+    CHECK(hardware.receiver_supports(3U, System::ISDB_T));
+    CHECK(!hardware.receiver_supports(2U, System::ISDB_T));
     CHECK(LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
     LibusbW3u3HardwareTestPeer::require_initialization(hardware);
     CHECK(hardware.open_receiver(1U).has_value());

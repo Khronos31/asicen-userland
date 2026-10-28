@@ -1026,7 +1026,8 @@ std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
     if (!runtime_model_supported()) {
         return 0U;
     }
-    if (profile_->model_id == ModelId::W3u2 || profile_->model_id == ModelId::W3u3) {
+    if (profile_->model_id == ModelId::W3u2 || profile_->model_id == ModelId::W3u3 ||
+        profile_->model_id == ModelId::W3u3V2) {
         return profile_->enclosure_receiver_count;
     }
     return profile_->combined_isdb_ts ? 1U : 2U;
@@ -1075,7 +1076,8 @@ bool LibusbW3u3Hardware::receiver_supports(std::uint8_t receiver, System system)
     if (profile_->combined_isdb_ts) {
         return system == System::ISDB_S || system == System::ISDB_T;
     }
-    if (profile_->model_id != ModelId::W3u2 && profile_->model_id != ModelId::W3u3) {
+    if (profile_->model_id != ModelId::W3u2 && profile_->model_id != ModelId::W3u3 &&
+        profile_->frontend_family != FrontendFamily::Nmi) {
         return (receiver == 0U && system == System::ISDB_S) ||
                (receiver == 1U && system == System::ISDB_T);
     }
@@ -1358,9 +1360,15 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
             continue;
         }
         const auto active_route = receiver_address(*profile_, active);
-        if (active_route && active_route.value().rf_function_index ==
-                                route.value().rf_function_index &&
-            active_route.value().local_lane == route.value().local_lane) {
+        const bool same_source = active_route &&
+                                 (profile_->frontend_family == FrontendFamily::Nmi
+                                      ? active_route.value().frontend_source ==
+                                            route.value().frontend_source
+                                      : active_route.value().rf_function_index ==
+                                                route.value().rf_function_index &&
+                                            active_route.value().local_lane ==
+                                                route.value().local_lane);
+        if (same_source) {
             return fail_open(Error::BUSY);
         }
     }
