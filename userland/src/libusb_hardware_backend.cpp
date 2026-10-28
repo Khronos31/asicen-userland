@@ -40,6 +40,25 @@ constexpr std::size_t kChunkSize = 65536U;
 constexpr std::chrono::milliseconds kDrainLimit{8000};
 #if defined(DTV_USERLAND_DIAGNOSTICS)
 thread_local bool prepare_runtime_diagnostic_active = false;
+
+bool prepare_diagnostic_read_request(Request request) noexcept
+{
+    switch (request) {
+    case Request::ReadIr:
+    case Request::I2cRead:
+    case Request::ChannelFilterRead:
+    case Request::GetHighSpeed:
+    case Request::CustomerInfo:
+    case Request::GpioRead:
+    case Request::GpioExGet:
+    case Request::SysCtrlRead:
+    case Request::I2cReadNoWait:
+    case Request::GetDeviceRandomKey:
+        return true;
+    default:
+        return false;
+    }
+}
 #endif
 // TC_SetLNB for original W3U2/W3U3 is active-low GPIO20. The V2
 // Windows LNBONOFF path is active-high on that same bit; its verified
@@ -2720,15 +2739,28 @@ int LibusbW3u3Hardware::control_function(std::uint8_t function, const ControlTra
 #if defined(DTV_USERLAND_DIAGNOSTICS)
         if (first_error && prepare_runtime_diagnostic_active) {
             const Error normalized = result < 0 ? map_libusb_error(result) : Error::PROTOCOL_ERROR;
-            dtv::userland::detail::diagnostic_log(
-                "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=0x%04x index=0x%04x length=%u result=%d error=%u",
-                static_cast<unsigned>(cleanup_route_receiver_.load(std::memory_order_acquire)),
-                static_cast<unsigned>(function),
-                static_cast<unsigned>(original.direction == Direction::In ? kVendorIn : kVendorOut),
-                static_cast<unsigned>(original.request),
-                static_cast<unsigned>(original.tuner_num), static_cast<unsigned>(original.value),
-                static_cast<unsigned>(original.index), static_cast<unsigned>(original.length),
-                result, static_cast<unsigned>(normalized));
+            if (prepare_diagnostic_read_request(original.request) &&
+                original.direction == Direction::In) {
+                dtv::userland::detail::diagnostic_log(
+                    "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=0x%04x index=0x%04x length=%u result=%d error=%u",
+                    static_cast<unsigned>(cleanup_route_receiver_.load(std::memory_order_acquire)),
+                    static_cast<unsigned>(function),
+                    static_cast<unsigned>(original.direction == Direction::In ? kVendorIn : kVendorOut),
+                    static_cast<unsigned>(original.request),
+                    static_cast<unsigned>(original.tuner_num),
+                    static_cast<unsigned>(original.value), static_cast<unsigned>(original.index),
+                    static_cast<unsigned>(original.length), result,
+                    static_cast<unsigned>(normalized));
+            } else {
+                dtv::userland::detail::diagnostic_log(
+                    "asicen_prepare_control_error receiver=%u function=%u request_type=0x%02x request=0x%02x tuner=%u value=<redacted> index=<redacted> length=%u result=%d error=%u",
+                    static_cast<unsigned>(cleanup_route_receiver_.load(std::memory_order_acquire)),
+                    static_cast<unsigned>(function),
+                    static_cast<unsigned>(original.direction == Direction::In ? kVendorIn : kVendorOut),
+                    static_cast<unsigned>(original.request),
+                    static_cast<unsigned>(original.tuner_num), static_cast<unsigned>(original.length),
+                    result, static_cast<unsigned>(normalized));
+            }
         }
 #else
         (void)first_error;
