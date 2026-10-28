@@ -31,7 +31,9 @@ void LIBUSB_CALL darwin_prepare_diagnostic_log(libusb_context*, enum libusb_log_
     }
     constexpr char marker[] = "transfer error: ";
     const char* error = std::strstr(message, marker);
-    if (error != nullptr) {
+    bool expected = false;
+    if (error != nullptr && detail::prepare_native_error_logged.compare_exchange_strong(
+                                expected, true, std::memory_order_acq_rel)) {
         std::fprintf(stderr, "asicen_darwin_control_error %s\n", error);
     }
 }

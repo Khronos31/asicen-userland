@@ -1060,6 +1060,8 @@ Result<void> LibusbW3u3Hardware::prepare_runtime_functions() noexcept
     struct DiagnosticScope final {
         DiagnosticScope() noexcept
         {
+            asicen::detail::prepare_native_error_logged.store(false,
+                                                              std::memory_order_release);
             asicen::detail::prepare_diagnostic_active.store(true, std::memory_order_release);
         }
         ~DiagnosticScope()

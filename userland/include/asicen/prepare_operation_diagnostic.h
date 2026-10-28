@@ -17,6 +17,7 @@ struct PrepareOperationContext {
 
 inline thread_local PrepareOperationContext prepare_operation_context{};
 inline std::atomic<bool> prepare_diagnostic_active{false};
+inline std::atomic<bool> prepare_native_error_logged{false};
 
 class PrepareOperationScope {
 public:
