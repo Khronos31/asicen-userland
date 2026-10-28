@@ -12,11 +12,11 @@
 | PX-S3U2 | `0b06:0003` | 0: 衛星、1: 地デジ（同時は 1 系統のみ） | 同上 |
 | PX-W3U2 | `0b06:0004` | 物理仕様は地デジ 2 + 衛星 2。バックエンドは primary の 2 系統（0: 衛星、1: 地デジ）のみ公開 | GPIO20 active-low。`--lnb-voltage 15` を受理 |
 | PX-W3U3 | `0b06:0005` | 同上 | 同上 |
-| PX-W3U3 V2 | `0b06:0006` | 条件付きの primary（[仕様上の制限](SPEC.md#010-source-supported-model-boundary)） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
+| PX-W3U3 V2 | `0b06:0006` | 0/1: primary、2/3: sibling（4 系統の実機同時受信は未確認） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
 
 候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
 
-4 チューナー機（PX-W3U2、PX-W3U3、PX-W3U3 V2）は sibling 側の USB 機能も認識して確保しますが、現行のバックエンドが公開している受信部は primary 側の 2 つ（0: 衛星、1: 地デジ）のみです。同時受信可能なストリームは 1 本であり、製品カタログ上の 4 系統同時受信には対応していません。
+PX-W3U3 V2 は受信 0/1 を primary、2/3 を sibling に割り当て、ストリーム制御も割り当て先の USB 機能へ送ります。これは受信経路のソフトウェア実装を示すもので、4 系統の実機同時受信や品質を確認したものではありません。
 
 実行時の内部経路はブリッジ revision 11/52・controller type 0f・version 7 に限定し、W3U2 は type 10 も受理します。未実装の revision 16/52 等は起動時に拒否します。機種名だけで全個体の対応を保証しません。
 
@@ -241,8 +241,8 @@ LNB 給電に対応する機種（PX-W3U2・PX-W3U3・PX-W3U3 V2）では、`asi
 
 ## 注意事項
 
-- **同時受信ストリームの制限**: 同時に受信できるストリームは 1 本のみです。4 チューナー機であっても、バックエンドが公開している受信部は primary 側の 2 系統（0: 衛星、1: 地デジ）のみであり、製品カタログにあるような 4 系統同時受信には対応していません。
-- **公開される受信部**: 機種ごとの割り当ては上の表のとおりです。4 チューナー機で公開しているのは primary の 2 系統だけです。
+- **同時受信ストリームの検証状態**: PX-W3U3 V2 は primary / sibling の 4 受信経路とfunction別stream制御を実装していますが、4 系統同時受信は実機未確認です。
+- **公開される受信部**: 機種ごとの割り当ては上の表のとおりです。V2 は 0/1 を primary、2/3 を sibling に割り当てます。
 - **対応ハードウェア revision**: 実行時に対応している内部経路はブリッジ revision 11 / ASIC type 0f / version 7 のみです。revision 16 は未実装のため起動前に失敗します。すべての個体がこの revision に該当するとは限りません。
 - **TS 品質カウンタ**: デーモンは受信 TS の TEI・continuity・同期の統計を計数します。取得パケット数と終了状態も確認してください。値が 0 だけでは「無誤りで受信できた証明」にはなりません。
 - **ハードウェアの列挙**: 接続機器の確認は `asicend --list-json` を使います。ASICEN は USB serial を持たないため、JSON の `serial` は null、識別は観測した USB topology です。
