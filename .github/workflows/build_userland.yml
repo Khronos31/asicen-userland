@@ -491,14 +491,6 @@ jobs:
           pattern: rc-*
           merge-multiple: true
           path: release-candidate
-      # Windows is built, packaged, and tested in CI, but is not distributed in
-      # 0.1.0. Restore the commented Windows entries here when WinSCard lands
-      # for the planned 0.2.x Windows release, and change the archive count to 10.
-      # - name: Download the tested Windows candidate archive
-      #   uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-      #   with:
-      #     name: win-candidate
-      #     path: release-candidate
       - name: Install native ELF audit tools
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y binutils
       - name: Verify and checksum candidate archives
@@ -535,14 +527,14 @@ jobs:
               f'asicen-userland-{version}-android-aarch64.tar.gz',
               f'asicen-userland-{version}-android-armv7a.tar.gz',
               f'asicen-userland-{version}-android-x86_64.tar.gz',
-              # f'asicen-userland-{version}-windows-x86_64.zip',
+              f'asicen-userland-{version}-windows-x86_64.zip',
               f'asicen-userland-{version}-source.tar.gz',
           }
           actual = {
               path.name for path in Path('release-candidate').iterdir()
               if path.is_file() and (path.name.endswith('.tar.gz') or path.name.endswith('.zip'))
           }
-          if len(actual) != 9 or actual != expected:
+          if len(actual) != 10 or actual != expected:
               raise SystemExit(f'exact archive set required: expected={sorted(expected)}, actual={sorted(actual)}')
           for name in sorted(actual):
               archive = Path('release-candidate') / name
@@ -566,7 +558,7 @@ jobs:
           android_aarch64_archive="asicen-userland-$version-android-aarch64.tar.gz"
           android_armv7a_archive="asicen-userland-$version-android-armv7a.tar.gz"
           android_x86_64_archive="asicen-userland-$version-android-x86_64.tar.gz"
-          # windows_archive="asicen-userland-$version-windows-x86_64.zip"
+          windows_archive="asicen-userland-$version-windows-x86_64.zip"
           source_archive="asicen-userland-$version-source.tar.gz"
           ../scripts/audit-artifact.sh --platform linux-glibc-x86_64 --archive "$linux_glibc_archive"
           ../scripts/audit-artifact.sh --platform linux-musl-x86_64 --archive "$linux_musl_archive"
@@ -576,12 +568,12 @@ jobs:
           ../scripts/audit-artifact.sh --platform android-aarch64 --archive "$android_aarch64_archive"
           ../scripts/audit-artifact.sh --platform android-armv7a --archive "$android_armv7a_archive"
           ../scripts/audit-artifact.sh --platform android-x86_64 --archive "$android_x86_64_archive"
-          # ../scripts/audit-artifact.sh --platform windows-x86_64 --archive "$windows_archive"
+          ../scripts/audit-artifact.sh --platform windows-x86_64 --archive "$windows_archive"
           ../scripts/audit-artifact.sh --source-archive --archive "$source_archive"
-          # Restore "$windows_archive" in the checksum input list for the 0.2.x Windows release.
           sha256sum "$linux_glibc_archive" "$linux_musl_archive" "$linux_glibc_aarch64_archive" \
             "$linux_musl_aarch64_archive" "$macos_archive" "$android_aarch64_archive" \
-            "$android_armv7a_archive" "$android_x86_64_archive" "$source_archive" > SHA256SUMS
+            "$android_armv7a_archive" "$android_x86_64_archive" "$windows_archive" \
+            "$source_archive" > SHA256SUMS
           sha256sum -c SHA256SUMS
       - name: Upload single release-candidate artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -805,10 +797,10 @@ jobs:
             --core-source-dir "$source_root/third_party/dtv-userland-core/repository" \
             --cache "$RUNNER_TEMP/asicen-windows-toolchain"
           find "$source_root" -depth -delete
-      - name: Upload Windows CI-only candidate archive (not release distribution)
+      - name: Upload Windows release candidate archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: win-candidate
+          name: rc-windows
           path: ${{ runner.temp }}/win/zip-1/*.zip
           if-no-files-found: error
       - name: Upload Windows corresponding-source candidate archive
@@ -833,8 +825,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: win-candidate
-          path: ${{ runner.temp }}/win-candidate
+          name: rc-windows
+          path: ${{ runner.temp }}/release-candidate-windows
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: win-candidate-tests
@@ -1054,12 +1046,12 @@ jobs:
           if ($failed.Count -ne 0) {
             throw "Windows offline test suites failed: $($failed -join ', ')"
           }
-      - name: Extract and smoke the exact CI-only Windows archive
+      - name: Extract and smoke the formal Windows archive
         shell: pwsh
         run: |
-          $archive = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'win-candidate') -Filter *.zip | Select-Object -First 1
-          if (-not $archive) { throw 'no Windows CI-only archive downloaded' }
-          $extract = Join-Path $env:RUNNER_TEMP 'win-candidate-extract'
+          $archive = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'release-candidate-windows') -Filter *.zip | Select-Object -First 1
+          if (-not $archive) { throw 'no formal Windows archive downloaded' }
+          $extract = Join-Path $env:RUNNER_TEMP 'release-candidate-windows-extract'
           Expand-Archive -Path $archive.FullName -DestinationPath $extract
           foreach ($program in 'asicend', 'asicen-ts', 'asicenctl') {
             & (Join-Path $extract "$program.exe") --help

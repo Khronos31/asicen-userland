@@ -21,9 +21,9 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 
 | 区分 | 製品固有の確認 |
 |---|---|
-| 機種初回 | PX-W3U2とPX-W3U3は4番組同時録画、地上波/衛星、CARD、対応LNBを確認する。ほかの機種はREADME記載の機種別能力に従う。 |
-| 回帰（毎release） | PX-W3U2とPX-W3U3は4番組を同時録画し、各TS/counter/終了値を確認する。W3U3のtuner path数、discovery route数、公開slot数は録画数と別々に記録する。WinSCard/PCSCはnative stackを別経路で確認する。 |
-| 必要に応じて | W3U3はLNB対応。W3U2/W3U3/V2以外はREADMEの能力表で確認し、非対応機種では公開APIの拒否（`UNSUPPORTED`/exit 3）を確認する。GPIO/端子給電は切り替えない。 |
+| 機種初回 | PX-W3U2とPX-W3U3は4番組同時録画、地上波/衛星、CARD、対応LNBを確認する。PX-S3U2は地上波receiver 1と衛星receiver 0の同時取得経路を確認し、実機受入は別記録にする。ほかの機種はREADME記載の機種別能力に従う。 |
+| 回帰（毎release） | PX-W3U2とPX-W3U3は4番組を同時録画し、各TS/counter/終了値を確認する。PX-S3U2はT03の2-client手順で同時取得・片側解放後の継続・停止側再取得を確認する。W3U3のtuner path数、discovery route数、公開slot数は録画数と別々に記録する。WinSCard/PCSCはnative stackを別経路で確認する。 |
+| 必要に応じて | W3U3はLNB対応。READMEの能力表とT11に従って機種別に確認し、ソフトウェア拒否だけを物理非対応や機能合格の根拠にしない。GPIO/端子給電は切り替えない。 |
 | 初回/major | 現地channel planとmodel receiver割当を記録。Windows 11 x86_64も正式target。現行workflowではWindows ZIPを同候補の`win-candidate`として別生成し、通常aggregateへ未接続（正式配布対象の除外ではなく、配布経路の実装gap）。 |
 
 ## 共通実行環境表
@@ -442,6 +442,22 @@ PY
 - **停止/cleanup:** 全client通常終了後daemon通常停止、残留なし。
 - **記録:** model/receiver/system/channel、各start/end/exit、TS/counter、cleanup。
 
+#### PX-S3U2: 地上波1 + 衛星0
+
+- **適用対象/頻度:** PX-S3U2の初回および毎release。software経路の確認と実機での同時受信受入は別々に記録する。
+- **準備:** READMEの機種表、`--list-json`、同じdaemonの`asicenctl list`でreceiver 1が地上波、receiver 0が衛星であることを保存する。候補の`asicend`、daemon専用`--runtime-dir`、`--instance`、現地BUS-PORT、地上波・衛星各1つの確認済みchannel、別TS/log出力を準備する。`CAPTURE_SECONDS`は正の有限値（例: `60`）、`REACQUIRE_SECONDS`は正の有限値（例: `10`）にする。衛星clientには`--lnb-voltage 0`を指定し、給電を要求しない。
+- **実操作/利用者への依頼:** daemonを`--device "usb:$PORT"`、`--instance "$INSTANCE"`、`--runtime-dir "$RT"`でreadyにし、`asicenctl --device "usb:$PORT" --instance "$INSTANCE" --runtime-dir "$RT" list`の結果を保存する。`ID="usb:$PORT"`を設定して、次の2 clientを同じdaemonへ続けて起動し、各PIDを保存する。
+
+    ```sh
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver 1 --channel "$TERRESTRIAL_CHANNEL" --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-first.ts" > "$LOG/terrestrial-first.out" 2> "$LOG/terrestrial-first.err" & T_PID=$!
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver 0 --channel "$SATELLITE_CHANNEL" --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite.ts" > "$LOG/satellite.out" 2> "$LOG/satellite.err" & S_PID=$!
+    ```
+
+  両方のclientが動作しTS出力が進んでいることを保存した後、地上波clientだけに`kill -INT "$T_PID"`を送り、`wait "$T_PID"`の実終了値を保存する。衛星clientのPIDが生存し衛星TSのbyte数が増え続けることを確認する。地上波clientを別TS出力`terrestrial-reacquired.ts`で同じreceiver/channelへ再起動し、`REACQUIRE_SECONDS`後のexitとTSを保存する。衛星clientは元の有限時間で終了させ、両clientのstart/end/exit、TS、counter、daemon cleanupを記録する。中断された最初の地上波clientの終了値は記録し、単独で合否を決めない。
+- **期待値/終了値:** 2 clientのcapture時間が重なり、地上波clientを止めても衛星clientとTS取得が続き、同じ地上波receiverを再取得できる。各完了clientのexitとTS/counterを個別に評価する。device-free fixtureの成功はこの手順の実機受入を代替しない。
+- **停止/cleanup:** 全clientを個別waitし、daemonを通常停止する。process/FD/IPC/socket残留を確認する。失敗時も所有するclient/daemonだけを通常停止し、そのrunを未完了として記録する。
+- **記録:** model/profile、固定source/candidate、receiver/channel、各clientのPID/start/end/exit、TS/counter/byte数、片側解放後の継続、再取得結果、cleanup、実機条件と未達理由。
+
 ### T04 不足波・全無料channel
 
 - **適用対象/頻度:** 毎releaseは不足波。初回/majorは全機種の代表機で全無料channel各10秒。
@@ -571,10 +587,10 @@ if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
 
 - **適用対象/頻度:** 必要時。給電対応profileだけ実測。
 - **準備:** 対応profile、meter、独立給電の状態を確認。
-- **実操作/利用者への依頼:** 対応機は`asicend --device usb:<BUS-PORT> --instance rc --runtime-dir "$RT" --allow-lnb-power`でdaemonを起動し、`asicenctl --device usb:<BUS-PORT> --runtime-dir "$RT" --instance rc lnb-on` / `lnb-off`を各実行してmeter測定する。非対応profileは機種/profileを一意に確認し、独立給電設備を接続せず開始時のGPIO/端子電圧を記録してから、同じdaemon commandと公開`asicenctl ... lnb-on` command（`--allow-lnb-power`を含む）を1回実行する。公開APIの`UNSUPPORTED`/exit 3とGPIO/端子電圧不変を確認する。非対応profileを一意に確認できない候補では実行しない。現所持機で実施できない場合は未実施と記録し、要件を削除しない。
-- **期待値/終了値:** 対応機はmeter実測を記録する。非対応profileの公開APIは`UNSUPPORTED`・exit 3を返し、GPIO/物理給電は切り替わらずmeter値も変化しないことを確認する。API拒否とGPIO/端子電圧不変の両方を記録する。
-- **停止/cleanup:** daemonを通常停止し、対応機は0Vと通常配線復帰を確認する。非対応profileは給電を切り替えず状態不変を確認する。
-- **記録:** model/profile、command/response/exit、meter値と条件、cleanup。現所持ASICEN機器は全てLNB対応のため非対応profile拒否の実機確認は未実施・現在実行不可と記録する。対応機試験やmockを代替合格にしない。
+- **実操作/利用者への依頼:** softwareで給電対応するW3U2/W3U3/V2は既存手順どおりmeterで実測する。PX-S3U/S3U2は公式資料に物理給電能力が記載される一方、softwareの制御経路が未解明である。現行CLIの`--lnb-voltage 15`拒否を記録するが、GPIO/端子電圧試験や非対応機種判定へ読み替えない。新しい制御経路を実装または根拠ある非対応profileを確定するまでは、物理切替試験を合格扱いにしない。
+- **期待値/終了値:** 対応機はmeter実測を記録する。S3U/S3U2では要求`15`の`UNSUPPORTED`/exit 3は現行software挙動の記録に限り、物理非対応・端子0V・T11合格の根拠にしない。物理給電とsoftware制御経路は未確認として残す。
+- **停止/cleanup:** daemonを通常停止し、対応機は0Vと通常配線復帰を確認する。S3U/S3U2では給電切替を試さず、未確認状態を記録する。
+- **記録:** model/profile、command/response/exit、meter値と条件、cleanup。S3U/S3U2の拒否応答と、未確認の物理電圧・software制御経路を分けて記録する。対応機試験やmockを代替合格にしない。
 
 ### T12 複数device・daemon・access
 
@@ -1792,7 +1808,7 @@ finally {
 
 ## 5. LNB・連続受信・cleanup
 
-PX-W3U2/W3U3/V2などREADMEで15V対応が明示された機種のみ、壁設備と他給電源を分離し、衛星端子へテスターを接続する。停止状態から `--allow-lnb-power` を付けてdaemonを起動し、`asicenctl --runtime-dir "$RT" --instance rc lnb-on` 後に実測15V、`asicenctl --runtime-dir "$RT" --instance rc lnb-off` 後に要求0と実測0Vを確認する。独立要求と受信部 `--lnb-voltage` は別の状態として記録する。非対応profileでは公開APIの拒否（`UNSUPPORTED`/exit 3）を確認するが、給電要求は拒否されGPIO/端子電圧が変化しない。daemon停止後は対応機で0Vと通常配線への復帰、非対応profileで状態不変を確認する。
+PX-W3U2/W3U3/V2などREADMEで15V対応が明示された機種のみ、壁設備と他給電源を分離し、衛星端子へテスターを接続する。停止状態から `--allow-lnb-power` を付けてdaemonを起動し、`asicenctl --runtime-dir "$RT" --instance rc lnb-on` 後に実測15V、`asicenctl --runtime-dir "$RT" --instance rc lnb-off` 後に要求0と実測0Vを確認する。独立要求と受信部 `--lnb-voltage` は別の状態として記録する。PX-S3U/S3U2の現行software拒否は物理非対応や端子電圧の証拠にしない。物理給電能力は公式資料に記載される一方で制御経路が未解明のため、T11では物理試験を合格扱いにせず未確認として残す。daemon停止後は給電対応機で0Vと通常配線への復帰を確認する。
 
 Soakでは代表Linux x86_64機の2時間連続受信を実施する。開始・定期・終了時にTS/counters、process/FD/RSS、channel、終了値を記録する。FD/RSSの数値合否閾値は設けない。最終観測まで安定化しない持続増加を示し、外部要因を特定できない場合は判定保留とし、公開しない。終了後はclient/daemonを正常停止し、status/process/runtime socketを確認して後始末する。候補SHA/archive hash、host/OS/arch/model、firmware、channel、操作、実コマンド、期待/実測、エラー、未確認事項をrelease recordへ保存する。全gateを終えた後にだけ結果文書をcommitし、code/build inputsが候補と同一であることを確認する。正式tag/releaseは別途の承認対象。
 

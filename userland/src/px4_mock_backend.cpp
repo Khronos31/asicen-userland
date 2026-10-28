@@ -315,6 +315,10 @@ Result<void> MockTunerStream::attach(const TunerAttachment& attachment) noexcept
     }
     State state;
     state.identity = attachment;
+#if defined(ASICEN_USE_DTV_CORE)
+    state.counters.availability[0U] = dtv::userland::wire::MeasureState::valid;
+    state.counters.availability[1U] = dtv::userland::wire::MeasureState::valid;
+#endif
     streams_.emplace(attachment.attachment_id, state);
     return Result<void>::success();
 }

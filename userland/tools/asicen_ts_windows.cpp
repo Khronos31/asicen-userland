@@ -86,19 +86,23 @@ bool install_handlers() noexcept
 
 void print_counters(const char* label, const ipc::CountersPayload& counters) noexcept
 {
-    std::fprintf(stderr,
-                 "%s packets=%llu bytes=%llu sync-errors=%llu tei=%llu "
-                 "continuity-errors=%llu queue-drops=%llu usb-errors=%llu "
-                 "empty-intervals=%llu\n",
-                 label,
-                 static_cast<unsigned long long>(counters.packets),
-                 static_cast<unsigned long long>(counters.bytes),
-                 static_cast<unsigned long long>(counters.sync_errors),
-                 static_cast<unsigned long long>(counters.tei_packets),
-                 static_cast<unsigned long long>(counters.continuity_errors),
-                 static_cast<unsigned long long>(counters.queue_drops),
-                 static_cast<unsigned long long>(counters.usb_errors),
-                 static_cast<unsigned long long>(counters.empty_intervals));
+    const auto print = [](const char* name, std::uint64_t value,
+                          dtv::userland::wire::MeasureState state) noexcept {
+        if (state == dtv::userland::wire::MeasureState::valid)
+            std::fprintf(stderr, " %s=%llu", name, static_cast<unsigned long long>(value));
+        else if (state == dtv::userland::wire::MeasureState::unknown)
+            std::fprintf(stderr, " %s=unknown", name);
+    };
+    std::fprintf(stderr, "%s", label);
+    print("packets", counters.packets, counters.availability[0U]);
+    print("bytes", counters.bytes, counters.availability[1U]);
+    print("sync-errors", counters.sync_errors, counters.availability[2U]);
+    print("tei", counters.tei_packets, counters.availability[3U]);
+    print("continuity-errors", counters.continuity_errors, counters.availability[4U]);
+    print("queue-drops", counters.queue_drops, counters.availability[5U]);
+    print("usb-errors", counters.usb_errors, counters.availability[6U]);
+    print("empty-intervals", counters.empty_intervals, counters.availability[7U]);
+    std::fputc('\n', stderr);
 }
 
 }  // namespace

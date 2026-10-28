@@ -34,7 +34,7 @@ PLATFORMS = (
 )
 PROFILES = {
     "px4-userland": PLATFORMS + ("windows-x86_64",),
-    "asicen-userland": PLATFORMS,
+    "asicen-userland": PLATFORMS + ("windows-x86_64",),
 }
 DOCUMENTS = frozenset({
     "README.md", "SPEC.md", "docs/platforms/validation-results.md",

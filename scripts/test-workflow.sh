@@ -22,10 +22,9 @@ printf '%s\n' "$android_block" | grep -F 'actions/upload-artifact@' >/dev/null
 printf '%s\n' "$android_block" | grep -F 'shellcheck packaging/termux/asicen-termux' >/dev/null
 grep -F 'android-api-24, source-archive' "$workflow" >/dev/null
 grep -F 'android-x86_64' "$workflow" >/dev/null
-grep -F 'len(actual) != 9' "$workflow" >/dev/null
+grep -F 'len(actual) != 10' "$workflow" >/dev/null
 grep -F 'android_x86_64_archive' "$workflow" >/dev/null
-# Windows implementation, packaging and native tests are retained. Only the
-# final release inclusion is commented out until the planned WinSCard release.
+# Windows implementation, packaging, release inclusion and native tests are retained.
 grep -F 'source-archive, windows-x86_64, windows-native-tests' "$workflow" >/dev/null
 grep -F 'needs: windows-x86_64' "$workflow" >/dev/null
 release_candidate_block=$(awk '
@@ -34,15 +33,15 @@ release_candidate_block=$(awk '
     in_job { print }
 ' "$workflow")
 release_candidate_active=$(printf '%s\n' "$release_candidate_block" | sed '/^[[:space:]]*#/d')
-if printf '%s\n' "$release_candidate_active" | grep -E 'windows_archive|windows-x86_64.zip|win-candidate-tests|name: win-candidate' >/dev/null; then
-    printf '%s\n' 'release-candidate must not contain Windows binaries or archives' >&2
+if ! printf '%s\n' "$release_candidate_active" | grep -F 'windows-x86_64.zip' >/dev/null ||
+   ! printf '%s\n' "$release_candidate_active" | grep -F 'windows_archive' >/dev/null; then
+    printf '%s\n' 'release-candidate must include the formal Windows archive' >&2
     exit 1
 fi
-printf '%s\n' "$release_candidate_block" | grep -F '#     name: win-candidate' >/dev/null
-printf '%s\n' "$release_candidate_block" | grep -F "# f'asicen-userland-{version}-windows-x86_64.zip'," >/dev/null
+grep -F 'name: rc-windows' "$workflow" >/dev/null
 grep -F 'name: win-candidate-tests' "$workflow" >/dev/null
-grep -F 'name: Upload Windows CI-only candidate archive (not release distribution)' "$workflow" >/dev/null
-grep -F 'name: Extract and smoke the exact CI-only Windows archive' "$workflow" >/dev/null
+grep -F 'name: Upload Windows release candidate archive' "$workflow" >/dev/null
+grep -F 'name: Extract and smoke the formal Windows archive' "$workflow" >/dev/null
 grep -F 'name: Corresponding-source Windows static relink proof' "$workflow" >/dev/null
 grep -F 'scripts/test-windows-static-relink.sh' "$workflow" >/dev/null
 grep -F -- '--enable-static --disable-shared' "$root/scripts/build-windows.sh" >/dev/null
