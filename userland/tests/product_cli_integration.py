@@ -72,6 +72,7 @@ with temporary_runtime_root() as temp:
     logs = [log]
     failure = None
     failure_states = {}
+    failure_endpoint_exists = None
     try:
         wait_socket(endpoint, daemon)
 
@@ -393,6 +394,7 @@ with temporary_runtime_root() as temp:
     except BaseException as exc:
         failure = exc
         failure_states = {child.pid: child.poll() for child in children}
+        failure_endpoint_exists = endpoint.exists()
         raise
     finally:
         for child in children:
@@ -411,16 +413,21 @@ with temporary_runtime_root() as temp:
                 print(f"child pid={child.pid} exit_at_failure={failure_states.get(child.pid)} "
                       f"exit_after_cleanup={child.poll()} argv={child.args!r}", file=sys.stderr)
             print(f"daemon_state exit_at_failure={failure_states.get(daemon.pid)} "
-                  f"exit_after_cleanup={daemon.poll()} endpoint_exists={endpoint.exists()}",
-                  file=sys.stderr)
+                  f"endpoint_exists_at_failure={failure_endpoint_exists} "
+                  f"exit_after_cleanup={daemon.poll()} "
+                  f"endpoint_exists_after_cleanup={endpoint.exists()}", file=sys.stderr)
             for stream in logs:
                 path = Path(stream.name)
                 try:
-                    content = path.read_bytes()[-8192:]
+                    size = path.stat().st_size
+                    with path.open("rb") as saved_log:
+                        saved_log.seek(max(0, size - 8192))
+                        content = saved_log.read(8192)
                 except OSError as error:
                     print(f"child_stderr path={path.name} read_error={error}", file=sys.stderr)
                     continue
-                print(f"child_stderr path={path.name} bytes={len(content)}", file=sys.stderr)
+                print(f"child_stderr path={path.name} size_bytes={size} "
+                      f"tail_bytes={len(content)}", file=sys.stderr)
                 if content:
                     print(content.decode(errors="replace"), file=sys.stderr, end="")
             for args, returncode, stderr in command_failures[-32:]:
