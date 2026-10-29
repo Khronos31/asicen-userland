@@ -334,7 +334,9 @@ bool make_list(const DeviceProfile& profile, std::uint8_t receiver_count,
 {
     using namespace dtv::userland::wire;
     if (!set_text(list.producer.product, "asicen-userland") ||
-        !set_text(list.producer.version, version)) return false;
+        !set_text(list.producer.version, version) ||
+        !set_text(list.producer.core_version.value, DTV_USERLAND_CORE_VERSION)) return false;
+    list.producer.core_version.present = true;
     list.topology.state = TopologyState::complete;
     list.topology.expected_function_count.present = true;
     list.topology.expected_function_count.value = profile.expected_runtime_functions;
