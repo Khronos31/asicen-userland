@@ -231,12 +231,19 @@ int main(int argc, char** argv)
         const auto polled = context->poll_once(Timeout{100U});
         if (!polled) {
             loop_error = static_cast<Error>(polled.error());
+            std::fprintf(stderr, "asicend-mock error stage=poll_once class=%s code=%u\n",
+                         px4::userland::error_string(loop_error),
+                         static_cast<unsigned>(loop_error));
             break;
         }
     }
     for (;;) {
         const auto closed = context->close(Timeout{5000U});
         if (!closed) {
+            const Error close_error = static_cast<Error>(closed.error());
+            std::fprintf(stderr, "asicend-mock error stage=close class=%s code=%u\n",
+                         px4::userland::error_string(close_error),
+                         static_cast<unsigned>(close_error));
             if (loop_error == Error::OK) loop_error = static_cast<Error>(closed.error());
             break;
         }

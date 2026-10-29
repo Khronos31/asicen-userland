@@ -15,16 +15,29 @@ from pathlib import Path
 
 
 DAEMON, CTL, TS = map(Path, sys.argv[1:4])
+command_failures = []
 
 
 def run(*args, timeout=5, **kwargs):
-    return subprocess.run(args, timeout=timeout, check=False, **kwargs)
+    try:
+        result = subprocess.run(args, timeout=timeout, check=False, **kwargs)
+    except subprocess.TimeoutExpired as error:
+        command_failures.append((args, "timeout", error.stderr))
+        raise
+    if result.returncode != 0:
+        command_failures.append((args, result.returncode, result.stderr))
+    return result
 
 
-def wait_socket(path, proc):
+def socket_ready(path, ready_log):
+    return path.exists() and ready_log.exists() and \
+        "asicend-mock ready backend=mock-only" in ready_log.read_text(errors="replace")
+
+
+def wait_socket(path, proc, ready_log):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        if path.exists():
+        if socket_ready(path, ready_log):
             return
         if proc.poll() is not None:
             raise AssertionError(f"daemon exited early: {proc.returncode}")
@@ -53,6 +66,20 @@ with temporary_runtime_root() as temp:
     root = Path(temp)
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)
+
+    readiness_fixture = root / "readiness-fixture"
+    readiness_fixture.mkdir()
+    readiness_socket = readiness_fixture / "control.sock"
+    readiness_log = readiness_fixture / "daemon.log"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(readiness_socket))
+    assert readiness_socket.exists()
+    assert not socket_ready(readiness_socket, readiness_log)
+    listener.listen()
+    readiness_log.write_text("asicend-mock ready backend=mock-only fixture\n")
+    assert socket_ready(readiness_socket, readiness_log)
+    listener.close()
+
     instance = "acceptance"
     endpoint_dir = runtime / "asicen-userland" / "v1" / instance
     endpoint = endpoint_dir / "control.sock"
@@ -62,8 +89,11 @@ with temporary_runtime_root() as temp:
          "--instance", instance], stdout=subprocess.DEVNULL, stderr=log)
     children = [daemon]
     logs = [log]
+    failure = None
+    failure_states = {}
+    failure_endpoint_exists = None
     try:
-        wait_socket(endpoint, daemon)
+        wait_socket(endpoint, daemon, root / "daemon.log")
 
         # Mock instances represent independent synthetic enclosures. A shared
         # runtime root must not turn their endpoint ownership into one global
@@ -75,7 +105,7 @@ with temporary_runtime_root() as temp:
             stdout=subprocess.DEVNULL, stderr=independent_log)
         children.append(independent)
         independent_endpoint = runtime / "asicen-userland" / "v1" / "independent" / "control.sock"
-        wait_socket(independent_endpoint, independent)
+        wait_socket(independent_endpoint, independent, root / "independent.log")
         independent.send_signal(signal.SIGHUP)
         assert independent.wait(timeout=2) == 0
         assert not independent_endpoint.exists()
@@ -192,10 +222,12 @@ with temporary_runtime_root() as temp:
         assert still_live.returncode == 0 and still_live.stdout.startswith("ready=1 ")
 
         # Closing a stream consumer must not wedge either client or daemon.
+        consumer_log = open(root / "consumer.log", "wb")
+        logs.append(consumer_log)
         consumer = subprocess.Popen(
             [str(TS), "--runtime-dir", str(runtime), "--instance", instance,
              "--receiver", "1", "--channel", "T27", "--packet-count", "100000",
-             "--output", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+             "--output", "-"], stdout=subprocess.PIPE, stderr=consumer_log)
         children.append(consumer)
         assert consumer.stdout is not None
         consumer.stdout.close()
@@ -205,14 +237,20 @@ with temporary_runtime_root() as temp:
             consumer.kill()
             consumer.wait()
             raise AssertionError("client stalled after consumer closed")
+        if os.environ.get("ASICEN_TEST_CLIENT_DIAG") == "1":
+            consumer_log.flush()
+            print("consumer-close stderr:")
+            print((root / "consumer.log").read_text(errors="replace"), end="")
         assert daemon.poll() is None
 
         # A blocked output pipe and partial control request must not hold
         # daemon shutdown. The client is deliberately left blocked on stdout.
+        slow_consumer_log = open(root / "slow-consumer.log", "wb")
+        logs.append(slow_consumer_log)
         slow_consumer = subprocess.Popen(
             [str(TS), "--runtime-dir", str(runtime), "--instance", instance,
              "--receiver", "1", "--channel", "T27", "--packet-count", "100000",
-             "--output", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+             "--output", "-"], stdout=subprocess.PIPE, stderr=slow_consumer_log)
         children.append(slow_consumer)
         time.sleep(0.1)
         assert slow_consumer.poll() is None
@@ -240,7 +278,7 @@ with temporary_runtime_root() as temp:
             stdout=subprocess.DEVNULL, stderr=research_log)
         children.append(research)
         logs.append(research_log)
-        wait_socket(research_socket, research)
+        wait_socket(research_socket, research, root / "research.log")
         partial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         partial.connect(str(research_socket))
         partial.sendall(b"\x01")
@@ -260,12 +298,14 @@ with temporary_runtime_root() as temp:
             stdout=subprocess.DEVNULL, stderr=research_log)
         children.append(research)
         logs.append(research_log)
-        wait_socket(research_socket, research)
+        wait_socket(research_socket, research, root / "research-slow.log")
+        slow_research_client_log = open(root / "slow-research-client.log", "wb")
+        logs.append(slow_research_client_log)
         slow_research_client = subprocess.Popen(
             [str(TS), "--runtime-dir", str(runtime), "--instance", research_instance,
              "--receiver", "1", "--channel", "T27", "--packet-count", "100000",
              "--output", "-"], stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL)
+            stderr=slow_research_client_log)
         children.append(slow_research_client)
         time.sleep(0.1)
         assert slow_research_client.poll() is None
@@ -294,7 +334,7 @@ with temporary_runtime_root() as temp:
                  "--runtime-dir", str(runtime),
                  "--instance", model_instance], stdout=subprocess.DEVNULL, stderr=model_log)
             children.append(model_daemon)
-            wait_socket(model_endpoint, model_daemon)
+            wait_socket(model_endpoint, model_daemon, root / (model + ".log"))
             for lnb_args in ([], ["--lnb-voltage", "15"], ["--lnb-voltage", "0"]):
                 satellite = run(str(TS), "--runtime-dir", str(runtime), "--instance",
                                 model_instance, "--receiver", "0", "--channel", "BS01_0",
@@ -356,7 +396,7 @@ with temporary_runtime_root() as temp:
             [str(DAEMON), "--model", "w3u3", "--runtime-dir", str(runtime),
              "--instance", denied_instance], stdout=subprocess.DEVNULL, stderr=denied_log)
         children.append(denied_daemon)
-        wait_socket(denied_endpoint, denied_daemon)
+        wait_socket(denied_endpoint, denied_daemon, root / "lnb-denied.log")
         denied_on = run(str(TS), "--runtime-dir", str(runtime), "--instance",
                         denied_instance, "--receiver", "0", "--channel", "BS01_0",
                         "--lnb-voltage", "15", "--packet-count", "3", "--output", "-",
@@ -374,6 +414,11 @@ with temporary_runtime_root() as temp:
         denied_daemon.send_signal(signal.SIGTERM)
         assert denied_daemon.wait(timeout=2) == 0
         assert not denied_endpoint.exists()
+    except BaseException as exc:
+        failure = exc
+        failure_states = {child.pid: child.poll() for child in children}
+        failure_endpoint_exists = endpoint.exists()
+        raise
     finally:
         for child in children:
             if child.poll() is None:
@@ -385,5 +430,33 @@ with temporary_runtime_root() as temp:
                 child.wait()
         for stream in logs:
             stream.close()
+        if failure is not None:
+            print(f"product CLI fixture failure type={type(failure).__name__}", file=sys.stderr)
+            for child in children:
+                print(f"child pid={child.pid} exit_at_failure={failure_states.get(child.pid)} "
+                      f"exit_after_cleanup={child.poll()} argv={child.args!r}", file=sys.stderr)
+            print(f"daemon_state exit_at_failure={failure_states.get(daemon.pid)} "
+                  f"endpoint_exists_at_failure={failure_endpoint_exists} "
+                  f"exit_after_cleanup={daemon.poll()} "
+                  f"endpoint_exists_after_cleanup={endpoint.exists()}", file=sys.stderr)
+            for stream in logs:
+                path = Path(stream.name)
+                try:
+                    size = path.stat().st_size
+                    with path.open("rb") as saved_log:
+                        saved_log.seek(max(0, size - 8192))
+                        content = saved_log.read(8192)
+                except OSError as error:
+                    print(f"child_stderr path={path.name} read_error={error}", file=sys.stderr)
+                    continue
+                print(f"child_stderr path={path.name} size_bytes={size} "
+                      f"tail_bytes={len(content)}", file=sys.stderr)
+                if content:
+                    print(content.decode(errors="replace"), file=sys.stderr, end="")
+            for args, returncode, stderr in command_failures[-32:]:
+                content = stderr if isinstance(stderr, bytes) else str(stderr or "").encode()
+                print(f"command exit={returncode} argv={args!r} "
+                      f"stderr_tail={content[-4096:].decode(errors='replace')!r}",
+                      file=sys.stderr)
 
 print("ASICEN mock CLI lifecycle acceptance passed")

@@ -6,8 +6,11 @@ This is not a release/support claim.
 
 Release-procedure change (2026-10-11): share PX4's release verification and
 publication implementation and matrix/record structure while preserving ASICEN's
-existing hardware acceptance, fixed 0.1.0 soak decisions, firmware policy and
-Windows distribution exclusion. For 0.1.0, embed the reviewed GPL-2.0-only
+existing hardware acceptance, fixed 0.1.0 soak decisions and firmware policy.
+Windows was absent from the historical 0.1.0 distribution inventory; it is a
+formal target in the current validation matrix. The current workflow still uploads
+its ZIP separately as `win-candidate` rather than adding it to the release aggregate.
+For 0.1.0, embed the reviewed GPL-2.0-only
 automation locally with recorded provenance; do not wait for PX4's next
 WinSCard release. A future external dependency must use the full commit SHA
 resolved from an official PX4 release tag. This change does not authorize a release or
@@ -189,7 +192,8 @@ acceptance remains unverified. WinSCard compatibility and Microsoft PC/SC IFD
 registration remain Phase 2; a cross-build does not complete hardware acceptance.
 The user's 2026-10-11 JST release decision explicitly excludes Windows binaries
 from 0.1.0 distribution while retaining the implementation and build checks.
-Formal Windows support is planned for 0.2.x after WinSCard support is ready.
+Windows x86_64 is a formal distribution target in the current matrix; its
+real-device acceptance remains unverified.
 
 - Distribute the three product commands `asicend`, `asicen-ts`, `asicenctl`,
   plus the applicable native card adapter and Android launcher. Research
@@ -369,17 +373,26 @@ The [README model table](README.md#対応機種) defines the five USB profiles.
 Model recognition, source-backed runtime support and physical validation are
 separate states. Unsupported
 silicon/controller revisions fail closed; they must not inherit W3U3 writes
-merely because the USB vendor is ASICEN. S3U's combined receiver remains one
-exclusive resource across terrestrial and satellite tuning. Four-receiver
-physical capacity does not imply secondary-function or simultaneous-capture
-acceptance. GPIO/LNB electrical testing is deferred to measurement; this does
-not prohibit implementing source-backed model-specific control sequences.
+merely because the USB vendor is ASICEN. The current S3U software profile
+exposes one combined receiver and treats terrestrial and satellite tuning as
+exclusive; the product's maximum physical simultaneous TS capacity is
+unconfirmed. S3U2 exposes receiver 1 for terrestrial and receiver 0 for
+satellite, with a software path for concurrent capture. A device-free fixture
+covers concurrent capture, release of one side while the other continues, and
+reacquisition of the stopped side; hardware simultaneous reception remains
+unconfirmed. Four-receiver physical capacity does not imply
+secondary-function or simultaneous-capture acceptance. GPIO/LNB electrical
+testing is deferred to measurement; this does not prohibit implementing
+source-backed model-specific control sequences.
 
 LNB requests follow px4-userland's `--lnb-voltage 0|15` ISDB-S interface.
-Current software switching is source-backed for W3U2/W3U3/V2 only. S3U/S3U2
-physical power support is established, but their recovered setters are no-ops:
-`15` must return UNSUPPORTED and `0` must not claim measured power OFF.
-The current user interface and shutdown behavior are in
+Current software switching is source-backed for W3U2/W3U3/V2 only. Official
+product material documents S3U/S3U2 physical feed capability, but a complete
+request-to-hardware control path was not found in the surveyed official Linux
+and Windows software. The current profile rejects `15`; `0` does not claim
+measured power OFF. This software behavior does not establish physical
+non-support or a measured terminal voltage, and the S3U/S3U2 control path
+remains unresolved. The current user interface and shutdown behavior are in
 [README LNB control](README.md#lnb-電源制御); source evidence is in
 [the static LNB facts](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/lnb-control-facts.md).
 
