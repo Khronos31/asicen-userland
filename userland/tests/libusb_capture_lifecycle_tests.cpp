@@ -313,6 +313,9 @@ struct FakeUsb {
     bool v2_selected_tuner = false;
     std::vector<std::uint8_t> endpoints;
     std::vector<libusb_device_handle*> transfer_handles;
+    std::array<std::array<libusb_transfer*, 4U>, 2U> endpoint_transfers{};
+    std::array<std::atomic<unsigned>, 2U> endpoint_submit_count{};
+    std::array<std::atomic<unsigned>, 2U> endpoint_completion_count{};
     std::atomic<int> submit_count{0};
     int fail_submit_number = 0;
     int fail_submit_error = LIBUSB_ERROR_IO;
@@ -368,8 +371,7 @@ struct FakeUsb {
     int free_before_callbacks = 0;
     std::mutex event_mutex;
     std::condition_variable event_changed;
-    bool interrupted_events = false;
-    bool event_ready = false;
+    std::uint64_t event_generation = 0U;
 
     FakeUsb()
     {
@@ -428,10 +430,31 @@ struct FakeUsb {
         fake.submitted[static_cast<std::size_t>((fake.submit_count - 1) % 4)] = transfer;
         fake.endpoints.push_back(transfer->endpoint);
         fake.transfer_handles.push_back(transfer->dev_handle);
+        const std::size_t endpoint_index = transfer->endpoint == 0x82U ? 1U : 0U;
+        const unsigned endpoint_submit = fake.endpoint_submit_count[endpoint_index].fetch_add(1U) + 1U;
+        if (endpoint_submit <= fake.endpoint_transfers[endpoint_index].size()) {
+            fake.endpoint_transfers[endpoint_index][endpoint_submit - 1U] = transfer;
+        }
         if (fake.fail_submit_number != 0 && fake.submit_count == fake.fail_submit_number) {
             return fake.fail_submit_error;
         }
         return 0;
+    }
+    bool complete_empty(std::uint8_t endpoint)
+    {
+        const std::size_t endpoint_index = endpoint == 0x82U ? 1U : 0U;
+        const unsigned completion = endpoint_completion_count[endpoint_index].fetch_add(1U);
+        libusb_transfer* const transfer = endpoint_transfers[endpoint_index][completion % 4U];
+        if (transfer == nullptr || transfer->callback == nullptr) return false;
+        transfer->actual_length = 0;
+        transfer->status = LIBUSB_TRANSFER_COMPLETED;
+        transfer->callback(transfer);
+        {
+            std::lock_guard<std::mutex> lock(event_mutex);
+            ++event_generation;
+        }
+        event_changed.notify_all();
+        return true;
     }
     static int cancel_hook(void* context, libusb_transfer* transfer)
     {
@@ -459,12 +482,17 @@ struct FakeUsb {
     static int pump_wait_hook(void* context, unsigned timeout_ms)
     {
         auto& fake = *static_cast<FakeUsb*>(context);
+        static thread_local const FakeUsb* observed_fake = nullptr;
+        static thread_local std::uint64_t observed_generation = 0U;
         ++fake.pump_count;
         std::unique_lock<std::mutex> lock(fake.event_mutex);
+        if (observed_fake != &fake) {
+            observed_fake = &fake;
+            observed_generation = fake.event_generation;
+        }
         fake.event_changed.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                                    [&] { return fake.interrupted_events || fake.event_ready; });
-        fake.interrupted_events = false;
-        fake.event_ready = false;
+                                    [&] { return fake.event_generation != observed_generation; });
+        observed_generation = fake.event_generation;
         return 0;
     }
 
@@ -473,7 +501,7 @@ struct FakeUsb {
         auto& fake = *static_cast<FakeUsb*>(context);
         {
             std::lock_guard<std::mutex> lock(fake.event_mutex);
-            fake.interrupted_events = true;
+            ++fake.event_generation;
         }
         fake.event_changed.notify_all();
     }
@@ -658,7 +686,7 @@ struct FakeUsb {
                     callback_total.fetch_add(1U);
                     {
                         std::lock_guard<std::mutex> lock(event_mutex);
-                        event_ready = true;
+                        ++event_generation;
                     }
                     event_changed.notify_all();
                 }
@@ -2444,15 +2472,80 @@ bool test_s3u2_powers_off_gpioex_and_tracks_distinct_receiver_leases()
     CHECK(LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 0U));
     CHECK(LibusbW3u3HardwareTestPeer::owns_receiver(hardware, 1U));
     CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
     std::atomic<bool> cancelled{false};
     CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
-    CHECK(hardware.stop().has_value());
-    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_storage_is_distinct(hardware, 0U, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(saw_demod_write(fake, 0x0fU, 0x34U));
+
+    std::atomic<bool> cancel_satellite{false};
+    std::atomic<bool> cancel_terrestrial{false};
+    CaptureRunResult satellite_result = CaptureRunResult::cancelled;
+    CaptureRunResult terrestrial_result = CaptureRunResult::cancelled;
+    std::thread satellite_capture([&] {
+        satellite_result = hardware.run_for_receiver(0U, cancel_satellite, discard_packets, nullptr);
+    });
+    std::thread terrestrial_capture([&] {
+        terrestrial_result = hardware.run_for_receiver(1U, cancel_terrestrial, discard_packets, nullptr);
+    });
+    const auto wait_for_endpoint_submit = [&](std::size_t endpoint, unsigned expected) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (fake.endpoint_submit_count[endpoint].load() < expected &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return fake.endpoint_submit_count[endpoint].load() >= expected;
+    };
+    for (unsigned attempt = 0U; attempt < 500U && fake.pump_count.load() < 2U; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(fake.pump_count.load() >= 2U);
+    CHECK(fake.complete_empty(0x81U));
+    CHECK(wait_for_endpoint_submit(0U, 5U));
+    CHECK(fake.complete_empty(0x82U));
+    CHECK(wait_for_endpoint_submit(1U, 5U));
+    cancel_satellite.store(true);
+    FakeUsb::interrupt_events_hook(&fake);
+    satellite_capture.join();
+    CHECK(satellite_result == CaptureRunResult::cancelled);
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(hardware.close_receiver(0U).has_value());
+    const bool terrestrial_completed = fake.complete_empty(0x82U);
+    FakeUsb::interrupt_events_hook(&fake);
+    const bool terrestrial_progress = terrestrial_completed && wait_for_endpoint_submit(1U, 6U);
+    if (!terrestrial_progress) {
+        cancel_terrestrial.store(true);
+        FakeUsb::interrupt_events_hook(&fake);
+        terrestrial_capture.join();
+    }
+    CHECK(terrestrial_progress);
+
     CHECK(hardware.open_receiver(0U).has_value());
     CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
-    CHECK(saw_demod_write(fake, 0x0fU, 0x34U));
     CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
-    CHECK(hardware.stop().has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(hardware.stop_receiver(0U).has_value());
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    cancel_terrestrial.store(true);
+    FakeUsb::interrupt_events_hook(&fake);
+    terrestrial_capture.join();
+    CHECK(terrestrial_result == CaptureRunResult::cancelled);
+    CHECK(!LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+
+    CHECK(hardware.close_receiver(0U).has_value());
+    CHECK(hardware.close_receiver(1U).has_value());
+    CHECK(hardware.open_receiver(1U).has_value());
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(hardware.stop_receiver(1U).has_value());
+    CHECK(hardware.close_receiver(1U).has_value());
     CHECK(fake.cf[0] == fake.initial_cf(0U) && fake.cf[1] == fake.initial_cf(1U));
     CHECK(hardware.shutdown().has_value());
     CHECK((fake.gpio & 0xecU) == 0xa8U && fake.gpio_ex == 0xa3U);
