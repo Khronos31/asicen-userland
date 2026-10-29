@@ -673,7 +673,7 @@ foreach ($Entry in $ReceiverFiles) {
 $T15Rc | Set-Content (Join-Path $LOG 't15-asicen-w3u3-rx0-3.rc')
 ```
 
-- **期待値/終了値:** helper outputの`packets`, `tei`, `continuity_errors`を使用する。CCは採用`tei_null_excluded`定義。各TSでTEI=0かつCC=0が必要。0 packet、scan JSON欠落/不正、一つでも不合格のTSがあれば数値判定をFAILとする。tool出力の`scope`は`tei_cc_numeric_only`、`capture_conditions_verified_by_tool`はfalse、`t15_overall`は`not_determined_by_tool`とし、数値判定とT15全体を混同しない。T15全体は版別記録で、receiver 0–3全TSが揃い、各TSが記録時刻で300秒以上、4本の共通区間が300秒以上、各client exit・T09 rc/JSON・tool出力が記録され、数値toolがPASSの場合に限り「完了・数値PASS」とする。欠落時は未完了、数値FAIL時は「完了・数値FAIL」として人間の逐次判断を待つ。T15はTEI/CC判定のみで、既存T09 parser exitやsync/framing判定を上書きしない。
+- **期待値/終了値:** helper outputの`packets`, `tei`, `continuity_errors`を使用する。CCは採用`tei_null_excluded`定義。各TSでTEI=0かつCC=0が必要。0 packet、scan JSON欠落/不正、一つでも不合格のTSがあればtoolはFAILとする。tool出力の`scope`は`tei_cc_numeric_only`、`capture_conditions_verified_by_tool`はfalse、`t15_overall`は`not_determined_by_tool`とし、数値判定とT15全体を混同しない。T15全体は版別記録で、receiver 0–3全TSが揃い、各TSが記録時刻で300秒以上、4本の共通区間が300秒以上、各client exit・T09 rc/JSON・tool出力が記録され、必要receiverの読み取り可能なscanが揃った場合に限って完了判定する。これらが欠ける場合は未完了。完了した全scanで数値条件を満たせば「完了・数値PASS」、数値条件を外せば「完了・数値FAIL」として人間の逐次判断を待つ。T15はTEI/CC判定のみで、既存T09 parser exitやsync/framing判定を上書きしない。
 - **停止/cleanup:** 自動再取得・自動修復はしない。不合格で停止して人間の逐次判断を待つ。
 - **記録:** profile/pattern、環境、実測capture秒数、candidate/archive/helper ref/hash、TS path/hash、全TSのpacket数/TEI数/TEI率/採用CC、clientとparser終了値、T15 JSON/終了値を版別記録から参照する。人間が不合格を受け入れる場合は理由・判断者・コメント等の参照を別に記録し、測定値・T15 JSONの自動判定を編集しない。
 
