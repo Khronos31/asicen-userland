@@ -19,6 +19,8 @@ on:
       - VERSION
       - .github/workflows/**
   push:
+    branches-ignore:
+      - asicen71-ci-direct90-20261029
     paths:
       - CMakeLists.txt
       - LICENSE

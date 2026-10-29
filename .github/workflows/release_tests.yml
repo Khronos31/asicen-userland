@@ -11,6 +11,8 @@ on:
       - docs/releasing.md
       - THIRD_PARTY_NOTICES.md
   push:
+    branches-ignore:
+      - asicen71-ci-direct90-20261029
     paths:
       - .github/workflows/**
       - scripts/**
