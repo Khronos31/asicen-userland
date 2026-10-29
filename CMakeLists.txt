@@ -85,6 +85,13 @@ set(ASICEN_LIBUSB_LINK_LIBRARIES "" CACHE STRING
 find_package(Threads REQUIRED)
 
 include(cmake/DtvUserlandCoreDependency.cmake)
+file(STRINGS "${dtv_userland_core_SOURCE_DIR}/CMakeLists.txt" DTV_CORE_PROJECT_LINE
+    REGEX "^project\\(dtv_userland_core VERSION ")
+if(NOT DTV_CORE_PROJECT_LINE MATCHES
+        "^project\\(dtv_userland_core VERSION ([0-9]+\\.[0-9]+\\.[0-9]+) LANGUAGES CXX\\)$")
+    message(FATAL_ERROR "Could not read dtv-userland-core project version")
+endif()
+set(DTV_USERLAND_CORE_VERSION "${CMAKE_MATCH_1}")
 
 if(ASICEN_ENABLE_LIBUSB)
     if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
@@ -315,6 +322,8 @@ if(ASICEN_ENABLE_LIBUSB)
     target_compile_definitions(asicen_libusb PRIVATE ASICEN_USE_DTV_CORE=1)
     target_compile_definitions(asicen_libusb PRIVATE
         "ASICEN_PROJECT_VERSION=\"${PROJECT_VERSION}\"")
+    target_compile_definitions(asicen_libusb PRIVATE
+        DTV_USERLAND_CORE_VERSION="${DTV_USERLAND_CORE_VERSION}")
     asicen_enable_project_warnings(asicen_libusb)
 endif()
 
