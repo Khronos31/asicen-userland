@@ -35,7 +35,7 @@ REPOSITORIES = {
 }
 # Reviewed release targets, never supplied by a record or an artifact. Changing
 # ASICEN's current release line requires a normal reviewed implementation change.
-RELEASE_BRANCHES = {"px4-userland": "main", "asicen-userland": "release/0.1.0"}
+RELEASE_BRANCHES = {"px4-userland": "main", "asicen-userland": "main"}
 WORKFLOW = ".github/workflows/build_userland.yml"
 ARTIFACT = "release-candidate"
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")

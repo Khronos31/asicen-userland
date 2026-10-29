@@ -149,17 +149,17 @@ class FullPipelineTests(unittest.TestCase):
             publisher.prepare()
         self.assertEqual(api.mutations, [])
 
-    def test_asicen_does_not_substitute_default_main_for_reviewed_release_branch(self):
+    def test_asicen_rejects_legacy_release_branch(self):
         _, api, publisher = self.setup_product("asicen-userland")
-        api.branch_ref_override = "refs/heads/main"
+        api.branch_ref_override = "refs/heads/release/0.1.0"
         with self.assertRaisesRegex(pub.ReleaseError, "wrong release branch identity"):
             publisher.prepare()
         self.assertEqual(api.mutations, [])
 
-    def test_asicen_tag_must_be_on_reviewed_release_branch(self):
+    def test_asicen_tag_must_be_on_main(self):
         _, api, publisher = self.setup_product("asicen-userland")
         api.compare_status = "diverged"
-        with self.assertRaisesRegex(pub.ReleaseError, "release/0.1.0"):
+        with self.assertRaisesRegex(pub.ReleaseError, "main"):
             publisher.prepare()
         self.assertEqual(api.mutations, [])
 
