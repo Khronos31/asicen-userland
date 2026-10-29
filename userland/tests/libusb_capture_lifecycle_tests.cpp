@@ -297,6 +297,8 @@ struct FakeUsb {
     std::array<std::uint8_t, 256> satellite_registers{};
     bool satellite_register_model = false;
     std::array<std::array<std::uint8_t, 0x45>, 2> cf{};
+    std::array<std::array<std::array<std::uint8_t, 0x45>, 2>, 2> function_cf{};
+    bool function_local_cf = false;
     std::vector<ControlEvent> controls;
     std::vector<std::uint8_t> control_functions;
     std::uint8_t current_function = 0U;
@@ -334,6 +336,7 @@ struct FakeUsb {
     int dsc_start_count = 0;
     int dsc_stop_count = 0;
     int seed_write_count = 0;
+    std::vector<std::uint8_t> seed_write_functions;
     int seed_clear_count = 0;
     std::array<unsigned, 16> seed_clear_register_counts{};
     bool seed_clear_values_zero = true;
@@ -390,6 +393,9 @@ struct FakeUsb {
                 cf[local][offset] = static_cast<std::uint8_t>(0x30U + local + offset);
             }
             cf[local][0x40] = 0x04U;
+            for (auto& function : function_cf) {
+                function[local] = cf[local];
+            }
         }
     }
 
@@ -702,6 +708,7 @@ struct FakeUsb {
                         seed_clear_values_zero = seed_clear_values_zero && value == 0U;
                     } else {
                         ++seed_write_count;
+                        seed_write_functions.push_back(current_function);
                     }
                     if (!seed_cleanup_active && seed_write_count == fail_seed_write_number) {
                         fail_seed_write_number = 0;
@@ -737,8 +744,10 @@ struct FakeUsb {
             const std::size_t local = (subcmd & 0x80U) != 0U ? 1U : 0U;
             const std::size_t offset = subcmd & 0x7fU;
             const std::size_t count = transfer.length - 1U;
-            for (std::size_t i = 0; i < count && offset + i < cf[local].size(); ++i) {
-                response[i + 1U] = cf[local][offset + i];
+            const auto& registers = function_local_cf ? function_cf[current_function][local]
+                                                      : cf[local];
+            for (std::size_t i = 0; i < count && offset + i < registers.size(); ++i) {
+                response[i + 1U] = registers[offset + i];
             }
             return static_cast<int>(transfer.length);
         }
@@ -762,14 +771,16 @@ struct FakeUsb {
             const std::size_t local = (subcmd & 0x80U) != 0U ? 1U : 0U;
             const std::size_t offset = subcmd & 0x7fU;
             const std::size_t count = transfer.length - 1U;
-            if (offset < cf[local].size()) {
-                cf[local][offset] = static_cast<std::uint8_t>(transfer.value >> 8U);
+            auto& registers = function_local_cf ? function_cf[current_function][local]
+                                                : cf[local];
+            if (offset < registers.size()) {
+                registers[offset] = static_cast<std::uint8_t>(transfer.value >> 8U);
             }
-            if (count > 1U && offset + 1U < cf[local].size()) {
-                cf[local][offset + 1U] = static_cast<std::uint8_t>(transfer.index & 0xffU);
+            if (count > 1U && offset + 1U < registers.size()) {
+                registers[offset + 1U] = static_cast<std::uint8_t>(transfer.index & 0xffU);
             }
-            if (count > 2U && offset + 2U < cf[local].size()) {
-                cf[local][offset + 2U] = static_cast<std::uint8_t>(transfer.index >> 8U);
+            if (count > 2U && offset + 2U < registers.size()) {
+                registers[offset + 2U] = static_cast<std::uint8_t>(transfer.index >> 8U);
             }
             return static_cast<int>(transfer.length);
         }
@@ -840,7 +851,9 @@ struct FakeUsb {
         }
         case Request::ResetChannel: {
             const std::size_t local = static_cast<std::uint8_t>(transfer.value) == 1U ? 1U : 0U;
-            cf[local].fill(0U);
+            auto& registers = function_local_cf ? function_cf[current_function][local]
+                                                : cf[local];
+            registers.fill(0U);
             return status();
         }
         default:
@@ -2040,8 +2053,12 @@ bool test_unsupported_models_fail_before_any_usb_io()
     const auto* v2_profile = find_profile(ModelId::W3u3V2);
     LibusbW3u3Hardware v2(nullptr, {}, {}, {}, {}, v2_profile);
     LibusbW3u3HardwareTestPeer::install_hooks_only(v2, &hooks);
-    CHECK(v2.device_profile() == v2_profile && v2.receiver_count() == 2U);
+    CHECK(v2.device_profile() == v2_profile && v2.receiver_count() == 4U);
     CHECK(v2.receiver_supports(0U, System::ISDB_S));
+    CHECK(v2.receiver_supports(1U, System::ISDB_T));
+    CHECK(v2.receiver_supports(2U, System::ISDB_S));
+    CHECK(v2.receiver_supports(3U, System::ISDB_T));
+    CHECK(!v2.receiver_supports(2U, System::ISDB_T));
     CHECK(v2.claim().error() == Error::DISCONNECTED);
     CHECK(v2.open_receiver(0U).error() == Error::UNSUPPORTED);
     std::array<unsigned char, 1> data{};
@@ -2880,8 +2897,13 @@ bool test_v2_master_routing_tune_capture_and_tsid()
     LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3V2));
     Hooks hooks{};
     configure(hardware, fake, hooks, 1U);
-    CHECK(hardware.receiver_count() == 2U &&
+    CHECK(hardware.receiver_count() == 4U &&
           hardware.device_profile()->enclosure_receiver_count == 4U);
+    CHECK(hardware.receiver_supports(0U, System::ISDB_S));
+    CHECK(hardware.receiver_supports(1U, System::ISDB_T));
+    CHECK(hardware.receiver_supports(2U, System::ISDB_S));
+    CHECK(hardware.receiver_supports(3U, System::ISDB_T));
+    CHECK(!hardware.receiver_supports(2U, System::ISDB_T));
     CHECK(LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
     LibusbW3u3HardwareTestPeer::require_initialization(hardware);
     CHECK(hardware.open_receiver(1U).has_value());
@@ -2927,6 +2949,219 @@ bool test_v2_master_routing_tune_capture_and_tsid()
     }
     CHECK(std::count(fake.endpoints.begin(), fake.endpoints.end(), 0x81U) == 4);
     CHECK(std::count(fake.endpoints.begin(), fake.endpoints.end(), 0x82U) == 4);
+    return true;
+}
+
+bool test_v2_stream_controls_follow_usb_function()
+{
+    FakeUsb fake;
+    fake.function_local_controller = true;
+    fake.function_local_cf = true;
+    LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {}, find_profile(ModelId::W3u3V2));
+    Hooks hooks{};
+    configure(hardware, fake, hooks, 0U);
+    CHECK(LibusbW3u3HardwareTestPeer::verify_v2_roles(hardware));
+    LibusbW3u3HardwareTestPeer::require_initialization(hardware);
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver) {
+        const auto opened = hardware.open_receiver(receiver);
+        if (!opened) {
+            std::fprintf(stderr, "V2 receiver open failed receiver=%u error=%u\n",
+                         static_cast<unsigned>(receiver),
+                         static_cast<unsigned>(opened.error()));
+        }
+        CHECK(opened.has_value());
+    }
+
+    const auto initial_function_cf = fake.function_cf;
+    std::atomic<bool> cancelled{false};
+
+    const auto before_primary_tune = fake.controls.size();
+    CHECK(hardware.tune_satellite(0U, 1049480U, 3000U).has_value());
+    CHECK(std::any_of(fake.controls.begin() +
+                          static_cast<std::ptrdiff_t>(before_primary_tune),
+                      fake.controls.end(), [&](const ControlEvent& event) {
+                          const auto index = static_cast<std::size_t>(
+                              &event - fake.controls.data());
+                          return event.request == Request::I2cBufferSend &&
+                                 event.value == 0x22U && fake.control_functions[index] == 0U;
+                      }));
+    const auto before_receiver0 = fake.controls.size();
+    CHECK(hardware.prepare(0U, System::ISDB_S, cancelled).has_value());
+    bool receiver0_cf_on_primary = false;
+    bool receiver0_dsc_on_primary = false;
+    for (std::size_t i = before_receiver0; i < fake.controls.size(); ++i) {
+        const auto& event = fake.controls[i];
+        if (event.request == Request::ChannelFilterRead ||
+            event.request == Request::ChannelFilterWrite) {
+            receiver0_cf_on_primary = receiver0_cf_on_primary ||
+                                      fake.control_functions[i] == 0U;
+        }
+        if (event.request == Request::DscStart) {
+            receiver0_dsc_on_primary = fake.control_functions[i] == 0U;
+        }
+    }
+    CHECK(receiver0_cf_on_primary && receiver0_dsc_on_primary);
+    const auto primary_lane0_active = fake.function_cf[0U][0U];
+
+    const auto before_satellite_tune = fake.controls.size();
+    CHECK(hardware.tune_satellite(2U, 1049480U, 3000U).has_value());
+    CHECK(std::any_of(fake.controls.begin() +
+                          static_cast<std::ptrdiff_t>(before_satellite_tune),
+                      fake.controls.end(), [&](const ControlEvent& event) {
+                          const auto index = static_cast<std::size_t>(
+                              &event - fake.controls.data());
+                          return event.request == Request::I2cBufferSend &&
+                                 event.value == 0x26U && fake.control_functions[index] == 0U;
+                      }));
+    const auto before_receiver2 = fake.controls.size();
+    CHECK(hardware.prepare(2U, System::ISDB_S, cancelled).has_value());
+    bool receiver2_cf_on_sibling = false;
+    bool receiver2_dsc_on_sibling = false;
+    std::size_t receiver2_reset_count = 0U;
+    bool receiver2_reset_on_sibling = false;
+    for (std::size_t i = before_receiver2; i < fake.controls.size(); ++i) {
+        const auto& event = fake.controls[i];
+        if (event.request == Request::ChannelFilterRead ||
+            event.request == Request::ChannelFilterWrite) {
+            receiver2_cf_on_sibling = receiver2_cf_on_sibling ||
+                                      fake.control_functions[i] == 1U;
+        }
+        if (event.request == Request::DscStart) {
+            receiver2_dsc_on_sibling = fake.control_functions[i] == 1U;
+        }
+        if (event.request == Request::ResetChannel) {
+            ++receiver2_reset_count;
+            receiver2_reset_on_sibling = fake.control_functions[i] == 1U;
+        }
+    }
+    const bool link_seed_on_primary = fake.seed_write_count == 16 &&
+                                      std::all_of(fake.seed_write_functions.begin(),
+                                                  fake.seed_write_functions.end(),
+                                                  [](std::uint8_t function) {
+                                                      return function == 0U;
+                                                  });
+    CHECK(receiver2_cf_on_sibling && receiver2_dsc_on_sibling && link_seed_on_primary);
+    CHECK(receiver2_reset_count == 1U && receiver2_reset_on_sibling);
+    CHECK(fake.function_cf[0U][0U] == primary_lane0_active);
+    CHECK(fake.function_cf[1U][0U] != initial_function_cf[1U][0U]);
+    CHECK(fake.function_controllers[0U][0x05U] == 0xa0U);
+    CHECK(fake.function_controllers[1U][0x05U] == 0U);
+
+    const auto stream_requests_on = [&](std::size_t begin, std::uint8_t function) {
+        bool cf_request = false;
+        bool dsc_request = false;
+        for (std::size_t i = begin; i < fake.controls.size(); ++i) {
+            const auto& event = fake.controls[i];
+            if (event.request == Request::ChannelFilterRead ||
+                event.request == Request::ChannelFilterWrite) {
+                cf_request = cf_request || fake.control_functions[i] == function;
+            }
+            if (event.request == Request::DscStart) {
+                dsc_request = fake.control_functions[i] == function;
+            }
+        }
+        return cf_request && dsc_request;
+    };
+    CHECK(hardware.tune_terrestrial(1U, 557142U, 3000U).has_value());
+    const auto before_receiver1 = fake.controls.size();
+    CHECK(hardware.prepare(1U, System::ISDB_T, cancelled).has_value());
+    CHECK(stream_requests_on(before_receiver1, 0U));
+    const auto primary_lane1_active = fake.function_cf[0U][1U];
+    const auto before_receiver3_tune = fake.controls.size();
+    CHECK(hardware.tune_terrestrial(3U, 557142U, 3000U).has_value());
+    CHECK(std::any_of(fake.controls.begin() +
+                          static_cast<std::ptrdiff_t>(before_receiver3_tune),
+                      fake.controls.end(), [&](const ControlEvent& event) {
+                          const auto index = static_cast<std::size_t>(
+                              &event - fake.controls.data());
+                          return event.request == Request::I2cBufferSend &&
+                                 event.value == 0x24U && fake.control_functions[index] == 0U;
+                      }));
+    const auto before_receiver3 = fake.controls.size();
+    CHECK(hardware.prepare(3U, System::ISDB_T, cancelled).has_value());
+    CHECK(stream_requests_on(before_receiver3, 1U));
+    std::size_t receiver3_reset_count = 0U;
+    bool receiver3_reset_on_sibling = false;
+    for (std::size_t i = before_receiver3; i < fake.controls.size(); ++i) {
+        if (fake.controls[i].request == Request::ResetChannel) {
+            ++receiver3_reset_count;
+            receiver3_reset_on_sibling = fake.control_functions[i] == 1U;
+        }
+    }
+    CHECK(receiver3_reset_count == 1U && receiver3_reset_on_sibling);
+    CHECK(fake.function_cf[0U][1U] == primary_lane1_active);
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 2U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(fake.function_cf[0U][0U] != initial_function_cf[0U][0U]);
+    CHECK(fake.function_cf[1U][0U] != initial_function_cf[1U][0U]);
+    CHECK(fake.function_cf[0U][1U] != initial_function_cf[0U][1U]);
+    CHECK(fake.function_cf[1U][1U] != initial_function_cf[1U][1U]);
+    for (std::uint8_t function = 0U; function < 2U; ++function) {
+        const auto handle = reinterpret_cast<libusb_device_handle*>(
+            static_cast<std::uintptr_t>(function + 1U));
+        for (const std::uint8_t endpoint : {0x81U, 0x82U}) {
+            std::size_t transfers = 0U;
+            for (std::size_t i = 0; i < fake.transfer_handles.size(); ++i) {
+                if (fake.transfer_handles[i] == handle && fake.endpoints[i] == endpoint) {
+                    ++transfers;
+                }
+            }
+            CHECK(transfers == 4U);
+        }
+    }
+    CHECK(std::all_of(fake.seed_write_functions.begin(), fake.seed_write_functions.end(),
+                      [](std::uint8_t function) { return function == 0U; }));
+
+    const auto controls_before_rejected_write = fake.controls.size();
+    const ControlTransfer write{0U, Request::I2cWrite, setup_word(0x4aU, 0x05U),
+                                0x01U, 2U, Direction::In, 1000U};
+    std::array<unsigned char, 4U> response{};
+    CHECK(LibusbW3u3HardwareTestPeer::function_control(hardware, 1U, write,
+                                                       response.data()) ==
+          LIBUSB_ERROR_NOT_SUPPORTED);
+    CHECK(fake.controls.size() == controls_before_rejected_write);
+
+    const auto before_stop2 = fake.controls.size();
+    CHECK(hardware.stop_receiver(2U).has_value());
+    bool receiver2_cf_stop_on_sibling = false;
+    bool receiver2_dsc_stop_on_sibling = false;
+    for (std::size_t i = before_stop2; i < fake.controls.size(); ++i) {
+        const auto& event = fake.controls[i];
+        if (event.request == Request::ChannelFilterRead ||
+            event.request == Request::ChannelFilterWrite) {
+            receiver2_cf_stop_on_sibling = receiver2_cf_stop_on_sibling ||
+                                           fake.control_functions[i] == 1U;
+        }
+        if (event.request == Request::DscStop) {
+            receiver2_dsc_stop_on_sibling = fake.control_functions[i] == 1U;
+        }
+    }
+    CHECK(receiver2_cf_stop_on_sibling && receiver2_dsc_stop_on_sibling);
+    CHECK(fake.function_cf[0U][0U] == primary_lane0_active);
+    CHECK(fake.function_cf[1U][0U] == initial_function_cf[1U][0U]);
+    CHECK(fake.function_cf[1U][1U] != initial_function_cf[1U][1U]);
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    CHECK(fake.function_controllers[0U][0x05U] == 0xa0U);
+    CHECK(fake.seed_clear_count == 0);
+    CHECK(hardware.close_receiver(2U).has_value());
+    CHECK(fake.function_cf[0U][0U] == primary_lane0_active);
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 0U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 1U));
+    CHECK(LibusbW3u3HardwareTestPeer::capture_prepared(hardware, 3U));
+    for (const auto receiver : {0U, 1U, 3U}) {
+        CHECK(hardware.stop_receiver(static_cast<std::uint8_t>(receiver)).has_value());
+    }
+    CHECK(fake.function_controllers[0U][0x05U] == 0U);
+    for (std::uint8_t receiver = 0U; receiver < 4U; ++receiver) {
+        if (receiver != 2U) {
+            CHECK(hardware.close_receiver(receiver).has_value());
+        }
+    }
+    CHECK(hardware.shutdown().has_value());
     return true;
 }
 
@@ -3074,6 +3309,8 @@ int main()
          test_all_source_terrestrial_channels_and_invalid_requests},
         {"test_v2_master_routing_tune_capture_and_tsid",
          test_v2_master_routing_tune_capture_and_tsid},
+        {"test_v2_stream_controls_follow_usb_function",
+         test_v2_stream_controls_follow_usb_function},
         {"test_v2_identity_mismatch_powers_off_before_rf_or_link_writes",
          test_v2_identity_mismatch_powers_off_before_rf_or_link_writes},
         {"test_v2_duplicate_roles_and_revision16_fail_before_board_writes",

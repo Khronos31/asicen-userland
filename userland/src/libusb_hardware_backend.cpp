@@ -1026,7 +1026,8 @@ std::uint8_t LibusbW3u3Hardware::receiver_count() const noexcept
     if (!runtime_model_supported()) {
         return 0U;
     }
-    if (profile_->model_id == ModelId::W3u2 || profile_->model_id == ModelId::W3u3) {
+    if (profile_->model_id == ModelId::W3u2 || profile_->model_id == ModelId::W3u3 ||
+        profile_->model_id == ModelId::W3u3V2) {
         return profile_->enclosure_receiver_count;
     }
     return profile_->combined_isdb_ts ? 1U : 2U;
@@ -1075,7 +1076,8 @@ bool LibusbW3u3Hardware::receiver_supports(std::uint8_t receiver, System system)
     if (profile_->combined_isdb_ts) {
         return system == System::ISDB_S || system == System::ISDB_T;
     }
-    if (profile_->model_id != ModelId::W3u2 && profile_->model_id != ModelId::W3u3) {
+    if (profile_->model_id != ModelId::W3u2 && profile_->model_id != ModelId::W3u3 &&
+        profile_->frontend_family != FrontendFamily::Nmi) {
         return (receiver == 0U && system == System::ISDB_S) ||
                (receiver == 1U && system == System::ISDB_T);
     }
@@ -1358,9 +1360,15 @@ Result<void> LibusbW3u3Hardware::open_receiver(std::uint8_t receiver) noexcept
             continue;
         }
         const auto active_route = receiver_address(*profile_, active);
-        if (active_route && active_route.value().rf_function_index ==
-                                route.value().rf_function_index &&
-            active_route.value().local_lane == route.value().local_lane) {
+        const bool same_source = active_route &&
+                                 (profile_->frontend_family == FrontendFamily::Nmi
+                                      ? active_route.value().frontend_source ==
+                                            route.value().frontend_source
+                                      : active_route.value().rf_function_index ==
+                                                route.value().rf_function_index &&
+                                            active_route.value().local_lane ==
+                                                route.value().local_lane);
+        if (same_source) {
             return fail_open(Error::BUSY);
         }
     }
@@ -2643,7 +2651,13 @@ int LibusbW3u3Hardware::control(const ControlTransfer& original, unsigned char* 
         if (!route) {
             return LIBUSB_ERROR_INVALID_PARAM;
         }
-        function = route.value().rf_function_index;
+        const bool stream_control = original.request == Request::ChannelFilterRead ||
+                                    original.request == Request::ChannelFilterWrite ||
+                                    original.request == Request::ResetChannel ||
+                                    original.request == Request::DscStart ||
+                                    original.request == Request::DscStop;
+        function = stream_control ? route.value().function_index
+                                  : route.value().rf_function_index;
     }
     return control_function(function, original, data);
 }
@@ -2689,15 +2703,24 @@ int LibusbW3u3Hardware::control_function_impl(std::uint8_t function,
     if (!runtime_model_supported()) {
         return LIBUSB_ERROR_NOT_SUPPORTED;
     }
-    // V2 keeps its secondary function read-only for the source-backed pair checks.
+    const bool v2_stream_control = original.direction == Direction::In &&
+                                   (original.request == Request::ChannelFilterRead ||
+                                    original.request == Request::ChannelFilterWrite ||
+                                    original.request == Request::ResetChannel ||
+                                    original.request == Request::DscStart ||
+                                    original.request == Request::DscStop);
+    const bool v2_function_one_read = original.direction == Direction::In &&
+                                      (original.request == Request::CustomerInfo ||
+                                       (original.request == Request::SysCtrlRead &&
+                                        original.value == 2U && original.index == 0U &&
+                                        original.length == 3U) ||
+                                       (original.request == Request::I2cRead &&
+                                        original.value == 0xb0a8U && original.index == 0U &&
+                                        (original.length == 2U || original.length == 17U)));
+    // V2 keeps its secondary function limited to identity reads and stream controls.
     if (function > 1U ||
         (function == 1U && uses_v2_frontend() &&
-         (original.direction != Direction::In ||
-          !(original.request == Request::CustomerInfo ||
-            (original.request == Request::SysCtrlRead && original.value == 2U &&
-             original.index == 0U && original.length == 3U) ||
-            (original.request == Request::I2cRead && original.value == 0xb0a8U &&
-             original.index == 0U && (original.length == 2U || original.length == 17U)))))) {
+         !(v2_stream_control || v2_function_one_read))) {
         return LIBUSB_ERROR_NOT_SUPPORTED;
     }
     if (uses_v2_frontend() && !v2_roles_verified_ && original.request != Request::SysCtrlRead &&

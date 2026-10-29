@@ -12,13 +12,15 @@
 | PX-S3U2 | `0b06:0003` | 0: 衛星、1: 地デジ。software は地デジ 1 + 衛星 1 の同時取得経路を公開。実機同時取得は未確認 | 現行 CLI は要求 `15` を拒否。物理給電能力は公式資料に記載され、制御経路は未解明 |
 | PX-W3U2 | `0b06:0004` | 地デジ 2 + 衛星 2 の計 4 受信部を公開し、4 番組同時録画をサポート | GPIO20 active-low。`--lnb-voltage 15` を受理 |
 | PX-W3U3 | `0b06:0005` | 同上 | 同上 |
-| PX-W3U3 V2 | `0b06:0006` | 条件付きの primary（[仕様上の制限](SPEC.md#010-source-supported-model-boundary)） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
+| PX-W3U3 V2 | `0b06:0006` | 0/1: primary、2/3: sibling（4 系統の実機同時受信は未確認） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
 
 候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation/0.1.0.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
 
 PX-W3U2 と PX-W3U3 は地デジ 2 系統と衛星 2 系統の計 4 受信部で、4 番組を同時録画できます。ASICEN main `bd25092fdae7240e9fddb8a3a3d19f4dc199e9ee` に4同時録画の実装を採用済みです。W3U2での固定source実機記録と、W3U3 coldを含む機種別受入の状態は検証記録で区別します。PX-W3U3 V2は上記2機種と同じ対応範囲とは扱わず、仕様上の制限に従います。
 
 PX-S3U2 は receiver 1 の地デジと receiver 0 の衛星を同時取得する software 経路を公開します。device-free fixture は同時capture、片側を解放した後の相方継続、停止側の再取得を確認しますが、これらは実機での同時受信を証明しません。候補の実機同時取得は未確認です。
+
+PX-W3U3 V2 は受信 0/1 を primary、2/3 を sibling に割り当て、ストリーム制御も割り当て先の USB 機能へ送ります。これは受信経路のソフトウェア実装を示すもので、4 系統の実機同時受信や品質を確認したものではありません。
 
 実行時の内部経路はブリッジ revision 11/52・controller type 0f・version 7 に限定し、W3U2 は type 10 も受理します。未実装の revision 16/52 等は起動時に拒否します。機種名だけで全個体の対応を保証しません。
 
@@ -244,7 +246,8 @@ LNB 給電に対応する機種（PX-W3U2・PX-W3U3・PX-W3U3 V2）では、`asi
 ## 注意事項
 
 - **同時受信ストリーム**: PX-S3U2のsoftware経路は地デジ1本と衛星1本を同時に公開し、device-free fixtureは同時capture・片側解放後の相方継続・停止側再取得を確認します。実機同時取得は未確認です。PX-W3U2/PX-W3U3の現行mainはreceiver 0〜3の4 laneを公開します（0/2が衛星、1/3が地デジ）。各software能力と候補ごとの実機受入結果を混同しないでください。
-- **公開される受信部**: PX-S3Uは現行software profileでcombined receiver 1つをT/S排他で使い、製品の物理最大数は未確定です。PX-S3U2はreceiver 0を衛星、1を地デジに割り当てます。PX-W3U2/PX-W3U3は0/2を衛星、1/3を地デジに割り当てます。ほかの機種ごとの割り当ては上の表のとおりです。
+- **PX-W3U3 V2 の同時受信ストリーム**: 受信0/1はprimary、2/3はsiblingに割り当て、function別stream制御を実装しています。4系統同時受信とTS品質は実機未確認です。
+- **公開される受信部**: PX-S3Uは現行software profileでcombined receiver 1つをT/S排他で使い、製品の物理最大数は未確定です。PX-S3U2はreceiver 0を衛星、1を地デジに割り当てます。PX-W3U2/PX-W3U3は0/2を衛星、1/3を地デジに割り当てます。V2は0/1をprimary、2/3をsiblingに割り当てます。ほかの機種ごとの割り当ては上の表のとおりです。
 - **対応ハードウェア revision**: 実行時に対応している内部経路はブリッジ revision 11 / ASIC type 0f / version 7 のみです。revision 16 は未実装のため起動前に失敗します。すべての個体がこの revision に該当するとは限りません。
 - **TS 品質カウンタ**: デーモンは受信 TS の TEI・continuity・同期の統計を計数します。取得パケット数と終了状態も確認してください。値が 0 だけでは「無誤りで受信できた証明」にはなりません。
 - **ハードウェアの列挙**: 接続機器の確認は `asicend --list-json` を使います。ASICEN は USB serial を持たないため、JSON の `serial` は null、識別は観測した USB topology です。
