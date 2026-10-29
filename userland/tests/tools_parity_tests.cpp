@@ -248,7 +248,9 @@ bool list_formats_share_observed_identity()
               single.find("\"ungrouped_usb_devices\":[]") != std::string::npos);
     }
     CHECK(asicen::cli::format_device_list({}, true) ==
-          "{\"schema\":{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0},\"producer\":{\"product\":\"asicen\",\"version\":\"0.1.0\"},\"scan\":{\"complete\":true,\"issues\":[]},\"enclosures\":[],\"ungrouped_usb_devices\":[]}\n");
+          "{\"schema\":{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0},\"producer\":{\"product\":\"asicen\",\"version\":\""
+          ASICEN_PROJECT_VERSION
+          "\"},\"scan\":{\"complete\":true,\"issues\":[]},\"enclosures\":[],\"ungrouped_usb_devices\":[]}\n");
     CHECK(asicen::cli::format_device_list({}, false).empty());
     return true;
 }
