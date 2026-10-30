@@ -8,11 +8,11 @@
 
 | 機種 | USB ID | 受信部 | ソフトウェアによる LNB 15V 給電 |
 |---|---|---|---|
-| PX-S3U | `0b06:0001` | 現行 software profile は 1 つの combined receiver（地デジと衛星で排他）。製品の最大物理同時 TS 数は未確定 | 現行 CLI は要求 `15` を拒否。物理給電能力は公式資料に記載され、制御経路は未解明 |
-| PX-S3U2 | `0b06:0003` | 0: 衛星、1: 地デジ。software は地デジ 1 + 衛星 1 の同時取得経路を公開。実機同時取得は未確認 | 現行 CLI は要求 `15` を拒否。物理給電能力は公式資料に記載され、制御経路は未解明 |
-| PX-W3U2 | `0b06:0004` | 地デジ 2 + 衛星 2 の計 4 受信部を公開し、4 番組同時録画をサポート | GPIO20 active-low。`--lnb-voltage 15` を受理 |
+| PX-S3U | `0b06:0001` | 現行 software profile は 1 つの combined receiver（地デジと衛星で排他）。製品の最大物理同時 TS 数は未確定 | software のLNB制御経路は未解明 |
+| PX-S3U2 | `0b06:0003` | 0: 衛星、1: 地デジ。software は地デジ 1 + 衛星 1 の同時取得経路を公開。実機同時取得は未確認 | software のLNB制御経路は未解明 |
+| PX-W3U2 | `0b06:0004` | 地デジ 2 + 衛星 2 の計 4 受信部を公開し、4 番組同時録画をサポート | GPIO20 active-low。LNBは `asicenctl lnb-on/off` で制御 |
 | PX-W3U3 | `0b06:0005` | 同上 | 同上 |
-| PX-W3U3 V2 | `0b06:0006` | 0/1: primary、2/3: sibling（4 系統の実機同時受信は未確認） | GPIO20 active-high。`--lnb-voltage 15` を受理。給電中は GPIO80 を監視 |
+| PX-W3U3 V2 | `0b06:0006` | 0/1: primary、2/3: sibling（4 系統の実機同時受信は未確認） | GPIO20 active-high。LNBは `asicenctl lnb-on/off` で制御。給電中は GPIO80 を監視 |
 
 候補 6dbdba2 の PX-W3U3 は Linux x86_64・macOS arm64 の短時間項目を確認しましたが、BS09 の CC 異常と未完了項目があり、リリース認定は未完了です。[現在の検証状況](docs/release-validation/0.1.0.md#現在の候補と検証状況)を参照してください。PX-W3U2 の[限定試験](https://github.com/Khronos31/asicen-userland/blob/02282efbf8394721a47dca8a70b5253be36646fa/docs/reverse-engineering/w3u2-type10-2026-10-16.md)は別記録です。S3U・S3U2・V2 は実機未確認です。
 
@@ -30,15 +30,15 @@ PX-W3U3 V2 は受信 0/1 を primary、2/3 を sibling に割り当て、スト�
 
 ## LNB 電源制御
 
-衛星放送（ISDB-S）の受信時に、`asicen-ts` の `--lnb-voltage 0|15` オプションで LNB 電源の要求を指定します（既定値は `0`）。px4-userland と同じく、15V を要求する場合はデーモン起動時に `--allow-lnb-power` を指定します。許可フラグがない場合の 15V 要求は拒否します。
+`asicen-ts` はLNB電圧の選局引数を持たず、TUNE時の既定値扱いは従来どおりです。独立して給電を制御する場合は、対応profileのdaemonを `--allow-lnb-power` 付きで起動し、`asicenctl lnb-on` / `asicenctl lnb-off` を使います。許可フラグがない場合は給電を拒否します。
 
-地デジ（ISDB-T）では `--lnb-voltage` を付けません（`0` を含め、明示すると拒否されます）。
+旧 `asicen-ts --lnb-voltage 0|15` は廃止され、値にかかわらず通常の引数エラーになります。
 
 LNB 給電に関する注意点は以下のとおりです。
 
 - **AC アダプタの要件**: PX-W3U2、PX-W3U3、PX-W3U3 V2 の公式仕様では、LNB 給電時に AC アダプタの接続が必要です。
 - **端子電圧**: USB 転送や GPIO の読み戻しは電圧の実測ではありません。今回測定した W3U3 の結果を、他機種・未試験環境へ広げません。
-- **PX-S3U / PX-S3U2 の LNB**: 物理給電能力は公式資料に記載されています。取得した公式 Linux/Windows software の静的調査では要求から USB/GPIO 等の給電制御までの経路を確認できず、現在の profile は `--lnb-voltage 15` を拒否します。この拒否は製品の物理機能非対応や端子 0V の証明ではなく、制御経路は未解明です。PX-W3U3 の GPIO 制御を S3U 系に適用しません。
+- **PX-S3U / PX-S3U2 の LNB**: 物理給電能力は公式資料に記載されています。取得した公式 Linux/Windows software の静的調査では要求から USB/GPIO 等の給電制御までの経路を確認できず、control pathは未解明です。このことは製品の物理機能非対応や端子 0V の証明ではありません。PX-W3U3 の GPIO 制御を S3U 系に適用しません。
 - **安全制御（給電制御対応profile）**: PX-W3U2、PX-W3U3、PX-W3U3 V2では、デーモン起動時に給電オフを書き込み、デバイスのクローズ時およびデーモン終了時にも以前のGPIO状態へ戻さずオフにします。選局失敗時は選局前の設定へ戻します。PX-W3U3 V2では保護条件（GPIO20が立ち、GPIO80が落ちる状態）を検出すると給電を遮断し、自動でオンへ戻しません。PX-S3U/PX-S3U2ではsoftwareのoff要求が成功しても、USB/GPIOへの書込みや端子0Vは保証されません。両機種の物理給電状態は未確認です。
 
 ## 動作環境
@@ -162,7 +162,7 @@ test "$ready" = 1 || { echo 'asicend did not become ready' >&2; exit 1; }
 asicen-ts --runtime-dir "$runtime_dir" --instance w3u3 \
   --receiver 1 --channel T27 --packet-count 30000 --output capture.ts
 asicen-ts --runtime-dir "$runtime_dir" --instance w3u3 \
-  --receiver 0 --channel BS01_0 --lnb-voltage 0 --packet-count 30000 --output satellite.ts
+  --receiver 0 --channel BS01_0 --packet-count 30000 --output satellite.ts
 ```
 
 USB 機能が 1 つの PX-S3U と PX-S3U2 では `--device usb:BUS-PORT` を指定します。2機能機種は、既知の内部 Hub 上で相方を一意に確認できるとき1位置で選択できます。それ以外は `--device usb:BUS-PORT1,BUS-PORT2` の形式で両方の位置を指定します。Termux ではランチャーが `--fd` を渡します。

@@ -206,10 +206,10 @@ if [ "$ready" -eq 1 ]; then
         "$asicents" --instance "$instance" --runtime-dir "$runtime" \
             --receiver "$terrestrial_receiver" --system isdb-t --frequency-khz 527143 \
             --duration-seconds 5 --output /dev/null || true
-        note '--- satellite receiver 0, 5s, 1318000 kHz, slot 0, LNB 0V ---'
+        note '--- satellite receiver 0, 5s, 1318000 kHz, slot 0, default LNB handling ---'
         "$asicents" --instance "$instance" --runtime-dir "$runtime" \
             --receiver 0 --system isdb-s --frequency-khz 1318000 \
-            --slot 0 --lnb-voltage 0 --duration-seconds 5 --output /dev/null || true
+            --slot 0 --duration-seconds 5 --output /dev/null || true
         note '--- asicenctl status after tune ---'
         "$asicenctl" --instance "$instance" --runtime-dir "$runtime" status || true
     fi

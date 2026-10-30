@@ -385,7 +385,9 @@ secondary-function or simultaneous-capture acceptance. GPIO/LNB electrical
 testing is deferred to measurement; this does not prohibit implementing
 source-backed model-specific control sequences.
 
-LNB requests follow px4-userland's `--lnb-voltage 0|15` ISDB-S interface.
+The `asicen-ts` CLI has no per-TUNE LNB voltage option. Independent LNB
+control continues through `asicenctl lnb-on/off` under the daemon's existing
+`--allow-lnb-power` opt-in.
 Current software switching is source-backed for W3U2/W3U3/V2 only. Official
 product material documents S3U/S3U2 physical feed capability, but a complete
 request-to-hardware control path was not found in the surveyed official Linux
