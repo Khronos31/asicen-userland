@@ -453,7 +453,7 @@ if(TARGET asicen_ifdhandler)
         asicen_enable_project_warnings(asicen-core-ifd-tests)
 
         add_executable(asicen-core-ifd-listener-tests
-            ${dtv_userland_core_SOURCE_DIR}/tests/unix_pcsc_ifd/pcsc_ifd_listener_tests.cpp)
+            userland/tests/asicen_ifd_listener_diagnostic.cpp)
         target_include_directories(asicen-core-ifd-listener-tests PRIVATE
             ${ASICEN_PCSC_IFD_INCLUDE_DIR}
             ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/include)
