@@ -4,6 +4,7 @@
 
 #include "asicen/frontend_sequence.h"
 #include "asicen/device_profile.h"
+#include "dtv/userland/host_card_t1/card_t1.h"
 #include "px4/card.h"
 
 #include <array>
@@ -59,6 +60,32 @@ private:
     bool atr_pending_ = false;
     bool controller_initialized_ = false;
     bool cleanup_mode_ = false;
+};
+
+class W3u3CoreCardHardwareAdapter final
+    : public dtv::userland::host_card_t1::CardHardware,
+      public dtv::userland::host_card_t1::CardTime {
+public:
+    explicit W3u3CoreCardHardwareAdapter(W3u3CardMailboxHardware& mailbox) noexcept
+        : mailbox_(mailbox)
+    {
+    }
+
+    dtv::userland::Result<bool> detect_card() noexcept override;
+    dtv::userland::Result<void> reset_card(
+        dtv::userland::host_card_t1::CardDelay& delay) noexcept override;
+    dtv::userland::Result<bool> data_ready() noexcept override;
+    dtv::userland::Result<std::size_t>
+    read_data(dtv::userland::MutableByteView output) noexcept override;
+    dtv::userland::Result<void>
+    write_data(dtv::userland::ByteView input) noexcept override;
+    dtv::userland::Result<void> set_baud_rate(
+        dtv::userland::host_card_t1::CardBaudRate baud_rate) noexcept override;
+    std::uint64_t monotonic_ms() noexcept override;
+    void sleep_ms(std::uint32_t milliseconds) noexcept override;
+
+private:
+    W3u3CardMailboxHardware& mailbox_;
 };
 
 }  // namespace asicen

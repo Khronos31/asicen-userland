@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "asicen/card_only_service.h"
 #include "asicen/libusb_hardware_backend.h"
 
 #include "asicen/device_profile.h"
@@ -903,6 +904,12 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(const CardProbeRequest& request,
     }
 
     const auto absolute_deadline = steady_now() + std::chrono::seconds(30);
+    const auto restore_probe_state = [&](std::chrono::steady_clock::time_point deadline) {
+        diagnostic_stop_flag_ = stop_flag;
+        diagnostic_stop_callback_ = stop_callback;
+        deadline_ = deadline;
+        deadline_active_ = true;
+    };
     diagnostic_stop_flag_ = stop_flag;
     diagnostic_stop_callback_ = stop_callback;
     deadline_ = absolute_deadline;
@@ -920,23 +927,33 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(const CardProbeRequest& request,
     deadline_active_ = true;
 
     W3u3CardMailboxHardware mailbox(*this, profile_->model_id);
-    px4::userland::CardSession session(mailbox, mailbox);
+    W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession session(card_hardware, card_hardware);
+    W3u3CardProtocolSession card_protocol(session, *this, stop_flag);
     if (request.mode == CardProbeMode::detect) {
         const auto detected = mailbox.detect_card();
         summary.error = detected ? Error::OK : detected.error();
         summary.detected = detected && detected.value();
     } else {
-        const auto atr = px4::userland::reset_and_read_card_atr(mailbox, mailbox);
+        const auto atr = dtv::userland::host_card_t1::reset_and_read_card_atr(
+            card_hardware, card_hardware);
         if (!atr) {
             summary.error = atr.error();
         } else {
             summary.detected = true;
             summary.atr_valid = true;
-            summary.atr = atr.value();
+            summary.atr.bytes = atr.value().bytes;
+            summary.atr.length = atr.value().length;
+            summary.atr.baud_rate =
+                static_cast<px4::userland::It930xCardBaudRate>(atr.value().baud_rate);
+            summary.atr.ifsc = atr.value().ifsc;
+            summary.atr.edc = static_cast<px4::userland::CardEdc>(atr.value().edc);
+            summary.atr.block_timeout_ms = atr.value().block_timeout_ms;
             summary.atr_length = atr.value().length;
             summary.error = Error::OK;
             if (request.mode == CardProbeMode::apdu) {
-                const auto initialized = session.initialize_with_atr(atr.value());
+                const auto initialized = card_protocol.initialize_with_atr(atr.value());
+                restore_probe_state(absolute_deadline);
                 if (!initialized) {
                     summary.error = initialized.error();
                 } else {
@@ -948,9 +965,10 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(const CardProbeRequest& request,
                             break;
                         }
                         deadline_ = steady_now() + std::chrono::seconds(15);
-                        const auto transmitted = session.transmit(
+                        const auto transmitted = card_protocol.transmit(
                             request.apdu,
                             px4::userland::MutableByteView{response.data(), response.size()});
+                        restore_probe_state(deadline_);
                         if (!transmitted) {
                             summary.error = transmitted.error();
                             break;

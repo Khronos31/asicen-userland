@@ -17,6 +17,46 @@ namespace {
 using px4::userland::Error;
 using px4::userland::Result;
 
+static_assert(static_cast<std::uint8_t>(px4::userland::Error::UNSUPPORTED) ==
+              static_cast<std::uint8_t>(dtv::userland::Error::UNSUPPORTED));
+static_assert(static_cast<std::uint8_t>(px4::userland::Error::INTERNAL) ==
+              static_cast<std::uint8_t>(dtv::userland::Error::INTERNAL));
+
+template <typename T>
+dtv::userland::Result<T> to_core_result(px4::userland::Result<T> result) noexcept
+{
+    if (!result) {
+        return dtv::userland::Result<T>::failure(
+            static_cast<dtv::userland::Error>(result.error()));
+    }
+    return dtv::userland::Result<T>::success(result.value());
+}
+
+dtv::userland::Result<void> to_core_result(px4::userland::Result<void> result) noexcept
+{
+    if (!result) {
+        return dtv::userland::Result<void>::failure(
+            static_cast<dtv::userland::Error>(result.error()));
+    }
+    return dtv::userland::Result<void>::success();
+}
+
+class CoreCardDelayBridge final : public px4::userland::It930xCardDelay {
+public:
+    explicit CoreCardDelayBridge(dtv::userland::host_card_t1::CardDelay& delay) noexcept
+        : delay_(delay)
+    {
+    }
+
+    void sleep_ms(std::uint32_t milliseconds) noexcept override
+    {
+        delay_.sleep_ms(milliseconds);
+    }
+
+private:
+    dtv::userland::host_card_t1::CardDelay& delay_;
+};
+
 std::uint8_t reverse_bits(std::uint8_t value) noexcept
 {
     value = static_cast<std::uint8_t>(((value & 0x55U) << 1U) | ((value >> 1U) & 0x55U));
@@ -180,19 +220,20 @@ Result<bool> W3u3CardMailboxHardware::data_ready() noexcept
         if (!read) {
             return Result<bool>::failure(read.error());
         }
-        const auto parsed =
-            px4::userland::parse_card_atr(px4::userland::ByteView{atr.data(), length.value()});
+        const auto parsed = dtv::userland::host_card_t1::parse_card_atr(
+            dtv::userland::ByteView{atr.data(), length.value()});
         if (parsed) {
-            if (parsed.value().edc != px4::userland::CardEdc::lrc ||
-                parsed.value().baud_rate != px4::userland::It930xCardBaudRate::baud_19200) {
+            if (parsed.value().edc != dtv::userland::host_card_t1::CardEdc::lrc ||
+                parsed.value().baud_rate !=
+                    dtv::userland::host_card_t1::CardBaudRate::baud_19200) {
                 return Result<bool>::failure(Error::UNSUPPORTED);
             }
             return Result<bool>::success(true);
         }
-        if (parsed.error() == Error::NOT_READY) {
+        if (parsed.error() == dtv::userland::Error::NOT_READY) {
             return Result<bool>::success(false);
         }
-        return Result<bool>::failure(parsed.error());
+        return Result<bool>::failure(static_cast<Error>(parsed.error()));
     }
     if (length.value() > 255U) {
         return Result<bool>::failure(Error::PROTOCOL_ERROR);
@@ -323,10 +364,10 @@ W3u3CardMailboxHardware::read_data(px4::userland::MutableByteView output) noexce
         if (!atr_read) {
             return Result<std::size_t>::failure(atr_read.error());
         }
-        const auto parsed =
-            px4::userland::parse_card_atr(px4::userland::ByteView{atr.data(), logical});
+        const auto parsed = dtv::userland::host_card_t1::parse_card_atr(
+            dtv::userland::ByteView{atr.data(), logical});
         if (!parsed) {
-            return Result<std::size_t>::failure(parsed.error());
+            return Result<std::size_t>::failure(static_cast<Error>(parsed.error()));
         }
         logical = parsed.value().length;
     } else {
@@ -381,13 +422,14 @@ W3u3CardMailboxHardware::read_data(px4::userland::MutableByteView output) noexce
                         verify.begin())) {
             return Result<std::size_t>::failure(Error::PROTOCOL_ERROR);
         }
-        const auto parsed =
-            px4::userland::parse_card_atr(px4::userland::ByteView{frame.data(), logical});
+        const auto parsed = dtv::userland::host_card_t1::parse_card_atr(
+            dtv::userland::ByteView{frame.data(), logical});
         if (!parsed) {
-            return Result<std::size_t>::failure(parsed.error());
+            return Result<std::size_t>::failure(static_cast<Error>(parsed.error()));
         }
-        if (parsed.value().edc != px4::userland::CardEdc::lrc ||
-            parsed.value().baud_rate != px4::userland::It930xCardBaudRate::baud_19200) {
+        if (parsed.value().edc != dtv::userland::host_card_t1::CardEdc::lrc ||
+            parsed.value().baud_rate !=
+                dtv::userland::host_card_t1::CardBaudRate::baud_19200) {
             return Result<std::size_t>::failure(Error::UNSUPPORTED);
         }
     } else {
@@ -482,6 +524,54 @@ void W3u3CardMailboxHardware::sleep_ms(std::uint32_t milliseconds) noexcept
         return;
     }
     transport_.delay_ms(milliseconds);
+}
+
+dtv::userland::Result<bool> W3u3CoreCardHardwareAdapter::detect_card() noexcept
+{
+    return to_core_result(mailbox_.detect_card());
+}
+
+dtv::userland::Result<void> W3u3CoreCardHardwareAdapter::reset_card(
+    dtv::userland::host_card_t1::CardDelay& delay) noexcept
+{
+    CoreCardDelayBridge bridge(delay);
+    return to_core_result(mailbox_.reset_card(bridge));
+}
+
+dtv::userland::Result<bool> W3u3CoreCardHardwareAdapter::data_ready() noexcept
+{
+    return to_core_result(mailbox_.data_ready());
+}
+
+dtv::userland::Result<std::size_t> W3u3CoreCardHardwareAdapter::read_data(
+    dtv::userland::MutableByteView output) noexcept
+{
+    return to_core_result(mailbox_.read_data(
+        px4::userland::MutableByteView{output.data, output.size}));
+}
+
+dtv::userland::Result<void> W3u3CoreCardHardwareAdapter::write_data(
+    dtv::userland::ByteView input) noexcept
+{
+    return to_core_result(mailbox_.write_data(
+        px4::userland::ByteView{input.data, input.size}));
+}
+
+dtv::userland::Result<void> W3u3CoreCardHardwareAdapter::set_baud_rate(
+    dtv::userland::host_card_t1::CardBaudRate baud_rate) noexcept
+{
+    return to_core_result(mailbox_.set_baud_rate(
+        static_cast<px4::userland::It930xCardBaudRate>(baud_rate)));
+}
+
+std::uint64_t W3u3CoreCardHardwareAdapter::monotonic_ms() noexcept
+{
+    return mailbox_.monotonic_ms();
+}
+
+void W3u3CoreCardHardwareAdapter::sleep_ms(std::uint32_t milliseconds) noexcept
+{
+    mailbox_.sleep_ms(milliseconds);
 }
 
 }  // namespace asicen

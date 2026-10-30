@@ -253,7 +253,8 @@ private:
 
 class ObservedProtocolSession final : public CardProtocolSession {
 public:
-    ObservedProtocolSession(CardProtocolSession& session, FixtureOperationGuard& guard) noexcept
+    ObservedProtocolSession(asicen::W3u3CardProtocolSession& session,
+                            FixtureOperationGuard& guard) noexcept
         : session_(session), guard_(guard)
     {
     }
@@ -264,6 +265,13 @@ public:
         // The server's card worker serializes protocol operations and presence
         // polling. Record this operation before a later detect_card() replaces
         // the guard's latest timeout with its independent 5000 ms budget.
+        initialize_timeout.store(guard_.last_operation_timeout.load());
+        return result;
+    }
+    Result<void> initialize_with_atr(
+        const dtv::userland::host_card_t1::CardAtr& atr) noexcept
+    {
+        const auto result = session_.initialize_with_atr(atr);
         initialize_timeout.store(guard_.last_operation_timeout.load());
         return result;
     }
@@ -282,7 +290,7 @@ public:
     std::atomic<std::uint32_t> transmit_timeout{0U};
 
 private:
-    CardProtocolSession& session_;
+    asicen::W3u3CardProtocolSession& session_;
     FixtureOperationGuard& guard_;
 };
 
@@ -293,13 +301,16 @@ bool test_protocol_timeouts_survive_presence_poll()
     transport.queue(t1_frame(0xe1U, {251U}));
     transport.queue(t1_frame(0x00U, {0x90U, 0x00U}));
     asicen::W3u3CardMailboxHardware mailbox(transport);
-    CardSession raw_session(mailbox, mailbox);
+    asicen::W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession raw_session(card_hardware, card_hardware);
     FixtureOperationGuard guard;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, nullptr);
     asicen::W3u3CardProtocolSession session(raw_session, guard, nullptr);
     ObservedProtocolSession observed_session(session, guard);
 
-    CHECK(observed_session.initialize());
+    const auto atr = dtv::userland::host_card_t1::reset_and_read_card_atr(
+        card_hardware, card_hardware);
+    CHECK(atr && observed_session.initialize_with_atr(atr.value()));
     CHECK(guard.last_operation_timeout == 15000U);
     const auto present = backend.detect_card();
     CHECK(present && present.value());
@@ -409,7 +420,8 @@ bool test_card_service_through_core_ipc()
     transport.queue(t1_frame(0x00U, reply));
 
     asicen::W3u3CardMailboxHardware mailbox(transport);
-    CardSession raw_session(mailbox, mailbox);
+    asicen::W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession raw_session(card_hardware, card_hardware);
     FixtureOperationGuard guard;
     volatile std::sig_atomic_t stop = 0;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, &stop);
@@ -619,7 +631,8 @@ bool test_card_operation_entry_preserves_error_class()
 {
     MailboxFixture transport;
     asicen::W3u3CardMailboxHardware mailbox(transport);
-    CardSession raw_session(mailbox, mailbox);
+    asicen::W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession raw_session(card_hardware, card_hardware);
     FixtureOperationGuard guard;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, nullptr);
     asicen::W3u3CardProtocolSession session(raw_session, guard, nullptr);

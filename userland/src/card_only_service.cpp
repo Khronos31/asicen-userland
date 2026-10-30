@@ -287,7 +287,8 @@ public:
                           const volatile std::sig_atomic_t* stop_requested,
                           bool card_only) noexcept
         : hardware_(hardware), card_backend_(mailbox, hardware, stop_requested),
-          card_session_(mailbox, mailbox), card_protocol_(card_session_, hardware, stop_requested),
+          card_hardware_(mailbox), card_session_(card_hardware_, card_hardware_),
+          card_protocol_(card_session_, hardware, stop_requested),
           card_only_tuner_(hardware.receiver_count()), frontend_(hardware)
     {
         if (!card_only)
@@ -317,7 +318,8 @@ public:
 private:
     LibusbW3u3Hardware& hardware_;
     W3u3CardServiceBackend card_backend_;
-    px4::userland::CardSession card_session_;
+    W3u3CoreCardHardwareAdapter card_hardware_;
+    dtv::userland::host_card_t1::CardSession card_session_;
     W3u3CardProtocolSession card_protocol_;
     CardOnlyTunerBackend card_only_tuner_;
     DeferredHardwareShutdown frontend_;
@@ -560,10 +562,24 @@ Result<void> W3u3CardProtocolSession::initialize() noexcept
     if (!entered) {
         return entered;
     }
-    const auto result = session_.initialize();
+    const auto result = adapter_.initialize();
     if (result) {
-        atr_.bytes = session_.atr().bytes;
-        atr_.length = session_.atr().length;
+        atr_ = adapter_.atr();
+    }
+    guard_.end_card_operation();
+    return result;
+}
+
+Result<void> W3u3CardProtocolSession::initialize_with_atr(
+    const dtv::userland::host_card_t1::CardAtr& atr) noexcept
+{
+    const auto entered = guard_.begin_card_operation(15000U, stop_requested_);
+    if (!entered) {
+        return entered;
+    }
+    const auto result = session_.initialize_with_atr(atr);
+    if (result) {
+        atr_ = adapter_.atr();
     }
     guard_.end_card_operation();
     return result;
@@ -577,14 +593,14 @@ W3u3CardProtocolSession::transmit(px4::userland::ByteView apdu,
     if (!entered) {
         return Result<std::size_t>::failure(entered.error());
     }
-    const auto result = session_.transmit(apdu, response);
+    const auto result = adapter_.transmit(apdu, response);
     guard_.end_card_operation();
     return result;
 }
 
 bool W3u3CardProtocolSession::initialized() const noexcept
 {
-    return session_.initialized();
+    return adapter_.initialized();
 }
 
 const px4::userland::CardAtrBytes& W3u3CardProtocolSession::atr() const noexcept
@@ -594,7 +610,7 @@ const px4::userland::CardAtrBytes& W3u3CardProtocolSession::atr() const noexcept
 
 void W3u3CardProtocolSession::invalidate() noexcept
 {
-    session_.invalidate();
+    adapter_.invalidate();
     atr_ = {};
 }
 
