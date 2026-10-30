@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "px4/ts_continuity.h"
+#include "dtv/userland/host_ts_continuity/ts_continuity.h"
 
 #include <array>
 #include <cstdio>
@@ -8,8 +8,8 @@
 
 namespace {
 
-using px4::userland::TsContinuityChecker;
-using px4::userland::TsContinuityKind;
+using dtv::userland::host_ts_continuity::TsContinuityChecker;
+using dtv::userland::host_ts_continuity::TsContinuityKind;
 using Packet = std::array<std::uint8_t, TsContinuityChecker::kPacketSize>;
 using Kind = TsContinuityKind;
 
