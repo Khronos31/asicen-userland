@@ -11,6 +11,10 @@ on:
       - docs/releasing.md
       - THIRD_PARTY_NOTICES.md
   push:
+    branches:
+      - main
+    tags:
+      - 'v*'
     paths:
       - .github/workflows/**
       - scripts/**

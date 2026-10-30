@@ -19,6 +19,10 @@ on:
       - VERSION
       - .github/workflows/**
   push:
+    branches:
+      - main
+    tags:
+      - 'v*'
     paths:
       - CMakeLists.txt
       - LICENSE
