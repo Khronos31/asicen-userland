@@ -4,12 +4,15 @@
 #include "asicend_receiver_records.h"
 #include "asicend_selector.h"
 #include "asicen/startup_readiness.h"
+#include "asicen/product_profile.h"
+#include "px4/identity.h"
 
 #include <cstdio>
 #include <chrono>
 #include <array>
 #include <initializer_list>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -92,6 +95,48 @@ bool arguments_match_reference()
     CHECK(!parse({"--instance", "test", "--group", "--group"}, true).valid);
     CHECK(!parse({"--instance", "test", "--runtime-dir", "x", "--runtime-dir", "x"}, true).valid);
     CHECK(!parse({"--instance", "12345678901234"}, true).valid);
+    return true;
+}
+
+bool instance_policy_matches_legacy_identity(std::string_view value)
+{
+    return asicen::profile::valid_instance(value) ==
+           (px4::userland::valid_runtime_instance(value) &&
+            !px4::userland::valid_device_instance(value));
+}
+
+bool instance_policy_preserves_acceptance()
+{
+    for (std::size_t size = 0U; size <= 81U; ++size) {
+        for (unsigned int byte = 0U; byte <= 255U; ++byte) {
+            const std::string value(size, static_cast<char>(byte));
+            CHECK(instance_policy_matches_legacy_identity(value));
+        }
+    }
+
+    for (const std::size_t size : {1U, 2U, 13U, 14U, 15U, 16U, 79U, 80U, 81U}) {
+        for (std::size_t position = 0U; position < size; ++position) {
+            for (unsigned int byte = 0U; byte <= 255U; ++byte) {
+                std::string value(size, 'a');
+                value[position] = static_cast<char>(byte);
+                CHECK(instance_policy_matches_legacy_identity(value));
+            }
+        }
+    }
+
+    for (const std::string& value : {std::string(), std::string("test"),
+                                     std::string("RoomA"), std::string("."),
+                                     std::string(".."), std::string(".a"),
+                                     std::string("a."), std::string(13U, '7'),
+                                     std::string(14U, '7'), std::string(15U, '7'),
+                                     std::string(16U, '7'), std::string(80U, 'a'),
+                                     std::string(81U, 'a'), std::string("bad/name"),
+                                     std::string("name space"), std::string("\xc3\xa9")}) {
+        const bool expected = px4::userland::valid_runtime_instance(value) &&
+                              !px4::userland::valid_device_instance(value);
+        const auto parsed = parse({"--instance", value.c_str()}, true);
+        CHECK(instance_policy_matches_legacy_identity(value) && parsed.valid == expected);
+    }
     return true;
 }
 
@@ -539,6 +584,7 @@ bool readiness_tracks_only_cold_functions_for_single_dual_and_mixed_profiles()
 int main()
 {
     if (!arguments_match_reference() || !selector_grouping() ||
+        !instance_policy_preserves_acceptance() ||
         !list_formats_share_observed_identity() ||
         !receiver_table_matches_product_profile() ||
         !readiness_rechecks_first_and_last_probe_boundaries() ||

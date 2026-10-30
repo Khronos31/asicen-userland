@@ -215,7 +215,6 @@ set_target_properties(asicen_portable_core PROPERTIES POSITION_INDEPENDENT_CODE 
 
 add_library(asicen_core_card_session STATIC
     ${ASICEN_PX4_ROOT}/src/card.cpp
-    ${ASICEN_PX4_ROOT}/src/identity.cpp
     ${ASICEN_PX4_ROOT}/src/ipc.cpp)
 if(NOT WIN32)
     target_sources(asicen_core_card_session PRIVATE
@@ -512,8 +511,7 @@ if(UNIX OR WIN32)
         # hardware daemon. Not part of the distributed product.
         add_executable(asicend-mock
             userland/tools/asicend_mock.cpp
-            ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp
-            ${ASICEN_PX4_ROOT}/src/identity.cpp)
+            ${ASICEN_PX4_ROOT}/tools/px4d_signals.cpp)
         target_include_directories(asicend-mock BEFORE PRIVATE
             ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
             ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
