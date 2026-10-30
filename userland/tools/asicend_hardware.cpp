@@ -2,10 +2,10 @@
 #include "asicend_args.h"
 #include "asicend_identity.h"
 #include "asicend_selector.h"
-#include "px4/endpoint_diagnostic.h"
 #include "loader_acquisition.h"
 #include "loader_diagnostic.h"
 #include "px4d_signals.h"
+#include "asicend_identity_lease.h"
 #if defined(_WIN32)
 #include "dtv/userland/host_facade/windows_stdin.h"
 #endif
@@ -15,7 +15,6 @@
 #include "asicen/loader_firmware.h"
 #include "asicen/startup_readiness.h"
 #include "asicen/firmware.h"
-#include "asicen/legacy_posix_ipc.h"
 #include "px4/platform_sleep.h"
 
 #include <libusb.h>
@@ -1098,24 +1097,18 @@ int run_asicend_hardware(int argc, char** argv) {
             }
         }
     }
-    const px4::userland::ipc::posix::EndpointConfig endpoint{
-        options.runtime_directory.empty() ? nullptr : options.runtime_directory.c_str(),
-        options.instance.empty() ? identity.value().c_str() : options.instance.c_str(),
-        px4::userland::ipc::posix::kControlEndpointName,
-        options.group ? px4::userland::ipc::posix::EndpointAccess::shared_group
-                      : px4::userland::ipc::posix::EndpointAccess::private_user};
-    std::optional<px4::userland::ipc::posix::SerialEndpointLease> enclosure_lease;
+    std::optional<dtv::userland::host_listener_context::IdentityLease> enclosure_lease;
     if (!identity.value().empty()) {
-        px4::userland::ipc::posix::EndpointDiagnostic endpoint_diagnostic{};
-        auto acquired = px4::userland::ipc::posix::SerialEndpointLease::acquire_identity(
-            endpoint, identity.value(), &endpoint_diagnostic);
+        dtv::userland::host_listener_context::IdentityLeaseDiagnostic lease_diagnostic{};
+        auto acquired = asicen::cli::acquire_identity_lease(
+            options.runtime_directory, options.group, identity.value(), &lease_diagnostic);
         if (!acquired) {
-            if (endpoint_diagnostic.reason !=
-                px4::userland::ipc::posix::EndpointDiagnosticReason::none) {
-                asicen::cli::print_endpoint_diagnostic(stderr, endpoint_diagnostic,
-                                                        options.group);
+            if (lease_diagnostic.reason !=
+                dtv::userland::host_listener_context::IdentityLeaseDiagnosticReason::none) {
+                asicen::cli::print_identity_lease_diagnostic(stderr, lease_diagnostic,
+                                                              options.group);
             } else {
-                std::fprintf(stderr, "enclosure endpoint: %s\n",
+                std::fprintf(stderr, "enclosure lease: %s\n",
                              px4::userland::error_string(acquired.error()));
             }
             return exit_status(acquired.error());

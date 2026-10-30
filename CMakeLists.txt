@@ -214,14 +214,9 @@ asicen_enable_project_warnings(asicen_portable_core)
 set_target_properties(asicen_portable_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(asicen_core_card_session STATIC
-    ${ASICEN_PX4_ROOT}/src/card.cpp
-    ${ASICEN_PX4_ROOT}/src/ipc.cpp)
-if(NOT WIN32)
+    ${ASICEN_PX4_ROOT}/src/card.cpp)
+if(WIN32)
     target_sources(asicen_core_card_session PRIVATE
-        ${ASICEN_PX4_ROOT}/src/posix_ipc.cpp)
-else()
-    target_sources(asicen_core_card_session PRIVATE
-        ${ASICEN_PX4_ROOT}/src/windows/windows_ipc.cpp
         ${ASICEN_PX4_ROOT}/src/windows/windows_sleep.cpp)
 endif()
 target_include_directories(asicen_core_card_session BEFORE PUBLIC
@@ -786,8 +781,17 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
 
     add_executable(asicen-enclosure-lock-tests
         userland/tests/enclosure_lock_tests.cpp)
-    target_include_directories(asicen-enclosure-lock-tests PRIVATE userland/include)
-    target_link_libraries(asicen-enclosure-lock-tests PRIVATE asicen_portable_core)
+    target_include_directories(asicen-enclosure-lock-tests BEFORE PRIVATE
+        ${ASICEN_PX4_ROOT}/include
+        ${ASICEN_PX4_ROOT}/src
+        userland/include)
+    target_include_directories(asicen-enclosure-lock-tests PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_include_directories(asicen-enclosure-lock-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
+    target_link_libraries(asicen-enclosure-lock-tests PRIVATE
+        asicen_portable_core dtv::host_listener_context)
     asicen_enable_project_warnings(asicen-enclosure-lock-tests)
     add_test(NAME asicen-enclosure-lock-tests COMMAND asicen-enclosure-lock-tests)
 
@@ -1151,6 +1155,18 @@ if(ASICEN_BUILD_TESTS)
 endif()
 
 if(ASICEN_BUILD_TESTS AND WIN32)
+    add_executable(asicen_windows_identity_lease_tests
+        userland/tests/identity_lease_windows_tests.cpp)
+    target_include_directories(asicen_windows_identity_lease_tests BEFORE PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_link_libraries(asicen_windows_identity_lease_tests PRIVATE
+        dtv::host_listener_context)
+    asicen_enable_project_warnings(asicen_windows_identity_lease_tests)
+    add_test(NAME asicen_windows_identity_lease_tests
+        COMMAND asicen_windows_identity_lease_tests)
+
     add_executable(asicen_windows_tests
         ${ASICEN_PX4_ROOT}/tests/windows_imported_tests_main.cpp
         ${ASICEN_PX4_ROOT}/tests/card_tests.cpp
