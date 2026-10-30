@@ -38,10 +38,13 @@ public:
     W3u3CardProtocolSession(dtv::userland::host_card_t1::CardSession& session,
                             CardOperationGuard& guard,
                             const volatile std::sig_atomic_t* stop_requested) noexcept
-        : adapter_(session), guard_(guard), stop_requested_(stop_requested)
+        : session_(session), adapter_(session), guard_(guard),
+          stop_requested_(stop_requested)
     {
     }
     px4::userland::Result<void> initialize() noexcept override;
+    px4::userland::Result<void> initialize_with_atr(
+        const dtv::userland::host_card_t1::CardAtr& atr) noexcept;
     px4::userland::Result<std::size_t>
     transmit(px4::userland::ByteView apdu,
              px4::userland::MutableByteView response) noexcept override;
@@ -51,6 +54,7 @@ public:
     void request_stop() noexcept override;
 
 private:
+    dtv::userland::host_card_t1::CardSession& session_;
     dtv::userland::host_card_t1::CardProtocolSessionAdapter adapter_;
     CardOperationGuard& guard_;
     const volatile std::sig_atomic_t* stop_requested_;

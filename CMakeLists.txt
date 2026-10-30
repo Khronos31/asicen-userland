@@ -550,6 +550,22 @@ endif()
 if(ASICEN_BUILD_TESTS AND TARGET host_card_t1_tests)
     enable_testing()
     add_test(NAME asicen-core-host-card-t1-tests COMMAND host_card_t1_tests)
+
+    add_executable(asicen-product-core-card-t1-tests
+        userland/tests/card_t1_product_adapter_tests.cpp)
+    target_include_directories(asicen-product-core-card-t1-tests BEFORE PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
+    target_include_directories(asicen-product-core-card-t1-tests PRIVATE
+        userland/include
+        ${ASICEN_PX4_ROOT}/include
+        ${dtv_userland_core_SOURCE_DIR})
+    target_link_libraries(asicen-product-core-card-t1-tests PRIVATE asicen_libusb)
+    asicen_enable_project_warnings(asicen-product-core-card-t1-tests)
+    add_test(NAME asicen-product-core-card-t1-tests
+        COMMAND asicen-product-core-card-t1-tests)
+    set_tests_properties(asicen-product-core-card-t1-tests PROPERTIES TIMEOUT 60)
 endif()
 
 if(ASICEN_BUILD_TESTS AND NOT WIN32)

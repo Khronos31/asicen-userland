@@ -570,6 +570,21 @@ Result<void> W3u3CardProtocolSession::initialize() noexcept
     return result;
 }
 
+Result<void> W3u3CardProtocolSession::initialize_with_atr(
+    const dtv::userland::host_card_t1::CardAtr& atr) noexcept
+{
+    const auto entered = guard_.begin_card_operation(15000U, stop_requested_);
+    if (!entered) {
+        return entered;
+    }
+    const auto result = session_.initialize_with_atr(atr);
+    if (result) {
+        atr_ = adapter_.atr();
+    }
+    guard_.end_card_operation();
+    return result;
+}
+
 Result<std::size_t>
 W3u3CardProtocolSession::transmit(px4::userland::ByteView apdu,
                                   px4::userland::MutableByteView response) noexcept

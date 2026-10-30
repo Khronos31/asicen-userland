@@ -253,7 +253,8 @@ private:
 
 class ObservedProtocolSession final : public CardProtocolSession {
 public:
-    ObservedProtocolSession(CardProtocolSession& session, FixtureOperationGuard& guard) noexcept
+    ObservedProtocolSession(asicen::W3u3CardProtocolSession& session,
+                            FixtureOperationGuard& guard) noexcept
         : session_(session), guard_(guard)
     {
     }
@@ -264,6 +265,13 @@ public:
         // The server's card worker serializes protocol operations and presence
         // polling. Record this operation before a later detect_card() replaces
         // the guard's latest timeout with its independent 5000 ms budget.
+        initialize_timeout.store(guard_.last_operation_timeout.load());
+        return result;
+    }
+    Result<void> initialize_with_atr(
+        const dtv::userland::host_card_t1::CardAtr& atr) noexcept
+    {
+        const auto result = session_.initialize_with_atr(atr);
         initialize_timeout.store(guard_.last_operation_timeout.load());
         return result;
     }
@@ -282,7 +290,7 @@ public:
     std::atomic<std::uint32_t> transmit_timeout{0U};
 
 private:
-    CardProtocolSession& session_;
+    asicen::W3u3CardProtocolSession& session_;
     FixtureOperationGuard& guard_;
 };
 
@@ -300,7 +308,9 @@ bool test_protocol_timeouts_survive_presence_poll()
     asicen::W3u3CardProtocolSession session(raw_session, guard, nullptr);
     ObservedProtocolSession observed_session(session, guard);
 
-    CHECK(observed_session.initialize());
+    const auto atr = dtv::userland::host_card_t1::reset_and_read_card_atr(
+        card_hardware, card_hardware);
+    CHECK(atr && observed_session.initialize_with_atr(atr.value()));
     CHECK(guard.last_operation_timeout == 15000U);
     const auto present = backend.detect_card();
     CHECK(present && present.value());
