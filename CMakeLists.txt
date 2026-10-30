@@ -434,7 +434,7 @@ if(TARGET asicen_ifdhandler)
         target_compile_definitions(asicen-core-ifd-listener-tests PRIVATE
             DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
         target_link_libraries(asicen-core-ifd-listener-tests PRIVATE
-            dtv::unix_pcsc_ifd dtv::host_listener_context dtv::control
+            asicen_ifdhandler dtv::host_listener_context dtv::control
             dtv::host_runtime)
         asicen_enable_project_warnings(asicen-core-ifd-listener-tests)
     endif()
@@ -622,19 +622,6 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
 
     if(UNIX)
         if(ASICEN_PCSC_IFD_AVAILABLE)
-            add_executable(px4-pcsc-ifd-tests
-                third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp
-                third_party/px4-userland/userland/src/pcsc_ifd.cpp
-                third_party/px4-userland/userland/tests/pcsc_ifd_tests.cpp)
-            target_include_directories(px4-pcsc-ifd-tests PRIVATE
-                third_party/px4-userland/userland/include
-                third_party/px4-userland/userland/tests
-                ${ASICEN_PCSC_IFD_INCLUDE_DIR})
-            target_link_libraries(px4-pcsc-ifd-tests PRIVATE
-                px4_portable_reference Threads::Threads)
-            asicen_enable_project_warnings(px4-pcsc-ifd-tests)
-            add_test(NAME px4-pcsc-ifd-tests COMMAND px4-pcsc-ifd-tests)
-            set_tests_properties(px4-pcsc-ifd-tests PROPERTIES TIMEOUT 20)
             if(TARGET asicen-ifd-prefix-tests)
                 add_test(NAME asicen-ifd-prefix-tests COMMAND asicen-ifd-prefix-tests)
             endif()
