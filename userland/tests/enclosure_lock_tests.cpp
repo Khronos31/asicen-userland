@@ -2,6 +2,7 @@
 // Original enclosure-lock safety coverage migrated to the shared endpoint lease.
 #include "px4/posix_ipc.h"
 #include "px4/endpoint_diagnostic.h"
+#include "../tools/asicend_identity_lease.h"
 #include "../../third_party/px4-userland/userland/tests/test_temp_directory.h"
 
 #include <cstdlib>
@@ -10,8 +11,10 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -203,6 +206,155 @@ bool endpoint_diagnostic_text_keeps_bytes_and_remediation()
     return true;
 }
 
+bool migrated_identity_lease_matches_legacy_private_and_group_owner_policy()
+{
+    TemporaryDirectory directory;
+    CHECK(directory.valid());
+    const std::string& runtime = directory.path();
+    const EndpointConfig private_endpoint{
+        runtime.c_str(), "first", kControlEndpointName, EndpointAccess::private_user};
+    auto legacy_private = SerialEndpointLease::acquire_identity(private_endpoint, kIdentity);
+    CHECK(legacy_private);
+    legacy_private.value().close();
+    auto migrated_private = asicen::cli::acquire_identity_lease(runtime, false, kIdentity);
+    CHECK(migrated_private);
+    migrated_private.value().close();
+
+    CHECK(::chmod(runtime.c_str(), 0750) == 0);
+    const EndpointConfig group_endpoint{
+        runtime.c_str(), "second", kControlEndpointName, EndpointAccess::shared_group};
+    auto legacy_group = SerialEndpointLease::acquire_identity(group_endpoint, kIdentity);
+    CHECK(legacy_group);
+    legacy_group.value().close();
+    auto migrated_group = asicen::cli::acquire_identity_lease(runtime, true, kIdentity);
+    CHECK(migrated_group);
+    const auto same_identity = asicen::cli::acquire_identity_lease(
+        runtime, true, kIdentity);
+    CHECK(!same_identity && same_identity.error() == dtv::userland::Error::BUSY);
+    auto independent_identity = asicen::cli::acquire_identity_lease(
+        runtime, true, "usb-1-3");
+    CHECK(independent_identity);
+    independent_identity.value().close();
+    migrated_group.value().close();
+    auto reacquired_group = asicen::cli::acquire_identity_lease(
+        runtime, true, kIdentity);
+    CHECK(reacquired_group);
+    reacquired_group.value().close();
+
+    if (::geteuid() == 0 && ::getegid() != 65534) {
+        CHECK(::chown(runtime.c_str(), ::geteuid(), 65534) == 0);
+        auto legacy_other_gid = SerialEndpointLease::acquire_identity(
+            group_endpoint, kIdentity);
+        CHECK(legacy_other_gid);
+        legacy_other_gid.value().close();
+        auto migrated_other_gid = asicen::cli::acquire_identity_lease(
+            runtime, true, kIdentity);
+        CHECK(migrated_other_gid);
+        migrated_other_gid.value().close();
+        CHECK(::chown(runtime.c_str(), ::geteuid(), ::getegid()) == 0);
+    }
+
+    CHECK(::chmod(runtime.c_str(), 0700) == 0);
+    CHECK(!SerialEndpointLease::acquire_identity(group_endpoint, kIdentity));
+    CHECK(!asicen::cli::acquire_identity_lease(runtime, true, kIdentity));
+    CHECK(::chmod(runtime.c_str(), 0750) == 0);
+
+    if (::geteuid() == 0) {
+        CHECK(::chown(runtime.c_str(), 65534, ::getegid()) == 0);
+        CHECK(!SerialEndpointLease::acquire_identity(group_endpoint, kIdentity));
+        CHECK(!asicen::cli::acquire_identity_lease(runtime, true, kIdentity));
+        CHECK(::chown(runtime.c_str(), ::geteuid(), ::getegid()) == 0);
+    }
+
+    const std::string missing = runtime + "/missing";
+    const EndpointConfig missing_endpoint{
+        missing.c_str(), "third", kControlEndpointName, EndpointAccess::shared_group};
+    CHECK(!SerialEndpointLease::acquire_identity(missing_endpoint, kIdentity));
+    CHECK(!asicen::cli::acquire_identity_lease(missing, true, kIdentity));
+    CHECK(::access(missing.c_str(), F_OK) != 0);
+    return true;
+}
+
+enum class IdentityLeaseParityCase {
+    private_mode_0750,
+    final_runtime_symlink,
+    lock_foreign_owner,
+    lock_invalid_mode,
+    lock_nonregular,
+    lock_multiple_links,
+    lock_symlink
+};
+
+bool identity_lease_parity_case(std::string_view name, IdentityLeaseParityCase test_case)
+{
+    TemporaryDirectory directory;
+    CHECK(directory.valid());
+    std::string runtime = directory.path();
+    const std::string lock = runtime + "/.asicen-userland-usb-1-2.lock";
+
+    if (test_case == IdentityLeaseParityCase::private_mode_0750) {
+        CHECK(::chmod(runtime.c_str(), 0750) == 0);
+    } else if (test_case == IdentityLeaseParityCase::final_runtime_symlink) {
+        const std::string target = runtime + "/target";
+        CHECK(::mkdir(target.c_str(), 0700) == 0);
+        const std::string alias = runtime + "/runtime-link";
+        CHECK(::symlink(target.c_str(), alias.c_str()) == 0);
+        runtime = alias;
+    } else if (test_case == IdentityLeaseParityCase::lock_symlink) {
+        const std::string target = runtime + "/target";
+        ScopedFd raw(create_lock(target));
+        CHECK(raw.get() >= 0 && raw.close() == 0);
+        CHECK(::symlink(target.c_str(), lock.c_str()) == 0);
+    } else if (test_case == IdentityLeaseParityCase::lock_nonregular) {
+        CHECK(::mkdir(lock.c_str(), 0700) == 0);
+    } else {
+        ScopedFd raw(create_lock(lock));
+        CHECK(raw.get() >= 0);
+        if (test_case == IdentityLeaseParityCase::lock_foreign_owner) {
+            if (::geteuid() != 0 || ::fchown(raw.get(), 65534, ::getegid()) != 0) {
+                std::printf("A2 NOT RUN %.*s: cannot create foreign-owner lock\n",
+                            static_cast<int>(name.size()), name.data());
+                return true;
+            }
+        } else if (test_case == IdentityLeaseParityCase::lock_invalid_mode) {
+            CHECK(::fchmod(raw.get(), 0640) == 0);
+        } else if (test_case == IdentityLeaseParityCase::lock_multiple_links) {
+            CHECK(::link(lock.c_str(), (lock + "-alias").c_str()) == 0);
+        }
+        CHECK(raw.close() == 0);
+    }
+
+    const EndpointConfig configured{
+        runtime.c_str(), "parity", kControlEndpointName, EndpointAccess::private_user};
+    auto legacy = SerialEndpointLease::acquire_identity(configured, kIdentity);
+    const bool legacy_accepted = static_cast<bool>(legacy);
+    if (legacy) legacy.value().close();
+    auto migrated = asicen::cli::acquire_identity_lease(runtime, false, kIdentity);
+    const bool migrated_accepted = static_cast<bool>(migrated);
+    if (migrated) migrated.value().close();
+    CHECK(legacy_accepted == migrated_accepted);
+    CHECK(!legacy_accepted);
+    std::printf("A2 PASS %.*s: legacy=reject Core=reject\n",
+                static_cast<int>(name.size()), name.data());
+    return true;
+}
+
+bool migrated_identity_lease_matches_legacy_added_private_and_lock_cases()
+{
+    constexpr std::array<std::pair<std::string_view, IdentityLeaseParityCase>, 7U> cases{{
+        {"private-0750", IdentityLeaseParityCase::private_mode_0750},
+        {"final-runtime-symlink", IdentityLeaseParityCase::final_runtime_symlink},
+        {"lock-foreign-owner", IdentityLeaseParityCase::lock_foreign_owner},
+        {"lock-mode-not-0600", IdentityLeaseParityCase::lock_invalid_mode},
+        {"lock-nonregular", IdentityLeaseParityCase::lock_nonregular},
+        {"lock-multiple-links", IdentityLeaseParityCase::lock_multiple_links},
+        {"lock-symlink", IdentityLeaseParityCase::lock_symlink}}};
+    for (const auto& [name, test_case] : cases) {
+        if (!identity_lease_parity_case(name, test_case)) return false;
+    }
+    return true;
+}
+
 bool symlink_and_nonregular_paths_are_rejected()
 {
     TemporaryDirectory directory;
@@ -232,7 +384,9 @@ int main()
     if (!regular_lock_is_created_exclusively_and_existing_inode_reopens() ||
         !symlink_and_nonregular_paths_are_rejected() ||
         !endpoint_length_and_runtime_mode_diagnostics_are_specific() ||
-        !endpoint_diagnostic_text_keeps_bytes_and_remediation()) {
+        !endpoint_diagnostic_text_keeps_bytes_and_remediation() ||
+        !migrated_identity_lease_matches_legacy_private_and_group_owner_policy() ||
+        !migrated_identity_lease_matches_legacy_added_private_and_lock_cases()) {
         return 1;
     }
     std::puts("enclosure lock tests passed (shared endpoint lease)");
