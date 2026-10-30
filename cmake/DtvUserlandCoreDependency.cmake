@@ -42,8 +42,21 @@ if(WIN32)
     set(DTV_USERLAND_BUILD_WINDOWS_WINSCARD ON)
 endif()
 if(UNIX AND NOT ANDROID AND ASICEN_BUILD_PCSC_IFD)
-    set(DTV_USERLAND_BUILD_UNIX_PCSC_IFD ON)
-    set(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE ON)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ASICEN_CORE_PCSC_LITE QUIET libpcsclite)
+    endif()
+    find_path(ASICEN_CORE_PCSC_IFD_INCLUDE_DIR
+        NAMES ifdhandler.h
+        HINTS ${ASICEN_CORE_PCSC_LITE_INCLUDE_DIRS}
+        PATH_SUFFIXES PCSC PCSC.framework/Headers)
+    if(ASICEN_CORE_PCSC_IFD_INCLUDE_DIR)
+        set(DTV_USERLAND_BUILD_UNIX_PCSC_IFD ON)
+        set(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE ON)
+        set(DTV_USERLAND_PCSC_IFD_INCLUDE_DIR
+            "${ASICEN_CORE_PCSC_IFD_INCLUDE_DIR}" CACHE PATH
+            "PC/SC IFD header directory for the Core Unix IFD target")
+    endif()
 endif()
 
 FetchContent_Declare(dtv_userland_core
