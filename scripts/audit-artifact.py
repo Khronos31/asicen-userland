@@ -191,6 +191,7 @@ WINDOWS_SOURCE_ALLOWED = re.compile(
 CORE_WINDOWS_SOURCE_ALLOWED = re.compile(
     r"^third_party/dtv-userland-core/repository/(?:"
     r"adapters/windows_winscard/(?:windows/[^/]+|COPYING|README\.md|CMakeLists\.txt|winscard\.def)"
+    r"|adapters/host_daemon/src/windows/card_t1_sleep_windows\.cpp"
     r"|adapters/host_listener_context/src/windows/[^/]+"
     r"|adapters/host_ts/windows/[^/]+"
     r"|adapters/host_runtime/include/windows/[^/]+"
@@ -1981,6 +1982,18 @@ def audit_source_archive(args: argparse.Namespace) -> dict:
 
 
 def self_test() -> int:
+    allowed_core_windows_source = (
+        "third_party/dtv-userland-core/repository/"
+        "adapters/host_daemon/src/windows/card_t1_sleep_windows.cpp"
+    )
+    denied_core_windows_source = (
+        "third_party/dtv-userland-core/repository/"
+        "adapters/host_daemon/src/windows/other.cpp"
+    )
+    if not CORE_WINDOWS_SOURCE_ALLOWED.fullmatch(allowed_core_windows_source):
+        fail("self-test rejected the pinned Core Windows source dependency")
+    if CORE_WINDOWS_SOURCE_ALLOWED.fullmatch(denied_core_windows_source):
+        fail("self-test accepted an unrelated Core Windows source member")
     with tempfile.TemporaryDirectory(prefix="asicen-audit-test-") as temporary:
         root = Path(temporary)
         safe = root / "safe.tar.gz"
