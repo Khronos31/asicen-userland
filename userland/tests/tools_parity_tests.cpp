@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "asicend_args.h"
 #include "asicend_list_format.h"
+#include "asicend_receiver_records.h"
 #include "asicend_selector.h"
 #include "asicen/startup_readiness.h"
 #include "asicen/product_profile.h"
@@ -300,6 +301,31 @@ bool list_formats_share_observed_identity()
     return true;
 }
 
+bool receiver_table_matches_product_profile()
+{
+    for (const std::uint8_t count : {1U, 2U, 4U}) {
+        const auto records = asicen::receiver_table::receiver_records(count);
+        CHECK(records.has_value());
+        for (std::uint8_t index = 0U; index < count; ++index) {
+            const std::uint8_t local = asicen::profile::local_receiver_for(index);
+            const std::uint8_t device = static_cast<std::uint8_t>(
+                asicen::profile::usb_function_for_receiver(index) + 1U);
+            const auto expected_system = asicen::profile::is_combined_receiver(count, index)
+                ? px4::userland::ipc::System::ISDB_T_OR_S
+                : asicen::profile::is_satellite_receiver(index)
+                      ? px4::userland::ipc::System::ISDB_S
+                      : px4::userland::ipc::System::ISDB_T;
+            CHECK(records.value()[index].global_id == index &&
+                  records.value()[index].dev_id == device &&
+                  records.value()[index].local_id == local &&
+                  records.value()[index].system == expected_system);
+        }
+    }
+    for (const std::uint8_t count : {0U, 3U, 5U, 8U, 255U})
+        CHECK(!asicen::receiver_table::receiver_records(count).has_value());
+    return true;
+}
+
 using asicen::UploadedRuntimeIdentity;
 using Error = px4::userland::Error;
 using TestClock = std::chrono::steady_clock;
@@ -560,6 +586,7 @@ int main()
     if (!arguments_match_reference() || !selector_grouping() ||
         !instance_policy_preserves_acceptance() ||
         !list_formats_share_observed_identity() ||
+        !receiver_table_matches_product_profile() ||
         !readiness_rechecks_first_and_last_probe_boundaries() ||
         !readiness_handles_staggered_reenumeration_and_disappearance() ||
         !readiness_timeout_cancel_error_and_shared_deadline() ||

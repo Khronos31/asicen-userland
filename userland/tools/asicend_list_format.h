@@ -9,6 +9,7 @@
 #include "asicen/enclosure_grouping.h"
 #include "asicend_discovery_json.h"
 #include "asicend_identity.h"
+#include "asicend_receiver_records.h"
 #include "px4/ipc.h"
 
 #include <algorithm>
@@ -60,8 +61,7 @@ inline void append_json_observation(std::string& out, unsigned int device,
 
 inline void append_receivers(std::string& out, const DeviceProfile& profile, bool json)
 {
-    const auto records = px4::userland::ipc::receiver_records(
-        profile.enclosure_receiver_count, profile.combined_isdb_ts);
+    const auto records = receiver_table::receiver_records(profile.enclosure_receiver_count);
     if (!records) return;
     const bool lnb_control = profile.model_id == ModelId::W3u2 ||
                              profile.model_id == ModelId::W3u3 ||
