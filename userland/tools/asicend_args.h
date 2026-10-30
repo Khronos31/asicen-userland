@@ -6,8 +6,8 @@
 #define ASICEN_USERLAND_ASICEND_ARGS_H
 
 #include "asicen/device_profile.h"
+#include "asicen/product_profile.h"
 #include <dtv/userland/identity.h>
-#include "px4/identity.h"
 #include "px4/error.h"
 
 #include <array>
@@ -174,12 +174,6 @@ inline bool parse_bus_port(std::string_view value, std::uint8_t* bus,
     return false;
 }
 
-inline bool valid_instance(std::string_view value) noexcept
-{
-    return px4::userland::valid_runtime_instance(value) &&
-           !px4::userland::valid_device_instance(value);
-}
-
 inline DaemonArguments invalid(std::string_view message) noexcept
 {
     DaemonArguments result;
@@ -320,7 +314,7 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             result.file_descriptors[result.file_descriptor_count++] = fd;
         }
     }
-    if (have_instance && !valid_instance(result.instance))
+    if (have_instance && !profile::valid_instance(result.instance))
         return invalid("--instance is invalid");
     if (!mock) {
         if (!result.device_selector.empty() && result.file_descriptor_count != 0U)
