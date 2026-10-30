@@ -547,7 +547,13 @@ if(ASICEN_BUILD_TESTS AND ASICEN_ENABLE_LIBUSB)
     add_test(NAME asicen-libusb-acquisition-tests COMMAND asicen-libusb-acquisition-tests)
 endif()
 
-if(ASICEN_BUILD_TESTS AND TARGET host_card_t1_tests)
+if(ASICEN_BUILD_TESTS AND DTV_USERLAND_BUILD_HOST_CARD_T1)
+    if(NOT TARGET host_card_t1_tests)
+        add_executable(host_card_t1_tests
+            ${dtv_userland_core_SOURCE_DIR}/tests/host_card_t1_tests.cpp)
+        target_link_libraries(host_card_t1_tests PRIVATE dtv::host_card_t1)
+        asicen_enable_project_warnings(host_card_t1_tests)
+    endif()
     enable_testing()
     add_test(NAME asicen-core-host-card-t1-tests COMMAND host_card_t1_tests)
 

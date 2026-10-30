@@ -8,6 +8,7 @@
 #include "asicend_identity_lease.h"
 #if defined(_WIN32)
 #include "dtv/userland/host_facade/windows_stdin.h"
+#include "dtv/userland/host_card_t1/platform_sleep.h"
 #endif
 #include "asicen/card_only_service.h"
 #include "asicen/libusb_hardware_backend.h"
@@ -43,7 +44,7 @@ namespace loader_diag = asicen::cli::loader_diagnostic;
 void sleep_ms(std::uint32_t milliseconds) noexcept
 {
 #if defined(_WIN32)
-    (void)px4::userland::platform::sleep_milliseconds(milliseconds);
+    (void)dtv::userland::host_card_t1::platform::sleep_milliseconds(milliseconds);
 #else
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
 #endif
