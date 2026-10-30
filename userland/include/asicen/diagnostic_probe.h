@@ -30,7 +30,6 @@ struct DiagnosticProbeArguments final {
     std::uint8_t slot = 0U;
     std::uint32_t symbol_rate = 0U;
     std::uint32_t rolloff = 0U;
-    std::uint32_t lnb_voltage = 0U;
     bool terrestrial = false;
     bool satellite = false;
     bool detect = false;

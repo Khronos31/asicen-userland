@@ -224,9 +224,7 @@ int main()
                     "--symbol-rate",
                     "28860",
                     "--rolloff",
-                    "4",
-                    "--lnb-voltage",
-                    "0"};
+                    "4"};
     check(parse(DiagnosticProbeRole::transport, satellite), "satellite TS complete contract");
     for (const char* option : {"--base", "--firmware", "--device", "--receiver", "--frequency-khz",
                                "--seconds", "--output"}) {
@@ -234,11 +232,17 @@ int main()
         repeated.insert(repeated.end(), {option, "1"});
         check(!parse(DiagnosticProbeRole::transport, repeated), "duplicate TS option rejected");
     }
-    for (const char* option : {"--slot", "--symbol-rate", "--rolloff", "--lnb-voltage"}) {
+    for (const char* option : {"--slot", "--symbol-rate", "--rolloff"}) {
         auto repeated = satellite;
         repeated.insert(repeated.end(), {option, "0"});
         check(!parse(DiagnosticProbeRole::transport, repeated),
               "duplicate satellite option rejected");
+    }
+    for (const char* voltage : {"0", "15"}) {
+        auto removed = satellite;
+        removed.insert(removed.end(), {"--lnb-voltage", voltage});
+        check(!parse(DiagnosticProbeRole::transport, removed),
+              "removed LNB CLI option rejected");
     }
     for (const char* value : {"0", "31", "-1", "+1", "0x1", " 1", "1x", "4294967296"}) {
         auto invalid = terrestrial;

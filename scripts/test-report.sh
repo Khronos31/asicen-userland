@@ -92,7 +92,7 @@ if name == "dmesg":
     captures = [call for call in calls if call[0] == "asicen-ts"]
     assert len(captures) == 2
     assert [call[call.index("--receiver") + 1] for call in captures] == ["1", "0"]
-    assert captures[1][captures[1].index("--lnb-voltage") + 1] == "0"
+    assert "--lnb-voltage" not in captures[1]
     output, calls = run(dict(paired, ASICEN_REPORT_TUNE="0"))
     assert not any(call[0] == "asicen-ts" for call in calls)
     output, calls = run(dict(ASICEN_REPORT_USB_PATH="1-2.1", ASICEN_REPORT_MODEL="s3u"))
