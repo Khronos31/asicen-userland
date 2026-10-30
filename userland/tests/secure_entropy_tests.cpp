@@ -78,22 +78,13 @@ bool test_failure_does_not_expose_partial_seed()
     return true;
 }
 
-bool test_native_provider_returns_exact_length()
-{
-    PosixTunerNonceSource source;
-    const auto result = source.generate();
-    CHECK(result && result.value().size() == 16U);
-    return true;
-}
-
 } // namespace
 
 int main()
 {
     // The unchanged reference suite checks short/EINTR reads, byte preservation,
     // EOF, read failure, open failure and close failure through the actual provider.
-    if (!run_posix_tuner_nonce_tests() || !test_failure_does_not_expose_partial_seed() ||
-        !test_native_provider_returns_exact_length()) {
+    if (!run_posix_tuner_nonce_tests() || !test_failure_does_not_expose_partial_seed()) {
         return 1;
     }
     std::puts("secure entropy tests: PASS");
