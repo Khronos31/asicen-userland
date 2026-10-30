@@ -213,22 +213,8 @@ target_link_libraries(asicen_portable_core PUBLIC Threads::Threads)
 asicen_enable_project_warnings(asicen_portable_core)
 set_target_properties(asicen_portable_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(asicen_core_card_session STATIC
-    ${ASICEN_PX4_ROOT}/src/card.cpp)
-if(WIN32)
-    target_sources(asicen_core_card_session PRIVATE
-        ${ASICEN_PX4_ROOT}/src/windows/windows_sleep.cpp)
-endif()
-target_include_directories(asicen_core_card_session BEFORE PUBLIC
-    userland/include
-    ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
-    ${dtv_userland_core_SOURCE_DIR}/include
-    ${ASICEN_PX4_ROOT}/include)
-target_include_directories(asicen_core_card_session PRIVATE ${ASICEN_PX4_ROOT}/src)
-target_compile_definitions(asicen_core_card_session PRIVATE
-    ASICEN_USE_DTV_CORE=1 ASICEN_PROFILE_ASICEN=1)
-target_link_libraries(asicen_core_card_session PUBLIC dtv::core Threads::Threads)
-asicen_enable_project_warnings(asicen_core_card_session)
+add_library(asicen_core_card_session INTERFACE)
+target_link_libraries(asicen_core_card_session INTERFACE dtv::host_card_t1)
 
 # Keep synthetic backends out of production archives and build targets.
 if(ASICEN_BUILD_TESTS OR ASICEN_BUILD_TOOLS)
@@ -559,6 +545,11 @@ if(ASICEN_BUILD_TESTS AND ASICEN_ENABLE_LIBUSB)
     target_link_libraries(asicen-libusb-acquisition-tests PRIVATE asicen_libusb)
     asicen_enable_project_warnings(asicen-libusb-acquisition-tests)
     add_test(NAME asicen-libusb-acquisition-tests COMMAND asicen-libusb-acquisition-tests)
+endif()
+
+if(ASICEN_BUILD_TESTS AND TARGET host_card_t1_tests)
+    enable_testing()
+    add_test(NAME asicen-core-host-card-t1-tests COMMAND host_card_t1_tests)
 endif()
 
 if(ASICEN_BUILD_TESTS AND NOT WIN32)
@@ -945,9 +936,11 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         userland/tests/card_mailbox_hardware_tests.cpp
         userland/src/card_mailbox_hardware.cpp)
     target_include_directories(asicen-card-mailbox-hardware-tests PRIVATE
-        userland/include ${ASICEN_PX4_ROOT}/include)
+        userland/include ${ASICEN_PX4_ROOT}/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
     target_link_libraries(asicen-card-mailbox-hardware-tests PRIVATE
-        asicen_core asicen_px4_mock Threads::Threads)
+        asicen_core asicen_px4_mock asicen_core_card_session Threads::Threads)
     asicen_enable_project_warnings(asicen-card-mailbox-hardware-tests)
     add_test(NAME asicen-card-mailbox-hardware-tests
         COMMAND asicen-card-mailbox-hardware-tests)

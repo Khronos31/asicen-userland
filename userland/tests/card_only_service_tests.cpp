@@ -293,7 +293,8 @@ bool test_protocol_timeouts_survive_presence_poll()
     transport.queue(t1_frame(0xe1U, {251U}));
     transport.queue(t1_frame(0x00U, {0x90U, 0x00U}));
     asicen::W3u3CardMailboxHardware mailbox(transport);
-    CardSession raw_session(mailbox, mailbox);
+    asicen::W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession raw_session(card_hardware, card_hardware);
     FixtureOperationGuard guard;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, nullptr);
     asicen::W3u3CardProtocolSession session(raw_session, guard, nullptr);
@@ -409,7 +410,8 @@ bool test_card_service_through_core_ipc()
     transport.queue(t1_frame(0x00U, reply));
 
     asicen::W3u3CardMailboxHardware mailbox(transport);
-    CardSession raw_session(mailbox, mailbox);
+    asicen::W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession raw_session(card_hardware, card_hardware);
     FixtureOperationGuard guard;
     volatile std::sig_atomic_t stop = 0;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, &stop);
@@ -619,7 +621,8 @@ bool test_card_operation_entry_preserves_error_class()
 {
     MailboxFixture transport;
     asicen::W3u3CardMailboxHardware mailbox(transport);
-    CardSession raw_session(mailbox, mailbox);
+    asicen::W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession raw_session(card_hardware, card_hardware);
     FixtureOperationGuard guard;
     asicen::W3u3CardServiceBackend backend(mailbox, guard, nullptr);
     asicen::W3u3CardProtocolSession session(raw_session, guard, nullptr);

@@ -920,19 +920,27 @@ CardProbeSummary LibusbW3u3Hardware::probe_card(const CardProbeRequest& request,
     deadline_active_ = true;
 
     W3u3CardMailboxHardware mailbox(*this, profile_->model_id);
-    px4::userland::CardSession session(mailbox, mailbox);
+    W3u3CoreCardHardwareAdapter card_hardware(mailbox);
+    dtv::userland::host_card_t1::CardSession session(card_hardware, card_hardware);
     if (request.mode == CardProbeMode::detect) {
         const auto detected = mailbox.detect_card();
         summary.error = detected ? Error::OK : detected.error();
         summary.detected = detected && detected.value();
     } else {
-        const auto atr = px4::userland::reset_and_read_card_atr(mailbox, mailbox);
+        const auto atr = dtv::userland::host_card_t1::reset_and_read_card_atr(
+            card_hardware, card_hardware);
         if (!atr) {
             summary.error = atr.error();
         } else {
             summary.detected = true;
             summary.atr_valid = true;
-            summary.atr = atr.value();
+            summary.atr.bytes = atr.value().bytes;
+            summary.atr.length = atr.value().length;
+            summary.atr.baud_rate =
+                static_cast<px4::userland::It930xCardBaudRate>(atr.value().baud_rate);
+            summary.atr.ifsc = atr.value().ifsc;
+            summary.atr.edc = static_cast<px4::userland::CardEdc>(atr.value().edc);
+            summary.atr.block_timeout_ms = atr.value().block_timeout_ms;
             summary.atr_length = atr.value().length;
             summary.error = Error::OK;
             if (request.mode == CardProbeMode::apdu) {

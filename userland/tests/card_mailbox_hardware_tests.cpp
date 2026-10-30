@@ -363,22 +363,29 @@ bool test_card_session_transmit_through_mailbox()
     transport.scripted_frames.push_back(make_t1_frame(0x00U, response_data));
 
     asicen::W3u3CardMailboxHardware hardware(transport);
-    px4::userland::CardSession session(hardware, hardware);
-    const auto initialized = session.initialize();
+    asicen::W3u3CoreCardHardwareAdapter card_hardware(hardware);
+    dtv::userland::host_card_t1::CardSession session(card_hardware, card_hardware);
+    const auto atr = dtv::userland::host_card_t1::reset_and_read_card_atr(
+        card_hardware, card_hardware);
+    const auto initialized = atr ? session.initialize_with_atr(atr.value())
+                                 : dtv::userland::Result<void>::failure(atr.error());
     if (!initialized) {
         std::fprintf(stderr, "CardSession init error=%s calls=%u pending=%zu\n",
-                     px4::userland::error_string(initialized.error()), transport.calls,
+                     dtv::userland::error_string(initialized.error()), transport.calls,
                      transport.scripted_frames.size());
     }
-    if (!check(initialized && session.atr().length == 13U,
-               "upstream CardSession initializes through mailbox")) {
+    if (!check(atr && initialized && session.atr().length == 13U &&
+                   session.atr().baud_rate ==
+                       dtv::userland::host_card_t1::CardBaudRate::baud_19200 &&
+                   session.atr().edc == dtv::userland::host_card_t1::CardEdc::lrc,
+               "probe ATR initializes Core CardSession through product mailbox adapter")) {
         return false;
     }
     const std::array<std::uint8_t, 5> apdu{{0x90U, 0x30U, 0U, 0U, 0U}};
     std::array<std::uint8_t, 80> response{};
     const auto transmitted =
-        session.transmit(px4::userland::ByteView{apdu.data(), apdu.size()},
-                         px4::userland::MutableByteView{response.data(), response.size()});
+        session.transmit(dtv::userland::ByteView{apdu.data(), apdu.size()},
+                         dtv::userland::MutableByteView{response.data(), response.size()});
     if (!check(transmitted && transmitted.value() == 61U,
                "initial-settings APDU crosses mailbox T1 path")) {
         return false;
