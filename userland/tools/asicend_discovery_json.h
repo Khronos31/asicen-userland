@@ -4,6 +4,7 @@
 
 #include "asicen/device_profile.h"
 #include "asicen/enclosure_grouping.h"
+#include "asicend_receiver_records.h"
 #include "px4/ipc.h"
 
 #include <dtv/userland/discovery_json.h>
@@ -159,8 +160,8 @@ void append_enclosure(EnclosureBuild& build,
         device.location = location(observation);
         if (profile != nullptr && observed_profile == profile && !is_loader(observation) &&
             (profile->expected_runtime_functions == 1U || groupable(observation))) {
-            const auto records = px4::userland::ipc::receiver_records(
-                profile->enclosure_receiver_count, profile->combined_isdb_ts);
+            const auto records = receiver_table::receiver_records(
+                profile->enclosure_receiver_count);
             if (records) {
                 receiver_offsets.push_back(build.receivers.back().size());
                 for (std::size_t i = 0U; i < profile->enclosure_receiver_count; ++i) {
