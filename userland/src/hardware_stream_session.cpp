@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicen/hardware_stream_session.h"
-#include "px4/ts_continuity.h"
+#include "dtv/userland/host_ts_continuity/ts_continuity.h"
 
 #include <algorithm>
 #include <cstring>
@@ -20,6 +20,8 @@ using px4::userland::TunerHzProgramming;
 using px4::userland::TunerStrictProfile;
 using px4::userland::TunerStreamTerminal;
 using px4::userland::ipc::System;
+using dtv::userland::host_ts_continuity::TsContinuityChecker;
+using dtv::userland::host_ts_continuity::TsContinuityKind;
 
 bool same_attachment(const TunerAttachment& left,
                      const TunerAttachment& right) noexcept
@@ -70,7 +72,7 @@ HardwareStreamService::HardwareStreamService(px4::userland::TunerServiceBackend&
                                 : queue_capacity.bytes),
       pinned_receiver_(receiver), dispatcher_(false),
       queue_(new (std::nothrow) std::uint8_t[queue_capacity_bytes_]),
-      continuity_(new (std::nothrow) px4::userland::TsContinuityChecker),
+      continuity_(new (std::nothrow) TsContinuityChecker),
       thread_launcher_(thread_launcher)
 {
 }
@@ -863,8 +865,8 @@ void HardwareStreamService::observe_packet_locked(const std::uint8_t* packet) no
     if ((packet[1U] & 0x80U) != 0U) {
         ++counters_.tei_packets;
     }
-    if (continuity_->observe(packet, px4::userland::TsContinuityChecker::kPacketSize).kind ==
-        px4::userland::TsContinuityKind::error) {
+    if (continuity_->observe(packet, TsContinuityChecker::kPacketSize).kind ==
+        TsContinuityKind::error) {
         ++counters_.continuity_errors;
     }
     // Observation only: no filtering or IT930x PSB startup-drop heuristic.

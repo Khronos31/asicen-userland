@@ -262,7 +262,8 @@ target_include_directories(asicen_hardware_session BEFORE PUBLIC
     ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
     ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
     ${dtv_userland_core_SOURCE_DIR}/include)
-target_link_libraries(asicen_hardware_session PUBLIC dtv::host_listener_context Threads::Threads)
+target_link_libraries(asicen_hardware_session PUBLIC
+    dtv::host_listener_context dtv::host_ts_continuity Threads::Threads)
 asicen_enable_project_warnings(asicen_hardware_session)
 
 add_library(asicen_core STATIC
@@ -1122,9 +1123,9 @@ endif()
 
 if(ASICEN_BUILD_TESTS)
     enable_testing()
-    # The upstream header-only checker and its unchanged portable regression fixture.
+    # Keep the continuity regression fixture on the Core checker implementation.
     add_executable(asicen-ts-continuity-tests ${ASICEN_PX4_ROOT}/tests/ts_continuity_tests.cpp)
-    target_include_directories(asicen-ts-continuity-tests PRIVATE ${ASICEN_PX4_ROOT}/include)
+    target_link_libraries(asicen-ts-continuity-tests PRIVATE dtv::host_ts_continuity)
     asicen_enable_project_warnings(asicen-ts-continuity-tests)
     add_test(NAME asicen-ts-continuity-tests COMMAND asicen-ts-continuity-tests)
 
