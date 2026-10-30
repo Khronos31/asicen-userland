@@ -2,7 +2,6 @@
 #include "asicen/device_profile.h"
 #include "asicen/px4_mock_backend.h"
 #include "px4/ipc.h"
-#include "px4_ts_core.h"
 
 #include <array>
 #include <charconv>
@@ -15,7 +14,6 @@
 
 namespace {
 using namespace px4::userland;
-using namespace px4::userland::cli;
 using namespace px4::userland::ipc;
 
 bool check(bool ok, const char* message)
@@ -33,74 +31,6 @@ bool check(bool ok, const char* message)
             return false;                                                                          \
         }                                                                                          \
     } while (false)
-
-Px4TsArguments parse(const std::vector<std::string>& options)
-{
-    std::vector<const char*> args{"asicen-ts"};
-    for (const auto& option : options) {
-        args.push_back(option.c_str());
-    }
-    return parse_px4_ts_arguments(static_cast<int>(args.size()), args.data());
-}
-
-bool cli_matches_reference_lnb_contract()
-{
-    const std::vector<std::vector<std::string>> satellite_inputs{
-        {"--instance", "lnb-test", "--receiver", "0", "--channel", "BS01_0"},
-        {"--instance", "lnb-test", "--receiver", "0", "--channel", "CS2"},
-        {"--instance", "lnb-test", "--receiver", "0", "--system", "isdb-s", "--frequency-khz",
-         "1049480", "--slot", "0"},
-        {"--instance", "lnb-test", "--receiver", "2", "--system", "isdb-s", "--frequency-khz",
-         "1049480", "--stream-id", "42"},
-    };
-    for (const auto& input : satellite_inputs) {
-        const auto defaults = parse(input);
-        CHECK(defaults.valid && defaults.lnb_voltage == 0U && defaults.tune_timeout_ms == 10000U &&
-                  defaults.bandwidth_hz == 0U,
-              "satellite defaults retain upstream OFF and timeout contract");
-        for (const auto* value : {"0", "15", "00", "015"}) {
-            auto options = input;
-            options.insert(options.end(), {"--lnb-voltage", value});
-            const auto parsed = parse(options);
-            unsigned int voltage = 0U;
-            const auto converted = std::from_chars(value, value + std::strlen(value), voltage);
-            CHECK(converted.ec == std::errc{} && converted.ptr == value + std::strlen(value) &&
-                      parsed.valid && parsed.lnb_voltage == voltage,
-                  "decimal 0/15 requests preserve upstream parsing");
-        }
-        for (const auto* value : {"1", "13", "18", "255", "256", "-1", "+15", "15V", "on", "off",
-                                  "15.0", "", " 15", "15 "}) {
-            auto options = input;
-            options.insert(options.end(), {"--lnb-voltage", value});
-            CHECK(!parse(options).valid, "unsupported or malformed voltage is rejected");
-        }
-        auto missing = input;
-        missing.push_back("--lnb-voltage");
-        CHECK(!parse(missing).valid, "missing LNB value is rejected");
-        auto duplicate = input;
-        duplicate.insert(duplicate.end(), {"--lnb-voltage", "0", "--lnb-voltage", "15"});
-        CHECK(!parse(duplicate).valid, "duplicate LNB option is rejected");
-        for (const auto* invented : {"--lnb", "--lnb-power", "--allow-lnb-power"}) {
-            auto options = input;
-            options.insert(options.end(), {invented, "15"});
-            CHECK(!parse(options).valid, "unrelated LNB aliases are not introduced");
-        }
-    }
-    const std::vector<std::string> terrestrial{"--instance", "lnb-test",  "--receiver",
-                                               "1",          "--channel", "T27"};
-    CHECK(parse(terrestrial).valid && parse(terrestrial).lnb_voltage == 0U,
-          "terrestrial default remains valid and OFF");
-    for (const auto* value : {"0", "15"}) {
-        auto options = terrestrial;
-        options.insert(options.end(), {"--lnb-voltage", value});
-        CHECK(!parse(options).valid, "even explicit zero is a satellite-only CLI field upstream");
-    }
-    CHECK(px4_ts_exit_status(Error::UNSUPPORTED, Px4TsFailureKind::ipc) == 3 &&
-              px4_ts_exit_status(Error::USB_IO, Px4TsFailureKind::ipc) == 7 &&
-              px4_ts_exit_status(Error::DISCONNECTED, Px4TsFailureKind::ipc) == 7,
-          "unsupported and transport failure status remain honest");
-    return true;
-}
 
 class Nonce final : public TunerNonceSource {
 public:
@@ -233,15 +163,12 @@ bool service_and_ipc_preserve_lnb_state()
 
 int main()
 {
-    if (!cli_matches_reference_lnb_contract()) {
-        return 1;
-    }
     if (!mock_transactions_and_model_boundaries()) {
         return 1;
     }
     if (!service_and_ipc_preserve_lnb_state()) {
         return 1;
     }
-    std::cout << "product LNB CLI/IPC/mock contract tests passed (synthetic only)\n";
+    std::cout << "product LNB IPC/mock contract tests passed (synthetic only)\n";
     return 0;
 }

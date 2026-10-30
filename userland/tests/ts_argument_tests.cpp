@@ -55,6 +55,10 @@ bool test_product_arguments()
                   "--channel", "T27", "--frequency-khz", "557142"}).valid);
     CHECK(!parse({"asicen-ts", "--instance", "usb1-2.1", "--receiver", "1",
                   "--channel", "T27", "--stream-id", "42"}).valid);
+    for (const char* voltage : {"0", "15"}) {
+        CHECK(!parse({"asicen-ts", "--instance", "usb1-2.1", "--receiver", "0",
+                      "--channel", "BS01_0", "--lnb-voltage", voltage}).valid);
+    }
 
     return true;
 }

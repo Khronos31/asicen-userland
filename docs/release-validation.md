@@ -433,8 +433,8 @@ PY
     for receiver in "$R1" "$R2" "$R3" "$R4"; do grep -F "receiver=$receiver" "$LOG/list.txt" >/dev/null || { echo "receiver $receiver absent from saved list" >&2; exit 1; }; done
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R1" --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-1.ts" > "$LOG/terrestrial-1.out" 2> "$LOG/terrestrial-1.err" & P1=$!
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R2" --channel T30 --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-2.ts" > "$LOG/terrestrial-2.out" 2> "$LOG/terrestrial-2.err" & P2=$!
-    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-1.ts" > "$LOG/satellite-1.out" 2> "$LOG/satellite-1.err" & P3=$!
-    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-2.ts" > "$LOG/satellite-2.out" 2> "$LOG/satellite-2.err" & P4=$!
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R3" --channel BS01_0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-1.ts" > "$LOG/satellite-1.out" 2> "$LOG/satellite-1.err" & P3=$!
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R4" --channel BS15_0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite-2.ts" > "$LOG/satellite-2.out" 2> "$LOG/satellite-2.err" & P4=$!
     FAIL=0
     for entry in "P1:terrestrial-1" "P2:terrestrial-2" "P3:satellite-1" "P4:satellite-2"; do pidvar=${entry%%:*}; name=${entry#*:}; eval "pid=\$$pidvar"; if wait "$pid"; then RC=0; else RC=$?; FAIL=1; fi; printf '%s\n' "$RC" > "$LOG/$name.rc"; unset "$pidvar"; done
     test "$FAIL" -eq 0 || { echo 'T03 client failure; inspect every client log and record incomplete' >&2; exit 1; }
@@ -446,12 +446,12 @@ PY
 #### PX-S3U2: 地上波1 + 衛星0
 
 - **適用対象/頻度:** PX-S3U2の初回および毎release。software経路の確認と実機での同時受信受入は別々に記録する。
-- **準備:** READMEの機種表、`--list-json`、同じdaemonの`asicenctl list`でreceiver 1が地上波、receiver 0が衛星であることを保存する。候補の`asicend`、daemon専用`--runtime-dir`、`--instance`、現地BUS-PORT、地上波・衛星各1つの確認済みchannel、別TS/log出力を準備する。`CAPTURE_SECONDS`は正の有限値（例: `60`）、`REACQUIRE_SECONDS`は正の有限値（例: `10`）にする。衛星clientには`--lnb-voltage 0`を指定し、給電を要求しない。
+- **準備:** READMEの機種表、`--list-json`、同じdaemonの`asicenctl list`でreceiver 1が地上波、receiver 0が衛星であることを保存する。候補の`asicend`、daemon専用`--runtime-dir`、`--instance`、現地BUS-PORT、地上波・衛星各1つの確認済みchannel、別TS/log出力を準備する。`CAPTURE_SECONDS`は正の有限値（例: `60`）、`REACQUIRE_SECONDS`は正の有限値（例: `10`）にする。衛星clientは既定のTUNE動作で受信する。
 - **実操作/利用者への依頼:** daemonを`--device "usb:$PORT"`、`--instance "$INSTANCE"`、`--runtime-dir "$RT"`でreadyにし、`asicenctl --device "usb:$PORT" --instance "$INSTANCE" --runtime-dir "$RT" list`の結果を保存する。`ID="usb:$PORT"`を設定して、次の2 clientを同じdaemonへ続けて起動し、各PIDを保存する。
 
     ```sh
     "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver 1 --channel "$TERRESTRIAL_CHANNEL" --time "$CAPTURE_SECONDS" --output "$LOG/terrestrial-first.ts" > "$LOG/terrestrial-first.out" 2> "$LOG/terrestrial-first.err" & T_PID=$!
-    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver 0 --channel "$SATELLITE_CHANNEL" --lnb-voltage 0 --time "$CAPTURE_SECONDS" --output "$LOG/satellite.ts" > "$LOG/satellite.out" 2> "$LOG/satellite.err" & S_PID=$!
+    "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver 0 --channel "$SATELLITE_CHANNEL" --time "$CAPTURE_SECONDS" --output "$LOG/satellite.ts" > "$LOG/satellite.out" 2> "$LOG/satellite.err" & S_PID=$!
     ```
 
   両方のclientが動作しTS出力が進んでいること、衛星clientの実測経過時間と`CAPTURE_SECONDS`から見積もった残り時間が`REACQUIRE_SECONDS`より長いことを確認して記録する。再取得時間を収められない場合は地上波clientを止めず、そのrunを未完了とする。条件を満たした場合は地上波clientだけに`kill -INT "$T_PID"`を送り、`wait "$T_PID"`の実終了値を保存する。停止処理後にも衛星clientのPID生存と、再取得時間を収められる残り時間を確認する。どちらかを満たさなければ再取得を始めず、そのrunを未完了とする。地上波clientを別TS出力`terrestrial-reacquired.ts`で同じreceiver/channelへ再起動し、停止から再取得完了まで衛星TSのbyte数が進み続けることを確認する。
@@ -604,8 +604,8 @@ if ($parserRc -ne 0) { throw "TS parser failed: $parserRc" }
 
 - **適用対象/頻度:** 必要時。給電対応profileだけ実測。
 - **準備:** 対応profile、meter、独立給電の状態を確認。
-- **実操作/利用者への依頼:** softwareで給電対応するW3U2/W3U3/V2は既存手順どおりmeterで実測する。PX-S3U/S3U2は公式資料に物理給電能力が記載される一方、softwareの制御経路が未解明である。現行CLIの`--lnb-voltage 15`拒否を記録するが、GPIO/端子電圧試験や非対応機種判定へ読み替えない。新しい制御経路を実装または根拠ある非対応profileを確定するまでは、物理切替試験を合格扱いにしない。
-- **期待値/終了値:** 対応機はmeter実測を記録する。S3U/S3U2では要求`15`の`UNSUPPORTED`/exit 3は現行software挙動の記録に限り、物理非対応・端子0V・T11合格の根拠にしない。物理給電とsoftware制御経路は未確認として残す。
+- **実操作/利用者への依頼:** softwareで給電対応するW3U2/W3U3/V2は既存の `asicenctl lnb-on/off` 手順どおりmeterで実測する。PX-S3U/S3U2は公式資料に物理給電能力が記載される一方、softwareの制御経路が未解明である。`asicen-ts` の旧`--lnb-voltage`引数は廃止済みであり、電圧要求の試験に使わない。GPIO/端子電圧試験や非対応機種判定へ読み替えず、物理切替試験は根拠が整うまで未確認として残す。
+- **期待値/終了値:** 対応機はmeter実測を記録する。S3U/S3U2での `asicenctl lnb-on` / `lnb-off` の `UNSUPPORTED` / exit 3 は現行software挙動の記録に限り、物理非対応・端子0V・T11合格の根拠にしない。物理給電とsoftware制御経路は未確認として残す。
 - **停止/cleanup:** daemonを通常停止し、対応機は0Vと通常配線復帰を確認する。S3U/S3U2では給電切替を試さず、未確認状態を記録する。
 - **記録:** model/profile、command/response/exit、meter値と条件、cleanup。S3U/S3U2の拒否応答と、未確認の物理電圧・software制御経路を分けて記録する。対応機試験やmockを代替合格にしない。
 
@@ -777,7 +777,7 @@ grep -F "receiver=$RECEIVER" "$LOG/list.txt" >/dev/null || { echo 'receiver abse
 echo 0 > "$LOG/ts.rc"
 ```
 
-statusがready、listにreceiverが存在すること、client終了値0、TSが188-byte packet列として同期すること、daemonのpacket/sync/TEI/continuity統計を確認する。変更に関係するchannel/receiverを受信し、チャンネル名・周波数・TSID等は現地channel planから列挙してログへ実値を記録する。衛星は実機のreceiver割当とREADMEに従い `--channel BS01_0 --lnb-voltage 0` を使う。出力非空だけをpassとせず、README/SPECのTS基準で判定し、失敗試行を消さない。
+statusがready、listにreceiverが存在すること、client終了値0、TSが188-byte packet列として同期すること、daemonのpacket/sync/TEI/continuity統計を確認する。変更に関係するchannel/receiverを受信し、チャンネル名・周波数・TSID等は現地channel planから列挙してログへ実値を記録する。衛星は実機のreceiver割当とREADMEに従い `--channel BS01_0` を使う。出力非空だけをpassとせず、README/SPECのTS基準で判定し、失敗試行を消さない。
 
 受信停止後、同じdaemon/runtimeで同じ受信を再取得し、normal exitと再取得成功を確認する。機種差があるので使うreceiverとT/Sの排他条件を記録する。
 
@@ -1518,14 +1518,13 @@ $R1 = '<receiver-1>'; $R2 = '<receiver-2>'; $R3 = '<receiver-3>'; $R4 = '<receiv
 $CHANNEL_PLAN = @('<free-channel-1>','<free-channel-2>')
 $CAPTURE_SECONDS = '30'
 $jobs = @(
-  [pscustomobject]@{ Receiver=$R1; Channel='T27'; Output='r1.ts'; Lnb=$false },
-  [pscustomobject]@{ Receiver=$R2; Channel='T30'; Output='r2.ts'; Lnb=$false },
-  [pscustomobject]@{ Receiver=$R3; Channel='BS01_0'; Output='r3.ts'; Lnb=$true },
-  [pscustomobject]@{ Receiver=$R4; Channel='BS15_0'; Output='r4.ts'; Lnb=$true }
+  [pscustomobject]@{ Receiver=$R1; Channel='T27'; Output='r1.ts' },
+  [pscustomobject]@{ Receiver=$R2; Channel='T30'; Output='r2.ts' },
+  [pscustomobject]@{ Receiver=$R3; Channel='BS01_0'; Output='r3.ts' },
+  [pscustomobject]@{ Receiver=$R4; Channel='BS15_0'; Output='r4.ts' }
 )
 $clients = foreach ($job in $jobs) {
   $captureArgs = @('--instance','rc','--runtime-dir',$RT,'--receiver',$job.Receiver,'--channel',$job.Channel,'--time',$CAPTURE_SECONDS,'--output',(Join-Path $LOG $job.Output))
-  if ($job.Lnb) { $captureArgs += @('--lnb-voltage','0') }
   Start-Process -FilePath $B -ArgumentList $captureArgs -PassThru -NoNewWindow
 }
 $CLIENT_FINISH_LIMIT_SECONDS = 90
@@ -1868,7 +1867,7 @@ finally {
 
 ## 5. LNB・連続受信・cleanup
 
-PX-W3U2/W3U3/V2などREADMEで15V対応が明示された機種のみ、壁設備と他給電源を分離し、衛星端子へテスターを接続する。停止状態から `--allow-lnb-power` を付けてdaemonを起動し、`asicenctl --runtime-dir "$RT" --instance rc lnb-on` 後に実測15V、`asicenctl --runtime-dir "$RT" --instance rc lnb-off` 後に要求0と実測0Vを確認する。独立要求と受信部 `--lnb-voltage` は別の状態として記録する。PX-S3U/S3U2の現行software拒否は物理非対応や端子電圧の証拠にしない。物理給電能力は公式資料に記載される一方で制御経路が未解明のため、T11では物理試験を合格扱いにせず未確認として残す。daemon停止後は給電対応機で0Vと通常配線への復帰を確認する。
+PX-W3U2/W3U3/V2などREADMEで15V対応が明示された機種のみ、壁設備と他給電源を分離し、衛星端子へテスターを接続する。停止状態から `--allow-lnb-power` を付けてdaemonを起動し、`asicenctl --runtime-dir "$RT" --instance rc lnb-on` 後に実測15V、`asicenctl --runtime-dir "$RT" --instance rc lnb-off` 後に要求0と実測0Vを確認する。LNB on/offはTS選局とは独立したctl操作として記録する。PX-S3U/S3U2の `asicenctl` が `UNSUPPORTED` を返しても、物理非対応や端子電圧の証拠にしない。物理給電能力は公式資料に記載される一方で制御経路が未解明のため、T11では物理試験を合格扱いにせず未確認として残す。daemon停止後は給電対応機で0Vと通常配線への復帰を確認する。
 
 Soakでは代表Linux x86_64機の2時間連続受信を実施する。開始・定期・終了時にTS/counters、process/FD/RSS、channel、終了値を記録する。FD/RSSの数値合否閾値は設けない。最終観測まで安定化しない持続増加を示し、外部要因を特定できない場合は判定保留とし、公開しない。終了後はclient/daemonを正常停止し、status/process/runtime socketを確認して後始末する。候補SHA/archive hash、host/OS/arch/model、firmware、channel、操作、実コマンド、期待/実測、エラー、未確認事項をrelease recordへ保存する。全gateを終えた後にだけ結果文書をcommitし、code/build inputsが候補と同一であることを確認する。正式tag/releaseは別途の承認対象。
 

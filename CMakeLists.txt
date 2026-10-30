@@ -706,11 +706,9 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     add_test(NAME asicen-model-ipc-tests COMMAND asicen-model-ipc-tests)
 
     add_executable(asicen-product-lnb-tests
-        userland/tests/product_lnb_tests.cpp
-        ${ASICEN_PX4_ROOT}/tools/px4_ts_core.cpp)
+        userland/tests/product_lnb_tests.cpp)
     target_include_directories(asicen-product-lnb-tests BEFORE PRIVATE
         ${ASICEN_PX4_ROOT}/include ${ASICEN_PX4_ROOT}/src userland/include)
-    target_include_directories(asicen-product-lnb-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
     target_compile_definitions(asicen-product-lnb-tests PRIVATE ASICEN_PRODUCT_CLI=1)
     target_link_libraries(asicen-product-lnb-tests PRIVATE
         asicen_core asicen_portable_core asicen_px4_mock)

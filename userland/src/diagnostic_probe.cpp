@@ -204,7 +204,7 @@ void usage(DiagnosticProbeRole role, const char* name, std::FILE* output)
         std::fprintf(output, "--tune-terrestrial\n");
         if (role == DiagnosticProbeRole::transport) {
             std::fprintf(output, "satellite mode: --tune-satellite --slot 0..7 --symbol-rate 28860 "
-                                 "--rolloff 4 --lnb-voltage 0\n");
+                                 "--rolloff 4\n");
         }
     }
     std::fprintf(
@@ -715,7 +715,6 @@ DiagnosticProbeArguments parse_ts_probe_arguments(int argc,
     bool have_slot = false;
     bool have_symbol_rate = false;
     bool have_rolloff = false;
-    bool have_lnb_voltage = false;
 
     for (int index = 1; index < argc; ++index) {
         if (argv[index] == nullptr) return invalid("null argument");
@@ -744,8 +743,7 @@ DiagnosticProbeArguments parse_ts_probe_arguments(int argc,
                             option == "--device" || option == "--receiver" ||
                             option == "--frequency-khz" || option == "--seconds" ||
                             option == "--output" || option == "--slot" ||
-                            option == "--symbol-rate" || option == "--rolloff" ||
-                            option == "--lnb-voltage";
+                            option == "--symbol-rate" || option == "--rolloff";
         if (!valued) return invalid("unknown argument");
 
         std::string_view value;
@@ -831,13 +829,6 @@ DiagnosticProbeArguments parse_ts_probe_arguments(int argc,
             if (!parse_u32(value, parsed)) return invalid("--rolloff is invalid");
             have_rolloff = true;
             result.rolloff = parsed;
-        } else if (option == "--lnb-voltage") {
-            if (have_lnb_voltage) return invalid("duplicate --lnb-voltage");
-            if (!take_value(index, argc, argv, value)) return invalid("--lnb-voltage requires a value");
-            std::uint32_t parsed = 0U;
-            if (!parse_u32(value, parsed)) return invalid("--lnb-voltage is invalid");
-            have_lnb_voltage = true;
-            result.lnb_voltage = parsed;
         } else {
             return invalid("unknown argument");
         }
@@ -853,20 +844,19 @@ DiagnosticProbeArguments parse_ts_probe_arguments(int argc,
     if (!have_output || result.output.empty()) return invalid("--output is required");
     if (!have_tune) return invalid("exactly one tune mode is required");
     if (result.terrestrial) {
-        if (have_slot || have_symbol_rate || have_rolloff || have_lnb_voltage)
+        if (have_slot || have_symbol_rate || have_rolloff)
             return invalid("satellite-only options require --tune-satellite");
         if (result.frequency_khz < 40000U || result.frequency_khz > 1002000U)
             return invalid("--frequency-khz is outside 40000..1002000");
     } else {
-        if (!have_slot || !have_symbol_rate || !have_rolloff || !have_lnb_voltage)
-            return invalid("satellite requires --slot --symbol-rate --rolloff --lnb-voltage");
+        if (!have_slot || !have_symbol_rate || !have_rolloff)
+            return invalid("satellite requires --slot --symbol-rate --rolloff");
         if (result.device != 1U || result.receiver != 0U)
             return invalid("satellite requires --device 1 and --receiver 0");
         if (result.frequency_khz < 146875U || result.frequency_khz > 2350000U)
             return invalid("--frequency-khz is outside 146875..2350000");
         if (result.symbol_rate != 28860U) return invalid("--symbol-rate must be 28860");
         if (result.rolloff != 4U) return invalid("--rolloff must be 4");
-        if (result.lnb_voltage != 0U) return invalid("--lnb-voltage must be 0");
     }
 
     std::uint8_t bus = 0U;
