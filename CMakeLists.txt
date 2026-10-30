@@ -327,32 +327,6 @@ if(ASICEN_BUILD_PCSC_IFD AND UNIX AND NOT ANDROID)
         set_target_properties(asicen_portable_core PROPERTIES
             POSITION_INDEPENDENT_CODE ON
         )
-        add_library(asicen_pcsc_ifd_core STATIC
-            ${ASICEN_PX4_ROOT}/src/pcsc_ifd_adapter.cpp
-        )
-        target_include_directories(asicen_pcsc_ifd_core
-            PUBLIC ${ASICEN_PX4_ROOT}/include
-        )
-        target_compile_definitions(asicen_pcsc_ifd_core PRIVATE
-            ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:" ASICEN_PROFILE_ASICEN=1
-            ASICEN_USE_DTV_CORE=1)
-        target_compile_features(asicen_pcsc_ifd_core PUBLIC cxx_std_17)
-        foreach(asicen_ifd_core_dependency IN ITEMS
-            dtv_userland_control dtv_userland_wire dtv_userland_host_runtime
-            dtv_userland_host_tuner dtv_userland_host_workers
-            dtv_userland_authority dtv_userland_status_projection
-            dtv_userland_receiver dtv_userland_core)
-            if(TARGET ${asicen_ifd_core_dependency})
-                set_target_properties(${asicen_ifd_core_dependency} PROPERTIES
-                    POSITION_INDEPENDENT_CODE ON)
-            endif()
-        endforeach()
-        target_link_libraries(asicen_pcsc_ifd_core PUBLIC dtv::control dtv::host_runtime)
-        set_target_properties(asicen_pcsc_ifd_core PROPERTIES
-            POSITION_INDEPENDENT_CODE ON
-        )
-        asicen_enable_project_warnings(asicen_pcsc_ifd_core)
-
         if(ASICEN_BUILD_TESTS)
             add_library(asicen_core_ifd_adapter STATIC
                 ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/src/pcsc_ifd_adapter.cpp)
@@ -1184,7 +1158,8 @@ endif()
 if(ASICEN_BUILD_TESTS)
     enable_testing()
     # Keep the continuity regression fixture on the Core checker implementation.
-    add_executable(asicen-ts-continuity-tests ${ASICEN_PX4_ROOT}/tests/ts_continuity_tests.cpp)
+    add_executable(asicen-ts-continuity-tests
+        userland/tests/asicen_ts_continuity_tests.cpp)
     target_link_libraries(asicen-ts-continuity-tests PRIVATE dtv::host_ts_continuity)
     asicen_enable_project_warnings(asicen-ts-continuity-tests)
     add_test(NAME asicen-ts-continuity-tests COMMAND asicen-ts-continuity-tests)
@@ -1346,14 +1321,15 @@ if(ASICEN_BUILD_TESTS)
     asicen_enable_project_warnings(asicen-product-worker-boundaries-tests)
     add_test(NAME asicen-product-worker-boundaries-tests COMMAND asicen-product-worker-boundaries-tests)
 
-    add_executable(asicen-ifd-capability-tests
-        ${ASICEN_PX4_ROOT}/tests/asicen_ifd_capability_tests.cpp
-        ${ASICEN_PX4_ROOT}/src/pcsc_ifd_adapter.cpp)
-    target_compile_definitions(asicen-ifd-capability-tests PRIVATE
-        ASICEN_PROFILE_ASICEN=1 ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:")
-    target_link_libraries(asicen-ifd-capability-tests PRIVATE asicen_px4_mock)
-    asicen_enable_project_warnings(asicen-ifd-capability-tests)
-    add_test(NAME asicen-ifd-capability-tests COMMAND asicen-ifd-capability-tests)
+    if(TARGET asicen_core_ifd_adapter)
+        add_executable(asicen-ifd-capability-tests
+            userland/tests/asicen_ifd_capability_tests.cpp)
+        target_link_libraries(asicen-ifd-capability-tests PRIVATE
+            asicen_core_ifd_adapter)
+        asicen_enable_project_warnings(asicen-ifd-capability-tests)
+        add_test(NAME asicen-ifd-capability-tests
+            COMMAND asicen-ifd-capability-tests)
+    endif()
 
     if(UNIX)
         add_executable(asicen-identity-endpoint-tests ${ASICEN_PX4_ROOT}/tests/identity_endpoint_tests.cpp)
