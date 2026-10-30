@@ -906,6 +906,11 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
     asicen_enable_project_warnings(asicen-secure-entropy-tests)
     add_test(NAME asicen-secure-entropy-tests COMMAND asicen-secure-entropy-tests)
 
+    add_executable(asicen-core-nonce-tests userland/tests/core_nonce_tests.cpp)
+    target_link_libraries(asicen-core-nonce-tests PRIVATE dtv::host_runtime)
+    asicen_enable_project_warnings(asicen-core-nonce-tests)
+    add_test(NAME asicen-core-nonce-tests COMMAND asicen-core-nonce-tests)
+
     add_executable(asicen-hardware-gpio-guard-tests
         userland/tests/hardware_gpio_guard_tests.cpp)
     target_include_directories(asicen-hardware-gpio-guard-tests PRIVATE userland/include)
