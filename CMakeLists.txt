@@ -451,6 +451,18 @@ if(TARGET asicen_ifdhandler)
             ${dtv_userland_core_SOURCE_DIR}/tests/unix_pcsc_ifd/pcsc_ifd_tests.cpp)
         target_link_libraries(asicen-core-ifd-tests PRIVATE asicen_core_ifd_adapter)
         asicen_enable_project_warnings(asicen-core-ifd-tests)
+
+        add_executable(asicen-core-ifd-listener-tests
+            ${dtv_userland_core_SOURCE_DIR}/tests/unix_pcsc_ifd/pcsc_ifd_listener_tests.cpp)
+        target_include_directories(asicen-core-ifd-listener-tests PRIVATE
+            ${ASICEN_PCSC_IFD_INCLUDE_DIR}
+            ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/include)
+        target_compile_definitions(asicen-core-ifd-listener-tests PRIVATE
+            DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
+        target_link_libraries(asicen-core-ifd-listener-tests PRIVATE
+            dtv::unix_pcsc_ifd dtv::host_listener_context dtv::control
+            dtv::host_runtime)
+        asicen_enable_project_warnings(asicen-core-ifd-listener-tests)
     endif()
 endif()
 
@@ -654,6 +666,12 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
             endif()
             if(TARGET asicen-core-ifd-tests)
                 add_test(NAME asicen-core-ifd-tests COMMAND asicen-core-ifd-tests)
+            endif()
+            if(TARGET asicen-core-ifd-listener-tests)
+                add_test(NAME asicen-core-ifd-listener-tests
+                    COMMAND asicen-core-ifd-listener-tests)
+                set_tests_properties(asicen-core-ifd-listener-tests
+                    PROPERTIES TIMEOUT 45)
             endif()
         endif()
         if(ASICEN_ENABLE_LIBUSB)
