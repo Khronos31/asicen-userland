@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ifd_core_test_bridge.h"
 
-#include "px4/pcsc_ifd_adapter.h"
+#include "dtv/userland/unix_pcsc_ifd/pcsc_ifd_adapter.h"
 
 namespace {
-using namespace px4::userland::pcsc;
+using namespace dtv::userland::unix_pcsc_ifd;
 
 struct Session final {
     PosixIfdCardClientFactory factory;
     IfdAdapter adapter;
 
-    Session() : adapter(factory) {}
+    Session() : factory(kAsicenIfdProfile), adapter(factory, kAsicenIfdProfile) {}
 };
 }
 
@@ -41,7 +41,7 @@ extern "C" int asicen_ifd_test_power(void* opaque, bool power_up) noexcept
     const IfdPowerAction action = power_up ? IfdPowerAction::power_up
                                           : IfdPowerAction::power_down;
     return static_cast<int>(static_cast<Session*>(opaque)->adapter.power(
-        0U, action, px4::userland::MutableByteView{atr, sizeof(atr)}, atr_length));
+        0U, action, dtv::userland::MutableByteView{atr, sizeof(atr)}, atr_length));
 }
 
 extern "C" int asicen_ifd_test_interface_status(void* opaque, std::uint8_t* status) noexcept
@@ -50,7 +50,7 @@ extern "C" int asicen_ifd_test_interface_status(void* opaque, std::uint8_t* stat
     std::size_t length = sizeof(*status);
     return static_cast<int>(static_cast<Session*>(opaque)->adapter.get_capability(
         0U, kAttrIccInterfaceStatus,
-        px4::userland::MutableByteView{status, sizeof(*status)}, length));
+        dtv::userland::MutableByteView{status, sizeof(*status)}, length));
 }
 
 extern "C" int asicen_ifd_test_close(void* opaque) noexcept

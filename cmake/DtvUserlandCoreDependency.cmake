@@ -41,6 +41,10 @@ set(DTV_USERLAND_BUILD_HOST_CARD_T1 ON)
 if(WIN32)
     set(DTV_USERLAND_BUILD_WINDOWS_WINSCARD ON)
 endif()
+if(UNIX AND NOT ANDROID AND ASICEN_BUILD_PCSC_IFD)
+    set(DTV_USERLAND_BUILD_UNIX_PCSC_IFD ON)
+    set(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE ON)
+endif()
 
 FetchContent_Declare(dtv_userland_core
     GIT_REPOSITORY https://github.com/Khronos31/dtv-userland-core.git

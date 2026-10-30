@@ -353,14 +353,33 @@ if(ASICEN_BUILD_PCSC_IFD AND UNIX AND NOT ANDROID)
         )
         asicen_enable_project_warnings(asicen_pcsc_ifd_core)
 
-        add_library(asicen_ifdhandler SHARED ${ASICEN_PX4_ROOT}/src/pcsc_ifd.cpp)
+        if(ASICEN_BUILD_TESTS)
+            add_library(asicen_core_ifd_adapter STATIC
+                ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/src/pcsc_ifd_adapter.cpp)
+            target_include_directories(asicen_core_ifd_adapter PUBLIC
+                ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/include)
+            target_compile_definitions(asicen_core_ifd_adapter PRIVATE
+                DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
+            target_compile_features(asicen_core_ifd_adapter PUBLIC cxx_std_17)
+            target_link_libraries(asicen_core_ifd_adapter PUBLIC
+                dtv::host_runtime dtv::control)
+            set_target_properties(asicen_core_ifd_adapter PROPERTIES
+                POSITION_INDEPENDENT_CODE ON)
+            asicen_enable_project_warnings(asicen_core_ifd_adapter)
+        endif()
+
+        add_library(asicen_ifdhandler SHARED
+            ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/src/pcsc_ifd.cpp
+            ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/src/pcsc_ifd_adapter.cpp)
         target_include_directories(asicen_ifdhandler PRIVATE
             ${ASICEN_PCSC_IFD_INCLUDE_DIR}
-            ${ASICEN_PX4_ROOT}/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/unix_pcsc_ifd/include
         )
+        target_compile_definitions(asicen_ifdhandler PRIVATE
+            DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
         target_compile_features(asicen_ifdhandler PRIVATE cxx_std_17)
         target_link_libraries(asicen_ifdhandler PRIVATE
-            asicen_pcsc_ifd_core
+            dtv::host_runtime dtv::control
         )
         set_target_properties(asicen_ifdhandler PROPERTIES
             CXX_VISIBILITY_PRESET hidden
@@ -425,8 +444,13 @@ endif()
 if(TARGET asicen_ifdhandler)
     if(ASICEN_BUILD_TESTS)
         add_executable(asicen-ifd-prefix-tests userland/tests/asicen_ifd_prefix_tests.cpp)
-        target_link_libraries(asicen-ifd-prefix-tests PRIVATE asicen_pcsc_ifd_core)
+        target_link_libraries(asicen-ifd-prefix-tests PRIVATE asicen_core_ifd_adapter)
         asicen_enable_project_warnings(asicen-ifd-prefix-tests)
+
+        add_executable(asicen-core-ifd-tests
+            ${dtv_userland_core_SOURCE_DIR}/tests/unix_pcsc_ifd/pcsc_ifd_tests.cpp)
+        target_link_libraries(asicen-core-ifd-tests PRIVATE asicen_core_ifd_adapter)
+        asicen_enable_project_warnings(asicen-core-ifd-tests)
     endif()
 endif()
 
@@ -628,6 +652,9 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
             if(TARGET asicen-ifd-prefix-tests)
                 add_test(NAME asicen-ifd-prefix-tests COMMAND asicen-ifd-prefix-tests)
             endif()
+            if(TARGET asicen-core-ifd-tests)
+                add_test(NAME asicen-core-ifd-tests COMMAND asicen-core-ifd-tests)
+            endif()
         endif()
         if(ASICEN_ENABLE_LIBUSB)
             add_executable(asicen-card-only-service-tests
@@ -645,17 +672,14 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
                 ASICEN_USE_DTV_CORE=1)
             target_link_libraries(asicen-card-only-service-tests PRIVATE
                 asicen_libusb asicen_core_test_mock)
-            if(TARGET asicen_pcsc_ifd_core)
+            if(TARGET asicen_core_ifd_adapter)
                 add_library(asicen_ifd_core_test_bridge STATIC
                     userland/tests/ifd_core_test_bridge.cpp)
-                target_include_directories(asicen_ifd_core_test_bridge PRIVATE
-                    ${ASICEN_PX4_ROOT}/include)
                 target_compile_definitions(asicen_ifd_core_test_bridge PRIVATE
-                    ASICEN_USE_DTV_CORE=1 ASICEN_PROFILE_ASICEN=1
-                    ASICEN_PCSC_DEVICE_PREFIX="asicen-userland:")
+                    ASICEN_USE_DTV_CORE=1 ASICEN_PROFILE_ASICEN=1)
                 target_compile_features(asicen_ifd_core_test_bridge PRIVATE cxx_std_17)
                 target_link_libraries(asicen_ifd_core_test_bridge PRIVATE
-                    asicen_pcsc_ifd_core)
+                    asicen_core_ifd_adapter)
                 asicen_enable_project_warnings(asicen_ifd_core_test_bridge)
                 target_link_libraries(asicen-card-only-service-tests PRIVATE
                     asicen_ifd_core_test_bridge)
