@@ -32,6 +32,20 @@ struct LibusbW3u3HardwareTestPeer {
     }
     static void clear_capture_fixture(LibusbW3u3Hardware& hw) { hw.source_prepared_[0U] = false; }
     static bool quarantined(const LibusbW3u3Hardware& hw) { return hw.cleanup_failed_.load(); }
+    static void mark_power_unknown(LibusbW3u3Hardware& hw)
+    {
+        hw.lnb_state_known_ = false;
+        hw.lnb_cleanup_required_ = true;
+        hw.publish_lnb_state();
+    }
+    static bool power_cleanup_required(const LibusbW3u3Hardware& hw)
+    {
+        return hw.lnb_cleanup_required_;
+    }
+    static bool independent_request(const LibusbW3u3Hardware& hw)
+    {
+        return hw.lnb_independent_on_;
+    }
     static int generic_gpio(LibusbW3u3Hardware& hw, std::uint8_t value, std::uint8_t mask)
     {
         std::uint8_t response = 0U;
@@ -40,6 +54,10 @@ struct LibusbW3u3HardwareTestPeer {
     static void reserve_receiver(LibusbW3u3Hardware& hw, std::uint8_t receiver)
     {
         (void)hw.active_receiver_.reserve(receiver);
+    }
+    static void prepared(LibusbW3u3Hardware& hw, std::uint8_t receiver, bool value)
+    {
+        hw.source_prepared_[receiver] = value;
     }
     static void stop_monitor(LibusbW3u3Hardware& hw) { hw.stop_lnb_monitor(); }
     static void hold_gate(LibusbW3u3Hardware& hw) { hw.control_gate_.lock(); }
@@ -159,6 +177,15 @@ struct FakeUsb {
         std::lock_guard<std::mutex> lock(mutex);
         return events.size();
     }
+    std::size_t gpio_writes() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::size_t writes = 0U;
+        for (const auto& event : events) {
+            if (event.request == Request::Gpio && (event.value >> 8U) != 0U) ++writes;
+        }
+        return writes;
+    }
     bool only_primary() const
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -222,13 +249,13 @@ bool test_model_polarity_and_transactions()
         CHECK(f.usb.on(model));
         CHECK(f.hw.stop());  // Ordinary stream stop retains the lease's feed.
         CHECK(f.usb.on(model));
-        // A pending zero-voltage request is applied before acquisition.
+        // The committed request stays active until a zero-voltage tune commits.
         CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
-        CHECK(!f.usb.on(model));
+        CHECK(f.usb.on(model));
         CHECK(f.hw.rollback_tune_power(0U));
         CHECK(f.usb.on(model));
         CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
-        CHECK(!f.usb.on(model));
+        CHECK(f.usb.on(model));
         CHECK(f.hw.commit_tune_power(0U));
         CHECK(!f.usb.on(model));
         CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
@@ -345,6 +372,34 @@ bool test_close_shutdown_release_and_snapshot_are_off()
         CHECK(!f.usb.on(ModelId::W3u3));
         LibusbW3u3HardwareTestPeer::clear_capture_fixture(f.hw);
     }
+    return true;
+}
+
+bool test_close_off_failure_quarantines_peer_transaction()
+{
+    Fixture f;
+    LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 1U);
+    f.hw.set_allow_lnb_power(true);
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+    CHECK(f.hw.commit_tune_power(0U));
+    CHECK(f.hw.begin_tune_power(1U, System::ISDB_T, 0U));
+    f.usb.fail_writes = 1U;
+    CHECK(f.hw.close_receiver(0U).error() == Error::USB_IO);
+    CHECK(LibusbW3u3HardwareTestPeer::quarantined(f.hw));
+    CHECK(LibusbW3u3HardwareTestPeer::power_cleanup_required(f.hw));
+    CHECK(f.hw.commit_tune_power(1U).error() != Error::OK);
+    return true;
+}
+
+bool test_close_off_is_allowed_after_request_stop()
+{
+    Fixture f;
+    f.hw.set_allow_lnb_power(true);
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+    CHECK(f.hw.commit_tune_power(0U));
+    f.hw.request_stop();
+    CHECK(f.hw.close_receiver(0U));
+    CHECK(!f.usb.on(ModelId::W3u3));
     return true;
 }
 
@@ -542,7 +597,7 @@ bool test_independent_changes_during_tune_are_not_rolled_back()
     CHECK(f.hw.set_independent_lnb_power(true));
     CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
     CHECK(f.hw.set_independent_lnb_power(false));
-    CHECK(!f.usb.on(ModelId::W3u3));
+    CHECK(f.usb.on(ModelId::W3u3));
     CHECK(f.hw.rollback_tune_power(0U));
     CHECK(f.usb.on(ModelId::W3u3));  // Only the committed receiver request returns.
     CHECK(f.hw.close_receiver(0U));
@@ -569,14 +624,19 @@ bool test_independent_power_failures_are_not_retained_or_hidden()
     }
     {
         Fixture f;
+        CHECK(f.hw.set_independent_lnb_power(true));
         f.usb.fail_writes = 1U;
+        CHECK(f.hw.set_independent_lnb_power(false).error() == Error::USB_IO);
         CHECK(!f.hw.set_independent_lnb_power(true));
+        CHECK(!LibusbW3u3HardwareTestPeer::independent_request(f.hw));
         CHECK(!f.usb.on(ModelId::W3u3) && !LibusbW3u3HardwareTestPeer::quarantined(f.hw));
-        // The refused request must not come back with a later tune or close.
-        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
-        CHECK(f.hw.commit_tune_power(0U));
         CHECK(f.hw.close_receiver(0U));
+        LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 0U);
+        const auto writes = f.usb.gpio_writes();
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
+        CHECK(f.usb.gpio_writes() == writes);
         CHECK(!f.usb.on(ModelId::W3u3));
+        CHECK(f.hw.rollback_tune_power(0U));
     }
     {
         Fixture f;
@@ -606,11 +666,14 @@ bool test_independent_power_failures_are_not_retained_or_hidden()
         CHECK(!f.usb.on(ModelId::W3u3) && independent_state_is(f, true, false));
     }
     {
-        Fixture f;  // A failed tune restores the independent feed rather than turning it off.
+        Fixture f;  // An unchanged feed does not attempt a GPIO write during tune.
         CHECK(f.hw.set_independent_lnb_power(true));
         f.usb.fail_writes = 1U;
-        CHECK(!f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+        const auto writes = f.usb.gpio_writes();
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+        CHECK(f.usb.gpio_writes() == writes);
         CHECK(f.usb.on(ModelId::W3u3) && independent_state_is(f, true, true));
+        CHECK(f.hw.rollback_tune_power(0U));
         CHECK(f.hw.close_receiver(0U));
         CHECK(f.usb.on(ModelId::W3u3));
     }
@@ -658,6 +721,135 @@ bool test_independent_state_is_readable_while_gate_is_held()
     CHECK(independent_state_is(f, false));
     return true;
 }
+
+bool test_peer_close_preserves_other_pending_power()
+{
+    Fixture f;
+    LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 1U);
+    CHECK(f.hw.set_independent_lnb_power(true));
+    const auto writes = f.usb.gpio_writes();
+    CHECK(f.hw.begin_tune_power(1U, System::ISDB_T, 0U));
+    CHECK(f.usb.gpio_writes() == writes);
+    CHECK(f.hw.close_receiver(0U));
+    CHECK(f.hw.commit_tune_power(1U));
+    CHECK(f.usb.on(ModelId::W3u3));
+    CHECK(f.usb.gpio_writes() == writes);
+    return true;
+}
+
+bool test_peer_capture_allows_unchanged_power_tune()
+{
+    Fixture f;
+    LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 1U);
+    CHECK(f.hw.set_independent_lnb_power(true));
+    LibusbW3u3HardwareTestPeer::prepared(f.hw, 0U, true);
+    const auto writes = f.usb.gpio_writes();
+    CHECK(f.hw.begin_tune_power(1U, System::ISDB_T, 0U));
+    CHECK(f.hw.commit_tune_power(1U));
+    CHECK(f.usb.gpio_writes() == writes);
+    CHECK(f.usb.on(ModelId::W3u3));
+    return true;
+}
+
+bool test_committed_receiver_power_is_not_overwritten()
+{
+    Fixture f;
+    LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 1U);
+    f.hw.set_allow_lnb_power(true);
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+    CHECK(f.hw.commit_tune_power(0U));
+    const auto writes = f.usb.gpio_writes();
+    CHECK(f.hw.begin_tune_power(1U, System::ISDB_T, 0U));
+    CHECK(f.hw.commit_tune_power(1U));
+    CHECK(f.usb.on(ModelId::W3u3));
+    CHECK(f.usb.gpio_writes() == writes);
+    CHECK(f.hw.close_receiver(1U));
+    CHECK(f.usb.on(ModelId::W3u3));
+    CHECK(f.usb.gpio_writes() == writes);
+    CHECK(f.hw.close_receiver(0U));
+    CHECK(!f.usb.on(ModelId::W3u3));
+    CHECK(f.usb.gpio_writes() == writes + 1U);
+    return true;
+}
+
+bool test_four_pending_zero_voltage_tunes()
+{
+    for (const bool independent : {false, true}) {
+        Fixture f;
+        for (const std::uint8_t receiver : {1U, 2U, 3U}) {
+            LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, receiver);
+        }
+        if (independent) {
+            CHECK(f.hw.set_independent_lnb_power(true));
+        } else {
+            CHECK(f.hw.set_independent_lnb_power(true));
+            CHECK(f.hw.set_independent_lnb_power(false));
+        }
+        const auto writes = f.usb.gpio_writes();
+        for (const std::uint8_t receiver : {1U, 3U, 0U, 2U}) {
+            const System system = (receiver % 2U) == 0U ? System::ISDB_S : System::ISDB_T;
+            CHECK(f.hw.begin_tune_power(receiver, system, 0U));
+        }
+        CHECK(f.usb.gpio_writes() == writes);
+        for (const std::uint8_t receiver : {3U, 1U, 2U, 0U}) {
+            CHECK(f.hw.commit_tune_power(receiver));
+        }
+        CHECK(f.usb.gpio_writes() == writes);
+        if (independent) {
+            CHECK(f.hw.set_independent_lnb_power(false));
+            CHECK(!f.usb.on(ModelId::W3u3));
+        }
+    }
+    {
+        Fixture f;
+        for (const std::uint8_t receiver : {1U, 2U, 3U}) {
+            LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, receiver);
+        }
+        CHECK(f.hw.set_independent_lnb_power(true));
+        CHECK(f.hw.set_independent_lnb_power(false));
+        const auto writes = f.usb.gpio_writes();
+        for (const std::uint8_t receiver : {1U, 3U, 0U, 2U}) {
+            const System system = (receiver % 2U) == 0U ? System::ISDB_S : System::ISDB_T;
+            CHECK(f.hw.begin_tune_power(receiver, system, 0U));
+        }
+        CHECK(f.hw.rollback_tune_power(0U));
+        CHECK(f.hw.close_receiver(1U));
+        CHECK(f.hw.commit_tune_power(3U));
+        CHECK(f.hw.rollback_tune_power(2U));
+        CHECK(!f.usb.on(ModelId::W3u3));
+        CHECK(f.usb.gpio_writes() == writes);
+    }
+    return true;
+}
+
+bool test_transition_is_blocked_by_peer_capture()
+{
+    Fixture f;
+    CHECK(f.hw.set_independent_lnb_power(true));
+    CHECK(f.hw.set_independent_lnb_power(false));
+    LibusbW3u3HardwareTestPeer::prepared(f.hw, 1U, true);
+    f.hw.set_allow_lnb_power(true);
+    const auto writes = f.usb.gpio_writes();
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U).error() == Error::BUSY);
+    CHECK(f.usb.gpio_writes() == writes);
+    CHECK(!f.usb.on(ModelId::W3u3));
+    return true;
+}
+
+bool test_peer_commit_fails_when_power_state_is_unknown()
+{
+    Fixture f;
+    LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 1U);
+    f.hw.set_allow_lnb_power(true);
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+    CHECK(f.hw.commit_tune_power(0U));
+    CHECK(f.hw.begin_tune_power(1U, System::ISDB_T, 0U));
+    LibusbW3u3HardwareTestPeer::mark_power_unknown(f.hw);
+    f.usb.fail_writes = 1U;
+    CHECK(f.hw.commit_tune_power(1U).error() == Error::USB_IO);
+    CHECK(LibusbW3u3HardwareTestPeer::power_cleanup_required(f.hw));
+    return true;
+}
 }  // namespace
 int main()
 {
@@ -667,6 +859,8 @@ int main()
         !test_controller_guard_and_generic_mask() ||
         !test_begin_failures_restore_off_and_quarantine_uncertainty() ||
         !test_close_shutdown_release_and_snapshot_are_off() ||
+        !test_close_off_failure_quarantines_peer_transaction() ||
+        !test_close_off_is_allowed_after_request_stop() ||
         !test_cancel_and_disconnect_do_not_leave_new_power_owned() ||
         !test_v2_feedback_cutoff_is_terminal() || !test_v2_restoration_failure_forces_off() ||
         !test_v2_cooperative_feedback_during_gate_owned_delay() ||
@@ -675,7 +869,13 @@ int main()
         !test_independent_power_rejection_does_no_io() ||
         !test_independent_changes_during_tune_are_not_rolled_back() ||
         !test_independent_power_failures_are_not_retained_or_hidden() ||
-        !test_independent_state_is_readable_while_gate_is_held()) {
+        !test_independent_state_is_readable_while_gate_is_held() ||
+        !test_peer_close_preserves_other_pending_power() ||
+        !test_peer_capture_allows_unchanged_power_tune() ||
+        !test_committed_receiver_power_is_not_overwritten() ||
+        !test_four_pending_zero_voltage_tunes() ||
+        !test_transition_is_blocked_by_peer_capture() ||
+        !test_peer_commit_fails_when_power_state_is_unknown()) {
         return 1;
     }
     return 0;
