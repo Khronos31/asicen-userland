@@ -25,7 +25,7 @@ ASICENの通常の無指定時検証機種はPX-W3U3だが、機種初回の対�
 | 機種初回 | PX-W3U2とPX-W3U3は4番組同時録画、地上波/衛星、CARD、対応LNBを確認する。PX-S3U2は地上波receiver 1と衛星receiver 0の同時取得経路を確認し、実機受入は別記録にする。ほかの機種はREADME記載の機種別能力に従う。 |
 | 回帰（毎release） | PX-W3U2とPX-W3U3は4番組を同時録画し、各TS/counter/終了値を確認する。PX-S3U2はT03の2-client手順で同時取得・片側解放後の継続・停止側再取得を確認する。W3U3のtuner path数、discovery route数、公開slot数は録画数と別々に記録する。WinSCard/PCSCはnative stackを別経路で確認する。 |
 | 必要に応じて | W3U3はLNB対応。READMEの能力表とT11に従って機種別に確認し、ソフトウェア拒否だけを物理非対応や機能合格の根拠にしない。GPIO/端子給電は切り替えない。 |
-| 初回/major | 現地channel planとmodel receiver割当を記録。Windows 11 x86_64も正式target。現行workflowではWindows ZIPを同候補の`win-candidate`として別生成し、通常aggregateへ未接続（正式配布対象の除外ではなく、配布経路の実装gap）。 |
+| 初回/major | 現地channel planとmodel receiver割当を記録。Windows 11 x86_64も正式target。現行workflowではWindows ZIPを同候補の`rc-windows`として生成し、通常`release-candidate` aggregateの9 binary+source=10 archiveに含める。 |
 
 ## 共通実行環境表
 
