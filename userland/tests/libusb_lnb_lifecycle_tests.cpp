@@ -42,6 +42,10 @@ struct LibusbW3u3HardwareTestPeer {
     {
         return hw.lnb_cleanup_required_;
     }
+    static bool independent_request(const LibusbW3u3Hardware& hw)
+    {
+        return hw.lnb_independent_on_;
+    }
     static int generic_gpio(LibusbW3u3Hardware& hw, std::uint8_t value, std::uint8_t mask)
     {
         std::uint8_t response = 0U;
@@ -371,6 +375,34 @@ bool test_close_shutdown_release_and_snapshot_are_off()
     return true;
 }
 
+bool test_close_off_failure_quarantines_peer_transaction()
+{
+    Fixture f;
+    LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 1U);
+    f.hw.set_allow_lnb_power(true);
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+    CHECK(f.hw.commit_tune_power(0U));
+    CHECK(f.hw.begin_tune_power(1U, System::ISDB_T, 0U));
+    f.usb.fail_writes = 1U;
+    CHECK(f.hw.close_receiver(0U).error() == Error::USB_IO);
+    CHECK(LibusbW3u3HardwareTestPeer::quarantined(f.hw));
+    CHECK(LibusbW3u3HardwareTestPeer::power_cleanup_required(f.hw));
+    CHECK(f.hw.commit_tune_power(1U).error() != Error::OK);
+    return true;
+}
+
+bool test_close_off_is_allowed_after_request_stop()
+{
+    Fixture f;
+    f.hw.set_allow_lnb_power(true);
+    CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 15U));
+    CHECK(f.hw.commit_tune_power(0U));
+    f.hw.request_stop();
+    CHECK(f.hw.close_receiver(0U));
+    CHECK(!f.usb.on(ModelId::W3u3));
+    return true;
+}
+
 bool test_cancel_and_disconnect_do_not_leave_new_power_owned()
 {
     {
@@ -592,14 +624,19 @@ bool test_independent_power_failures_are_not_retained_or_hidden()
     }
     {
         Fixture f;
+        CHECK(f.hw.set_independent_lnb_power(true));
         f.usb.fail_writes = 1U;
+        CHECK(f.hw.set_independent_lnb_power(false).error() == Error::USB_IO);
         CHECK(!f.hw.set_independent_lnb_power(true));
+        CHECK(!LibusbW3u3HardwareTestPeer::independent_request(f.hw));
         CHECK(!f.usb.on(ModelId::W3u3) && !LibusbW3u3HardwareTestPeer::quarantined(f.hw));
-        // The refused request must not come back with a later tune or close.
-        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
-        CHECK(f.hw.commit_tune_power(0U));
         CHECK(f.hw.close_receiver(0U));
+        LibusbW3u3HardwareTestPeer::reserve_receiver(f.hw, 0U);
+        const auto writes = f.usb.gpio_writes();
+        CHECK(f.hw.begin_tune_power(0U, System::ISDB_S, 0U));
+        CHECK(f.usb.gpio_writes() == writes);
         CHECK(!f.usb.on(ModelId::W3u3));
+        CHECK(f.hw.rollback_tune_power(0U));
     }
     {
         Fixture f;
@@ -822,6 +859,8 @@ int main()
         !test_controller_guard_and_generic_mask() ||
         !test_begin_failures_restore_off_and_quarantine_uncertainty() ||
         !test_close_shutdown_release_and_snapshot_are_off() ||
+        !test_close_off_failure_quarantines_peer_transaction() ||
+        !test_close_off_is_allowed_after_request_stop() ||
         !test_cancel_and_disconnect_do_not_leave_new_power_owned() ||
         !test_v2_feedback_cutoff_is_terminal() || !test_v2_restoration_failure_forces_off() ||
         !test_v2_cooperative_feedback_during_gate_owned_delay() ||

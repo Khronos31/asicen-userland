@@ -1840,12 +1840,14 @@ Result<void> LibusbW3u3Hardware::close_receiver(std::uint8_t receiver) noexcept
         if (lnb_on_ || lnb_cleanup_required_) {
             const auto off = set_lnb_power(false, true);
             if (!off) {
+                mark_cleanup_failed(off.error());
                 return off;
             }
         }
     } else if (!lnb_target_request() && lnb_on_) {
-        const auto off = set_lnb_power(false, false);
+        const auto off = set_lnb_power(false, true);
         if (!off) {
+            mark_cleanup_failed(off.error());
             return off;
         }
     } else if (lnb_target_request() && !lnb_on_) {
@@ -2122,6 +2124,7 @@ Result<void> LibusbW3u3Hardware::set_independent_lnb_power(bool enabled) noexcep
     }
     if (requested && (lnb_fault_latched_ || disconnected_.load() || cleanup_failed_.load() ||
                       lnb_cleanup_required_)) {
+        lnb_independent_on_ = previous;
         return Result<void>::failure(lnb_fault_latched_ ? Error::PROTOCOL_ERROR : Error::USB_IO);
     }
     const auto applied = set_lnb_power(requested, false);
