@@ -384,21 +384,50 @@ private:
     bool lnb_state_known_ = false;
     bool lnb_on_ = false;
     bool lnb_cleanup_required_ = false;
-    bool lnb_transaction_active_ = false;
-    bool lnb_requested_on_ = false;
+    std::array<bool, 4U> lnb_transaction_active_{};
+    std::array<bool, 4U> lnb_requested_on_{};
     // The feed is ON while the receiver's committed request or the independent
     // (ctl) request asks for it. Both are cleared by clear_lnb_power().
-    bool lnb_receiver_on_ = false;
+    std::array<bool, 4U> lnb_receiver_on_{};
     bool lnb_independent_on_ = false;
     // Lock-free mirror of the verified GPIO state for status: 0 unknown, 1 off, 2 on.
     std::atomic<std::uint8_t> lnb_published_{0U};
-    bool lnb_committed_request() const noexcept { return lnb_receiver_on_ || lnb_independent_on_; }
+    bool lnb_has_pending_transaction() const noexcept
+    {
+        for (const bool active : lnb_transaction_active_) {
+            if (active) return true;
+        }
+        return false;
+    }
+    bool lnb_committed_request() const noexcept
+    {
+        if (lnb_independent_on_) return true;
+        for (const bool requested : lnb_receiver_on_) {
+            if (requested) return true;
+        }
+        return false;
+    }
+    bool lnb_target_request() const noexcept
+    {
+        if (lnb_committed_request()) return true;
+        for (std::size_t index = 0U; index < lnb_transaction_active_.size(); ++index) {
+            if (lnb_transaction_active_[index] && lnb_requested_on_[index]) return true;
+        }
+        return false;
+    }
+    bool lnb_power_healthy() const noexcept
+    {
+        if (!supports_lnb_control()) {
+            return !disconnected_.load() && !cleanup_failed_.load();
+        }
+        return lnb_state_known_ && !lnb_fault_latched_ && !disconnected_.load() &&
+               !cleanup_failed_.load();
+    }
     void publish_lnb_state() noexcept
     {
         lnb_published_.store(lnb_state_known_ ? (lnb_on_ ? 2U : 1U) : 0U,
                              std::memory_order_release);
     }
-    std::uint8_t lnb_transaction_receiver_ = kNoActiveReceiver;
     std::array<AsyncState*, 4U> async_states_{};
     bool abandoned_ = false;
     void quarantine_capture() noexcept;
