@@ -480,7 +480,7 @@ PY
 CAPTURE_SECONDS='7200'
 case "$CAPTURE_SECONDS" in ''|*[!0-9]*|0) echo 'CAPTURE_SECONDS must be positive seconds' >&2; exit 2 ;; esac
 "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R1" \
-  --channel T27 --time "$CAPTURE_SECONDS" --output "$LOG/representative-soak.ts" \
+  --channel T27 --time "$CAPTURE_SECONDS" --output /dev/null \
   > "$LOG/representative-soak.out" 2> "$LOG/representative-soak.err" || { RC=$?; echo "$RC" > "$LOG/representative-soak.rc"; exit "$RC"; }
 echo 0 > "$LOG/representative-soak.rc"
 ```
