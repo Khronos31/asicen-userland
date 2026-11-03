@@ -474,13 +474,15 @@ PY
 - **停止/cleanup:** client wait/exit保存、daemon通常停止。
 - **記録:** model/system/channel/全channel list、TS解析/counter/exit、未取得理由。
 
-代表機の必須2時間runは単一receiverで行い、上記の短い全channel確認とは別runにする。初回/majorのmacOS・Windowsは1800秒、他OS/ABIは600秒をCAPTURE_SECONDSに設定する。候補daemonを同じ候補・selector・instanceでreadyにした同じBash shellで次を実行する。
+代表機の必須2時間runは単一receiverで行い、上記の短い全channel確認とは別runにする。初回/majorのmacOS・Windowsは1800秒、他OS/ABIは600秒をCAPTURE_SECONDSに設定する。候補daemonを同じ候補・selector・instanceでreadyにした同じBash shellで次を実行する。7200秒はTSを破棄し、1800秒/600秒ではTSを代表soakファイルへ保存して既存の品質検査に利用できる。
 
 ```sh
 CAPTURE_SECONDS='7200'
 case "$CAPTURE_SECONDS" in ''|*[!0-9]*|0) echo 'CAPTURE_SECONDS must be positive seconds' >&2; exit 2 ;; esac
+CAPTURE_OUTPUT="$LOG/representative-soak.ts"
+if [ "$CAPTURE_SECONDS" = 7200 ]; then CAPTURE_OUTPUT=/dev/null; fi
 "$D/asicen-ts" --device "$ID" --instance "$INSTANCE" --runtime-dir "$RT" --receiver "$R1" \
-  --channel T27 --time "$CAPTURE_SECONDS" --output /dev/null \
+  --channel T27 --time "$CAPTURE_SECONDS" --output "$CAPTURE_OUTPUT" \
   > "$LOG/representative-soak.out" 2> "$LOG/representative-soak.err" || { RC=$?; echo "$RC" > "$LOG/representative-soak.rc"; exit "$RC"; }
 echo 0 > "$LOG/representative-soak.rc"
 ```
