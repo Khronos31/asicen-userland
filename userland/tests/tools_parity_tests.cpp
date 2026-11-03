@@ -38,8 +38,16 @@ bool arguments_match_reference()
 {
     for (const char* option : {"--help", "-h", "--version", "--list-json", "--models"}) {
         CHECK(parse({option}).valid);
-        CHECK(!parse({option, option}).valid);
-        CHECK(!parse({option, "--group"}).valid);
+        const auto repeated = parse({option, option});
+        const auto combined = parse({option, "--group"});
+        if (std::string_view(option) == "--help" ||
+            std::string_view(option) == "-h") {
+            CHECK(repeated.help && combined.help);
+        } else if (std::string_view(option) == "--version") {
+            CHECK(repeated.version && combined.version);
+        } else {
+            CHECK(!repeated.valid && !combined.valid);
+        }
     }
     CHECK(!parse({"--list"}).valid &&
           parse({"--list"}).error == "unknown argument");
@@ -47,16 +55,22 @@ bool arguments_match_reference()
     CHECK(!parse({"--list"}, true).valid);
     CHECK(parse({"-h"}).help && parse({"--help"}).help);
     CHECK(parse({"--version"}).version);
+    CHECK(parse({"--help", "--unknown"}).help);
+    CHECK(parse({"--version", "--unknown"}).version);
+    CHECK(parse({"--version", "--help"}).help);
+    CHECK(parse({"--device", "usb:1-2", "--instance", "test",
+                 "--firmware", "-h"}).firmware == "-h");
     CHECK(!parse({"--version"}, true).valid);
     CHECK(!parse({"-l"}).valid);
     CHECK(!parse({"--socket", "/unused"}, true).valid &&
           !parse({"--socket", "/unused"}).valid);
     CHECK(!parse({"--usb-path", "1:2", "--instance", "test"}).valid);
-    CHECK(parse({"--device", "usb:1-2", "--instance", "test"}).valid);
     CHECK(parse({"--device", "usb:1-2", "--instance", "test",
                  "--firmware", "loader.bin"}).valid);
-    CHECK(parse({"--device", "usb:1-2.1,1-2.2", "--instance", "test"}).valid);
-    CHECK(parse({"--device", "serial:abc", "--instance", "test"}).valid);
+    CHECK(parse({"--device", "usb:1-2.1,1-2.2", "--instance", "test",
+                 "--firmware", "loader.bin"}).valid);
+    CHECK(parse({"--device", "serial:abc", "--instance", "test",
+                 "--firmware", "loader.bin"}).valid);
     CHECK(!parse({"--device", "usb:01-2", "--instance", "test"}).valid);
     CHECK(!parse({"--device", "usb:1-2,1-2", "--instance", "test"}).valid);
     CHECK(!parse({"--device", "usb:1-2.1,1-2.2,1-2.3", "--instance", "test"}).valid);
@@ -69,8 +83,14 @@ bool arguments_match_reference()
                                "--slot"}) {
         CHECK(!parse({option}).valid && parse({option}).error == "unknown argument");
     }
-    CHECK(parse({"--fd", "3", "--instance", "test"}).valid);
-    CHECK(parse({"--fd", "3"}).valid && parse({"--fd", "3"}).instance.empty());
+    CHECK(parse({"--fd", "3", "--instance", "test", "--firmware",
+                 "loader.bin"}).valid);
+    CHECK(parse({"--fd", "3", "--firmware", "loader.bin"}).valid &&
+          parse({"--fd", "3", "--firmware", "loader.bin"}).instance.empty());
+    CHECK(!parse({"--fd", "3"}).valid);
+    CHECK(!parse({"--fd", "3", "--firmware"}).valid);
+    CHECK(!parse({"--fd", "3", "--firmware", "loader.bin", "-F"}).valid);
+    CHECK(!parse({"--fd", "3", "--firmware", "loader.bin", "-V"}).valid);
     CHECK(parse({}, true).valid && parse({}, true).instance == "default");
     for (const char* selector : {"usb:0-1", "usb:1-0", "usb:256-1",
                                  "usb:1-256", "usb:1-1.", "usb:1-1..2",

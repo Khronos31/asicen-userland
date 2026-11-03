@@ -122,10 +122,14 @@ with temporary_runtime_root() as temp:
             assert not obsolete_endpoint.exists()
 
         # An obsolete selector in an option value is also a usage error.
-        wrong_dispatch = run(str(TS), "--output", "--socket", "--help",
+        wrong_dispatch = run(str(TS), "--output", "--socket",
                              capture_output=True, text=True)
         assert wrong_dispatch.returncode == 2
         assert "argument error:" in wrong_dispatch.stderr, wrong_dispatch.stderr
+        metadata_dispatch = run(str(TS), "--output", "--socket", "--help",
+                                capture_output=True, text=True)
+        assert metadata_dispatch.returncode == 0
+        assert "usage: asicen-ts" in metadata_dispatch.stdout
         wrong_daemon_dispatch = run(str(DAEMON), "--runtime-dir", "--socket",
                                     "--instance", "test", capture_output=True, text=True)
         assert wrong_daemon_dispatch.returncode == 2
