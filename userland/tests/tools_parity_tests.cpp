@@ -38,8 +38,16 @@ bool arguments_match_reference()
 {
     for (const char* option : {"--help", "-h", "--version", "--list-json", "--models"}) {
         CHECK(parse({option}).valid);
-        CHECK(!parse({option, option}).valid);
-        CHECK(!parse({option, "--group"}).valid);
+        const auto repeated = parse({option, option});
+        const auto combined = parse({option, "--group"});
+        if (std::string_view(option) == "--help" ||
+            std::string_view(option) == "-h") {
+            CHECK(repeated.help && combined.help);
+        } else if (std::string_view(option) == "--version") {
+            CHECK(repeated.version && combined.version);
+        } else {
+            CHECK(!repeated.valid && !combined.valid);
+        }
     }
     CHECK(!parse({"--list"}).valid &&
           parse({"--list"}).error == "unknown argument");
@@ -47,16 +55,22 @@ bool arguments_match_reference()
     CHECK(!parse({"--list"}, true).valid);
     CHECK(parse({"-h"}).help && parse({"--help"}).help);
     CHECK(parse({"--version"}).version);
+    CHECK(parse({"--help", "--unknown"}).help);
+    CHECK(parse({"--version", "--unknown"}).version);
+    CHECK(parse({"--version", "--help"}).help);
+    CHECK(parse({"--device", "usb:1-2", "--instance", "test",
+                 "--firmware", "-h"}).firmware == "-h");
     CHECK(!parse({"--version"}, true).valid);
     CHECK(!parse({"-l"}).valid);
     CHECK(!parse({"--socket", "/unused"}, true).valid &&
           !parse({"--socket", "/unused"}).valid);
     CHECK(!parse({"--usb-path", "1:2", "--instance", "test"}).valid);
-    CHECK(parse({"--device", "usb:1-2", "--instance", "test"}).valid);
     CHECK(parse({"--device", "usb:1-2", "--instance", "test",
                  "--firmware", "loader.bin"}).valid);
-    CHECK(parse({"--device", "usb:1-2.1,1-2.2", "--instance", "test"}).valid);
-    CHECK(parse({"--device", "serial:abc", "--instance", "test"}).valid);
+    CHECK(parse({"--device", "usb:1-2.1,1-2.2", "--instance", "test",
+                 "--firmware", "loader.bin"}).valid);
+    CHECK(parse({"--device", "serial:abc", "--instance", "test",
+                 "--firmware", "loader.bin"}).valid);
     CHECK(!parse({"--device", "usb:01-2", "--instance", "test"}).valid);
     CHECK(!parse({"--device", "usb:1-2,1-2", "--instance", "test"}).valid);
     CHECK(!parse({"--device", "usb:1-2.1,1-2.2,1-2.3", "--instance", "test"}).valid);
@@ -69,8 +83,14 @@ bool arguments_match_reference()
                                "--slot"}) {
         CHECK(!parse({option}).valid && parse({option}).error == "unknown argument");
     }
-    CHECK(parse({"--fd", "3", "--instance", "test"}).valid);
-    CHECK(parse({"--fd", "3"}).valid && parse({"--fd", "3"}).instance.empty());
+    CHECK(parse({"--fd", "3", "--instance", "test", "--firmware",
+                 "loader.bin"}).valid);
+    CHECK(parse({"--fd", "3", "--firmware", "loader.bin"}).valid &&
+          parse({"--fd", "3", "--firmware", "loader.bin"}).instance.empty());
+    CHECK(!parse({"--fd", "3"}).valid);
+    CHECK(!parse({"--fd", "3", "--firmware"}).valid);
+    CHECK(!parse({"--fd", "3", "--firmware", "loader.bin", "-F"}).valid);
+    CHECK(!parse({"--fd", "3", "--firmware", "loader.bin", "-V"}).valid);
     CHECK(parse({}, true).valid && parse({}, true).instance == "default");
     for (const char* selector : {"usb:0-1", "usb:1-0", "usb:256-1",
                                  "usb:1-256", "usb:1-1.", "usb:1-1..2",
@@ -94,49 +114,14 @@ bool arguments_match_reference()
     CHECK(parse({"--fd", "3", "--firmware", "loader.bin"}).valid);
     CHECK(!parse({"--instance", "test", "--group", "--group"}, true).valid);
     CHECK(!parse({"--instance", "test", "--runtime-dir", "x", "--runtime-dir", "x"}, true).valid);
-    CHECK(!parse({"--instance", "12345678901234"}, true).valid);
-    return true;
-}
-
-bool instance_policy_matches_legacy_identity(std::string_view value)
-{
-    return asicen::profile::valid_instance(value) ==
-           (px4::userland::valid_runtime_instance(value) &&
-            !px4::userland::valid_device_instance(value));
-}
-
-bool instance_policy_preserves_acceptance()
-{
-    for (std::size_t size = 0U; size <= 81U; ++size) {
-        for (unsigned int byte = 0U; byte <= 255U; ++byte) {
-            const std::string value(size, static_cast<char>(byte));
-            CHECK(instance_policy_matches_legacy_identity(value));
-        }
-    }
-
-    for (const std::size_t size : {1U, 2U, 13U, 14U, 15U, 16U, 79U, 80U, 81U}) {
-        for (std::size_t position = 0U; position < size; ++position) {
-            for (unsigned int byte = 0U; byte <= 255U; ++byte) {
-                std::string value(size, 'a');
-                value[position] = static_cast<char>(byte);
-                CHECK(instance_policy_matches_legacy_identity(value));
-            }
-        }
-    }
-
-    for (const std::string& value : {std::string(), std::string("test"),
-                                     std::string("RoomA"), std::string("."),
-                                     std::string(".."), std::string(".a"),
-                                     std::string("a."), std::string(13U, '7'),
-                                     std::string(14U, '7'), std::string(15U, '7'),
-                                     std::string(16U, '7'), std::string(80U, 'a'),
-                                     std::string(81U, 'a'), std::string("bad/name"),
-                                     std::string("name space"), std::string("\xc3\xa9")}) {
-        const bool expected = px4::userland::valid_runtime_instance(value) &&
-                              !px4::userland::valid_device_instance(value);
-        const auto parsed = parse({"--instance", value.c_str()}, true);
-        CHECK(instance_policy_matches_legacy_identity(value) && parsed.valid == expected);
-    }
+    CHECK(parse({"--instance", "12345678901234"}, true).valid);
+    CHECK(parse({"--instance", "RoomA"}, true).instance == "RoomA");
+    CHECK(parse({"--instance", "rooma"}, true).instance == "rooma");
+    for (const char* instance : {".", "..", ".a", "a.", "CON", "con.txt",
+                                 "bad/name"})
+        CHECK(!parse({"--instance", instance}, true).valid);
+    const std::string long_instance(65U, 'a');
+    CHECK(!parse({"--instance", long_instance.c_str()}, true).valid);
     return true;
 }
 
@@ -584,7 +569,6 @@ bool readiness_tracks_only_cold_functions_for_single_dual_and_mixed_profiles()
 int main()
 {
     if (!arguments_match_reference() || !selector_grouping() ||
-        !instance_policy_preserves_acceptance() ||
         !list_formats_share_observed_identity() ||
         !receiver_table_matches_product_profile() ||
         !readiness_rechecks_first_and_last_probe_boundaries() ||

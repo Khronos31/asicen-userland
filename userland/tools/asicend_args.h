@@ -198,6 +198,37 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
 
     DaemonArguments result;
     if (mock) result.instance = "default";
+    bool request_help = false;
+    bool request_version = false;
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) continue;
+        const std::string_view option(argv[index]);
+        if (option == "--help" || option == "-h") request_help = true;
+        else if (option == "--version") request_version = true;
+        if ((option == "--firmware" || option == "--runtime-dir") &&
+            index + 1 < argc && argv[index + 1] != nullptr &&
+            std::string_view(argv[index + 1]).rfind("--", 0U) != 0U) {
+            ++index;
+        } else if ((option == "--device" || option == "--instance" ||
+                    (mock && option == "--model")) && index + 1 < argc &&
+            argv[index + 1] != nullptr &&
+            std::string_view(argv[index + 1]).rfind("-", 0U) != 0U) {
+            ++index;
+        } else if (option == "--fd" && index + 1 < argc &&
+                   argv[index + 1] != nullptr &&
+                   std::string_view(argv[index + 1]) != "-h" &&
+                   std::string_view(argv[index + 1]) != "--help" &&
+                   std::string_view(argv[index + 1]) != "--version") {
+            ++index;
+        }
+    }
+    if (request_help || request_version) {
+        result.valid = true;
+        result.help = request_help;
+        result.version = !request_help && request_version && !mock;
+        if (request_version && mock && !request_help) return invalid("unknown argument");
+        return result;
+    }
     bool have_firmware = false;
     bool have_runtime = false;
     bool have_instance = false;
@@ -205,19 +236,8 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
     for (int index = 1; index < argc; ++index) {
         if (argv[index] == nullptr) return invalid("null argument");
         const std::string_view option(argv[index]);
-        if (option == "--help" || option == "-h") {
-            if (argc != 2) return invalid("--help cannot be combined");
-            result.valid = true;
-            result.help = true;
-            return result;
-        }
-        if (option == "--version") {
-            if (argc != 2) return invalid("--version cannot be combined");
-            if (mock) return invalid("unknown argument");
-            result.valid = true;
-            result.version = true;
-            return result;
-        }
+        if (option == "--help" || option == "-h" || option == "--version")
+            return invalid("metadata scan failed");
         if (option == "--list-json") {
             if (argc != 2) return invalid("--list-json cannot be combined");
             if (mock) return invalid("unknown argument");
@@ -314,7 +334,8 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             result.file_descriptors[result.file_descriptor_count++] = fd;
         }
     }
-    if (have_instance && !profile::valid_instance(result.instance))
+    if (have_instance &&
+        !dtv::userland::identity::canonicalize_instance(result.instance).has_value())
         return invalid("--instance is invalid");
     if (!mock) {
         if (!result.device_selector.empty() && result.file_descriptor_count != 0U)
@@ -327,6 +348,8 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
     if (have_runtime && result.runtime_directory.empty()) {
         return invalid("--runtime-dir must not be empty");
     }
+    if (!mock && (!have_firmware || result.firmware.empty()))
+        return invalid("--firmware is required");
     result.valid = true;
     return result;
 }

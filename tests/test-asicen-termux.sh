@@ -28,11 +28,19 @@ version_output=$(sh "$launcher" --version) || fail_test 'source version failed'
 for option in --help --group --allow-lnb-power --usb-device --firmware --instance --runtime-dir; do
     status=0
     sh "$launcher" --version "$option" >/dev/null 2>&1 || status=$?
-    [ "$status" -eq 2 ] || fail_test "version combined with $option was accepted"
+    [ "$status" -eq 0 ] || fail_test "version did not take precedence with $option"
     status=0
     sh "$launcher" "$option" --version >/dev/null 2>&1 || status=$?
-    [ "$status" -eq 2 ] || fail_test "$option combined with version was accepted"
+    [ "$status" -eq 0 ] || fail_test "$option did not yield to version"
 done
+status=0
+sh "$launcher" --version --help >"$test_root/metadata.out" 2>&1 || status=$?
+[ "$status" -eq 0 ] || fail_test 'help/version combination failed'
+grep -q '^usage: asicen-termux' "$test_root/metadata.out" ||
+    fail_test 'help did not take precedence over version'
+status=0
+sh "$launcher" --help --unknown >"$test_root/help.out" 2>&1 || status=$?
+[ "$status" -eq 0 ] || fail_test 'help did not take precedence over unknown option'
 
 assert_equal()
 {
@@ -497,17 +505,25 @@ else
     test "$?" -eq 23
 fi
 
-# ASICEN devices may already be in runtime state; firmware is optional.
-PATH="$fake_bin:$PATH" FAKE_ASICEND_LOG="$log" FAKE_ASICEND_PID="$pid_file" \
-    sh "$launcher" --usb-device "$usb_one"
-assert_equal '2' "$(head -n 1 "$log")" 'runtime single-function argv count'
-assert_log_line '[--fd]' 'runtime fd option'
-assert_log_line '[7]' 'runtime fd value'
+: > "$log"
+status=0
+missing_firmware_pid=$test_root/missing-firmware-pid
+PATH="$fake_bin:$PATH" FAKE_ASICEND_LOG="$log" \
+    FAKE_ASICEND_PID="$missing_firmware_pid" \
+    sh "$launcher" --usb-device "$usb_one" >/dev/null 2>&1 || status=$?
+assert_equal 2 "$status" 'missing firmware rejection'
+assert_file_absent "$missing_firmware_pid" 'missing firmware asicend startup'
+[ ! -s "$log" ] || fail_test 'missing firmware started asicend'
 if PATH="$fake_bin:$PATH" sh "$launcher" --usb-device "$usb_one" --model w3u3; then
     fail_test 'removed model option accepted'
 fi
-if PATH="$fake_bin:$PATH" sh "$launcher" --help --usb-device "$usb_one"; then
-    fail_test 'help combined with arguments accepted'
-fi
+: > "$log"
+status=0
+PATH="$fake_bin:$PATH" sh "$launcher" --help --usb-device "$usb_one" \
+    >"$test_root/help-with-device.out" 2>&1 || status=$?
+assert_equal 0 "$status" 'help precedence with USB selector'
+grep -q '^usage: asicen-termux' "$test_root/help-with-device.out" ||
+    fail_test 'help output missing with USB selector'
+[ ! -s "$log" ] || fail_test 'help started asicend'
 
 printf '%s\n' 'asicen-termux offline tests: PASS'

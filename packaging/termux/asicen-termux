@@ -6,7 +6,7 @@ set -eu
 usage()
 {
     printf '%s\n' \
-        'usage: asicen-termux --usb-device PATH [--usb-device PATH] [--firmware PATH]' \
+        'usage: asicen-termux --usb-device PATH [--usb-device PATH] --firmware PATH' \
         '                    [--instance TOKEN] [--runtime-dir PATH]' \
         '                    [--group] [--allow-lnb-power]' \
         '       asicen-termux --version' \
@@ -19,6 +19,48 @@ fail()
 {
     printf 'asicen-termux: %s\n' "$1" >&2
     exit 2
+}
+
+has_metadata_option()
+{
+    wanted=$1
+    shift
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                [ "$wanted" = help ] && return 0
+                ;;
+            --version)
+                [ "$wanted" = version ] && return 0
+                ;;
+            --firmware|--runtime-dir)
+                if [ "$#" -gt 1 ]; then
+                    case "$2" in --*) ;; *) shift 2; continue ;; esac
+                fi
+                ;;
+            --usb-device|--instance)
+                if [ "$#" -gt 1 ]; then
+                    case "$2" in --*|-h) ;; *) shift 2; continue ;; esac
+                fi
+                ;;
+        esac
+        shift
+    done
+    return 1
+}
+
+show_version()
+{
+    product_version='@ASICEN_PROJECT_VERSION@'
+    case "$product_version" in
+    @*)
+        source_root=$(CDPATH='' cd -- "$(dirname -- "$script_path")/../.." && pwd -P) ||
+            fail 'cannot resolve source VERSION'
+        IFS= read -r product_version < "$source_root/VERSION" ||
+            fail 'cannot read source VERSION'
+        ;;
+    esac
+    printf 'asicen-termux %s\n' "$product_version"
 }
 
 script_path=$0
@@ -84,11 +126,14 @@ valid_fd()
 stage=${ASICEN_TERMUX_STAGE-0}
 case "$stage" in
 0)
-    for argument do
-        if [ "$argument" = --version ] && [ "$#" -ne 1 ]; then
-            fail '--version cannot be combined with other arguments'
-        fi
-    done
+    if has_metadata_option help "$@"; then
+        usage
+        exit 0
+    fi
+    if has_metadata_option version "$@"; then
+        show_version
+        exit 0
+    fi
     usb_device_count=0
     usb_device_1=
     usb_device_2=
@@ -99,23 +144,12 @@ case "$stage" in
     allow_lnb_power=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --help)
-                [ "$#" -eq 1 ] || fail '--help cannot be combined with other arguments'
+            --help|-h)
                 usage
                 exit 0
                 ;;
             --version)
-                product_version='@ASICEN_PROJECT_VERSION@'
-                case "$product_version" in
-                @*)
-                    # A source checkout uses VERSION; builds and archives embed it.
-                    source_root=$(CDPATH='' cd -- "$(dirname -- "$script_path")/../.." && pwd -P) ||
-                        fail 'cannot resolve source VERSION'
-                    IFS= read -r product_version < "$source_root/VERSION" ||
-                        fail 'cannot read source VERSION'
-                    ;;
-                esac
-                printf 'asicen-termux %s\n' "$product_version"
+                show_version
                 exit 0
                 ;;
             --usb-device)
@@ -167,6 +201,7 @@ case "$stage" in
         esac
     done
     [ "$usb_device_count" -ge 1 ] || fail '--usb-device must be specified once or twice'
+    [ -n "$firmware" ] || fail '--firmware PATH is required'
     if [ "$usb_device_count" -eq 2 ]; then
         [ "$usb_device_1" != "$usb_device_2" ] || fail 'the two USB device paths must differ'
     fi
