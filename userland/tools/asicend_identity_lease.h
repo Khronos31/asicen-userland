@@ -3,18 +3,14 @@
 #define ASICEN_USERLAND_ASICEND_IDENTITY_LEASE_H
 
 #include "dtv/userland/host_listener_context/identity_lease.h"
-
-#include <climits>
-#include <cstdio>
 #include <string>
+
+#include <cstdio>
 #include <string_view>
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
+namespace px4::userland::ipc::posix {
+dtv::userland::Result<std::string> select_lease_runtime_root() noexcept;
+}
 
 namespace asicen::cli {
 
@@ -26,44 +22,24 @@ using dtv::userland::host_listener_context::IdentityLeaseDiagnostic;
 using dtv::userland::host_listener_context::IdentityLeaseDiagnosticReason;
 using dtv::userland::host_runtime::EndpointAccess;
 
-inline bool local_app_data_utf8(std::string& output) noexcept
-{
-#if defined(_WIN32)
-    const DWORD required = ::GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0U);
-    if (required == 0U) return false;
-    std::wstring wide(required, L'\0');
-    const DWORD length = ::GetEnvironmentVariableW(
-        L"LOCALAPPDATA", wide.data(), required);
-    if (length == 0U || length >= required) return false;
-    wide.resize(length);
-    if (wide.size() > static_cast<std::size_t>(INT_MAX)) return false;
-    const int bytes = ::WideCharToMultiByte(
-        CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), static_cast<int>(wide.size()),
-        nullptr, 0, nullptr, nullptr);
-    if (bytes <= 0) return false;
-    output.resize(static_cast<std::size_t>(bytes));
-    return ::WideCharToMultiByte(
-        CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), static_cast<int>(wide.size()),
-        output.data(), bytes, nullptr, nullptr) == bytes;
-#else
-    (void)output;
-    return false;
-#endif
-}
-
 inline Result<IdentityLease> acquire_identity_lease(
     std::string_view runtime_directory, bool group, std::string_view identity,
     IdentityLeaseDiagnostic* diagnostic = nullptr) noexcept
 {
 #if defined(_WIN32)
     if (group) return Result<IdentityLease>::failure(Error::UNSUPPORTED);
-    std::string local_app_data;
-    if (runtime_directory.empty()) {
-        if (!local_app_data_utf8(local_app_data))
-            return Result<IdentityLease>::failure(Error::INVALID_ARGUMENT);
-        runtime_directory = local_app_data;
-    }
 #endif
+    std::string selected_runtime_directory;
+    if (runtime_directory.empty()) {
+#if defined(ASICEN_TEST_NO_AUTOMATIC_RUNTIME_DEFAULT)
+        return Result<IdentityLease>::failure(Error::INVALID_ARGUMENT);
+#else
+        auto selected = px4::userland::ipc::posix::select_lease_runtime_root();
+        if (!selected) return Result<IdentityLease>::failure(selected.error());
+        selected_runtime_directory = selected.value();
+        runtime_directory = selected_runtime_directory;
+#endif
+    }
     const IdentityLeaseConfig config{
         runtime_directory,
         ".asicen-userland-",

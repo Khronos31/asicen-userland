@@ -91,7 +91,15 @@ bool arguments_match_reference()
     CHECK(!parse({"--fd", "3", "--firmware"}).valid);
     CHECK(!parse({"--fd", "3", "--firmware", "loader.bin", "-F"}).valid);
     CHECK(!parse({"--fd", "3", "--firmware", "loader.bin", "-V"}).valid);
+#if !defined(_WIN32)
+    CHECK(!parse({"--fd", "3", "--firmware", "loader.bin", "--group"}).valid);
+    CHECK(parse({"--fd", "3", "--firmware", "loader.bin", "--group",
+                 "--runtime-dir", "/tmp/asicen-group"}).valid);
+#endif
     CHECK(parse({}, true).valid && parse({}, true).instance == "default");
+#if !defined(_WIN32)
+    CHECK(!parse({"--group"}, true).valid);
+#endif
     for (const char* selector : {"usb:0-1", "usb:1-0", "usb:256-1",
                                  "usb:1-256", "usb:1-1.", "usb:1-1..2",
                                  "usb:1-1.2.3.4.5.6.7.8.9"})

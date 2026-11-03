@@ -172,7 +172,7 @@ USB 機能が 1 つの PX-S3U と PX-S3U2 では `--device usb:BUS-PORT` を指�
 Termux:API の `termux-usb` を利用してファイルディスクリプタを渡します。配布用 APK はありません。
 Android 側の Termux:API アプリと Termux 内の `termux-api` パッケージが必要です。ランチャーが使う `setsid` は `util-linux` が提供します。`termux-usb -l` で対象を確認し、`termux-usb -r <usb-path>` で各 USB 機能のアクセス許可を取得します。ランチャーは受け渡した fd を保持してデーモンを監視し、終了時は停止・待機・後始末を行います。
 
-ランタイムディレクトリには `/tmp` を使わないでください。Termux の `/tmp` はユーザーが書き込めない場合があり、エンドポイント作成（`make_layout`）も `--runtime-dir` 未指定時は `$XDG_RUNTIME_DIR` だけを参照します。Android では UNIX ドメインソケットのパス長上限が短いため、`$HOME` 配下などの深い階層ではなく `$PREFIX/tmp` 直下の短い固定パスを使います（px4-userland と同じ運用）。
+`--runtime-dir` を省略した場合、POSIXではCore共通候補（`$XDG_RUNTIME_DIR`、`$TMPDIR/dtv-userland-<uid>`、`/tmp/dtv-userland-<uid>`）、Windowsでは `%LOCALAPPDATA%` を使います。明示したpathが不正でも自動候補へ切り替えません。TermuxではCoreが`$TMPDIR`配下の候補を選びます。AndroidのUNIXドメインソケットはパス長上限が短いため、診断された場合は`$PREFIX/tmp`直下の短い専用pathを`--runtime-dir`で明示してください。
 
 ```sh
 runtime_dir="$PREFIX/tmp/a3"
