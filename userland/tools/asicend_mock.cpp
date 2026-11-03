@@ -188,13 +188,7 @@ int main(int argc, char** argv)
         px4::userland::ipc::posix::PosixTunerNonceSource());
     if (!family || !nonce) return 70;
     ContextConfig config;
-    if (!arguments.runtime_directory.empty()) {
-        config.runtime_directory = arguments.runtime_directory;
-    } else {
-        const char* runtime_root = std::getenv("XDG_RUNTIME_DIR");
-        if (runtime_root == nullptr || runtime_root[0] == '\0') return 2;
-        config.runtime_directory = runtime_root;
-    }
+    config.runtime_directory = arguments.runtime_directory;
     config.product = "asicen-userland";
     config.instance = arguments.instance;
     config.access = arguments.group ? EndpointAccess::shared_group : EndpointAccess::private_user;

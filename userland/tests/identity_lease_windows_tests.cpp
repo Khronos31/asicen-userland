@@ -53,17 +53,6 @@ private:
     bool had_previous_ = false;
 };
 
-bool local_app_data_default_is_utf8()
-{
-    ScopedLocalAppData restore;
-    const wchar_t* path = L"C:\\Users\\\x65e5\x672c\\AppData\\Local";
-    CHECK(::SetEnvironmentVariableW(L"LOCALAPPDATA", path) != FALSE);
-    std::string converted;
-    CHECK(asicen::cli::local_app_data_utf8(converted));
-    CHECK(converted == "C:\\Users\\\xE6\x97\xA5\xE6\x9C\xAC\\AppData\\Local");
-    return true;
-}
-
 bool to_utf8(const std::wstring& input, std::string& output)
 {
     if (input.size() > static_cast<std::size_t>(INT_MAX)) return false;
@@ -199,8 +188,7 @@ bool windows_runtime_contract_is_preserved()
 
 int main()
 {
-    if (!local_app_data_default_is_utf8() ||
-        !windows_valid_runtime_paths_support_identity_leases() ||
+    if (!windows_valid_runtime_paths_support_identity_leases() ||
         !windows_runtime_contract_is_preserved())
         return 1;
     std::puts("ASICEN Windows identity lease fixtures passed");

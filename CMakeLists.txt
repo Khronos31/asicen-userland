@@ -805,10 +805,31 @@ if(ASICEN_BUILD_TESTS AND NOT WIN32)
         ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
         ${dtv_userland_core_SOURCE_DIR}/include)
     target_include_directories(asicen-enclosure-lock-tests PRIVATE ${ASICEN_PX4_ROOT}/tools)
+    # This legacy parity test links both IPC implementations; the dedicated
+    # runtime-adoption test covers the Core automatic-root branch separately.
+    target_compile_definitions(asicen-enclosure-lock-tests PRIVATE
+        ASICEN_TEST_NO_AUTOMATIC_RUNTIME_DEFAULT=1)
     target_link_libraries(asicen-enclosure-lock-tests PRIVATE
         asicen_portable_core dtv::host_listener_context)
     asicen_enable_project_warnings(asicen-enclosure-lock-tests)
     add_test(NAME asicen-enclosure-lock-tests COMMAND asicen-enclosure-lock-tests)
+
+    if(UNIX)
+        add_executable(asicen-runtime-adoption-tests
+            userland/tests/runtime_adoption_tests.cpp)
+        target_include_directories(asicen-runtime-adoption-tests BEFORE PRIVATE
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+            ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+            ${dtv_userland_core_SOURCE_DIR}/include)
+        target_include_directories(asicen-runtime-adoption-tests PRIVATE
+            ${ASICEN_PX4_ROOT}/tools ${ASICEN_PX4_ROOT}/userland/tests)
+        target_link_libraries(asicen-runtime-adoption-tests PRIVATE
+            asicen_core_test_mock dtv::host_listener_context)
+        asicen_enable_project_warnings(asicen-runtime-adoption-tests)
+        add_test(NAME asicen-runtime-adoption-tests
+            COMMAND asicen-runtime-adoption-tests)
+    endif()
 
     add_executable(asicen-hardware-session-tests
         userland/tests/hardware_stream_session_tests.cpp)

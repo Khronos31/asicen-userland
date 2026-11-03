@@ -95,6 +95,36 @@ with temporary_runtime_root() as temp:
     try:
         wait_socket(endpoint, daemon, root / "daemon.log")
 
+        # Daemon, control client and TS client share Core's default candidates
+        # when the caller leaves --runtime-dir unset.
+        with tempfile.TemporaryDirectory(prefix="asicen-auto-", dir="/tmp") as auto_tmp:
+            auto_env = os.environ.copy()
+            auto_env.pop("XDG_RUNTIME_DIR", None)
+            auto_env["TMPDIR"] = auto_tmp
+            auto_root = Path(auto_tmp) / f"dtv-userland-{os.geteuid()}"
+            auto_endpoint = auto_root / "asicen-userland" / "v1" / "default" / "control.sock"
+            auto_log = open(root / "automatic-daemon.log", "wb")
+            logs.append(auto_log)
+            auto_daemon = subprocess.Popen(
+                [str(DAEMON)], stdout=subprocess.DEVNULL, stderr=auto_log, env=auto_env)
+            children.append(auto_daemon)
+            wait_socket(auto_endpoint, auto_daemon, root / "automatic-daemon.log")
+
+            auto_status = run(str(CTL), "--instance", "default", "status",
+                              capture_output=True, text=True, env=auto_env)
+            assert auto_status.returncode == 0, auto_status.stderr
+            auto_capture = root / "automatic-capture.ts"
+            auto_stream = run(str(TS), "--instance", "default", "--receiver", "1",
+                              "--channel", "T27", "--packet-count", "3", "--output",
+                              str(auto_capture), capture_output=True, timeout=5, env=auto_env)
+            assert auto_stream.returncode == 0, auto_stream.stderr.decode(errors="replace")
+            assert len(auto_capture.read_bytes()) == 3 * 188
+
+            auto_daemon.send_signal(signal.SIGTERM)
+            assert auto_daemon.wait(timeout=2) == 0
+            assert not auto_endpoint.exists()
+            assert auto_root.is_dir(), "Core removed its shared automatic runtime root"
+
         # Mock instances represent independent synthetic enclosures. A shared
         # runtime root must not turn their endpoint ownership into one global
         # hardware lock.

@@ -436,14 +436,6 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
     ContextConfig config;
     if (runtime_directory != nullptr && runtime_directory[0] != '\0') {
         config.runtime_directory = runtime_directory;
-    } else {
-#if !defined(_WIN32)
-        const char* runtime_root = std::getenv("XDG_RUNTIME_DIR");
-        if (runtime_root == nullptr || runtime_root[0] == '\0') return 2;
-        config.runtime_directory = runtime_root;
-#else
-        return 2;
-#endif
     }
     config.product = "asicen-userland";
     config.instance = instance;

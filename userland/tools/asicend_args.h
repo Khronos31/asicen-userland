@@ -348,6 +348,11 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
     if (have_runtime && result.runtime_directory.empty()) {
         return invalid("--runtime-dir must not be empty");
     }
+#if !defined(_WIN32)
+    if (result.group && !have_runtime) {
+        return invalid("--group requires --runtime-dir");
+    }
+#endif
     if (!mock && (!have_firmware || result.firmware.empty()))
         return invalid("--firmware is required");
     result.valid = true;
