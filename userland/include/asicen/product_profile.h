@@ -4,14 +4,24 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <dtv/userland/identity.h>
 #include <string_view>
 
 namespace asicen::profile {
 
-inline bool valid_instance(std::string_view value) noexcept
+constexpr bool valid_instance(std::string_view value) noexcept
 {
-    return dtv::userland::identity::canonicalize_instance(value).has_value();
+    if (value.empty() || value.size() > 80U || value == "." || value == "..") return false;
+
+    bool numeric = true;
+    for (const unsigned char character : value) {
+        const bool digit = character >= '0' && character <= '9';
+        const bool accepted = digit || (character >= 'a' && character <= 'z') ||
+                              (character >= 'A' && character <= 'Z') ||
+                              character == '_' || character == '-' || character == '.';
+        if (!accepted) return false;
+        numeric = numeric && digit;
+    }
+    return !numeric || (value.size() != 14U && value.size() != 15U);
 }
 
 // Maximum/default W3U3 topology; runtime enclosures may contain 1 or 2 receivers.

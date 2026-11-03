@@ -334,7 +334,8 @@ inline DaemonArguments parse_daemon_arguments(int argc, const char* const* argv,
             result.file_descriptors[result.file_descriptor_count++] = fd;
         }
     }
-    if (have_instance && !profile::valid_instance(result.instance))
+    if (have_instance &&
+        !dtv::userland::identity::canonicalize_instance(result.instance).has_value())
         return invalid("--instance is invalid");
     if (!mock) {
         if (!result.device_selector.empty() && result.file_descriptor_count != 0U)
