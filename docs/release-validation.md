@@ -782,7 +782,7 @@ statusがready、listにreceiverが存在すること、client終了値0、TSが
 受信停止後、同じdaemon/runtimeで同じ受信を再取得し、normal exitと再取得成功を確認する。機種差があるので使うreceiverとT/Sの排他条件を記録する。
 
 <a id="asicen-linux-posix-t07"></a>
-### E03 Linux POSIX T07 recipe
+### E03 Linux POSIX T07手順
 
 Linux native Bash runで使うidle/stream手順。T00で設定した候補path、firmware、LOG、WORKを同じBash shellで保持する。各物理操作は利用者へ依頼しEnter応答を最大300秒待ち、daemon/client PIDと返却値を保存する。再接続後は必ず新しいruntimeを使う。
 
@@ -1059,7 +1059,8 @@ ldd "$WORK/bcas-safe-probe" | grep 'libpcsclite.so.1'
 
 AndroidにはIFDがない。
 
-#### E04 macOS native PC/SC
+<a id="e04-macos-native-pcsc"></a>
+#### E04 macOS native PC/SC手順
 
 T10のnative consumerはApple PCSC.frameworkを使って今回candidateごとに実施する。reader列挙だけでは合格にせず、接続、ATR、card operationまで確認する。以下のHomebrew `pcsc-lite`手順は任意の隔離alternate stackであり、標準経路の前提ではない。T00で固定した`release-candidate` runから配布archiveとmanifestを取得する。
 
