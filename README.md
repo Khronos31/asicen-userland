@@ -66,7 +66,7 @@ Windows 11 x86_64 は Phase 1（製品コマンドと CARD_* を含む同一ホ�
 
 `firmware/asicen-loader.bin`（16,384 バイト）は全機種共通の Windows 由来イメージです。通常の model 省略起動ではこのイメージを使用します。固定イメージの抽出・hash検査には既存の `scripts/extract-windows-loader-firmware.py` を使います。再配布権は未解決であり、vendor notice と由来情報を各 binary archive に含めます。
 
-通常起動は `asicend --device usb:BUS-PORT[,BUS-PORT...] --instance TOKEN --firmware PATH` です。cold loader へ共通イメージを転送した後、同じ USB 位置に戻る runtime VID:PID から機種を決めます。既に runtime なら転送を省略します。既知の内部 Hub で相方位置を一意に確認できる機種は1位置で選択でき、確認できない場合は複数位置を指定します。serial がない ASICEN 機器を `serial:` で選択した場合は一致なしになります。Termux の `--fd` は再列挙に追随できないため、転送と起動を分けます（転送後に runtime の fd を再取得して `--firmware` なしで起動）。runtime fd の VID:PID から機種を決めます。開発用の `asicen-probe load-firmware` も引き続き利用できます。
+通常起動は `asicend --device usb:BUS-PORT[,BUS-PORT...] --instance TOKEN --firmware PATH` です。cold loader へ共通イメージを転送した後、同じ USB 位置に戻る runtime VID:PID から機種を決めます。既に runtime なら転送を省略します。既知の内部 Hub で相方位置を一意に確認できる機種は1位置で選択でき、確認できない場合は複数位置を指定します。serial がない ASICEN 機器を `serial:` で選択した場合は一致なしになります。Termux の `--fd` は再列挙に追随できないため、転送と起動を分けます（転送後に runtime の fd を再取得し、起動時にも `--firmware PATH` を指定します。runtimeなら再転送はしません）。runtime fd の VID:PID から機種を決めます。開発用の `asicen-probe load-firmware` も引き続き利用できます。
 
 ### 実行時ライブラリ
 
@@ -179,7 +179,7 @@ runtime_dir="$PREFIX/tmp/a3"
 mkdir -p "$runtime_dir"
 chmod 700 "$runtime_dir"
 asicen-termux --usb-device /dev/bus/usb/001/004 \
-  --runtime-dir "$runtime_dir" --instance tuner
+  --runtime-dir "$runtime_dir" --instance tuner --firmware /path/to/asicen-loader.bin
 ```
 
 USB 機能が 2 つの機種では、`--usb-device` を primary、sibling の順で 2 回指定します。ローダ状態からの起動時は、まず別途ファームウェアを転送してから runtime を起動してください（`--fd` は再列挙に追随しないため、転送と起動を分けます）。

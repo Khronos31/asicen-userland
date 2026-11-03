@@ -28,10 +28,14 @@ for binary, label in [('asicend', 'asicend'), ('asicen-ts', 'asicen-ts'),
     result = run(binary, '--version')
     check(result.returncode == 0 and result.stdout == f'{label} {version}\n' and
           not result.stderr, (binary, result.returncode, result.stdout, result.stderr))
+    help_result = run(binary, '--help')
+    check(help_result.returncode == 0 and help_result.stdout and not help_result.stderr,
+          (binary, help_result.returncode, help_result.stdout, help_result.stderr))
     for other in [('--help',), ('--version',), ('--instance', 'version-test')]:
         for arguments in [('--version', *other), (*other, '--version')]:
             result = run(binary, *arguments)
-            check(result.returncode == 2 and not result.stdout,
+            expected = help_result.stdout if '--help' in arguments else f'{label} {version}\n'
+            check(result.returncode == 0 and result.stdout == expected and not result.stderr,
                   (binary, arguments, result.returncode, result.stdout, result.stderr))
 
 help_long = run('asicend', '--help')
@@ -41,7 +45,11 @@ check(help_long.returncode == help_short.returncode == 0 and
 for arguments in [('-h', '--models'), ('--models', '-h'), ('-h', '--version'),
                   ('--instance', 'help-test', '-h'), ('-l',)]:
     result = run('asicend', *arguments)
-    check(result.returncode == 2 and not result.stdout, (arguments, result.stderr))
+    if '-h' in arguments:
+        check(result.returncode == 0 and result.stdout == help_long.stdout and not result.stderr,
+              (arguments, result.returncode, result.stdout, result.stderr))
+    else:
+        check(result.returncode == 2 and not result.stdout, (arguments, result.stderr))
 check(run('asicend-mock', '--model', 'not-an-asicen').returncode == 2,
       'unknown mock model must fail before a server is created')
 check(run('asicend', '--model', 'not-an-asicen').returncode in (2, 3),
