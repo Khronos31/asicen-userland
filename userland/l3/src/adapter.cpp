@@ -821,6 +821,10 @@ void Adapter::stream_loop()
             // provider delivers a terminal completion.
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        if (stream_deliver_ != nullptr)
+        {
+            stream_deliver_(stream_deliver_context_, nullptr, 0U);
+        }
     }
     stream_running_.store(false);
 }
