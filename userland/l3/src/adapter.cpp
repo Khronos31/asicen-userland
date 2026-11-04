@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 namespace asicen::l3 {
 namespace {
@@ -18,9 +19,24 @@ bool has_system(std::uint32_t mask, std::uint32_t system) noexcept
 
 } // namespace
 
+void fill_capabilities(const DeviceProfile& profile, dtv_l3_capabilities* capabilities)
+{
+    std::memset(capabilities, 0, sizeof(*capabilities));
+    const bool multi_function = profile.expected_runtime_functions > 1U;
+    capabilities->receiver_count =
+        multi_function ? profile.enclosure_receiver_count
+                       : (profile.combined_isdb_ts ? 1U : profile.enclosure_receiver_count);
+    capabilities->reader_count = 1U;
+    const bool model_lnb = profile.model_id == ModelId::W3u2 || profile.model_id == ModelId::W3u3 ||
+                           profile.model_id == ModelId::W3u3V2;
+    capabilities->lnb_power = model_lnb ? 1U : 0U;
+    capabilities->serial = 0U;
+    capabilities->cancel_scope = DTV_L3_CANCEL_SCOPE_TRANSFER;
+}
+
 Adapter::Adapter(const DeviceProfile& profile, Host& host) : profile_(&profile), host_(host)
 {
-    fill_capability(profile, &capability_);
+    fill_capabilities(profile, &capabilities_);
     for (std::uint32_t receiver = 0U; receiver < profile.enclosure_receiver_count; ++receiver)
     {
         const auto address = receiver_address(profile, receiver);
@@ -38,79 +54,82 @@ Adapter::Adapter(const DeviceProfile& profile, Host& host) : profile_(&profile),
                                        : ASICEN_L3_SYSTEM_TERRESTRIAL;
     }
 
-    provider_.provider_context = this;
-    provider_.claim = &Adapter::claim_thunk;
-    provider_.release_claim = &Adapter::release_claim_thunk;
-    provider_.submit = &Adapter::submit_thunk;
-    provider_.cancel = &Adapter::cancel_thunk;
-    provider_.scope_query = &Adapter::scope_query_thunk;
-    provider_.bridge_start = &Adapter::bridge_start_thunk;
-    provider_.bridge_stop = &Adapter::bridge_stop_thunk;
-    provider_.stream_attach = &Adapter::stream_attach_thunk;
-    provider_.stream_stop = &Adapter::stream_stop_thunk;
-    provider_.tune = &Adapter::tune_thunk;
-    provider_.claim_cancel = nullptr;
-    provider_.cancel_scope = DTV_L3_CANCEL_SCOPE_TRANSFER;
-    provider_.logger.fn = nullptr;
-    provider_.logger.userdata = nullptr;
-    provider_.logger.min_level = DTV_L3_LOG_ERROR;
+    reader_token_.reader_id = 0U;
+    adapter_.product_context = this;
+    adapter_.capabilities = capabilities_;
+    adapter_.firmware = nullptr;
+    adapter_.scope_query = &Adapter::scope_query_thunk;
+    adapter_.tune = &Adapter::tune_thunk;
+    adapter_.bridge_start = &Adapter::bridge_start_thunk;
+    adapter_.bridge_stop = &Adapter::bridge_stop_thunk;
+    adapter_.stream_attach = &Adapter::stream_attach_thunk;
+    adapter_.stream_stop = &Adapter::stream_stop_thunk;
+    adapter_.reader_acquire = &Adapter::reader_acquire_thunk;
+    adapter_.lnb_set = &Adapter::lnb_set_thunk;
 }
 
-void fill_capability(const DeviceProfile& profile, asicen_l3_capability* capability)
+dtv_l3_result Adapter::prepare_firmware(const dtv_l3_firmware* firmware)
 {
-    std::memset(capability, 0, sizeof(*capability));
-    capability->struct_size = static_cast<std::uint32_t>(sizeof(*capability));
-    capability->model = static_cast<std::uint32_t>(profile.model_id);
-    capability->model_key = profile.model_key;
-    capability->vid = profile.vid;
-    capability->pid = profile.pid;
-    capability->enclosure_receivers = profile.enclosure_receiver_count;
-    const bool multi_function = profile.expected_runtime_functions > 1U;
-    capability->public_receivers =
-        multi_function ? profile.enclosure_receiver_count
-                       : (profile.combined_isdb_ts ? 1U : profile.enclosure_receiver_count);
-    capability->usb_functions = profile.expected_runtime_functions;
-    capability->local_lanes = profile.local_lane_count;
-    capability->combined_isdb_ts = profile.combined_isdb_ts ? 1U : 0U;
-    capability->readers = 1U;
-    capability->loader_firmware = 1U;
-    capability->multi_endpoint = multi_function ? 1U : 0U;
-    // Not measured. The existing capture service must be the source of truth
-    // before a concurrent-stream limit is published.
-    capability->max_concurrent_streams = 0U;
-
-    const bool model_lnb = profile.model_id == ModelId::W3u2 || profile.model_id == ModelId::W3u3 ||
-                           profile.model_id == ModelId::W3u3V2;
-    for (std::uint32_t receiver = 0U; receiver < profile.enclosure_receiver_count; ++receiver)
+    if (firmware == nullptr || firmware->source == DTV_L3_FIRMWARE_NONE)
     {
-        const auto address = receiver_address(profile, receiver);
-        if (!address)
-        {
-            continue;
-        }
-        const std::uint32_t system = address.value().system == BroadcastSystem::IsdbS
-                                         ? ASICEN_L3_SYSTEM_SATELLITE
-                                         : ASICEN_L3_SYSTEM_TERRESTRIAL;
-        if (profile.combined_isdb_ts)
-        {
-            // One combined receiver serves both systems even though the
-            // internal lane address names only one.
-            capability->receiver_systems[receiver] =
-                ASICEN_L3_SYSTEM_TERRESTRIAL | ASICEN_L3_SYSTEM_SATELLITE;
-        } else
-        {
-            capability->receiver_systems[receiver] |= system;
-        }
-        if (model_lnb && system == ASICEN_L3_SYSTEM_SATELLITE)
-        {
-            capability->lnb_receiver_mask |= 1U << receiver;
-        }
+        adapter_.firmware = nullptr;
+        return DTV_L3_OK;
     }
-}
+    switch (firmware->source)
+    {
+    case DTV_L3_FIRMWARE_BYTES:
+        if (firmware->bytes == nullptr || firmware->size == 0U)
+        {
+            return DTV_L3_INVALID;
+        }
+        firmware_bytes_.assign(firmware->bytes, firmware->bytes + firmware->size);
+        break;
+    case DTV_L3_FIRMWARE_PATH:
+        if (firmware->path == nullptr || firmware->path[0] == '\0')
+        {
+            return DTV_L3_INVALID;
+        }
+        firmware_path_ = firmware->path;
+        break;
+    case DTV_L3_FIRMWARE_READ_CALLBACK: {
+        if (firmware->read == nullptr)
+        {
+            return DTV_L3_INVALID;
+        }
+        const std::uint8_t* data = nullptr;
+        std::size_t size = 0U;
+        const auto read = firmware->read(firmware->read_context, &data, &size);
+        if (read != DTV_L3_OK)
+        {
+            return read;
+        }
+        if (data == nullptr || size == 0U)
+        {
+            return DTV_L3_INVALID;
+        }
+        firmware_bytes_.assign(data, data + size);
+        break;
+    }
+    default:
+        return DTV_L3_INVALID;
+    }
 
-std::uint32_t Adapter::claim_count() const noexcept
-{
-    return profile_->expected_runtime_functions;
+    firmware_view_ = *firmware;
+    firmware_view_.read = nullptr;
+    firmware_view_.read_context = nullptr;
+    if (firmware->source == DTV_L3_FIRMWARE_PATH)
+    {
+        firmware_view_.path = firmware_path_.c_str();
+        firmware_view_.bytes = nullptr;
+        firmware_view_.size = 0U;
+    } else
+    {
+        firmware_view_.path = nullptr;
+        firmware_view_.bytes = firmware_bytes_.data();
+        firmware_view_.size = firmware_bytes_.size();
+    }
+    adapter_.firmware = &firmware_view_;
+    return DTV_L3_OK;
 }
 
 bool Adapter::route(std::uint32_t receiver, asicen_l3_route* out) const noexcept
@@ -135,7 +154,21 @@ int Adapter::system_for_receiver(std::uint32_t receiver) const noexcept
     {
         return 0;
     }
-    return static_cast<int>(capability_.receiver_systems[receiver]);
+    std::uint32_t mask = 0U;
+    const auto address = receiver_address(*profile_, receiver);
+    if (!address)
+    {
+        return 0;
+    }
+    if (profile_->combined_isdb_ts)
+    {
+        mask = ASICEN_L3_SYSTEM_TERRESTRIAL | ASICEN_L3_SYSTEM_SATELLITE;
+    } else
+    {
+        mask = address.value().system == BroadcastSystem::IsdbS ? ASICEN_L3_SYSTEM_SATELLITE
+                                                                : ASICEN_L3_SYSTEM_TERRESTRIAL;
+    }
+    return static_cast<int>(mask);
 }
 
 dtv_l3_result Adapter::tune_locked(std::uint32_t receiver, std::uint32_t system,
@@ -153,8 +186,6 @@ dtv_l3_result Adapter::tune_locked(std::uint32_t receiver, std::uint32_t system,
     }
     if (system == 0U)
     {
-        // A combined T/S receiver has no single default in the candidate
-        // provider contract; the caller must name the system.
         if (supported != ASICEN_L3_SYSTEM_TERRESTRIAL && supported != ASICEN_L3_SYSTEM_SATELLITE)
         {
             return DTV_L3_UNSUPPORTED;
@@ -178,19 +209,21 @@ dtv_l3_result Adapter::tune(std::uint32_t receiver, std::uint32_t system,
 
 dtv_l3_result Adapter::reader_open(std::uint32_t reader_id)
 {
-    return reader_id < capability_.readers ? host_.reader_open(reader_id) : DTV_L3_UNSUPPORTED;
+    return reader_id < capabilities_.reader_count ? host_.reader_open(reader_id)
+                                                  : DTV_L3_UNSUPPORTED;
 }
 
 dtv_l3_result Adapter::reader_reset(std::uint32_t reader_id)
 {
-    return reader_id < capability_.readers ? host_.reader_reset(reader_id) : DTV_L3_UNSUPPORTED;
+    return reader_id < capabilities_.reader_count ? host_.reader_reset(reader_id)
+                                                  : DTV_L3_UNSUPPORTED;
 }
 
 dtv_l3_result Adapter::reader_transmit(std::uint32_t reader_id, const std::uint8_t* command,
                                        std::size_t command_size, std::uint8_t* response,
                                        std::size_t response_capacity, std::size_t* response_size)
 {
-    if (reader_id >= capability_.readers || command == nullptr || command_size == 0U ||
+    if (reader_id >= capabilities_.reader_count || command == nullptr || command_size == 0U ||
         response_size == nullptr)
     {
         return DTV_L3_INVALID;
@@ -201,48 +234,23 @@ dtv_l3_result Adapter::reader_transmit(std::uint32_t reader_id, const std::uint8
 
 dtv_l3_result Adapter::reader_close(std::uint32_t reader_id)
 {
-    return reader_id < capability_.readers ? host_.reader_close(reader_id) : DTV_L3_UNSUPPORTED;
+    return reader_id < capabilities_.reader_count ? host_.reader_close(reader_id)
+                                                  : DTV_L3_UNSUPPORTED;
 }
 
 dtv_l3_result Adapter::lnb_set(std::uint32_t receiver, std::uint32_t mode)
 {
-    if (receiver >= profile_->enclosure_receiver_count ||
-        (capability_.lnb_receiver_mask & (1U << receiver)) == 0U)
+    if (receiver >= profile_->enclosure_receiver_count)
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    const auto address = receiver_address(*profile_, receiver);
+    if (!address || address.value().system != BroadcastSystem::IsdbS ||
+        profile_->model_id == ModelId::S3u || profile_->model_id == ModelId::S3u2)
     {
         return DTV_L3_UNSUPPORTED;
     }
     return host_.lnb_set(receiver, mode);
-}
-
-dtv_l3_claim_result Adapter::claim_thunk(void* context, dtv_l3_provider_binding*,
-                                         std::uint32_t index)
-{
-    return static_cast<Adapter*>(context)->host_.claim(index);
-}
-
-dtv_l3_release_result Adapter::release_claim_thunk(void* context, dtv_l3_provider_binding*,
-                                                   std::uint32_t index)
-{
-    return static_cast<Adapter*>(context)->host_.release_claim(index);
-}
-
-dtv_l3_result Adapter::submit_thunk(void* context, dtv_l3_provider_binding*,
-                                    std::uint64_t transfer_id,
-                                    const dtv_l3_transfer_request* request,
-                                    dtv_l3_transfer_complete_fn complete, void* callback_context)
-{
-    if (request == nullptr)
-    {
-        return DTV_L3_INVALID;
-    }
-    return static_cast<Adapter*>(context)->host_.submit(transfer_id, *request, complete,
-                                                        callback_context);
-}
-
-dtv_l3_result Adapter::cancel_thunk(void* context, dtv_l3_provider_binding*,
-                                    std::uint64_t transfer_id)
-{
-    return static_cast<Adapter*>(context)->host_.cancel(transfer_id);
 }
 
 dtv_l3_result Adapter::scope_query_thunk(void* context, std::uint32_t receiver,
@@ -252,10 +260,8 @@ dtv_l3_result Adapter::scope_query_thunk(void* context, std::uint32_t receiver,
     {
         return DTV_L3_INVALID;
     }
-    // rf_function_index is the existing shared RF scope. Distinct local lanes
-    // on one function remain separate receivers with their own tune revision.
-    asicen_l3_route route{};
     auto* adapter = static_cast<Adapter*>(context);
+    asicen_l3_route route{};
     if (!adapter->route(receiver, &route))
     {
         return DTV_L3_UNSUPPORTED;
@@ -263,6 +269,16 @@ dtv_l3_result Adapter::scope_query_thunk(void* context, std::uint32_t receiver,
     scope->bridge_id = route.rf_function_index;
     scope->compatibility = DTV_L3_LEASE_SHAREABLE;
     return DTV_L3_OK;
+}
+
+dtv_l3_result Adapter::tune_thunk(void* context, dtv_l3_provider_binding*,
+                                  std::uint32_t receiver_id, std::uint64_t requested_hz,
+                                  std::uint64_t* programmed_hz)
+{
+    auto* adapter = static_cast<Adapter*>(context);
+    std::lock_guard<std::mutex> lock(adapter->mutex_);
+    return adapter->tune_locked(receiver_id, 0U, requested_hz, kDefaultTuneTimeoutMs,
+                                programmed_hz);
 }
 
 dtv_l3_result Adapter::bridge_start_thunk(void* context, dtv_l3_provider_binding*,
@@ -274,7 +290,7 @@ dtv_l3_result Adapter::bridge_start_thunk(void* context, dtv_l3_provider_binding
     {
         return DTV_L3_UNSUPPORTED;
     }
-    if (adapter->capability_.combined_isdb_ts != 0U)
+    if (adapter->profile_->combined_isdb_ts)
     {
         // The candidate bridge_start carries no system, so a combined T/S
         // receiver cannot choose a stream input here.
@@ -287,7 +303,6 @@ dtv_l3_result Adapter::bridge_start_thunk(void* context, dtv_l3_provider_binding
     }
     std::lock_guard<std::mutex> lock(adapter->mutex_);
     adapter->pending_attaches_.push_back(PendingAttach{bridge_id, receiver_id});
-    adapter->active_receiver_ = receiver_id;
     return DTV_L3_OK;
 }
 
@@ -315,9 +330,8 @@ dtv_l3_result Adapter::stream_attach_thunk(void* context, dtv_l3_provider_bindin
         std::lock_guard<std::mutex> lock(adapter->mutex_);
         if (adapter->pending_attaches_.empty())
         {
-            // stream_attach carries no receiver or bridge identity; the
-            // candidate provider needs that input added before this can be
-            // made race-free.
+            // Core's candidate stream_attach carries no receiver or bridge
+            // identity; add one before this can be made race-free.
             return DTV_L3_FAILED;
         }
         pending = adapter->pending_attaches_.front();
@@ -364,14 +378,96 @@ dtv_l3_result Adapter::stream_stop_thunk(void* context, dtv_l3_provider_binding*
     return stopped;
 }
 
-dtv_l3_result Adapter::tune_thunk(void* context, dtv_l3_provider_binding*,
-                                  std::uint32_t receiver_id, std::uint64_t requested_hz,
-                                  std::uint64_t* programmed_hz)
+dtv_l3_result Adapter::reader_acquire_thunk(void* context, std::uint32_t reader_id,
+                                            dtv_l3_reader** reader_out)
 {
     auto* adapter = static_cast<Adapter*>(context);
-    std::lock_guard<std::mutex> lock(adapter->mutex_);
-    return adapter->tune_locked(receiver_id, 0U, requested_hz, kDefaultTuneTimeoutMs,
-                                programmed_hz);
+    if (reader_out == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    *reader_out = nullptr;
+    if (reader_id >= adapter->capabilities_.reader_count)
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    const auto opened = adapter->host_.reader_open(reader_id);
+    if (opened != DTV_L3_OK)
+    {
+        return opened;
+    }
+    adapter->reader_token_.reader_id = reader_id;
+    *reader_out = reinterpret_cast<dtv_l3_reader*>(&adapter->reader_token_);
+    return DTV_L3_OK;
+}
+
+dtv_l3_result Adapter::lnb_set_thunk(void* context, std::uint32_t receiver_id, std::uint32_t mode)
+{
+    return static_cast<Adapter*>(context)->lnb_set(receiver_id, mode);
+}
+
+Factory::Factory(const DeviceProfile& profile, Host& host) : profile_(&profile), host_(host)
+{
+    factory_.factory_context = this;
+    factory_.create = &Factory::create_thunk;
+    factory_.release = &Factory::release_thunk;
+}
+
+std::uint32_t Factory::claim_count() const noexcept
+{
+    return profile_->expected_runtime_functions;
+}
+
+bool Factory::route(std::uint32_t receiver, asicen_l3_route* out) const noexcept
+{
+    if (out == nullptr || receiver >= profile_->enclosure_receiver_count)
+    {
+        return false;
+    }
+    const auto address = receiver_address(*profile_, receiver);
+    if (!address)
+    {
+        return false;
+    }
+    out->valid = 1U;
+    out->function_index = address.value().function_index;
+    out->local_lane = address.value().local_lane;
+    out->rf_function_index = address.value().rf_function_index;
+    out->frontend_source = address.value().frontend_source;
+    out->system = address.value().system == BroadcastSystem::IsdbS ? ASICEN_L3_SYSTEM_SATELLITE
+                                                                   : ASICEN_L3_SYSTEM_TERRESTRIAL;
+    return true;
+}
+
+dtv_l3_result Factory::create_thunk(void* context, const dtv_l3_open_config* config,
+                                    const dtv_l3_product_adapter** adapter_out,
+                                    void** adapter_owner_out)
+{
+    auto* factory = static_cast<Factory*>(context);
+    if (config == nullptr || adapter_out == nullptr || adapter_owner_out == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    *adapter_out = nullptr;
+    *adapter_owner_out = nullptr;
+    if (config->model != static_cast<std::uint32_t>(factory->profile_->model_id))
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    auto adapter = std::make_unique<Adapter>(*factory->profile_, factory->host_);
+    const auto firmware_result = adapter->prepare_firmware(config->firmware);
+    if (firmware_result != DTV_L3_OK)
+    {
+        return firmware_result;
+    }
+    *adapter_out = adapter->product_adapter();
+    *adapter_owner_out = adapter.release();
+    return DTV_L3_OK;
+}
+
+void Factory::release_thunk(void* owner)
+{
+    delete static_cast<Adapter*>(owner);
 }
 
 } // namespace asicen::l3

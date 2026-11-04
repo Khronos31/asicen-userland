@@ -14,21 +14,13 @@ class LibusbW3u3Hardware;
 
 namespace asicen::l3 {
 
-// Adapts the existing enclosure backend to the candidate L3 host seam. The
-// current backend claims the enclosure atomically, so only claim index 0
-// performs a physical claim; higher logical function indices are reported as
-// already covered by that enclosure claim.
-class LibusbBackendHost final : public Host {
+// Product-owned semantics over the existing enclosure backend.
+class LibusbProductHost final : public Host {
   public:
-    explicit LibusbBackendHost(LibusbW3u3Hardware& backend) : backend_(backend)
+    explicit LibusbProductHost(LibusbW3u3Hardware& backend) : backend_(backend)
     {
     }
 
-    dtv_l3_claim_result claim(std::uint32_t claim_index) override;
-    dtv_l3_release_result release_claim(std::uint32_t claim_index) override;
-    dtv_l3_result submit(std::uint64_t transfer_id, const dtv_l3_transfer_request& request,
-                         dtv_l3_transfer_complete_fn complete, void* callback_context) override;
-    dtv_l3_result cancel(std::uint64_t transfer_id) override;
     dtv_l3_result tune(std::uint32_t receiver, std::uint32_t system, std::uint64_t frequency_hz,
                        std::uint32_t timeout_ms, std::uint64_t* programmed_hz) override;
     dtv_l3_result reader_open(std::uint32_t reader_id) override;
@@ -41,6 +33,45 @@ class LibusbBackendHost final : public Host {
 
   private:
     LibusbW3u3Hardware& backend_;
+};
+
+// USB-only provider over the current enclosure claim. The backend has no
+// public generic submit/cancel seam, so those callbacks report UNSUPPORTED.
+class LibusbUsbProvider final {
+  public:
+    explicit LibusbUsbProvider(LibusbW3u3Hardware& backend) : backend_(backend)
+    {
+        provider_.provider_context = this;
+        provider_.claim = &LibusbUsbProvider::claim_thunk;
+        provider_.release_claim = &LibusbUsbProvider::release_claim_thunk;
+        provider_.submit = &LibusbUsbProvider::submit_thunk;
+        provider_.cancel = &LibusbUsbProvider::cancel_thunk;
+        provider_.claim_cancel = nullptr;
+        provider_.cancel_scope = DTV_L3_CANCEL_SCOPE_TRANSFER;
+        provider_.logger.fn = nullptr;
+        provider_.logger.userdata = nullptr;
+        provider_.logger.min_level = DTV_L3_LOG_ERROR;
+    }
+
+    const dtv_l3_usb_provider* provider() const noexcept
+    {
+        return &provider_;
+    }
+
+  private:
+    static dtv_l3_claim_result claim_thunk(void* context, dtv_l3_provider_binding* binding,
+                                           std::uint32_t claim_index);
+    static dtv_l3_release_result
+    release_claim_thunk(void* context, dtv_l3_provider_binding* binding, std::uint32_t claim_index);
+    static dtv_l3_result submit_thunk(void* context, dtv_l3_provider_binding* binding,
+                                      std::uint64_t transfer_id,
+                                      const dtv_l3_transfer_request* request,
+                                      dtv_l3_transfer_complete_fn complete, void* callback_context);
+    static dtv_l3_result cancel_thunk(void* context, dtv_l3_provider_binding* binding,
+                                      std::uint64_t transfer_id);
+
+    LibusbW3u3Hardware& backend_;
+    dtv_l3_usb_provider provider_{};
     bool enclosure_claimed_ = false;
 };
 

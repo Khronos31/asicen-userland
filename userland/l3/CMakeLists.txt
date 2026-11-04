@@ -9,6 +9,14 @@ if(NOT EXISTS "${ASICEN_L3_CANDIDATE_DIR}/include/dtv/l3_owner.h")
         "ASICEN_BUILD_L3_ADAPTER needs the Core L3 candidate header at "
         "${ASICEN_L3_CANDIDATE_DIR}/include/dtv/l3_owner.h")
 endif()
+file(STRINGS "${ASICEN_L3_CANDIDATE_DIR}/include/dtv/l3_owner.h"
+    ASICEN_L3_PRODUCT_SPLIT_API REGEX "dtv_l3_usb_provider")
+if(NOT ASICEN_L3_PRODUCT_SPLIT_API)
+    message(FATAL_ERROR
+        "ASICEN_BUILD_L3_ADAPTER needs the Core product split API "
+        "(dtv_l3_usb_provider / dtv_l3_product_adapter), first available at "
+        "253053da51184af03abebb15e7c129c465d90dee")
+endif()
 
 set(ASICEN_L3_CORE_CANDIDATE_SOURCES
     "${ASICEN_L3_CANDIDATE_DIR}/src/owner_engine.cpp"

@@ -18,7 +18,6 @@ dtv_l3_result map_error(px4::userland::Error error) noexcept
     case px4::userland::Error::INVALID_ARGUMENT:
         return DTV_L3_INVALID;
     case px4::userland::Error::BUSY:
-        return DTV_L3_BUSY;
     case px4::userland::Error::NOT_READY:
         return DTV_L3_BUSY;
     case px4::userland::Error::TIMEOUT:
@@ -27,9 +26,6 @@ dtv_l3_result map_error(px4::userland::Error error) noexcept
         return DTV_L3_DISCONNECTED;
     case px4::userland::Error::UNSUPPORTED:
         return DTV_L3_UNSUPPORTED;
-    case px4::userland::Error::NO_CARD:
-    case px4::userland::Error::CARD_REMOVED:
-    case px4::userland::Error::BUFFER_TOO_SMALL:
     default:
         return DTV_L3_FAILED;
     }
@@ -54,74 +50,7 @@ std::uint32_t function_count(const LibusbW3u3Hardware& backend) noexcept
 
 } // namespace
 
-dtv_l3_claim_result LibusbBackendHost::claim(std::uint32_t claim_index)
-{
-    const std::uint32_t functions = function_count(backend_);
-    if (functions == 0U || claim_index >= functions)
-    {
-        return claim_failure(DTV_L3_INVALID);
-    }
-    if (enclosure_claimed_)
-    {
-        return dtv_l3_claim_result{DTV_L3_OK, DTV_L3_CLAIM_RETAINED};
-    }
-    if (claim_index != 0U)
-    {
-        // Function claims are served by the enclosure claim; the engine claims
-        // in ascending order, so a higher index before index 0 is a programming
-        // error rather than a partial physical claim.
-        return claim_failure(DTV_L3_FAILED);
-    }
-    const auto claimed = backend_.claim();
-    if (!claimed)
-    {
-        return claim_failure(map_error(claimed.error()));
-    }
-    enclosure_claimed_ = true;
-    return dtv_l3_claim_result{DTV_L3_OK, DTV_L3_CLAIM_RETAINED};
-}
-
-dtv_l3_release_result LibusbBackendHost::release_claim(std::uint32_t claim_index)
-{
-    const std::uint32_t functions = function_count(backend_);
-    if (functions == 0U || claim_index >= functions)
-    {
-        return release_failure(DTV_L3_INVALID);
-    }
-    if (claim_index != 0U)
-    {
-        return dtv_l3_release_result{DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
-                                     DTV_L3_RESTORE_NOT_ATTEMPTED, DTV_L3_OK};
-    }
-    if (!enclosure_claimed_)
-    {
-        return dtv_l3_release_result{DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
-                                     DTV_L3_RESTORE_NOT_ATTEMPTED, DTV_L3_OK};
-    }
-    const auto released = backend_.release();
-    if (!released)
-    {
-        return release_failure(map_error(released.error()));
-    }
-    enclosure_claimed_ = false;
-    return dtv_l3_release_result{DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
-                                 DTV_L3_RESTORE_NOT_ATTEMPTED, DTV_L3_OK};
-}
-
-dtv_l3_result LibusbBackendHost::submit(std::uint64_t, const dtv_l3_transfer_request&,
-                                        dtv_l3_transfer_complete_fn, void*)
-{
-    // The existing backend keeps its transfer and capture plumbing private.
-    // Exposing a generic submit/cancel seam is a required product/Core change.
-    return DTV_L3_UNSUPPORTED;
-}
-
-dtv_l3_result LibusbBackendHost::cancel(std::uint64_t)
-{
-    return DTV_L3_UNSUPPORTED;
-}
-
-dtv_l3_result LibusbBackendHost::tune(std::uint32_t receiver, std::uint32_t system,
+dtv_l3_result LibusbProductHost::tune(std::uint32_t receiver, std::uint32_t system,
                                       std::uint64_t frequency_hz, std::uint32_t timeout_ms,
                                       std::uint64_t* programmed_hz)
 {
@@ -150,7 +79,7 @@ dtv_l3_result LibusbBackendHost::tune(std::uint32_t receiver, std::uint32_t syst
     return DTV_L3_OK;
 }
 
-dtv_l3_result LibusbBackendHost::reader_open(std::uint32_t reader_id)
+dtv_l3_result LibusbProductHost::reader_open(std::uint32_t reader_id)
 {
     if (reader_id != 0U)
     {
@@ -160,7 +89,7 @@ dtv_l3_result LibusbBackendHost::reader_open(std::uint32_t reader_id)
     return summary.detected ? DTV_L3_OK : map_error(summary.error);
 }
 
-dtv_l3_result LibusbBackendHost::reader_reset(std::uint32_t reader_id)
+dtv_l3_result LibusbProductHost::reader_reset(std::uint32_t reader_id)
 {
     if (reader_id != 0U)
     {
@@ -171,7 +100,7 @@ dtv_l3_result LibusbBackendHost::reader_reset(std::uint32_t reader_id)
     return summary.atr_valid ? DTV_L3_OK : map_error(summary.error);
 }
 
-dtv_l3_result LibusbBackendHost::reader_transmit(std::uint32_t reader_id,
+dtv_l3_result LibusbProductHost::reader_transmit(std::uint32_t reader_id,
                                                  const std::uint8_t* command,
                                                  std::size_t command_size, std::uint8_t* response,
                                                  std::size_t response_capacity,
@@ -206,11 +135,79 @@ dtv_l3_result LibusbBackendHost::reader_transmit(std::uint32_t reader_id,
     return DTV_L3_OK;
 }
 
-dtv_l3_result LibusbBackendHost::reader_close(std::uint32_t reader_id)
+dtv_l3_result LibusbProductHost::reader_close(std::uint32_t reader_id)
 {
     // The card mailbox in this backend is stateless per probe; closing is a
     // no-op until a persistent card session is exposed.
     return reader_id == 0U ? DTV_L3_OK : DTV_L3_UNSUPPORTED;
+}
+
+dtv_l3_claim_result LibusbUsbProvider::claim_thunk(void* context, dtv_l3_provider_binding*,
+                                                   std::uint32_t claim_index)
+{
+    auto* self = static_cast<LibusbUsbProvider*>(context);
+    const std::uint32_t functions = function_count(self->backend_);
+    if (functions == 0U || claim_index >= functions)
+    {
+        return claim_failure(DTV_L3_INVALID);
+    }
+    if (self->enclosure_claimed_)
+    {
+        return dtv_l3_claim_result{DTV_L3_OK, DTV_L3_CLAIM_RETAINED};
+    }
+    if (claim_index != 0U)
+    {
+        return claim_failure(DTV_L3_FAILED);
+    }
+    const auto claimed = self->backend_.claim();
+    if (!claimed)
+    {
+        return claim_failure(map_error(claimed.error()));
+    }
+    self->enclosure_claimed_ = true;
+    return dtv_l3_claim_result{DTV_L3_OK, DTV_L3_CLAIM_RETAINED};
+}
+
+dtv_l3_release_result LibusbUsbProvider::release_claim_thunk(void* context,
+                                                             dtv_l3_provider_binding*,
+                                                             std::uint32_t claim_index)
+{
+    auto* self = static_cast<LibusbUsbProvider*>(context);
+    const std::uint32_t functions = function_count(self->backend_);
+    if (functions == 0U || claim_index >= functions)
+    {
+        return release_failure(DTV_L3_INVALID);
+    }
+    if (claim_index != 0U || !self->enclosure_claimed_)
+    {
+        return dtv_l3_release_result{DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
+                                     DTV_L3_RESTORE_NOT_ATTEMPTED, DTV_L3_OK};
+    }
+    const auto released = self->backend_.release();
+    if (!released)
+    {
+        return release_failure(map_error(released.error()));
+    }
+    self->enclosure_claimed_ = false;
+    return dtv_l3_release_result{DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
+                                 DTV_L3_RESTORE_NOT_ATTEMPTED, DTV_L3_OK};
+}
+
+dtv_l3_result LibusbUsbProvider::submit_thunk(void* context, dtv_l3_provider_binding*,
+                                              std::uint64_t, const dtv_l3_transfer_request*,
+                                              dtv_l3_transfer_complete_fn, void*)
+{
+    (void)context;
+    // The existing backend keeps capture/transfer ownership private. Exposing
+    // a generic submit/cancel seam is a required product/Core change.
+    return DTV_L3_UNSUPPORTED;
+}
+
+dtv_l3_result LibusbUsbProvider::cancel_thunk(void* context, dtv_l3_provider_binding*,
+                                              std::uint64_t)
+{
+    (void)context;
+    return DTV_L3_UNSUPPORTED;
 }
 
 } // namespace asicen::l3

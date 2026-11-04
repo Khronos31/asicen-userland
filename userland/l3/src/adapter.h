@@ -9,23 +9,19 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace asicen::l3 {
 
-void fill_capability(const DeviceProfile& profile, asicen_l3_capability* capability);
+void fill_capabilities(const DeviceProfile& profile, dtv_l3_capabilities* capabilities);
 
-// Operations the existing backend already owns. Optional calls default to
-// UNSUPPORTED so a fixture or a partial host never reports success for work it
-// did not perform.
+// Product-owned operations supplied by the existing backend. Core's USB-only
+// provider is separate and is never called from here.
 class Host {
   public:
     virtual ~Host() = default;
-    virtual dtv_l3_claim_result claim(std::uint32_t claim_index) = 0;
-    virtual dtv_l3_release_result release_claim(std::uint32_t claim_index) = 0;
-    virtual dtv_l3_result submit(std::uint64_t transfer_id, const dtv_l3_transfer_request& request,
-                                 dtv_l3_transfer_complete_fn complete, void* callback_context) = 0;
-    virtual dtv_l3_result cancel(std::uint64_t transfer_id) = 0;
     virtual dtv_l3_result tune(std::uint32_t, std::uint32_t, std::uint64_t, std::uint32_t,
                                std::uint64_t*)
     {
@@ -78,17 +74,20 @@ class Adapter final {
     {
         return *profile_;
     }
-    const asicen_l3_capability& capability() const noexcept
+    const dtv_l3_capabilities& capabilities() const noexcept
     {
-        return capability_;
+        return capabilities_;
     }
-    const dtv_l3_provider* provider() const noexcept
+    const dtv_l3_product_adapter* product_adapter() const noexcept
     {
-        return &provider_;
+        return &adapter_;
     }
-    std::uint32_t claim_count() const noexcept;
     bool route(std::uint32_t receiver, asicen_l3_route* out) const noexcept;
+    dtv_l3_result prepare_firmware(const dtv_l3_firmware* firmware);
 
+    // Explicit-system product tune used directly by ASICEN callers/tests. Core's
+    // candidate tune callback has no system argument, so a combined S3U
+    // receiver must use this path or a future Core field.
     dtv_l3_result tune(std::uint32_t receiver, std::uint32_t system, std::uint64_t frequency_hz,
                        std::uint32_t timeout_ms, std::uint64_t* programmed_hz);
     dtv_l3_result reader_open(std::uint32_t reader_id);
@@ -104,19 +103,15 @@ class Adapter final {
         std::uint32_t bridge_id;
         std::uint32_t receiver;
     };
+    struct ReaderToken {
+        std::uint32_t reader_id;
+    };
 
-    static dtv_l3_claim_result claim_thunk(void* context, dtv_l3_provider_binding* binding,
-                                           std::uint32_t index);
-    static dtv_l3_release_result
-    release_claim_thunk(void* context, dtv_l3_provider_binding* binding, std::uint32_t index);
-    static dtv_l3_result submit_thunk(void* context, dtv_l3_provider_binding* binding,
-                                      std::uint64_t transfer_id,
-                                      const dtv_l3_transfer_request* request,
-                                      dtv_l3_transfer_complete_fn complete, void* callback_context);
-    static dtv_l3_result cancel_thunk(void* context, dtv_l3_provider_binding* binding,
-                                      std::uint64_t transfer_id);
     static dtv_l3_result scope_query_thunk(void* context, std::uint32_t receiver,
                                            dtv_l3_scope_info* scope);
+    static dtv_l3_result tune_thunk(void* context, dtv_l3_provider_binding* binding,
+                                    std::uint32_t receiver_id, std::uint64_t requested_hz,
+                                    std::uint64_t* programmed_hz);
     static dtv_l3_result bridge_start_thunk(void* context, dtv_l3_provider_binding* binding,
                                             std::uint32_t bridge_id, std::uint32_t receiver_id);
     static dtv_l3_result bridge_stop_thunk(void* context, dtv_l3_provider_binding* binding,
@@ -126,9 +121,10 @@ class Adapter final {
                                              void* callback_context);
     static dtv_l3_result stream_stop_thunk(void* context, dtv_l3_provider_binding* binding,
                                            std::uint64_t stream_id);
-    static dtv_l3_result tune_thunk(void* context, dtv_l3_provider_binding* binding,
-                                    std::uint32_t receiver_id, std::uint64_t requested_hz,
-                                    std::uint64_t* programmed_hz);
+    static dtv_l3_result reader_acquire_thunk(void* context, std::uint32_t reader_id,
+                                              dtv_l3_reader** reader_out);
+    static dtv_l3_result lnb_set_thunk(void* context, std::uint32_t receiver_id,
+                                       std::uint32_t mode);
 
     dtv_l3_result tune_locked(std::uint32_t receiver, std::uint32_t system,
                               std::uint64_t frequency_hz, std::uint32_t timeout_ms,
@@ -138,13 +134,45 @@ class Adapter final {
 
     const DeviceProfile* profile_;
     Host& host_;
-    asicen_l3_capability capability_{};
+    dtv_l3_capabilities capabilities_{};
     asicen_l3_route routes_[4]{};
-    dtv_l3_provider provider_{};
+    dtv_l3_product_adapter adapter_{};
+    std::vector<std::uint8_t> firmware_bytes_;
+    std::string firmware_path_;
+    dtv_l3_firmware firmware_view_{};
+    ReaderToken reader_token_{};
     mutable std::mutex mutex_;
     std::deque<PendingAttach> pending_attaches_;
     std::deque<std::pair<std::uint64_t, std::uint32_t>> streams_;
-    std::uint32_t active_receiver_ = 0xffffffffu;
+};
+
+class Factory final {
+  public:
+    Factory(const DeviceProfile& profile, Host& host);
+
+    Factory(const Factory&) = delete;
+    Factory& operator=(const Factory&) = delete;
+
+    const dtv_l3_adapter_factory* core_factory() const noexcept
+    {
+        return &factory_;
+    }
+    std::uint32_t claim_count() const noexcept;
+    bool route(std::uint32_t receiver, asicen_l3_route* out) const noexcept;
+    const DeviceProfile& profile() const noexcept
+    {
+        return *profile_;
+    }
+
+  private:
+    static dtv_l3_result create_thunk(void* context, const dtv_l3_open_config* config,
+                                      const dtv_l3_product_adapter** adapter_out,
+                                      void** adapter_owner_out);
+    static void release_thunk(void* owner);
+
+    const DeviceProfile* profile_;
+    Host& host_;
+    dtv_l3_adapter_factory factory_{};
 };
 
 } // namespace asicen::l3
