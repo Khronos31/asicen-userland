@@ -226,6 +226,11 @@ void LibusbContext::close() noexcept
     context_ = nullptr;
 }
 
+void LibusbContext::swap(LibusbContext& other) noexcept
+{
+    std::swap(context_, other.context_);
+}
+
 KernelDriverState classify_kernel_driver_state(int query_result) noexcept
 {
     KernelDriverState state;
