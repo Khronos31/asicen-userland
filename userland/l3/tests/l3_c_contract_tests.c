@@ -640,7 +640,10 @@ static int test_product_semantics_through_core(void)
 
     CHECK(dtv_l3_reader_acquire(opened.owner, 0U, &reader) == DTV_L3_UNSUPPORTED);
     CHECK(reader == NULL && fake.reader_open_calls == 0);
-    CHECK(dtv_l3_lnb_set(opened.owner, 0U, 15U) == DTV_L3_UNSUPPORTED);
+    dtv_l3_lnb_state lnb_state;
+    memset(&lnb_state, 0, sizeof(lnb_state));
+    CHECK(dtv_l3_lnb_set(opened.owner, 0U, DTV_L3_LNB_ON_15V, 0U, &lnb_state) ==
+          DTV_L3_UNSUPPORTED);
     CHECK(fake.lnb_calls == 0);
 
     CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);

@@ -203,10 +203,9 @@ dtv_l3_result LibusbStreamSubmit::configure(std::uint32_t receiver, std::uint32_
     {
         return DTV_L3_INVALID;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    receiver_ = receiver;
-    system_ = system;
-    configured_ = true;
+    receiver_.store(receiver, std::memory_order_release);
+    system_.store(system, std::memory_order_release);
+    configured_.store(true, std::memory_order_release);
     return DTV_L3_OK;
 }
 
@@ -220,13 +219,8 @@ dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
     {
         return DTV_L3_INVALID;
     }
-    std::uint32_t receiver = 0U;
-    std::uint32_t system = 0U;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        receiver = receiver_;
-        system = system_;
-    }
+    const std::uint32_t receiver = receiver_.load(std::memory_order_acquire);
+    const std::uint32_t system = system_.load(std::memory_order_acquire);
     if (request->kind == DTV_L3_TRANSFER_CONTROL)
     {
         ControlTransfer transfer{};
@@ -249,7 +243,7 @@ dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
         complete(binding, transfer_id, &completion, callback_context);
         return DTV_L3_ACCEPTED;
     }
-    if (request->kind != DTV_L3_TRANSFER_BULK || !configured_)
+    if (request->kind != DTV_L3_TRANSFER_BULK || !configured_.load(std::memory_order_acquire))
     {
         return DTV_L3_UNSUPPORTED;
     }
@@ -292,11 +286,7 @@ dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
 dtv_l3_result LibusbStreamSubmit::cancel(std::uint64_t)
 {
     cancelled_.store(true);
-    std::uint32_t receiver = 0U;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        receiver = receiver_;
-    }
+    const std::uint32_t receiver = receiver_.load(std::memory_order_acquire);
     backend_.interrupt_receiver(static_cast<std::uint8_t>(receiver));
     return DTV_L3_ACCEPTED;
 }

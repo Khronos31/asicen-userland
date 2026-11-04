@@ -62,11 +62,10 @@ class LibusbStreamSubmit : public StreamConfig {
 
   private:
     LibusbW3u3Hardware& backend_;
-    std::uint32_t receiver_ = 0U;
-    std::uint32_t system_ = 0U;
-    bool configured_ = false;
+    std::atomic<std::uint32_t> receiver_{0U};
+    std::atomic<std::uint32_t> system_{0U};
+    std::atomic<bool> configured_{false};
     std::atomic<bool> cancelled_{false};
-    std::mutex mutex_;
 };
 
 // USB-only provider over the current enclosure claim. Control transfers use

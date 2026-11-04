@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <memory>
 
 namespace {
 
@@ -95,12 +96,12 @@ int real_backend_stream_path()
     Hooks hooks{};
     configure(hardware, fake, hooks, 0U);
 
-    TestStreamSubmit stream(hardware, fake);
+    auto stream = std::make_unique<TestStreamSubmit>(hardware, fake);
     LibusbProductHost host(hardware);
     const auto* profile = hardware.device_profile();
-    Factory factory(*profile, host, &stream);
+    Factory factory(*profile, host, stream.get());
 
-    ProviderState state{&stream};
+    ProviderState state{stream.get()};
     dtv_l3_usb_provider usb{};
     usb.provider_context = &state;
     usb.claim = claim_ok;
