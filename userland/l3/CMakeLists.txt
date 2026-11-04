@@ -85,7 +85,7 @@ if(ASICEN_BUILD_TESTS)
 endif()
 
 if(ASICEN_L3_ENABLE_TSAN)
-    foreach(target asicen_l3 asicen-l3-c-contract-tests asicen-l3-adapter-tests)
+    foreach(target asicen_l3 asicen-l3-c-contract-tests asicen-l3-adapter-tests asicen-l3-real-backend-tests)
         if(TARGET ${target})
             target_compile_options(${target} PRIVATE
                 -fsanitize=thread -fno-omit-frame-pointer -g)
@@ -95,11 +95,36 @@ if(ASICEN_L3_ENABLE_TSAN)
 endif()
 
 if(ASICEN_L3_ENABLE_ASAN)
-    foreach(target asicen_l3 asicen-l3-c-contract-tests asicen-l3-adapter-tests)
+    foreach(target asicen_l3 asicen-l3-c-contract-tests asicen-l3-adapter-tests asicen-l3-real-backend-tests)
         if(TARGET ${target})
             target_compile_options(${target} PRIVATE
                 -fsanitize=address -fno-omit-frame-pointer -g)
             target_link_options(${target} PRIVATE -fsanitize=address)
         endif()
     endforeach()
+endif()
+
+if(ASICEN_BUILD_TESTS AND ASICEN_ENABLE_LIBUSB)
+    add_executable(asicen-l3-real-backend-tests tests/l3_stream_real_backend_tests.cpp)
+    target_link_libraries(asicen-l3-real-backend-tests PRIVATE asicen_l3 asicen_l3_libusb asicen_libusb)
+    target_include_directories(asicen-l3-real-backend-tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
+    target_compile_options(asicen-l3-real-backend-tests PRIVATE -Wall -Wextra -Werror)
+    target_compile_features(asicen-l3-real-backend-tests PRIVATE cxx_std_17)
+    set_target_properties(asicen-l3-real-backend-tests PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME asicen-l3-real-backend-tests COMMAND asicen-l3-real-backend-tests)
+    set_tests_properties(asicen-l3-real-backend-tests PROPERTIES TIMEOUT 60)
+endif()
+if(TARGET asicen-l3-real-backend-tests)
+    if(ASICEN_L3_ENABLE_ASAN)
+        target_compile_options(asicen-l3-real-backend-tests PRIVATE
+            -fsanitize=address -fno-omit-frame-pointer -g)
+        target_link_options(asicen-l3-real-backend-tests PRIVATE -fsanitize=address)
+    endif()
+    if(ASICEN_L3_ENABLE_TSAN)
+        target_compile_options(asicen-l3-real-backend-tests PRIVATE
+            -fsanitize=thread -fno-omit-frame-pointer -g)
+        target_link_options(asicen-l3-real-backend-tests PRIVATE -fsanitize=thread)
+    endif()
 endif()

@@ -34,6 +34,7 @@ typedef struct fake_host {
     int submit_fail;
     int defer_bulk;
     int pending_bulk;
+    int cancel_no_completion;
     int cancel_calls;
     dtv_l3_provider_binding* pending_binding;
     uint64_t pending_id;
@@ -177,7 +178,7 @@ static dtv_l3_result usb_cancel(void* context, dtv_l3_provider_binding* binding,
     (void)transfer_id;
     pthread_mutex_lock(&fake->mutex);
     ++fake->cancel_calls;
-    if (fake->pending_bulk != 0)
+    if (fake->pending_bulk != 0 && fake->cancel_no_completion == 0)
     {
         pending_binding = fake->pending_binding;
         pending_id = fake->pending_id;
@@ -352,6 +353,29 @@ static int wait_release_entered(fake_host* fake, int milliseconds)
         ++waited;
     }
     return 0;
+}
+
+static int complete_pending_bulk(fake_host* fake)
+{
+    dtv_l3_provider_binding* pending_binding = NULL;
+    uint64_t pending_id = 0U;
+    dtv_l3_transfer_complete_fn pending_complete = NULL;
+    void* pending_context = NULL;
+    pthread_mutex_lock(&fake->mutex);
+    if (fake->pending_bulk == 0)
+    {
+        pthread_mutex_unlock(&fake->mutex);
+        return 0;
+    }
+    pending_binding = fake->pending_binding;
+    pending_id = fake->pending_id;
+    pending_complete = fake->pending_complete;
+    pending_context = fake->pending_context;
+    fake->pending_bulk = 0;
+    pthread_mutex_unlock(&fake->mutex);
+    const dtv_l3_transfer_completion completion = {DTV_L3_CANCELLED, NULL, 0U, 0U, 0U};
+    pending_complete(pending_binding, pending_id, &completion, pending_context);
+    return 1;
 }
 
 static int wait_pending_bulk(fake_host* fake, int milliseconds)
@@ -912,6 +936,58 @@ static int test_stream_in_close_recovery(void)
     return 1;
 }
 
+static int test_stream_in_stop_timeout_recovery(void)
+{
+    fake_host fake;
+    asicen_l3_product_ops ops;
+    asicen_l3_factory* factory = NULL;
+    dtv_l3_usb_provider usb;
+    dtv_l3_open_config config;
+    dtv_l3_open_result opened;
+    dtv_l3_lease* lease = NULL;
+    dtv_l3_stream* stream = NULL;
+    dtv_l3_close_status close_status;
+    uint64_t programmed = 0U;
+    uint64_t revision = 0U;
+
+    fake_init(&fake);
+    fake.defer_bulk = 1;
+    fake.cancel_no_completion = 1;
+    ops = product_ops_for(&fake);
+    usb = usb_provider_for(&fake);
+    CHECK(asicen_l3_factory_create(&ops, 0x0b06, 0x0005, &factory) == DTV_L3_OK);
+    config = config_for(ASICEN_L3_MODEL_W3U3, NULL);
+    opened = dtv_l3_open_factory(&usb, asicen_l3_factory_adapter_factory(factory), &config, 2);
+    CHECK(opened.result == DTV_L3_ACCEPTED && opened.owner != NULL && opened.op != NULL);
+    CHECK(dtv_l3_op_wait(opened.op, 5000) == DTV_L3_OK);
+    CHECK(dtv_l3_op_release(opened.op) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_acquire(opened.owner, 0U, &lease) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_tune(lease, 11000000000ULL, &programmed, &revision) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_start(lease) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_attach(lease, &stream) == DTV_L3_OK && stream != NULL);
+    CHECK(wait_pending_bulk(&fake, 2000) == 1);
+
+    /* The provider accepts cancel but sends no completion. The product keeps
+     * the stream/transfer residual instead of joining indefinitely. */
+    CHECK(dtv_l3_stream_stop(stream, 100) == DTV_L3_BUSY);
+    CHECK(fake.pending_bulk == 1);
+
+    CHECK(complete_pending_bulk(&fake) == 1);
+    CHECK(dtv_l3_stream_stop(stream, 2000) == DTV_L3_OK);
+    CHECK(dtv_l3_stream_release(stream, DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) == DTV_L3_OK);
+    CHECK(dtv_l3_stream_destroy(stream) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_release(lease) == DTV_L3_OK);
+    CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);
+    memset(&close_status, 0, sizeof(close_status));
+    CHECK(wait_releasable(opened.owner, &close_status, 5000) == 1);
+    CHECK(close_status.physical_quiesced == 1 && close_status.cleanup_complete == 1);
+    CHECK(release_owner(opened.owner, 5000) == 1);
+    CHECK(fake.cancel_calls >= 1);
+    asicen_l3_factory_destroy(factory);
+    fake_destroy(&fake);
+    return 1;
+}
+
 static int test_explicit_system_tune(void)
 {
     fake_host fake;
@@ -987,6 +1063,8 @@ int main(void)
     if (!test_tune_ex_and_combined_stream())
         return 1;
     if (!test_stream_in_close_recovery())
+        return 1;
+    if (!test_stream_in_stop_timeout_recovery())
         return 1;
     if (!test_explicit_system_tune())
         return 1;

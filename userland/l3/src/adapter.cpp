@@ -14,6 +14,7 @@ namespace asicen::l3 {
 namespace {
 
 constexpr std::uint32_t kDefaultTuneTimeoutMs = 30000U;
+constexpr int kStreamStopObservationMs = 300;
 
 bool has_system(std::uint32_t mask, std::uint32_t system) noexcept
 {
@@ -66,7 +67,8 @@ void fill_capabilities(const DeviceProfile& profile, dtv_l3_capabilities* capabi
     capabilities->cancel_scope = DTV_L3_CANCEL_SCOPE_TRANSFER;
 }
 
-Adapter::Adapter(const DeviceProfile& profile, Host& host) : profile_(&profile), host_(host)
+Adapter::Adapter(const DeviceProfile& profile, Host& host, StreamConfig* stream_config)
+    : profile_(&profile), host_(host), stream_config_(stream_config)
 {
     fill_capabilities(profile, &capabilities_);
     for (std::uint32_t receiver = 0U; receiver < profile.enclosure_receiver_count; ++receiver)
@@ -570,7 +572,14 @@ dtv_l3_result Adapter::bridge_start_thunk(void* context, dtv_l3_provider_binding
     {
         return DTV_L3_UNSUPPORTED;
     }
-    const auto started = adapter->host_.stream_begin(receiver_id, stream_system, bridge_id);
+    dtv_l3_result started = DTV_L3_OK;
+    if (adapter->stream_config_ != nullptr)
+    {
+        started = adapter->stream_config_->configure(receiver_id, stream_system);
+    } else
+    {
+        started = adapter->host_.stream_begin(receiver_id, stream_system, bridge_id);
+    }
     if (started != DTV_L3_OK)
     {
         return started;
@@ -699,6 +708,20 @@ dtv_l3_result Adapter::stream_stop_ex_thunk(void* context, dtv_l3_provider_bindi
         return DTV_L3_UNSUPPORTED;
     }
     adapter->stream_stop_.store(true);
+    for (int waited = 0; waited < kStreamStopObservationMs; ++waited)
+    {
+        if (!adapter->stream_running_.load())
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (adapter->stream_running_.load())
+    {
+        // The provider accepted cancel but has not completed. Keep the worker
+        // and transfer residual so a later stop/close can observe recovery.
+        return DTV_L3_BUSY;
+    }
     if (adapter->stream_worker_.joinable())
     {
         adapter->stream_worker_.join();
@@ -728,6 +751,7 @@ void Adapter::stream_loop()
         const auto started = dtv_l3_transfer_start(owner, &request, &op);
         if (started == DTV_L3_ACCEPTED && op != nullptr)
         {
+            bool cancel_sent = false;
             while (true)
             {
                 const auto waited = dtv_l3_op_wait(op, 200U);
@@ -737,14 +761,18 @@ void Adapter::stream_loop()
                 }
                 if (waited == DTV_L3_WAIT_TIMEOUT)
                 {
-                    if (stream_stop_.load())
+                    if (stream_stop_.load() && !cancel_sent)
                     {
+                        cancel_sent = true;
                         (void)dtv_l3_op_cancel(op);
                     }
                     continue;
                 }
-                (void)dtv_l3_op_cancel(op);
-                break;
+                if (!cancel_sent)
+                {
+                    cancel_sent = true;
+                    (void)dtv_l3_op_cancel(op);
+                }
             }
             dtv_l3_op_result result{};
             if (dtv_l3_op_poll(op, &result) == DTV_L3_OK && !stream_stop_.load() &&
@@ -763,7 +791,8 @@ void Adapter::stream_loop()
     stream_running_.store(false);
 }
 
-Factory::Factory(const DeviceProfile& profile, Host& host) : profile_(&profile), host_(host)
+Factory::Factory(const DeviceProfile& profile, Host& host, StreamConfig* stream_config)
+    : profile_(&profile), host_(host), stream_config_(stream_config)
 {
     factory_.factory_context = this;
     factory_.create = &Factory::create_thunk;
@@ -815,7 +844,8 @@ dtv_l3_result Factory::create_thunk(void* context, const dtv_l3_open_config* con
     {
         return DTV_L3_UNSUPPORTED;
     }
-    auto adapter = std::make_unique<Adapter>(*factory->profile_, factory->host_);
+    auto adapter =
+        std::make_unique<Adapter>(*factory->profile_, factory->host_, factory->stream_config_);
     const auto firmware_result = adapter->prepare_firmware(config->firmware);
     if (firmware_result != DTV_L3_OK)
     {
@@ -865,7 +895,7 @@ dtv_l3_result Factory::create_v1(const dtv_l3_open_args* args,
         }
     }
 
-    auto adapter = std::make_unique<Adapter>(*profile_, host_);
+    auto adapter = std::make_unique<Adapter>(*profile_, host_, stream_config_);
     const auto firmware_result = adapter->prepare_firmware(args->firmware);
     if (firmware_result != DTV_L3_OK)
     {

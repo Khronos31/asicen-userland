@@ -759,6 +759,16 @@ Result<void> LibusbW3u3Hardware::claim()
     return Result<void>::success();
 }
 
+Result<void> LibusbW3u3Hardware::l3_control_transfer(const ControlTransfer& transfer,
+                                                   unsigned char* response)
+{
+    const int result = control(transfer, response);
+    if (result < 0) {
+        return Result<void>::failure(map_libusb_error(result));
+    }
+    return Result<void>::success();
+}
+
 Result<void> LibusbW3u3Hardware::release() noexcept
 {
     stop_lnb_monitor();

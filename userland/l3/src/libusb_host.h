@@ -4,7 +4,10 @@
 
 #include "adapter.h"
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <vector>
 
 namespace asicen {
 
@@ -35,11 +38,44 @@ class LibusbProductHost final : public Host {
     LibusbW3u3Hardware& backend_;
 };
 
-// USB-only provider over the current enclosure claim. The backend has no
-// public generic submit/cancel seam, so those callbacks report UNSUPPORTED.
+// Product-internal mapping of the owner stream IN transfer to the existing
+// capture path. One submit performs prepare/run for exactly one framed chunk,
+// then stops/drains the capture; the completion carries that chunk.
+class LibusbStreamSubmit : public StreamConfig {
+  public:
+    explicit LibusbStreamSubmit(LibusbW3u3Hardware& backend) : backend_(backend)
+    {
+    }
+
+    dtv_l3_result configure(std::uint32_t receiver, std::uint32_t system) override;
+    dtv_l3_result submit(dtv_l3_provider_binding* binding, std::uint64_t transfer_id,
+                         const dtv_l3_transfer_request* request,
+                         dtv_l3_transfer_complete_fn complete, void* callback_context);
+    dtv_l3_result cancel(std::uint64_t transfer_id);
+
+  protected:
+    // Test seam: called after prepare and before the capture run. Production
+    // leaves it empty; the real backend fixture uses it to complete a URB.
+    virtual void after_prepare()
+    {
+    }
+
+  private:
+    LibusbW3u3Hardware& backend_;
+    std::uint32_t receiver_ = 0U;
+    std::uint32_t system_ = 0U;
+    bool configured_ = false;
+    std::atomic<bool> cancelled_{false};
+    std::mutex mutex_;
+};
+
+// USB-only provider over the current enclosure claim. Control transfers use
+// the product-internal single-control seam; bulk stream IN delegates to
+// LibusbStreamSubmit when one is attached to the factory.
 class LibusbUsbProvider final {
   public:
-    explicit LibusbUsbProvider(LibusbW3u3Hardware& backend) : backend_(backend)
+    explicit LibusbUsbProvider(LibusbW3u3Hardware& backend, LibusbStreamSubmit* stream = nullptr)
+        : backend_(backend), stream_(stream)
     {
         provider_.provider_context = this;
         provider_.claim = &LibusbUsbProvider::claim_thunk;
@@ -71,6 +107,7 @@ class LibusbUsbProvider final {
                                       std::uint64_t transfer_id);
 
     LibusbW3u3Hardware& backend_;
+    LibusbStreamSubmit* stream_ = nullptr;
     dtv_l3_usb_provider provider_{};
     bool enclosure_claimed_ = false;
 };

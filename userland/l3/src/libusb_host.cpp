@@ -42,6 +42,10 @@ dtv_l3_release_result release_failure(dtv_l3_result error) noexcept
                                  DTV_L3_RESTORE_UNKNOWN, error};
 }
 
+struct EmbeddedFrame {
+    std::vector<std::uint8_t> data;
+};
+
 std::uint32_t function_count(const LibusbW3u3Hardware& backend) noexcept
 {
     const auto* profile = backend.device_profile();
@@ -193,21 +197,138 @@ dtv_l3_release_result LibusbUsbProvider::release_claim_thunk(void* context,
                                  DTV_L3_RESTORE_NOT_ATTEMPTED, DTV_L3_OK};
 }
 
-dtv_l3_result LibusbUsbProvider::submit_thunk(void* context, dtv_l3_provider_binding*,
-                                              std::uint64_t, const dtv_l3_transfer_request*,
-                                              dtv_l3_transfer_complete_fn, void*)
+dtv_l3_result LibusbStreamSubmit::configure(std::uint32_t receiver, std::uint32_t system)
 {
-    (void)context;
-    // The existing backend keeps capture/transfer ownership private. Exposing
-    // a generic submit/cancel seam is a required product/Core change.
+    if (system != ASICEN_L3_SYSTEM_TERRESTRIAL && system != ASICEN_L3_SYSTEM_SATELLITE)
+    {
+        return DTV_L3_INVALID;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    receiver_ = receiver;
+    system_ = system;
+    configured_ = true;
+    return DTV_L3_OK;
+}
+
+dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
+                                         std::uint64_t transfer_id,
+                                         const dtv_l3_transfer_request* request,
+                                         dtv_l3_transfer_complete_fn complete,
+                                         void* callback_context)
+{
+    if (request == nullptr || complete == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    std::uint32_t receiver = 0U;
+    std::uint32_t system = 0U;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        receiver = receiver_;
+        system = system_;
+    }
+    if (request->kind == DTV_L3_TRANSFER_CONTROL)
+    {
+        ControlTransfer transfer{};
+        transfer.tuner_num = 0U;
+        transfer.request = static_cast<Request>(request->control.request);
+        transfer.value = request->control.value;
+        transfer.index = request->control.index;
+        transfer.length = static_cast<std::uint16_t>(request->in_capacity);
+        transfer.direction =
+            (request->control.request_type & 0x80U) != 0U ? Direction::In : Direction::Out;
+        transfer.timeout_ms = static_cast<std::uint16_t>(request->timeout_ms);
+        std::vector<unsigned char> response(request->in_capacity);
+        const auto result = backend_.l3_control_transfer(transfer, response.data());
+        if (!result)
+        {
+            return map_error(result.error());
+        }
+        const dtv_l3_transfer_completion completion = {DTV_L3_OK, response.data(), response.size(),
+                                                       response.size(), 1U};
+        complete(binding, transfer_id, &completion, callback_context);
+        return DTV_L3_ACCEPTED;
+    }
+    if (request->kind != DTV_L3_TRANSFER_BULK || !configured_)
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+
+    cancelled_.store(false);
+    const auto px4_system = system == ASICEN_L3_SYSTEM_TERRESTRIAL
+                                ? px4::userland::ipc::System::ISDB_T
+                                : px4::userland::ipc::System::ISDB_S;
+    const auto prepared =
+        backend_.prepare(static_cast<std::uint8_t>(receiver), px4_system, cancelled_);
+    if (!prepared)
+    {
+        return map_error(prepared.error());
+    }
+    after_prepare();
+    EmbeddedFrame frame;
+    const auto run_result = backend_.run(
+        cancelled_,
+        [](void* context, const std::uint8_t* data, std::size_t size) -> bool {
+            auto* frame = static_cast<EmbeddedFrame*>(context);
+            if (data != nullptr && size >= 188U)
+            {
+                frame->data.assign(data, data + size);
+                return false;
+            }
+            return true;
+        },
+        &frame);
+    (void)backend_.stop_receiver(static_cast<std::uint8_t>(receiver));
+    if (frame.data.empty())
+    {
+        return run_result == CaptureRunResult::cancelled ? DTV_L3_CANCELLED : DTV_L3_FAILED;
+    }
+    const dtv_l3_transfer_completion completion = {DTV_L3_OK, frame.data.data(), frame.data.size(),
+                                                   frame.data.size(), 1U};
+    complete(binding, transfer_id, &completion, callback_context);
+    return DTV_L3_ACCEPTED;
+}
+
+dtv_l3_result LibusbStreamSubmit::cancel(std::uint64_t)
+{
+    cancelled_.store(true);
+    std::uint32_t receiver = 0U;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        receiver = receiver_;
+    }
+    backend_.interrupt_receiver(static_cast<std::uint8_t>(receiver));
+    return DTV_L3_ACCEPTED;
+}
+
+dtv_l3_result LibusbUsbProvider::submit_thunk(void* context, dtv_l3_provider_binding* binding,
+                                              std::uint64_t transfer_id,
+                                              const dtv_l3_transfer_request* request,
+                                              dtv_l3_transfer_complete_fn complete,
+                                              void* callback_context)
+{
+    auto* self = static_cast<LibusbUsbProvider*>(context);
+    if (request == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    if (request->kind == DTV_L3_TRANSFER_BULK && self->stream_ != nullptr)
+    {
+        return self->stream_->submit(binding, transfer_id, request, complete, callback_context);
+    }
+    if (request->kind == DTV_L3_TRANSFER_CONTROL)
+    {
+        LibusbStreamSubmit control_submit(self->backend_);
+        return control_submit.submit(binding, transfer_id, request, complete, callback_context);
+    }
     return DTV_L3_UNSUPPORTED;
 }
 
 dtv_l3_result LibusbUsbProvider::cancel_thunk(void* context, dtv_l3_provider_binding*,
-                                              std::uint64_t)
+                                              std::uint64_t transfer_id)
 {
-    (void)context;
-    return DTV_L3_UNSUPPORTED;
+    auto* self = static_cast<LibusbUsbProvider*>(context);
+    return self->stream_ != nullptr ? self->stream_->cancel(transfer_id) : DTV_L3_UNSUPPORTED;
 }
 
 } // namespace asicen::l3

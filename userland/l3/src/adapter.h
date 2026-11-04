@@ -19,6 +19,15 @@ namespace asicen::l3 {
 
 void fill_capabilities(const DeviceProfile& profile, dtv_l3_capabilities* capabilities);
 
+// Product-local configuration seam used before a product-owned stream IN path
+// starts (for example, telling the real backend which receiver/system feeds the
+// provider submit). It is not a Core API.
+class StreamConfig {
+  public:
+    virtual ~StreamConfig() = default;
+    virtual dtv_l3_result configure(std::uint32_t receiver, std::uint32_t system) = 0;
+};
+
 // Product-owned operations supplied by the existing backend. Core's USB-only
 // provider is separate and is never called from here.
 class Host {
@@ -67,7 +76,8 @@ class Host {
 
 class Adapter final {
   public:
-    Adapter(const DeviceProfile& profile, Host& host);
+    Adapter(const DeviceProfile& profile, Host& host,
+            StreamConfig* stream_config = nullptr);
     ~Adapter();
 
     Adapter(const Adapter&) = delete;
@@ -157,6 +167,7 @@ class Adapter final {
 
     const DeviceProfile* profile_;
     Host& host_;
+    StreamConfig* stream_config_ = nullptr;
     dtv_l3_capabilities capabilities_{};
     asicen_l3_route routes_[4]{};
     dtv_l3_product_adapter adapter_{};
@@ -187,7 +198,8 @@ class Adapter final {
 
 class Factory final {
   public:
-    Factory(const DeviceProfile& profile, Host& host);
+    Factory(const DeviceProfile& profile, Host& host,
+            StreamConfig* stream_config = nullptr);
 
     Factory(const Factory&) = delete;
     Factory& operator=(const Factory&) = delete;
@@ -221,6 +233,7 @@ class Factory final {
 
     const DeviceProfile* profile_;
     Host& host_;
+    StreamConfig* stream_config_ = nullptr;
     dtv_l3_adapter_factory factory_{};
     dtv_l3_factory factory_v1_{};
 };
