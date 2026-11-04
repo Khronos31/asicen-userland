@@ -3,6 +3,7 @@
 #include "asicen/libusb_transport.h"
 #include "asicen/libusb_hardware_backend.h"
 #include "asicen/usb_location_record.h"
+#include "asicend_runtime_context.h"
 
 #include <algorithm>
 #include <array>
@@ -315,6 +316,24 @@ bool context_swap_preserves_owned_context_lifetimes()
     CHECK(api.exited_contexts == std::vector<libusb_context*>{fresh_context, existing_context},
           "each swapped context is exited exactly once by its owner");
     CHECK(cleanup_order(api, {"exit", "exit"}), "swapped context cleanup order");
+    return true;
+}
+
+bool final_runtime_poll_reinitializes_owned_context()
+{
+    FakeApi api;
+    asicen::LibusbContext context(api);
+    CHECK(asicen::cli::initialize_fresh_context(context) == 0,
+          "first final runtime poll initializes a context");
+    auto* first_context = context.get();
+    CHECK(asicen::cli::initialize_fresh_context(context) == 0,
+          "next final runtime poll refreshes its context");
+    auto* second_context = context.get();
+    CHECK(first_context != second_context,
+          "each final runtime poll receives a newly initialized libusb context");
+    context.close();
+    CHECK(api.exited_contexts == std::vector<libusb_context*>{first_context, second_context},
+          "poll refresh and final close each release their owned context once");
     return true;
 }
 
@@ -738,6 +757,7 @@ bool usb_location_record_uses_observed_values()
 int main()
 {
     if (!initialization_and_open_failures() || !context_swap_preserves_owned_context_lifetimes() ||
+        !final_runtime_poll_reinitializes_owned_context() ||
         !ownership_failure_and_success_order() ||
         !claim_diagnostics_are_cached_and_do_not_touch_usb() ||
         !failed_claim_logs_raw_error() ||

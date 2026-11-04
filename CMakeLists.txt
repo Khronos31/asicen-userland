@@ -556,6 +556,7 @@ endif()
 if(ASICEN_BUILD_TESTS AND ASICEN_ENABLE_LIBUSB)
     add_executable(asicen-libusb-acquisition-tests
         userland/tests/libusb_acquisition_tests.cpp)
+    target_include_directories(asicen-libusb-acquisition-tests PRIVATE userland/tools)
     target_link_libraries(asicen-libusb-acquisition-tests PRIVATE asicen_libusb)
     asicen_enable_project_warnings(asicen-libusb-acquisition-tests)
     add_test(NAME asicen-libusb-acquisition-tests COMMAND asicen-libusb-acquisition-tests)

@@ -2,6 +2,7 @@
 #include "asicend_args.h"
 #include "asicend_identity.h"
 #include "asicend_runtime_match.h"
+#include "asicend_runtime_context.h"
 #include "asicend_selector.h"
 #include "loader_acquisition.h"
 #include "loader_diagnostic.h"
@@ -420,11 +421,6 @@ struct SysfsRuntimeObservation final {
     std::string address;
 };
 
-int initialize_fresh_context(asicen::LibusbContext& context) {
-    context.close();
-    return context.initialize(false);
-}
-
 SysfsRuntimeObservation read_sysfs_runtime(std::uint8_t bus,
                                            const std::vector<std::uint8_t>& port_path) {
     SysfsRuntimeObservation result{};
@@ -710,7 +706,7 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
                     if (trace != nullptr) trace->record(loader_diag::Stage::ResolveBegin, target);
                     libusb_context* attempt_context = context;
                     if (is_sibling_release && split_contexts) {
-                        const int refreshed = initialize_fresh_context(fresh_context);
+                        const int refreshed = asicen::cli::initialize_fresh_context(fresh_context);
                         if (refreshed != 0) {
                             open_error = asicen::map_libusb_error(refreshed);
                             if (trace != nullptr) trace->record(loader_diag::Stage::ResolveResult,
@@ -901,7 +897,7 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
             runtime_target.selected_index = i;
             while (std::chrono::steady_clock::now() < deadline) {
                 if (px4::userland::px4d::stop_requested()) return diagnostic.finish(3);
-                const int refreshed = initialize_fresh_context(fresh_context);
+                const int refreshed = asicen::cli::initialize_fresh_context(fresh_context);
                 if (refreshed != 0) {
                     runtime_error = asicen::map_libusb_error(refreshed);
                     break;
@@ -984,7 +980,7 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
                 std::chrono::steady_clock::now() + std::chrono::seconds(8);
             while (std::chrono::steady_clock::now() < deadline) {
                 if (px4::userland::px4d::stop_requested()) return diagnostic.finish(3);
-                const int refreshed = initialize_fresh_context(fresh_context);
+                const int refreshed = asicen::cli::initialize_fresh_context(fresh_context);
                 if (refreshed != 0) {
                     runtime_error = asicen::map_libusb_error(refreshed);
                     break;
@@ -1057,7 +1053,7 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
     }
     if (any_transferred) {
         if (split_contexts) {
-            const int refreshed = initialize_fresh_context(fresh_context);
+            const int refreshed = asicen::cli::initialize_fresh_context(fresh_context);
             if (refreshed != 0) {
                 std::fprintf(stderr, "firmware: libusb context refresh failed: %s\n",
                              libusb_error_name(refreshed));
@@ -1078,14 +1074,29 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
 // Validate the current runtime match for one successfully uploaded topology.
 // The readiness helper re-resolves every identity on each polling pass.
 px4::userland::Error probe_uploaded_runtime(
-    libusb_context* context, const asicen::DeviceProfile* expected_model,
+    libusb_context* context, asicen::LibusbContext& fresh_context,
+    const asicen::DeviceProfile* expected_model, bool diagnostic_mode,
     const asicen::UploadedRuntimeIdentity& uploaded)
 {
     if (expected_model == nullptr || uploaded.vendor_id != expected_model->vid ||
         uploaded.product_id != expected_model->pid)
         return px4::userland::Error::INVALID_ARGUMENT;
+    const int refreshed = asicen::cli::initialize_fresh_context(fresh_context);
+    if (refreshed != 0) return asicen::map_libusb_error(refreshed);
+    RuntimeScanSummary fresh_scan{};
     const auto candidate = resolve_runtime_at_parent(
-        context, uploaded.bus, uploaded.port_path, expected_model);
+        fresh_context.get(), uploaded.bus, uploaded.port_path, expected_model,
+        nullptr, nullptr, diagnostic_mode ? &fresh_scan : nullptr);
+    if (diagnostic_mode) {
+        RuntimeScanSummary existing_scan{};
+        const auto existing = resolve_runtime_at_parent(
+            context, uploaded.bus, uploaded.port_path, expected_model,
+            nullptr, nullptr, &existing_scan);
+        print_runtime_context_comparison("final_readiness", existing_scan,
+            existing.error(), fresh_scan,
+            candidate ? px4::userland::Error::OK : candidate.error(),
+            uploaded.bus, uploaded.port_path);
+    }
     return candidate ? px4::userland::Error::OK : candidate.error();
 }
 }  // namespace
@@ -1447,11 +1458,16 @@ int run_asicend_hardware(int argc, char** argv) {
                 [](const asicen::UploadedRuntimeIdentity& identity) {
                     return identity.selected_index == 1U;
                 });
+            asicen::LibusbContext readiness_context;
+            const char* diagnostic_setting = std::getenv("ASICEN_DIAGNOSTIC_LOADER");
+            const bool diagnostic_mode = diagnostic_setting != nullptr &&
+                                         std::strcmp(diagnostic_setting, "1") == 0;
             const auto readiness = asicen::wait_for_uploaded_runtimes(
                 uploaded_identities,
-                [context, model = options.expected_model](
+                [context, &readiness_context, model = options.expected_model, diagnostic_mode](
                     const asicen::UploadedRuntimeIdentity& identity) {
-                    return probe_uploaded_runtime(context, model, identity);
+                    return probe_uploaded_runtime(context, readiness_context, model,
+                                                  diagnostic_mode, identity);
                 },
                 [] { return std::chrono::steady_clock::now(); },
                 [](std::chrono::milliseconds interval) {

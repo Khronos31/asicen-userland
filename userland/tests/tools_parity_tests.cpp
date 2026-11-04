@@ -323,6 +323,39 @@ bool cold_runtime_context_comparison_uses_product_matcher()
     CHECK(asicen::cli::classify_runtime_candidate(
               runtime, 1U, {2U, 1U, 1U}, w3u2) ==
           asicen::cli::RuntimeCandidateStatus::WrongModel);
+
+    const std::vector<asicen::UploadedRuntimeIdentity> uploaded{
+        {0U, 1U, {2U, 1U, 1U}, 0x0b06U, 0x0005U},
+        {1U, 1U, {2U, 1U, 2U}, 0x0b06U, 0x0005U}};
+    auto sibling_runtime = runtime;
+    sibling_runtime.port_path = {2U, 1U, 2U};
+    sibling_runtime.address = 65U;
+    const std::vector<UsbFunctionObservation> final_fresh_list{runtime, sibling_runtime};
+    for (const auto& identity : uploaded) {
+        std::size_t stale_matches = 0U;
+        for (const auto& candidate : existing_context_list) {
+            if (asicen::cli::classify_runtime_candidate(
+                    candidate, identity.bus, identity.port_path, w3u3) ==
+                asicen::cli::RuntimeCandidateStatus::Match) ++stale_matches;
+        }
+        CHECK(stale_matches == 0U);
+    }
+    unsigned int fresh_polls = 0U;
+    CHECK(asicen::wait_for_uploaded_runtimes(
+              uploaded,
+              [&](const asicen::UploadedRuntimeIdentity& identity) {
+                  ++fresh_polls;
+                  for (const auto& candidate : final_fresh_list) {
+                      if (asicen::cli::classify_runtime_candidate(
+                              candidate, identity.bus, identity.port_path, w3u3) ==
+                          asicen::cli::RuntimeCandidateStatus::Match)
+                          return px4::userland::Error::OK;
+                  }
+                  return px4::userland::Error::NOT_FOUND;
+              },
+              [] { return TestClock::time_point{}; }, [](std::chrono::milliseconds) {},
+              [] { return false; }) == px4::userland::Error::OK);
+    CHECK(fresh_polls == uploaded.size());
     return true;
 }
 
