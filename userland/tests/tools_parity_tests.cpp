@@ -353,7 +353,8 @@ bool cold_runtime_context_comparison_uses_product_matcher()
                   }
                   return px4::userland::Error::NOT_FOUND;
               },
-              [] { return TestClock::time_point{}; }, [](std::chrono::milliseconds) {},
+              [] { return std::chrono::steady_clock::time_point{}; },
+              [](std::chrono::milliseconds) {},
               [] { return false; }) == px4::userland::Error::OK);
     CHECK(fresh_polls == uploaded.size());
     return true;
