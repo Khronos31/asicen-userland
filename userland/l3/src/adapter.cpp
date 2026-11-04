@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
@@ -325,6 +326,8 @@ dtv_l3_result Adapter::initialize(dtv_l3_context* owner)
     const auto started = dtv_l3_transfer_start(context, &request, &op);
     if (started != DTV_L3_ACCEPTED || op == nullptr)
     {
+        std::fprintf(stderr, "asicen-l3: initialize transfer start failed result=%d op=%u\n",
+                     static_cast<int>(started), op != nullptr ? 1U : 0U);
         return started == DTV_L3_OK ? DTV_L3_FAILED : started;
     }
     const auto waited = dtv_l3_op_wait(op, 2000U);
@@ -332,6 +335,11 @@ dtv_l3_result Adapter::initialize(dtv_l3_context* owner)
     const auto polled = dtv_l3_op_poll(op, &result);
     if (waited != DTV_L3_OK || polled != DTV_L3_OK)
     {
+        std::fprintf(stderr,
+                     "asicen-l3: initialize transfer wait/poll failed waited=%d polled=%d"
+                     " state=%u result=%d\n",
+                     static_cast<int>(waited), static_cast<int>(polled),
+                     static_cast<unsigned int>(result.state), static_cast<int>(result.result));
         (void)dtv_l3_op_cancel(op);
         dtv_l3_op_result late{};
         if (dtv_l3_op_poll(op, &late) == DTV_L3_OK && late.state != DTV_L3_OP_RUNNING)
@@ -343,7 +351,16 @@ dtv_l3_result Adapter::initialize(dtv_l3_context* owner)
     const auto released = dtv_l3_op_release(op);
     if (result.state != DTV_L3_OP_DONE || result.result != DTV_L3_OK)
     {
+        std::fprintf(stderr,
+                     "asicen-l3: initialize control transfer failed state=%u result=%d release=%d\n",
+                     static_cast<unsigned int>(result.state), static_cast<int>(result.result),
+                     static_cast<int>(released));
         return result.result == DTV_L3_OK ? DTV_L3_FAILED : result.result;
+    }
+    if (released != DTV_L3_OK)
+    {
+        std::fprintf(stderr, "asicen-l3: initialize transfer release failed result=%d\n",
+                     static_cast<int>(released));
     }
     return released;
 }

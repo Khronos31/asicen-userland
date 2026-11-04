@@ -61,6 +61,7 @@ public:
     std::array<std::uint16_t, 2> products_{{0x0005U, 0x0005U}};
     std::array<libusb_context*, 2> contexts_{};
     std::vector<libusb_context*> exited_contexts;
+    std::vector<libusb_context*> listed_contexts;
     std::vector<std::string> events;
 
     FakeApi()
@@ -102,6 +103,7 @@ public:
     ssize_t get_device_list(libusb_context* context, libusb_device*** list) noexcept override
     {
         verify(owns_context(context), "enumeration uses initialized context");
+        listed_contexts.push_back(context);
         events.emplace_back("list");
         *list = list_error == 0 ? devices_.data() : nullptr;
         return list_error == 0 ? 2 : list_error;
@@ -334,6 +336,37 @@ bool final_runtime_poll_reinitializes_owned_context()
     context.close();
     CHECK((api.exited_contexts == std::vector<libusb_context*>{first_context, second_context}),
           "poll refresh and final close each release their owned context once");
+    return true;
+}
+
+bool final_runtime_context_adoption_preserves_owner_lifetime()
+{
+    FakeApi api;
+    asicen::LibusbContext owned_context(api);
+    asicen::LibusbContext fresh_context(api);
+    CHECK(owned_context.initialize() == 0 && fresh_context.initialize() == 0,
+          "initialize contexts before final readiness adoption");
+    auto* const prior_context = owned_context.get();
+    auto* const ready_context = fresh_context.get();
+    asicen::cli::adopt_fresh_context(owned_context, fresh_context);
+    CHECK(owned_context.get() == ready_context && fresh_context.get() == prior_context,
+          "the context that observed readiness becomes the persistent hardware owner");
+    {
+        asicen::LibusbDevice device(api);
+        CHECK(device.open(owned_context.get(), asicen::UsbLocation{1U, 2U}) == 0,
+              "runtime device opens through the adopted context");
+        CHECK(!api.listed_contexts.empty() && api.listed_contexts.back() == ready_context,
+              "device discovery uses the context that observed runtime readiness");
+    }
+    owned_context.close();
+    CHECK((api.exited_contexts == std::vector<libusb_context*>{ready_context}),
+          "closing the hardware owner releases the ready context");
+    fresh_context.close();
+    CHECK((api.exited_contexts ==
+           std::vector<libusb_context*>{ready_context, prior_context}),
+          "the prior context remains separately owned until explicitly closed");
+    CHECK(cleanup_order(api, {"close1", "exit", "exit"}),
+          "device handle closes before either context owner exits");
     return true;
 }
 
@@ -758,6 +791,7 @@ int main()
 {
     if (!initialization_and_open_failures() || !context_swap_preserves_owned_context_lifetimes() ||
         !final_runtime_poll_reinitializes_owned_context() ||
+        !final_runtime_context_adoption_preserves_owner_lifetime() ||
         !ownership_failure_and_success_order() ||
         !claim_diagnostics_are_cached_and_do_not_touch_usb() ||
         !failed_claim_logs_raw_error() ||

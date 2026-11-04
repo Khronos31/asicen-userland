@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <thread>
 
 namespace asicen::l3 {
@@ -586,18 +587,55 @@ dtv_l3_result L3DaemonSession::start()
         dtv_l3_open_factory(&provider_, factory_->core_factory(), &config, factory_->claim_count());
     if (opened.result != DTV_L3_ACCEPTED || opened.owner == nullptr || opened.op == nullptr)
     {
+        std::fprintf(stderr, "asicen-l3: owner open rejected result=%d owner=%u op=%u\n",
+                     static_cast<int>(opened.result), opened.owner != nullptr ? 1U : 0U,
+                     opened.op != nullptr ? 1U : 0U);
         return opened.result;
     }
     if (!wait_owner_terminal(opened.op, 5000U))
     {
+        dtv_l3_op_result operation{};
+        const auto poll_result = dtv_l3_op_poll(opened.op, &operation);
+        dtv_l3_open_status status{};
+        const auto status_result = dtv_l3_open_status_get(opened.owner, &status);
+        std::fprintf(stderr,
+                     "asicen-l3: owner open operation failed poll=%d state=%u result=%d"
+                     " status=%d open_state=%u open_result=%d claims=%u/%u"
+                     " cleanup_remaining=%u cleanup_error=%d disconnected=%u"
+                     " restoration_failed=%u timeout_ms=5000\n",
+                     static_cast<int>(poll_result), static_cast<unsigned int>(operation.state),
+                     static_cast<int>(operation.result), static_cast<int>(status_result),
+                     static_cast<unsigned int>(status.state), static_cast<int>(status.result),
+                     static_cast<unsigned int>(status.claims_acquired),
+                     static_cast<unsigned int>(status.claims_attempted),
+                     static_cast<unsigned int>(status.cleanup_claims_remaining),
+                     static_cast<int>(status.last_cleanup_error),
+                     static_cast<unsigned int>(status.disconnected),
+                     static_cast<unsigned int>(status.restoration_failed));
         (void)dtv_l3_op_release(opened.op);
         return DTV_L3_FAILED;
     }
     (void)dtv_l3_op_release(opened.op);
     dtv_l3_open_status status{};
-    if (dtv_l3_open_status_get(opened.owner, &status) != DTV_L3_OK ||
-        status.state != DTV_L3_OPEN_READY)
+    const auto status_result = dtv_l3_open_status_get(opened.owner, &status);
+    if (status_result != DTV_L3_OK)
     {
+        std::fprintf(stderr, "asicen-l3: owner open status unavailable result=%d\n",
+                     static_cast<int>(status_result));
+        return DTV_L3_FAILED;
+    }
+    if (status.state != DTV_L3_OPEN_READY)
+    {
+        std::fprintf(stderr,
+                     "asicen-l3: owner open not ready state=%u result=%d claims=%u/%u"
+                     " cleanup_remaining=%u cleanup_error=%d disconnected=%u restoration_failed=%u\n",
+                     static_cast<unsigned int>(status.state), static_cast<int>(status.result),
+                     static_cast<unsigned int>(status.claims_acquired),
+                     static_cast<unsigned int>(status.claims_attempted),
+                     static_cast<unsigned int>(status.cleanup_claims_remaining),
+                     static_cast<int>(status.last_cleanup_error),
+                     static_cast<unsigned int>(status.disconnected),
+                     static_cast<unsigned int>(status.restoration_failed));
         return DTV_L3_FAILED;
     }
     owner_ = opened.owner;

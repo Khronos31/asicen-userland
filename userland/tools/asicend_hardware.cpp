@@ -1479,6 +1479,9 @@ int run_asicend_hardware(int argc, char** argv) {
                              px4::userland::error_string(readiness));
                 return exit_status(readiness);
             }
+            // Keep the context that observed every runtime for device open and its handle lifetime.
+            asicen::cli::adopt_fresh_context(owned_context, readiness_context);
+            context = owned_context.get();
         }
     }
     int result = 70;
