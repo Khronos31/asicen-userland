@@ -615,6 +615,7 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, UsbLocation prim
     if (context_ == nullptr) {
         return;
     }
+    const char* failed_function = "primary";
     open_error_ = primary_.open(context_, primary);
     if (open_error_ == 0) {
         if (expected_profile == nullptr) {
@@ -625,9 +626,14 @@ LibusbW3u3Hardware::LibusbW3u3Hardware(libusb_context* context, UsbLocation prim
             }
         }
         if (profile_ != nullptr && profile_->expected_runtime_functions == 2U) {
+            failed_function = "sibling";
             open_error_ = sibling_.open(context_, sibling);
         }
         // Handles remain open until release(), including after stream cleanup.
+    }
+    if (open_error_ != 0) {
+        std::fprintf(stderr, "asicend: runtime handle open failed function=%s error=%d\n",
+                     failed_function, open_error_);
     }
 }
 
@@ -708,6 +714,8 @@ Result<void> LibusbW3u3Hardware::claim()
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
     if (open_error_ != 0) {
+        std::fprintf(stderr, "asicend: runtime handle preflight failed open_error=%d\n",
+                     open_error_);
         return Result<void>::failure(map_libusb_acquisition_error(open_error_));
     }
     if (!runtime_model_supported()) {
@@ -715,6 +723,10 @@ Result<void> LibusbW3u3Hardware::claim()
     }
     if (context_ == nullptr || !primary_.is_open() ||
         (profile_->expected_runtime_functions == 2U && !sibling_.is_open())) {
+        std::fprintf(stderr,
+                     "asicend: runtime handle state invalid context=%u primary=%u sibling=%u\n",
+                     context_ != nullptr ? 1U : 0U, primary_.is_open() ? 1U : 0U,
+                     sibling_.is_open() ? 1U : 0U);
         return Result<void>::failure(Error::DISCONNECTED);
     }
     const auto result = ownership_.claim_profile(
@@ -755,6 +767,16 @@ Result<void> LibusbW3u3Hardware::claim()
         const Error error = transport_failure(Error::PROTOCOL_ERROR);
         (void)release();
         return Result<void>::failure(error);
+    }
+    return Result<void>::success();
+}
+
+Result<void> LibusbW3u3Hardware::l3_control_transfer(const ControlTransfer& transfer,
+                                                   unsigned char* response)
+{
+    const int result = control(transfer, response);
+    if (result < 0) {
+        return Result<void>::failure(map_libusb_error(result));
     }
     return Result<void>::success();
 }

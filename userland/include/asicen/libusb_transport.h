@@ -65,6 +65,7 @@ public:
     int initialize(bool fd_mode = false) noexcept;
     libusb_context* get() const noexcept { return context_; }
     void close() noexcept;
+    void swap(LibusbContext& other) noexcept;
 private:
     LibusbAcquisitionApi& api_;
     libusb_context* context_ = nullptr;

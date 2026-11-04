@@ -92,6 +92,10 @@ public:
     const DeviceProfile* device_profile() const noexcept { return profile_; }
     px4::userland::Result<void> claim();
     px4::userland::Result<void> release() noexcept;
+    // Product-internal seam for the L3 USB-only provider: one control
+    // transfer only. It does not change the existing frontend sequences.
+    px4::userland::Result<void> l3_control_transfer(const ControlTransfer& transfer,
+                                                    unsigned char* response);
     SatelliteProbeSummary probe_satellite(std::uint32_t rf_khz, bool select_slot, std::size_t slot,
                                           const volatile std::sig_atomic_t* stop_flag,
                                           bool (*stop_callback)() noexcept = nullptr) noexcept;
@@ -165,6 +169,11 @@ private:
     friend int run_live_card_stream_server(LibusbW3u3Hardware&, const char*, const char*, bool,
                                            const volatile std::sig_atomic_t*,
                                            bool (*)() noexcept) noexcept;
+    friend int run_l3_core_server(LibusbW3u3Hardware&, const char*, const char*, bool,
+                                  px4::userland::TunerServiceBackend&,
+                                  px4::userland::TunerStreamControl&,
+                                  const volatile std::sig_atomic_t*,
+                                  bool (*)() noexcept) noexcept;
     px4::userland::Result<void>
     begin_card_operation(std::uint32_t timeout_ms,
                          const volatile std::sig_atomic_t* stop_flag) noexcept override;

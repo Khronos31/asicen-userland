@@ -2,6 +2,7 @@
 #include "asicend_args.h"
 #include "asicend_list_format.h"
 #include "asicend_receiver_records.h"
+#include "asicend_runtime_match.h"
 #include "asicend_selector.h"
 #include "asicen/startup_readiness.h"
 #include "asicen/product_profile.h"
@@ -294,6 +295,71 @@ bool list_formats_share_observed_identity()
     return true;
 }
 
+bool cold_runtime_context_comparison_uses_product_matcher()
+{
+    using asicen::UsbFunctionObservation;
+    const auto* w3u3 = asicen::find_profile(asicen::ModelId::W3u3);
+    const auto* w3u2 = asicen::find_profile(asicen::ModelId::W3u2);
+    CHECK(w3u3 != nullptr && w3u2 != nullptr);
+    const UsbFunctionObservation runtime{0x0b06U, 0x0005U, 1U, {2U, 1U, 1U}, 64U};
+    const std::vector<UsbFunctionObservation> existing_context_list;
+    const std::vector<UsbFunctionObservation> fresh_context_list{runtime};
+    std::size_t existing_matches = 0U;
+    for (const auto& candidate : existing_context_list) {
+        if (asicen::cli::classify_runtime_candidate(candidate, 1U, {2U, 1U, 1U}, w3u3) ==
+            asicen::cli::RuntimeCandidateStatus::Match) ++existing_matches;
+    }
+    std::size_t fresh_matches = 0U;
+    for (const auto& candidate : fresh_context_list) {
+        if (asicen::cli::classify_runtime_candidate(candidate, 1U, {2U, 1U, 1U}, w3u3) ==
+            asicen::cli::RuntimeCandidateStatus::Match) ++fresh_matches;
+    }
+    CHECK(existing_matches == 0U && fresh_matches == 1U);
+    auto different_path = runtime;
+    different_path.port_path = {2U, 1U, 2U};
+    CHECK(asicen::cli::classify_runtime_candidate(
+              different_path, 1U, {2U, 1U, 1U}, w3u3) ==
+          asicen::cli::RuntimeCandidateStatus::OtherPath);
+    CHECK(asicen::cli::classify_runtime_candidate(
+              runtime, 1U, {2U, 1U, 1U}, w3u2) ==
+          asicen::cli::RuntimeCandidateStatus::WrongModel);
+
+    const std::vector<asicen::UploadedRuntimeIdentity> uploaded{
+        {0U, 1U, {2U, 1U, 1U}, 0x0b06U, 0x0005U},
+        {1U, 1U, {2U, 1U, 2U}, 0x0b06U, 0x0005U}};
+    auto sibling_runtime = runtime;
+    sibling_runtime.port_path = {2U, 1U, 2U};
+    sibling_runtime.address = 65U;
+    const std::vector<UsbFunctionObservation> final_fresh_list{runtime, sibling_runtime};
+    for (const auto& identity : uploaded) {
+        std::size_t stale_matches = 0U;
+        for (const auto& candidate : existing_context_list) {
+            if (asicen::cli::classify_runtime_candidate(
+                    candidate, identity.bus, identity.port_path, w3u3) ==
+                asicen::cli::RuntimeCandidateStatus::Match) ++stale_matches;
+        }
+        CHECK(stale_matches == 0U);
+    }
+    unsigned int fresh_polls = 0U;
+    CHECK(asicen::wait_for_uploaded_runtimes(
+              uploaded,
+              [&](const asicen::UploadedRuntimeIdentity& identity) {
+                  ++fresh_polls;
+                  for (const auto& candidate : final_fresh_list) {
+                      if (asicen::cli::classify_runtime_candidate(
+                              candidate, identity.bus, identity.port_path, w3u3) ==
+                          asicen::cli::RuntimeCandidateStatus::Match)
+                          return px4::userland::Error::OK;
+                  }
+                  return px4::userland::Error::NOT_FOUND;
+              },
+              [] { return std::chrono::steady_clock::time_point{}; },
+              [](std::chrono::milliseconds) {},
+              [] { return false; }) == px4::userland::Error::OK);
+    CHECK(fresh_polls == uploaded.size());
+    return true;
+}
+
 bool receiver_table_matches_product_profile()
 {
     for (const std::uint8_t count : {1U, 2U, 4U}) {
@@ -578,6 +644,7 @@ int main()
 {
     if (!arguments_match_reference() || !selector_grouping() ||
         !list_formats_share_observed_identity() ||
+        !cold_runtime_context_comparison_uses_product_matcher() ||
         !receiver_table_matches_product_profile() ||
         !readiness_rechecks_first_and_last_probe_boundaries() ||
         !readiness_handles_staggered_reenumeration_and_disappearance() ||
