@@ -313,7 +313,7 @@ bool context_swap_preserves_owned_context_lifetimes()
           "product context swap transfers the actual libusb context identities");
     existing.close();
     fresh.close();
-    CHECK(api.exited_contexts == std::vector<libusb_context*>{fresh_context, existing_context},
+    CHECK((api.exited_contexts == std::vector<libusb_context*>{fresh_context, existing_context}),
           "each swapped context is exited exactly once by its owner");
     CHECK(cleanup_order(api, {"exit", "exit"}), "swapped context cleanup order");
     return true;
@@ -332,7 +332,7 @@ bool final_runtime_poll_reinitializes_owned_context()
     CHECK(first_context != second_context,
           "each final runtime poll receives a newly initialized libusb context");
     context.close();
-    CHECK(api.exited_contexts == std::vector<libusb_context*>{first_context, second_context},
+    CHECK((api.exited_contexts == std::vector<libusb_context*>{first_context, second_context}),
           "poll refresh and final close each release their owned context once");
     return true;
 }
