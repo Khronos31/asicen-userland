@@ -6,6 +6,7 @@
 #include "sha256.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <memory>
 
@@ -89,6 +90,8 @@ Adapter::Adapter(const DeviceProfile& profile, Host& host) : profile_(&profile),
     fill_catalog();
     adapter_.product_context = this;
     adapter_.capabilities = capabilities_;
+    // Let Core choose its ~1 MiB default; the fixture only needs one packet.
+    adapter_.stream_queue_packets = 0U;
     adapter_.catalog = &catalog_;
     adapter_.firmware = nullptr;
     adapter_.bind = &Adapter::bind_thunk;
@@ -102,6 +105,15 @@ Adapter::Adapter(const DeviceProfile& profile, Host& host) : profile_(&profile),
     adapter_.stream_attach_ex = &Adapter::stream_attach_ex_thunk;
     adapter_.stream_stop = &Adapter::stream_stop_thunk;
     adapter_.stream_stop_ex = &Adapter::stream_stop_ex_thunk;
+}
+
+Adapter::~Adapter()
+{
+    stream_stop_.store(true);
+    if (stream_worker_.joinable())
+    {
+        stream_worker_.join();
+    }
 }
 
 dtv_l3_result Adapter::prepare_firmware(const dtv_l3_firmware* firmware)
@@ -212,8 +224,8 @@ void Adapter::fill_catalog()
     }
 
     reader_caps_[0].id = 0U;
-    reader_caps_[0].external_apdu = DTV_L3_SUPPORT_UNSUPPORTED;
-    reader_caps_[0].support = DTV_L3_SUPPORT_UNSUPPORTED;
+    reader_caps_[0].external_apdu = DTV_L3_SUPPORT_SUPPORTED;
+    reader_caps_[0].support = DTV_L3_SUPPORT_SUPPORTED;
 
     std::uint32_t lnb_count = 0U;
     for (std::uint32_t receiver = 0U; receiver < profile_->enclosure_receiver_count; ++receiver)
@@ -227,9 +239,18 @@ void Adapter::fill_catalog()
             profile_->model_id == ModelId::W3u3V2)
         {
             lnb_caps_[lnb_count].id = receiver;
-            lnb_caps_[lnb_count].support = DTV_L3_SUPPORT_UNSUPPORTED;
+            lnb_caps_[lnb_count].support = DTV_L3_SUPPORT_SUPPORTED;
             ++lnb_count;
         }
+    }
+    if (lnb_count == 0U)
+    {
+        // S3U/S3U2 have no established model-specific LNB software control
+        // in the existing backend; declare the difference instead of
+        // generalizing every ASICEN model to "no LNB".
+        lnb_caps_[0].id = 0U;
+        lnb_caps_[0].support = DTV_L3_SUPPORT_UNSUPPORTED;
+        lnb_count = 1U;
     }
 
     std::uint32_t shared_count = 0U;
@@ -643,26 +664,31 @@ dtv_l3_result Adapter::stream_attach_ex_thunk(void* context, dtv_l3_provider_bin
 {
     auto* adapter = static_cast<Adapter*>(context);
     asicen_l3_route route{};
-    if (!adapter->route(receiver_id, &route) || !adapter->bridge_matches(route, bridge_id))
+    if (!adapter->route(receiver_id, &route) || !adapter->bridge_matches(route, bridge_id) ||
+        adapter->owner_ == nullptr || adapter->stream_running_.exchange(true))
     {
-        return DTV_L3_UNSUPPORTED;
+        return DTV_L3_BUSY;
     }
-    const auto stream_system = adapter->stream_system_for(receiver_id, route);
-    if (stream_system == 0U)
+    adapter->stream_stop_.store(false);
+    adapter->stream_claim_index_ = route.function_index;
+    adapter->stream_deliver_ = deliver;
+    adapter->stream_deliver_context_ = callback_context;
+    try
     {
-        return DTV_L3_UNSUPPORTED;
+        adapter->stream_worker_ = std::thread([adapter] { adapter->stream_loop(); });
+    } catch (...)
+    {
+        adapter->stream_running_.store(false);
+        return DTV_L3_FAILED;
     }
-    const auto attached = adapter->host_.stream_attach(stream_id, receiver_id, stream_system,
-                                                       deliver, callback_context);
-    if (attached == DTV_L3_OK)
     {
         std::lock_guard<std::mutex> lock(adapter->mutex_);
         adapter->streams_.emplace_back(stream_id, receiver_id);
     }
-    return attached;
+    return DTV_L3_OK;
 }
 
-dtv_l3_result Adapter::stream_stop_ex_thunk(void* context, dtv_l3_provider_binding* binding,
+dtv_l3_result Adapter::stream_stop_ex_thunk(void* context, dtv_l3_provider_binding*,
                                             std::uint64_t stream_id, std::uint32_t receiver_id,
                                             std::uint32_t bridge_id)
 {
@@ -672,7 +698,69 @@ dtv_l3_result Adapter::stream_stop_ex_thunk(void* context, dtv_l3_provider_bindi
     {
         return DTV_L3_UNSUPPORTED;
     }
-    return Adapter::stream_stop_thunk(context, binding, stream_id);
+    adapter->stream_stop_.store(true);
+    if (adapter->stream_worker_.joinable())
+    {
+        adapter->stream_worker_.join();
+    }
+    std::lock_guard<std::mutex> lock(adapter->mutex_);
+    adapter->streams_.erase(
+        std::remove_if(adapter->streams_.begin(), adapter->streams_.end(),
+                       [stream_id](const auto& entry) { return entry.first == stream_id; }),
+        adapter->streams_.end());
+    return DTV_L3_OK;
+}
+
+void Adapter::stream_loop()
+{
+    dtv_l3_context* owner = owner_;
+    if (owner != nullptr && !stream_stop_.load())
+    {
+        dtv_l3_transfer_request request{};
+        request.kind = DTV_L3_TRANSFER_BULK;
+        request.endpoint = 0x81U;
+        request.timeout_ms = 200U;
+        request.in_capacity = 188U;
+        request.claim_index = stream_claim_index_;
+        request.deadline_ns = DTV_L3_DEADLINE_NONE;
+
+        dtv_l3_op* op = nullptr;
+        const auto started = dtv_l3_transfer_start(owner, &request, &op);
+        if (started == DTV_L3_ACCEPTED && op != nullptr)
+        {
+            while (true)
+            {
+                const auto waited = dtv_l3_op_wait(op, 200U);
+                if (waited == DTV_L3_OK)
+                {
+                    break;
+                }
+                if (waited == DTV_L3_WAIT_TIMEOUT)
+                {
+                    if (stream_stop_.load())
+                    {
+                        (void)dtv_l3_op_cancel(op);
+                    }
+                    continue;
+                }
+                (void)dtv_l3_op_cancel(op);
+                break;
+            }
+            dtv_l3_op_result result{};
+            if (dtv_l3_op_poll(op, &result) == DTV_L3_OK && !stream_stop_.load() &&
+                result.state == DTV_L3_OP_DONE && result.result == DTV_L3_OK &&
+                result.data != nullptr && result.data_size != 0U && stream_deliver_ != nullptr)
+            {
+                stream_deliver_(stream_deliver_context_, result.data, result.data_size);
+            }
+            (void)dtv_l3_op_release(op);
+        }
+    }
+    while (!stream_stop_.load())
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stream_running_.store(false);
 }
 
 Factory::Factory(const DeviceProfile& profile, Host& host) : profile_(&profile), host_(host)

@@ -164,6 +164,11 @@ bool test_capabilities_and_routes()
     CHECK(s3u_adapter.capabilities().lnb_power == 0U);
     CHECK(s3u_adapter.capabilities().serial == 0U);
     CHECK(s3u_adapter.capabilities().cancel_scope == DTV_L3_CANCEL_SCOPE_TRANSFER);
+    CHECK(s3u_adapter.product_adapter()->catalog != nullptr);
+    CHECK(s3u_adapter.product_adapter()->catalog->readers[0].support == DTV_L3_SUPPORT_SUPPORTED);
+    CHECK(s3u_adapter.product_adapter()->catalog->lnb_scope_count == 1U);
+    CHECK(s3u_adapter.product_adapter()->catalog->lnb_scopes[0].support ==
+          DTV_L3_SUPPORT_UNSUPPORTED);
     CHECK(expect_route(s3u_adapter, 0U, 0U, 0U, 0U, 0U, ASICEN_L3_SYSTEM_SATELLITE));
 
     CHECK(s3u2_adapter.capabilities().receiver_count == 2U);
@@ -277,8 +282,10 @@ bool test_product_adapter_callbacks()
     CHECK(catalog != nullptr && catalog->receiver_count == 4U);
     CHECK(catalog->receivers[0].systems == DTV_L3_SYSTEM_ISDB_S);
     CHECK(catalog->receivers[1].systems == DTV_L3_SYSTEM_ISDB_T);
-    CHECK(catalog->readers[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
-    CHECK(catalog->lnb_scopes[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(catalog->readers[0].support == DTV_L3_SUPPORT_SUPPORTED);
+    CHECK(catalog->readers[0].external_apdu == DTV_L3_SUPPORT_SUPPORTED);
+    CHECK(catalog->lnb_scope_count == 2U);
+    CHECK(catalog->lnb_scopes[0].support == DTV_L3_SUPPORT_SUPPORTED);
     CHECK(catalog->shared_scope_count == 2U);
 
     const dtv_l3_product_adapter* combined = s3u_adapter.product_adapter();
@@ -450,7 +457,7 @@ bool test_factory_v1_manifest_and_catalog()
                                             &product, &claim_count, &owner) == DTV_L3_OK);
     CHECK(product != nullptr && owner != nullptr && claim_count == 2U);
     CHECK(product->catalog != nullptr && product->catalog->receiver_count == 4U);
-    CHECK(product->catalog->readers[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(product->catalog->readers[0].support == DTV_L3_SUPPORT_SUPPORTED);
     CHECK(product->catalog->lnb_scope_count == 2U);
     CHECK(product->catalog->shared_scope_count == 2U);
     CHECK(product->firmware != nullptr && product->firmware->manifest != nullptr);

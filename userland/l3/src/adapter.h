@@ -6,9 +6,11 @@
 
 #include "asicen/device_profile.h"
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <utility>
 #include <vector>
@@ -66,6 +68,7 @@ class Host {
 class Adapter final {
   public:
     Adapter(const DeviceProfile& profile, Host& host);
+    ~Adapter();
 
     Adapter(const Adapter&) = delete;
     Adapter& operator=(const Adapter&) = delete;
@@ -142,6 +145,7 @@ class Adapter final {
                                               std::uint64_t stream_id, std::uint32_t receiver_id,
                                               std::uint32_t bridge_id);
 
+    void stream_loop();
     void fill_catalog();
     dtv_l3_result tune_locked(std::uint32_t receiver, std::uint32_t system,
                               std::uint64_t frequency_hz, std::uint32_t timeout_ms,
@@ -170,6 +174,12 @@ class Adapter final {
     dtv_l3_context* owner_ = nullptr;
     std::uint32_t power_permission_ = 1U;
     std::uint32_t tuned_system_[4]{};
+    std::thread stream_worker_;
+    std::atomic<bool> stream_stop_{false};
+    std::atomic<bool> stream_running_{false};
+    std::uint32_t stream_claim_index_ = 0U;
+    dtv_l3_ts_deliver_fn stream_deliver_ = nullptr;
+    void* stream_deliver_context_ = nullptr;
     mutable std::mutex mutex_;
     std::deque<PendingAttach> pending_attaches_;
     std::deque<std::pair<std::uint64_t, std::uint32_t>> streams_;

@@ -32,6 +32,13 @@ typedef struct fake_host {
     int release_indices[8];
     int submit_calls;
     int submit_fail;
+    int defer_bulk;
+    int pending_bulk;
+    int cancel_calls;
+    dtv_l3_provider_binding* pending_binding;
+    uint64_t pending_id;
+    dtv_l3_transfer_complete_fn pending_complete;
+    void* pending_context;
     unsigned int last_submit_kind;
     unsigned int last_submit_request_type;
     size_t last_submit_in_capacity;
@@ -122,7 +129,7 @@ static dtv_l3_result usb_submit(void* context, dtv_l3_provider_binding* binding,
                                 dtv_l3_transfer_complete_fn complete, void* callback_context)
 {
     fake_host* fake = (fake_host*)context;
-    static const uint8_t data[1] = {0x5aU};
+    uint8_t data[188];
     ++fake->submit_calls;
     fake->last_submit_kind = request->kind;
     fake->last_submit_request_type = request->control.request_type;
@@ -131,18 +138,60 @@ static dtv_l3_result usb_submit(void* context, dtv_l3_provider_binding* binding,
     {
         return DTV_L3_FAILED;
     }
-    const dtv_l3_transfer_completion completion = {DTV_L3_OK, data, sizeof(data), sizeof(data), 1U};
-    complete(binding, transfer_id, &completion, callback_context);
+    if (request->kind == DTV_L3_TRANSFER_BULK && fake->defer_bulk != 0)
+    {
+        pthread_mutex_lock(&fake->mutex);
+        fake->pending_bulk = 1;
+        fake->pending_binding = binding;
+        fake->pending_id = transfer_id;
+        fake->pending_complete = complete;
+        fake->pending_context = callback_context;
+        pthread_mutex_unlock(&fake->mutex);
+        return DTV_L3_ACCEPTED;
+    }
+    if (request->kind == DTV_L3_TRANSFER_BULK)
+    {
+        memset(data, 0x47, sizeof(data));
+        const dtv_l3_transfer_completion completion = {DTV_L3_OK, data, sizeof(data), sizeof(data),
+                                                       1U};
+        complete(binding, transfer_id, &completion, callback_context);
+    } else
+    {
+        const uint8_t control_data[1] = {0x5aU};
+        const dtv_l3_transfer_completion completion = {
+            DTV_L3_OK, control_data, sizeof(control_data), sizeof(control_data), 1U};
+        complete(binding, transfer_id, &completion, callback_context);
+    }
     return DTV_L3_ACCEPTED;
 }
 
 static dtv_l3_result usb_cancel(void* context, dtv_l3_provider_binding* binding,
                                 uint64_t transfer_id)
 {
-    (void)context;
+    fake_host* fake = (fake_host*)context;
+    dtv_l3_provider_binding* pending_binding = NULL;
+    uint64_t pending_id = 0U;
+    dtv_l3_transfer_complete_fn pending_complete = NULL;
+    void* pending_context = NULL;
     (void)binding;
     (void)transfer_id;
-    return DTV_L3_UNSUPPORTED;
+    pthread_mutex_lock(&fake->mutex);
+    ++fake->cancel_calls;
+    if (fake->pending_bulk != 0)
+    {
+        pending_binding = fake->pending_binding;
+        pending_id = fake->pending_id;
+        pending_complete = fake->pending_complete;
+        pending_context = fake->pending_context;
+        fake->pending_bulk = 0;
+    }
+    pthread_mutex_unlock(&fake->mutex);
+    if (pending_complete != NULL)
+    {
+        const dtv_l3_transfer_completion completion = {DTV_L3_CANCELLED, NULL, 0U, 0U, 0U};
+        pending_complete(pending_binding, pending_id, &completion, pending_context);
+    }
+    return DTV_L3_ACCEPTED;
 }
 
 static dtv_l3_result product_tune(void* context, uint32_t receiver, uint32_t system,
@@ -296,6 +345,42 @@ static int wait_release_entered(fake_host* fake, int milliseconds)
         const int entered = fake->release_entered;
         pthread_mutex_unlock(&fake->mutex);
         if (entered != 0)
+        {
+            return 1;
+        }
+        sleep_ms(1);
+        ++waited;
+    }
+    return 0;
+}
+
+static int wait_pending_bulk(fake_host* fake, int milliseconds)
+{
+    int waited = 0;
+    while (waited < milliseconds)
+    {
+        pthread_mutex_lock(&fake->mutex);
+        const int pending = fake->pending_bulk;
+        pthread_mutex_unlock(&fake->mutex);
+        if (pending != 0)
+        {
+            return 1;
+        }
+        sleep_ms(1);
+        ++waited;
+    }
+    return 0;
+}
+
+static int read_one_ts(dtv_l3_stream* stream, uint8_t* out, size_t out_size,
+                       dtv_l3_read_state* state, int milliseconds)
+{
+    int waited = 0;
+    while (waited < milliseconds)
+    {
+        size_t bytes = 0U;
+        if (dtv_l3_stream_read_ts(stream, out, out_size, &bytes, state) == DTV_L3_OK &&
+            *state == DTV_L3_READ_DATA && bytes == out_size)
         {
             return 1;
         }
@@ -485,9 +570,7 @@ static int test_product_semantics_through_core(void)
     dtv_l3_lease_status lease_status;
     uint64_t programmed = 0U;
     uint64_t revision = 0U;
-    uint8_t ts_data[376];
     uint8_t out[188];
-    size_t bytes = 0U;
     dtv_l3_read_state read_state = DTV_L3_READ_WAIT;
 
     fake_init(&fake);
@@ -517,16 +600,16 @@ static int test_product_semantics_through_core(void)
           programmed == 11000000000ULL);
     CHECK(dtv_l3_lease_start(lease) == DTV_L3_OK);
     CHECK(dtv_l3_lease_attach(lease, &stream) == DTV_L3_OK && stream != NULL);
-    CHECK(fake.begin_calls == 1 && fake.attach_calls == 1 && fake.deliver != NULL);
-    CHECK(fake.begin_receiver == 0U && fake.begin_system == ASICEN_L3_SYSTEM_SATELLITE);
-    CHECK(fake.attach_receiver == 0U && fake.attach_system == ASICEN_L3_SYSTEM_SATELLITE);
-    memset(ts_data, 0x47, sizeof(ts_data));
-    fake.deliver(fake.deliver_context, ts_data, sizeof(ts_data));
-    CHECK(dtv_l3_stream_read_ts(stream, out, sizeof(out), &bytes, &read_state) == DTV_L3_OK);
-    CHECK(read_state == DTV_L3_READ_DATA && bytes == sizeof(out));
+    CHECK(fake.begin_calls == 1 && fake.begin_receiver == 0U &&
+          fake.begin_system == ASICEN_L3_SYSTEM_SATELLITE);
+    /* The stream IN transfer goes through owner transfer_start/submit, not the
+     * product host stream_attach callback. */
+    CHECK(fake.attach_calls == 0 && fake.stop_calls == 0);
+    CHECK(read_one_ts(stream, out, sizeof(out), &read_state, 2000) == 1);
+    CHECK(out[0] == 0x47U);
     CHECK(dtv_l3_lease_status_get(lease, &lease_status) == DTV_L3_OK);
-    CHECK(dtv_l3_stream_stop(stream, 0) == DTV_L3_OK);
-    CHECK(fake.stop_calls == 1);
+    CHECK(dtv_l3_stream_stop(stream, 2000) == DTV_L3_OK);
+    CHECK(fake.stop_calls == 0);
     CHECK(dtv_l3_stream_release(stream, DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) == DTV_L3_OK);
     CHECK(dtv_l3_stream_destroy(stream) == DTV_L3_OK);
     CHECK(dtv_l3_lease_release(lease) == DTV_L3_OK);
@@ -670,9 +753,9 @@ static int test_args_factory_catalog_and_manifest(void)
     CHECK(catalog->receivers[0].systems == DTV_L3_SYSTEM_ISDB_S);
     CHECK(catalog->receivers[1].systems == DTV_L3_SYSTEM_ISDB_T);
     CHECK(catalog->receivers[0].support == DTV_L3_SUPPORT_SUPPORTED);
-    CHECK(catalog->readers[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(catalog->readers[0].support == DTV_L3_SUPPORT_SUPPORTED);
     CHECK(catalog->lnb_scope_count == 2U &&
-          catalog->lnb_scopes[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+          catalog->lnb_scopes[0].support == DTV_L3_SUPPORT_SUPPORTED);
     CHECK(catalog->shared_scope_count == 2U &&
           catalog->shared_scopes[0].support == DTV_L3_SUPPORT_SUPPORTED);
     CHECK(catalog->ts_form == DTV_L3_SUPPORT_SUPPORTED);
@@ -769,14 +852,60 @@ static int test_tune_ex_and_combined_stream(void)
     CHECK(dtv_l3_lease_attach(lease, &stream) == DTV_L3_OK && stream != NULL);
     CHECK(fake.begin_calls == 1 && fake.begin_receiver == 0U &&
           fake.begin_system == ASICEN_L3_SYSTEM_SATELLITE);
-    CHECK(fake.attach_calls == 1 && fake.attach_receiver == 0U &&
-          fake.attach_system == ASICEN_L3_SYSTEM_SATELLITE);
-    CHECK(dtv_l3_stream_stop(stream, 0) == DTV_L3_OK);
+    CHECK(fake.attach_calls == 0);
+    CHECK(dtv_l3_stream_stop(stream, 2000) == DTV_L3_OK);
     CHECK(dtv_l3_stream_release(stream, DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) == DTV_L3_OK);
     CHECK(dtv_l3_stream_destroy(stream) == DTV_L3_OK);
     CHECK(dtv_l3_lease_release(lease) == DTV_L3_OK);
 
     CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);
+    CHECK(release_owner(opened.owner, 5000) == 1);
+    asicen_l3_factory_destroy(factory);
+    fake_destroy(&fake);
+    return 1;
+}
+
+static int test_stream_in_close_recovery(void)
+{
+    fake_host fake;
+    asicen_l3_product_ops ops;
+    asicen_l3_factory* factory = NULL;
+    dtv_l3_usb_provider usb;
+    dtv_l3_open_config config;
+    dtv_l3_open_result opened;
+    dtv_l3_lease* lease = NULL;
+    dtv_l3_stream* stream = NULL;
+    dtv_l3_close_status close_status;
+    uint64_t programmed = 0U;
+    uint64_t revision = 0U;
+
+    fake_init(&fake);
+    fake.defer_bulk = 1;
+    ops = product_ops_for(&fake);
+    usb = usb_provider_for(&fake);
+    CHECK(asicen_l3_factory_create(&ops, 0x0b06, 0x0005, &factory) == DTV_L3_OK);
+    config = config_for(ASICEN_L3_MODEL_W3U3, NULL);
+    opened = dtv_l3_open_factory(&usb, asicen_l3_factory_adapter_factory(factory), &config, 2);
+    CHECK(opened.result == DTV_L3_ACCEPTED && opened.owner != NULL && opened.op != NULL);
+    CHECK(dtv_l3_op_wait(opened.op, 5000) == DTV_L3_OK);
+    CHECK(dtv_l3_op_release(opened.op) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_acquire(opened.owner, 0U, &lease) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_tune(lease, 11000000000ULL, &programmed, &revision) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_start(lease) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_attach(lease, &stream) == DTV_L3_OK && stream != NULL);
+    CHECK(wait_pending_bulk(&fake, 2000) == 1);
+
+    /* Close while the stream IN transfer is in flight. The product worker
+     * cancels it; the provider completes CANCELLED and the owner recovers. */
+    CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);
+    CHECK(dtv_l3_stream_destroy(stream) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_release(lease) == DTV_L3_OK);
+    CHECK(wait_releasable(opened.owner, &close_status, 5000) == 1);
+    CHECK(close_status.physical_quiesced == 1 && close_status.cleanup_complete == 1);
+    CHECK(fake.cancel_calls >= 1);
+    pthread_mutex_lock(&fake.mutex);
+    CHECK(fake.pending_bulk == 0);
+    pthread_mutex_unlock(&fake.mutex);
     CHECK(release_owner(opened.owner, 5000) == 1);
     asicen_l3_factory_destroy(factory);
     fake_destroy(&fake);
@@ -856,6 +985,8 @@ int main(void)
     if (!test_initialize_failure())
         return 1;
     if (!test_tune_ex_and_combined_stream())
+        return 1;
+    if (!test_stream_in_close_recovery())
         return 1;
     if (!test_explicit_system_tune())
         return 1;
