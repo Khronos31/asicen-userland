@@ -707,6 +707,10 @@ dtv_l3_result Adapter::stream_stop_ex_thunk(void* context, dtv_l3_provider_bindi
     {
         return DTV_L3_UNSUPPORTED;
     }
+    if (adapter->stream_config_ != nullptr)
+    {
+        (void)adapter->stream_config_->stop();
+    }
     adapter->stream_stop_.store(true);
     for (int waited = 0; waited < kStreamStopObservationMs; ++waited)
     {
@@ -736,57 +740,87 @@ dtv_l3_result Adapter::stream_stop_ex_thunk(void* context, dtv_l3_provider_bindi
 
 void Adapter::stream_loop()
 {
+    constexpr std::size_t kInFlight = 4U;
     dtv_l3_context* owner = owner_;
-    if (owner != nullptr && !stream_stop_.load())
+    std::deque<dtv_l3_op*> ops;
+    if (owner != nullptr)
     {
-        dtv_l3_transfer_request request{};
-        request.kind = DTV_L3_TRANSFER_BULK;
-        request.endpoint = 0x81U;
-        request.timeout_ms = 200U;
-        request.in_capacity = 188U;
-        request.claim_index = stream_claim_index_;
-        request.deadline_ns = DTV_L3_DEADLINE_NONE;
-
-        dtv_l3_op* op = nullptr;
-        const auto started = dtv_l3_transfer_start(owner, &request, &op);
-        if (started == DTV_L3_ACCEPTED && op != nullptr)
+        while (!stream_stop_.load())
         {
-            bool cancel_sent = false;
-            while (true)
+            while (ops.size() < kInFlight && !stream_stop_.load())
             {
-                const auto waited = dtv_l3_op_wait(op, 200U);
-                if (waited == DTV_L3_OK)
+                dtv_l3_transfer_request request{};
+                request.kind = DTV_L3_TRANSFER_BULK;
+                request.endpoint = 0x81U;
+                request.timeout_ms = 200U;
+                request.in_capacity = 188U;
+                request.claim_index = stream_claim_index_;
+                request.deadline_ns = DTV_L3_DEADLINE_NONE;
+                dtv_l3_op* op = nullptr;
+                if (dtv_l3_transfer_start(owner, &request, &op) != DTV_L3_ACCEPTED || op == nullptr)
                 {
                     break;
                 }
-                if (waited == DTV_L3_WAIT_TIMEOUT)
+                ops.push_back(op);
+            }
+            bool progressed = false;
+            for (auto it = ops.begin(); it != ops.end();)
+            {
+                dtv_l3_op_result result{};
+                if (dtv_l3_op_poll(*it, &result) != DTV_L3_OK)
                 {
-                    if (stream_stop_.load() && !cancel_sent)
-                    {
-                        cancel_sent = true;
-                        (void)dtv_l3_op_cancel(op);
-                    }
+                    ++it;
                     continue;
                 }
-                if (!cancel_sent)
+                if (result.state == DTV_L3_OP_DONE || result.state == DTV_L3_OP_FAILED)
                 {
-                    cancel_sent = true;
-                    (void)dtv_l3_op_cancel(op);
+                    if (result.state == DTV_L3_OP_DONE && result.result == DTV_L3_OK &&
+                        result.data != nullptr && result.data_size != 0U &&
+                        stream_deliver_ != nullptr)
+                    {
+                        stream_deliver_(stream_deliver_context_, result.data, result.data_size);
+                    }
+                    (void)dtv_l3_op_release(*it);
+                    it = ops.erase(it);
+                    progressed = true;
+                } else
+                {
+                    ++it;
                 }
             }
-            dtv_l3_op_result result{};
-            if (dtv_l3_op_poll(op, &result) == DTV_L3_OK && !stream_stop_.load() &&
-                result.state == DTV_L3_OP_DONE && result.result == DTV_L3_OK &&
-                result.data != nullptr && result.data_size != 0U && stream_deliver_ != nullptr)
+            if (!progressed)
             {
-                stream_deliver_(stream_deliver_context_, result.data, result.data_size);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            (void)dtv_l3_op_release(op);
         }
-    }
-    while (!stream_stop_.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+        for (auto* op : ops)
+        {
+            (void)dtv_l3_op_cancel(op);
+        }
+        while (!ops.empty())
+        {
+            for (auto it = ops.begin(); it != ops.end();)
+            {
+                dtv_l3_op_result result{};
+                if (dtv_l3_op_poll(*it, &result) == DTV_L3_OK &&
+                    (result.state == DTV_L3_OP_DONE || result.state == DTV_L3_OP_FAILED))
+                {
+                    (void)dtv_l3_op_release(*it);
+                    it = ops.erase(it);
+                } else
+                {
+                    ++it;
+                }
+            }
+            if (ops.empty())
+            {
+                break;
+            }
+            // Keep the worker and outstanding handles residual until the
+            // provider delivers a terminal completion.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
     stream_running_.store(false);
 }

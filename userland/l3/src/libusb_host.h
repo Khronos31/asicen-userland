@@ -5,8 +5,11 @@
 #include "adapter.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace asicen {
@@ -48,6 +51,7 @@ class LibusbStreamSubmit : public StreamConfig {
     }
 
     dtv_l3_result configure(std::uint32_t receiver, std::uint32_t system) override;
+    dtv_l3_result stop() override;
     dtv_l3_result submit(dtv_l3_provider_binding* binding, std::uint64_t transfer_id,
                          const dtv_l3_transfer_request* request,
                          dtv_l3_transfer_complete_fn complete, void* callback_context);
@@ -61,11 +65,29 @@ class LibusbStreamSubmit : public StreamConfig {
     }
 
   private:
+    struct Pending {
+        dtv_l3_provider_binding* binding = nullptr;
+        std::uint64_t id = 0U;
+        dtv_l3_transfer_complete_fn complete = nullptr;
+        void* callback_context = nullptr;
+    };
+
+    void capture_loop();
+    void fail_pending_locked(dtv_l3_result result);
+    static bool emit_thunk(void* context, const std::uint8_t* data, std::size_t size) noexcept;
+
     LibusbW3u3Hardware& backend_;
     std::atomic<std::uint32_t> receiver_{0U};
     std::atomic<std::uint32_t> system_{0U};
     std::atomic<bool> configured_{false};
     std::atomic<bool> cancelled_{false};
+    std::mutex mutex_;
+    std::deque<Pending> pending_;
+    std::deque<std::vector<std::uint8_t>> packets_;
+    std::thread capture_;
+    bool started_ = false;
+    bool done_ = false;
+    dtv_l3_result capture_result_ = DTV_L3_OK;
 };
 
 // USB-only provider over the current enclosure claim. Control transfers use

@@ -18,6 +18,13 @@
         }                                                                                          \
     } while (0)
 
+typedef struct fake_pending {
+    dtv_l3_provider_binding* binding;
+    uint64_t id;
+    dtv_l3_transfer_complete_fn complete;
+    void* callback_context;
+} fake_pending;
+
 typedef struct fake_host {
     pthread_mutex_t mutex;
     pthread_cond_t condition;
@@ -33,13 +40,10 @@ typedef struct fake_host {
     int submit_calls;
     int submit_fail;
     int defer_bulk;
-    int pending_bulk;
+    int pending_count;
     int cancel_no_completion;
     int cancel_calls;
-    dtv_l3_provider_binding* pending_binding;
-    uint64_t pending_id;
-    dtv_l3_transfer_complete_fn pending_complete;
-    void* pending_context;
+    fake_pending pending[8];
     unsigned int last_submit_kind;
     unsigned int last_submit_request_type;
     size_t last_submit_in_capacity;
@@ -142,11 +146,16 @@ static dtv_l3_result usb_submit(void* context, dtv_l3_provider_binding* binding,
     if (request->kind == DTV_L3_TRANSFER_BULK && fake->defer_bulk != 0)
     {
         pthread_mutex_lock(&fake->mutex);
-        fake->pending_bulk = 1;
-        fake->pending_binding = binding;
-        fake->pending_id = transfer_id;
-        fake->pending_complete = complete;
-        fake->pending_context = callback_context;
+        if (fake->pending_count >= 8)
+        {
+            pthread_mutex_unlock(&fake->mutex);
+            return DTV_L3_BUSY;
+        }
+        fake->pending[fake->pending_count].binding = binding;
+        fake->pending[fake->pending_count].id = transfer_id;
+        fake->pending[fake->pending_count].complete = complete;
+        fake->pending[fake->pending_count].callback_context = callback_context;
+        ++fake->pending_count;
         pthread_mutex_unlock(&fake->mutex);
         return DTV_L3_ACCEPTED;
     }
@@ -170,27 +179,27 @@ static dtv_l3_result usb_cancel(void* context, dtv_l3_provider_binding* binding,
                                 uint64_t transfer_id)
 {
     fake_host* fake = (fake_host*)context;
-    dtv_l3_provider_binding* pending_binding = NULL;
-    uint64_t pending_id = 0U;
-    dtv_l3_transfer_complete_fn pending_complete = NULL;
-    void* pending_context = NULL;
+    fake_pending pending[8];
+    int count = 0;
     (void)binding;
     (void)transfer_id;
     pthread_mutex_lock(&fake->mutex);
     ++fake->cancel_calls;
-    if (fake->pending_bulk != 0 && fake->cancel_no_completion == 0)
+    if (fake->cancel_no_completion == 0)
     {
-        pending_binding = fake->pending_binding;
-        pending_id = fake->pending_id;
-        pending_complete = fake->pending_complete;
-        pending_context = fake->pending_context;
-        fake->pending_bulk = 0;
+        count = fake->pending_count;
+        for (int i = 0; i < count; ++i)
+        {
+            pending[i] = fake->pending[i];
+        }
+        fake->pending_count = 0;
     }
     pthread_mutex_unlock(&fake->mutex);
-    if (pending_complete != NULL)
+    for (int i = 0; i < count; ++i)
     {
         const dtv_l3_transfer_completion completion = {DTV_L3_CANCELLED, NULL, 0U, 0U, 0U};
-        pending_complete(pending_binding, pending_id, &completion, pending_context);
+        pending[i].complete(pending[i].binding, pending[i].id, &completion,
+                            pending[i].callback_context);
     }
     return DTV_L3_ACCEPTED;
 }
@@ -357,25 +366,23 @@ static int wait_release_entered(fake_host* fake, int milliseconds)
 
 static int complete_pending_bulk(fake_host* fake)
 {
-    dtv_l3_provider_binding* pending_binding = NULL;
-    uint64_t pending_id = 0U;
-    dtv_l3_transfer_complete_fn pending_complete = NULL;
-    void* pending_context = NULL;
+    fake_pending pending[8];
+    int count = 0;
     pthread_mutex_lock(&fake->mutex);
-    if (fake->pending_bulk == 0)
+    count = fake->pending_count;
+    for (int i = 0; i < count; ++i)
     {
-        pthread_mutex_unlock(&fake->mutex);
-        return 0;
+        pending[i] = fake->pending[i];
     }
-    pending_binding = fake->pending_binding;
-    pending_id = fake->pending_id;
-    pending_complete = fake->pending_complete;
-    pending_context = fake->pending_context;
-    fake->pending_bulk = 0;
+    fake->pending_count = 0;
     pthread_mutex_unlock(&fake->mutex);
-    const dtv_l3_transfer_completion completion = {DTV_L3_CANCELLED, NULL, 0U, 0U, 0U};
-    pending_complete(pending_binding, pending_id, &completion, pending_context);
-    return 1;
+    for (int i = 0; i < count; ++i)
+    {
+        const dtv_l3_transfer_completion completion = {DTV_L3_CANCELLED, NULL, 0U, 0U, 0U};
+        pending[i].complete(pending[i].binding, pending[i].id, &completion,
+                            pending[i].callback_context);
+    }
+    return count != 0;
 }
 
 static int wait_pending_bulk(fake_host* fake, int milliseconds)
@@ -384,7 +391,7 @@ static int wait_pending_bulk(fake_host* fake, int milliseconds)
     while (waited < milliseconds)
     {
         pthread_mutex_lock(&fake->mutex);
-        const int pending = fake->pending_bulk;
+        const int pending = fake->pending_count;
         pthread_mutex_unlock(&fake->mutex);
         if (pending != 0)
         {
@@ -931,7 +938,7 @@ static int test_stream_in_close_recovery(void)
     CHECK(close_status.physical_quiesced == 1 && close_status.cleanup_complete == 1);
     CHECK(fake.cancel_calls >= 1);
     pthread_mutex_lock(&fake.mutex);
-    CHECK(fake.pending_bulk == 0);
+    CHECK(fake.pending_count == 0);
     pthread_mutex_unlock(&fake.mutex);
     CHECK(release_owner(opened.owner, 5000) == 1);
     asicen_l3_factory_destroy(factory);
@@ -973,7 +980,9 @@ static int test_stream_in_stop_timeout_recovery(void)
     /* The provider accepts cancel but sends no completion. The product keeps
      * the stream/transfer residual instead of joining indefinitely. */
     CHECK(dtv_l3_stream_stop(stream, 100) == DTV_L3_BUSY);
-    CHECK(fake.pending_bulk == 1);
+    pthread_mutex_lock(&fake.mutex);
+    CHECK(fake.pending_count > 0);
+    pthread_mutex_unlock(&fake.mutex);
 
     CHECK(complete_pending_bulk(&fake) == 1);
     CHECK(dtv_l3_stream_stop(stream, 2000) == DTV_L3_OK);

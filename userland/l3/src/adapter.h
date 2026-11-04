@@ -26,6 +26,10 @@ class StreamConfig {
   public:
     virtual ~StreamConfig() = default;
     virtual dtv_l3_result configure(std::uint32_t receiver, std::uint32_t system) = 0;
+    virtual dtv_l3_result stop()
+    {
+        return DTV_L3_OK;
+    }
 };
 
 // Product-owned operations supplied by the existing backend. Core's USB-only

@@ -26,18 +26,29 @@ struct TestStreamSubmit final : LibusbStreamSubmit {
 
     void after_prepare() override
     {
-        for (auto* transfer : fake_.submitted)
+        const std::size_t sizes[] = {100U, 600U, 500U, 680U};
+        std::size_t offset = 0U;
+        for (std::size_t index = 0U; index < fake_.submitted.size() && index < 4U; ++index)
         {
+            auto* transfer = fake_.submitted[index];
             if (transfer == nullptr || transfer->buffer == nullptr)
             {
                 continue;
             }
-            std::memset(transfer->buffer, 0x47, static_cast<std::size_t>(transfer->length));
-            transfer->actual_length = 188;
+            const std::size_t length = sizes[index];
+            for (std::size_t i = 0U; i < length; ++i)
+            {
+                const std::size_t position = offset + i;
+                transfer->buffer[i] = position % 188U == 0U
+                                          ? 0x47U
+                                          : static_cast<std::uint8_t>(position / 188U & 0x7fU);
+            }
+            transfer->actual_length = static_cast<int>(length);
             transfer->status = LIBUSB_TRANSFER_COMPLETED;
             transfer->callback(transfer);
             fake_.callback_count.fetch_add(1U);
             fake_.callback_total.fetch_add(1U);
+            offset += length;
         }
     }
 
@@ -73,20 +84,26 @@ dtv_l3_result cancel_thunk(void* context, dtv_l3_provider_binding*, std::uint64_
     return state->stream->cancel(transfer_id);
 }
 
-bool read_one_ts(dtv_l3_stream* stream, std::uint8_t* out, std::size_t out_size)
+bool read_packets(dtv_l3_stream* stream, std::uint8_t* out, std::size_t out_size, std::size_t count)
 {
-    for (int attempt = 0; attempt < 12000; ++attempt)
+    std::size_t received = 0U;
+    for (int attempt = 0; attempt < 12000 && received < count; ++attempt)
     {
         std::size_t bytes = 0U;
         dtv_l3_read_state state = DTV_L3_READ_WAIT;
         if (dtv_l3_stream_read_ts(stream, out, out_size, &bytes, &state) == DTV_L3_OK &&
             state == DTV_L3_READ_DATA && bytes == out_size)
         {
-            return true;
+            if (out[0] != 0x47U || out[1] != static_cast<std::uint8_t>(received & 0x7fU))
+            {
+                return false;
+            }
+            ++received;
+            continue;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return false;
+    return received == count;
 }
 
 int real_backend_stream_path()
@@ -155,7 +172,7 @@ int real_backend_stream_path()
         return 4;
     }
     std::uint8_t packet[188]{};
-    if (!read_one_ts(stream_handle, packet, sizeof(packet)) || packet[0] != 0x47U)
+    if (!read_packets(stream_handle, packet, sizeof(packet), 10U))
     {
         return 5;
     }

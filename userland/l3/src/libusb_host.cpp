@@ -209,6 +209,68 @@ dtv_l3_result LibusbStreamSubmit::configure(std::uint32_t receiver, std::uint32_
     return DTV_L3_OK;
 }
 
+void LibusbStreamSubmit::fail_pending_locked(dtv_l3_result result)
+{
+    while (!pending_.empty())
+    {
+        const Pending pending = pending_.front();
+        pending_.pop_front();
+        const dtv_l3_transfer_completion completion = {result, nullptr, 0U, 0U, 0U};
+        pending.complete(pending.binding, pending.id, &completion, pending.callback_context);
+    }
+}
+
+bool LibusbStreamSubmit::emit_thunk(void* context, const std::uint8_t* data,
+                                    std::size_t size) noexcept
+{
+    auto* self = static_cast<LibusbStreamSubmit*>(context);
+    if (data == nullptr || size < 188U)
+    {
+        return true;
+    }
+    std::unique_lock<std::mutex> lock(self->mutex_);
+    if (!self->pending_.empty())
+    {
+        const Pending pending = self->pending_.front();
+        self->pending_.pop_front();
+        lock.unlock();
+        const dtv_l3_transfer_completion completion = {DTV_L3_OK, data, size, size, 1U};
+        pending.complete(pending.binding, pending.id, &completion, pending.callback_context);
+        return true;
+    }
+    if (self->packets_.size() < 256U)
+    {
+        self->packets_.emplace_back(data, data + size);
+    }
+    return true;
+}
+
+void LibusbStreamSubmit::capture_loop()
+{
+    const std::uint32_t receiver = receiver_.load(std::memory_order_acquire);
+    const std::uint32_t system = system_.load(std::memory_order_acquire);
+    const auto px4_system = system == ASICEN_L3_SYSTEM_TERRESTRIAL
+                                ? px4::userland::ipc::System::ISDB_T
+                                : px4::userland::ipc::System::ISDB_S;
+    const auto prepared =
+        backend_.prepare(static_cast<std::uint8_t>(receiver), px4_system, cancelled_);
+    if (!prepared)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        fail_pending_locked(map_error(prepared.error()));
+        capture_result_ = map_error(prepared.error());
+        done_ = true;
+        return;
+    }
+    after_prepare();
+    const auto run_result = backend_.run(cancelled_, &LibusbStreamSubmit::emit_thunk, this);
+    (void)backend_.stop_receiver(static_cast<std::uint8_t>(receiver));
+    std::lock_guard<std::mutex> lock(mutex_);
+    capture_result_ = run_result == CaptureRunResult::cancelled ? DTV_L3_OK : DTV_L3_FAILED;
+    fail_pending_locked(capture_result_);
+    done_ = true;
+}
+
 dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
                                          std::uint64_t transfer_id,
                                          const dtv_l3_transfer_request* request,
@@ -219,10 +281,9 @@ dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
     {
         return DTV_L3_INVALID;
     }
-    const std::uint32_t receiver = receiver_.load(std::memory_order_acquire);
-    const std::uint32_t system = system_.load(std::memory_order_acquire);
     if (request->kind == DTV_L3_TRANSFER_CONTROL)
     {
+        const std::uint32_t receiver = receiver_.load(std::memory_order_acquire);
         ControlTransfer transfer{};
         transfer.tuner_num = 0U;
         transfer.request = static_cast<Request>(request->control.request);
@@ -241,6 +302,7 @@ dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
         const dtv_l3_transfer_completion completion = {DTV_L3_OK, response.data(), response.size(),
                                                        response.size(), 1U};
         complete(binding, transfer_id, &completion, callback_context);
+        (void)receiver;
         return DTV_L3_ACCEPTED;
     }
     if (request->kind != DTV_L3_TRANSFER_BULK || !configured_.load(std::memory_order_acquire))
@@ -248,47 +310,71 @@ dtv_l3_result LibusbStreamSubmit::submit(dtv_l3_provider_binding* binding,
         return DTV_L3_UNSUPPORTED;
     }
 
-    cancelled_.store(false);
-    const auto px4_system = system == ASICEN_L3_SYSTEM_TERRESTRIAL
-                                ? px4::userland::ipc::System::ISDB_T
-                                : px4::userland::ipc::System::ISDB_S;
-    const auto prepared =
-        backend_.prepare(static_cast<std::uint8_t>(receiver), px4_system, cancelled_);
-    if (!prepared)
+    Pending pending{binding, transfer_id, complete, callback_context};
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!started_)
     {
-        return map_error(prepared.error());
+        started_ = true;
+        done_ = false;
+        cancelled_.store(false, std::memory_order_release);
+        try
+        {
+            capture_ = std::thread([this] { capture_loop(); });
+        } catch (...)
+        {
+            started_ = false;
+            return DTV_L3_FAILED;
+        }
     }
-    after_prepare();
-    EmbeddedFrame frame;
-    const auto run_result = backend_.run(
-        cancelled_,
-        [](void* context, const std::uint8_t* data, std::size_t size) -> bool {
-            auto* frame = static_cast<EmbeddedFrame*>(context);
-            if (data != nullptr && size >= 188U)
-            {
-                frame->data.assign(data, data + size);
-                return false;
-            }
-            return true;
-        },
-        &frame);
-    (void)backend_.stop_receiver(static_cast<std::uint8_t>(receiver));
-    if (frame.data.empty())
+    if (done_)
     {
-        return run_result == CaptureRunResult::cancelled ? DTV_L3_CANCELLED : DTV_L3_FAILED;
+        return DTV_L3_FAILED;
     }
-    const dtv_l3_transfer_completion completion = {DTV_L3_OK, frame.data.data(), frame.data.size(),
-                                                   frame.data.size(), 1U};
-    complete(binding, transfer_id, &completion, callback_context);
+    if (!packets_.empty())
+    {
+        std::vector<std::uint8_t> packet = std::move(packets_.front());
+        packets_.pop_front();
+        lock.unlock();
+        const dtv_l3_transfer_completion completion = {DTV_L3_OK, packet.data(), packet.size(),
+                                                       packet.size(), 1U};
+        complete(binding, transfer_id, &completion, callback_context);
+        return DTV_L3_ACCEPTED;
+    }
+    pending_.push_back(pending);
     return DTV_L3_ACCEPTED;
 }
 
-dtv_l3_result LibusbStreamSubmit::cancel(std::uint64_t)
+dtv_l3_result LibusbStreamSubmit::cancel(std::uint64_t transfer_id)
 {
-    cancelled_.store(true);
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (auto it = pending_.begin(); it != pending_.end(); ++it)
+    {
+        if (it->id == transfer_id)
+        {
+            const Pending pending = *it;
+            pending_.erase(it);
+            lock.unlock();
+            const dtv_l3_transfer_completion completion = {DTV_L3_CANCELLED, nullptr, 0U, 0U, 0U};
+            pending.complete(pending.binding, pending.id, &completion, pending.callback_context);
+            return DTV_L3_ACCEPTED;
+        }
+    }
+    return DTV_L3_OK;
+}
+
+dtv_l3_result LibusbStreamSubmit::stop()
+{
+    cancelled_.store(true, std::memory_order_release);
     const std::uint32_t receiver = receiver_.load(std::memory_order_acquire);
     backend_.interrupt_receiver(static_cast<std::uint8_t>(receiver));
-    return DTV_L3_ACCEPTED;
+    if (capture_.joinable())
+    {
+        capture_.join();
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    fail_pending_locked(DTV_L3_CANCELLED);
+    started_ = false;
+    return DTV_L3_OK;
 }
 
 dtv_l3_result LibusbUsbProvider::submit_thunk(void* context, dtv_l3_provider_binding* binding,
