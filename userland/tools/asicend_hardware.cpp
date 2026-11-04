@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "asicend_args.h"
 #include "asicend_identity.h"
+#include "asicend_runtime_match.h"
 #include "asicend_selector.h"
 #include "loader_acquisition.h"
 #include "loader_diagnostic.h"
@@ -594,15 +595,19 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
         }
         scan.devices.push_back(observation);
         if (observation.port_path == loader_port_path) ++scan.on_path;
-        const auto* profile = asicen::find_profile(descriptor.idVendor, descriptor.idProduct);
-        if (profile == nullptr || observation.port_path != loader_port_path) continue;
+        const auto candidate = asicen::cli::classify_runtime_candidate(
+            observation, bus, loader_port_path, expected_model);
+        if (candidate == asicen::cli::RuntimeCandidateStatus::OtherPath ||
+            candidate == asicen::cli::RuntimeCandidateStatus::UnknownProfile ||
+            candidate == asicen::cli::RuntimeCandidateStatus::OtherBus) continue;
         ++scan.runtime_ids;
-        if (!asicen::profile_runtime_supported(*profile)) continue;
+        if (candidate == asicen::cli::RuntimeCandidateStatus::UnsupportedProfile) continue;
         ++scan.supported;
-        if (asicen::loader_firmware_manifest(profile->model_id) == nullptr) continue;
+        if (candidate == asicen::cli::RuntimeCandidateStatus::MissingManifest) continue;
         ++scan.manifests;
-        if (expected_model != nullptr && profile->model_id != expected_model->model_id) continue;
+        if (candidate == asicen::cli::RuntimeCandidateStatus::WrongModel) continue;
         ++scan.expected_model;
+        const auto* profile = asicen::find_profile(descriptor.idVendor, descriptor.idProduct);
         selected = {bus, libusb_get_device_address(device)};
         selected_model = profile;
         if (diagnostic_target != nullptr) {

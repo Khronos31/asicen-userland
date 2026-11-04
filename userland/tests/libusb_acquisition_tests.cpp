@@ -58,12 +58,15 @@ public:
     std::array<std::uint8_t, 2> addresses_{{2U, 3U}};
     std::array<std::uint16_t, 2> vendors_{{0x0b06U, 0x0b06U}};
     std::array<std::uint16_t, 2> products_{{0x0005U, 0x0005U}};
+    std::array<libusb_context*, 2> contexts_{};
+    std::vector<libusb_context*> exited_contexts;
     std::vector<std::string> events;
 
     FakeApi()
     {
         static std::uintptr_t next_context = 0x1000U;
-        context_ = reinterpret_cast<libusb_context*>(++next_context);
+        contexts_[0] = reinterpret_cast<libusb_context*>(++next_context);
+        contexts_[1] = reinterpret_cast<libusb_context*>(++next_context);
         for (std::size_t index = 0U; index < 2U; ++index) {
             devices_[index] = reinterpret_cast<libusb_device*>(index + 1U);
             endpoints_[index].bEndpointAddress = static_cast<std::uint8_t>(0x81U + index);
@@ -81,17 +84,23 @@ public:
     {
         events.emplace_back("init");
         no_discovery = fd_mode;
-        *context = init_error == 0 && !empty_context ? context_ : nullptr;
+        const std::size_t index = init_calls_++;
+        *context = init_error == 0 && !empty_context && index < contexts_.size()
+                       ? contexts_[index] : nullptr;
         return init_error;
     }
     void exit(libusb_context* context) noexcept override
     {
-        verify(context == context_, "context identity retained until exit");
+        verify((context == contexts_[0] || context == contexts_[1]) &&
+                   std::find(exited_contexts.begin(), exited_contexts.end(), context) ==
+                       exited_contexts.end(),
+               "each owned context exits once through its acquisition API");
+        exited_contexts.push_back(context);
         events.emplace_back("exit");
     }
     ssize_t get_device_list(libusb_context* context, libusb_device*** list) noexcept override
     {
-        verify(context == context_, "enumeration uses initialized context");
+        verify(owns_context(context), "enumeration uses initialized context");
         events.emplace_back("list");
         *list = list_error == 0 ? devices_.data() : nullptr;
         return list_error == 0 ? 2 : list_error;
@@ -120,7 +129,7 @@ public:
     int wrap_sys_device(libusb_context* context, intptr_t fd,
                         libusb_device_handle** handle) noexcept override
     {
-        verify(context == context_, "wrap uses initialized context");
+        verify(owns_context(context), "wrap uses initialized context");
         retained_fd = static_cast<int>(fd);
         events.emplace_back("wrap");
         ++wrap_calls;
@@ -198,6 +207,8 @@ public:
     }
 
 private:
+    bool owns_context(libusb_context* context) const noexcept
+    { return context == contexts_[0] || context == contexts_[1]; }
     void verify(bool condition, const char* description) noexcept
     {
         if (!condition) {
@@ -207,7 +218,7 @@ private:
     }
     template<class T> static int id(T* value) noexcept
     { return static_cast<int>(reinterpret_cast<std::uintptr_t>(value)); }
-    libusb_context* context_ = nullptr;
+    std::size_t init_calls_ = 0U;
     std::array<libusb_device*, 3U> devices_{};
     std::array<libusb_endpoint_descriptor, 2U> endpoints_{};
     libusb_interface_descriptor alternate_{};
@@ -284,6 +295,26 @@ bool initialization_and_open_failures()
               "sibling open failure preserved");
     }
     CHECK(cleanup_order(api, {"close1", "exit"}), "cleanup order");
+    return true;
+}
+
+bool context_swap_preserves_owned_context_lifetimes()
+{
+    FakeApi api;
+    asicen::LibusbContext existing(api);
+    asicen::LibusbContext fresh(api);
+    CHECK(existing.initialize() == 0 && fresh.initialize() == 0,
+          "initialize existing and fresh contexts through the product owner");
+    auto* existing_context = existing.get();
+    auto* fresh_context = fresh.get();
+    existing.swap(fresh);
+    CHECK(existing.get() == fresh_context && fresh.get() == existing_context,
+          "product context swap transfers the actual libusb context identities");
+    existing.close();
+    fresh.close();
+    CHECK(api.exited_contexts == std::vector<libusb_context*>{fresh_context, existing_context},
+          "each swapped context is exited exactly once by its owner");
+    CHECK(cleanup_order(api, {"exit", "exit"}), "swapped context cleanup order");
     return true;
 }
 
@@ -706,7 +737,8 @@ bool usb_location_record_uses_observed_values()
 
 int main()
 {
-    if (!initialization_and_open_failures() || !ownership_failure_and_success_order() ||
+    if (!initialization_and_open_failures() || !context_swap_preserves_owned_context_lifetimes() ||
+        !ownership_failure_and_success_order() ||
         !claim_diagnostics_are_cached_and_do_not_touch_usb() ||
         !failed_claim_logs_raw_error() ||
         !failed_second_snapshot_invalidates_cached_diagnostics() ||
