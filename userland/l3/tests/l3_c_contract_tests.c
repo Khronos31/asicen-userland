@@ -30,6 +30,11 @@ typedef struct fake_host {
     int claim_indices[8];
     int release_calls;
     int release_indices[8];
+    int submit_calls;
+    int submit_fail;
+    unsigned int last_submit_kind;
+    unsigned int last_submit_request_type;
+    size_t last_submit_in_capacity;
     int tune_calls;
     unsigned int tune_receiver;
     unsigned int tune_system;
@@ -112,13 +117,19 @@ static dtv_l3_result usb_submit(void* context, dtv_l3_provider_binding* binding,
                                 uint64_t transfer_id, const dtv_l3_transfer_request* request,
                                 dtv_l3_transfer_complete_fn complete, void* callback_context)
 {
-    (void)context;
-    (void)binding;
-    (void)transfer_id;
-    (void)request;
-    (void)complete;
-    (void)callback_context;
-    return DTV_L3_UNSUPPORTED;
+    fake_host* fake = (fake_host*)context;
+    static const uint8_t data[1] = {0x5aU};
+    ++fake->submit_calls;
+    fake->last_submit_kind = request->kind;
+    fake->last_submit_request_type = request->control.request_type;
+    fake->last_submit_in_capacity = request->in_capacity;
+    if (fake->submit_fail != 0)
+    {
+        return DTV_L3_FAILED;
+    }
+    const dtv_l3_transfer_completion completion = {DTV_L3_OK, data, sizeof(data), sizeof(data), 1U};
+    complete(binding, transfer_id, &completion, callback_context);
+    return DTV_L3_ACCEPTED;
 }
 
 static dtv_l3_result usb_cancel(void* context, dtv_l3_provider_binding* binding,
@@ -461,6 +472,7 @@ static int test_product_semantics_through_core(void)
     dtv_l3_usb_provider usb;
     dtv_l3_open_config config;
     dtv_l3_open_result opened;
+    dtv_l3_open_status open_status;
     dtv_l3_close_status close_status;
     dtv_l3_capabilities capabilities;
     dtv_l3_lease* lease = NULL;
@@ -483,6 +495,13 @@ static int test_product_semantics_through_core(void)
     CHECK(opened.result == DTV_L3_ACCEPTED && opened.owner != NULL && opened.op != NULL);
     CHECK(dtv_l3_op_wait(opened.op, 5000) == DTV_L3_OK);
     CHECK(dtv_l3_op_release(opened.op) == DTV_L3_OK);
+    /* G2 initialize performed one control transfer through the owner API. */
+    CHECK(fake.submit_calls == 1 && fake.last_submit_kind == DTV_L3_TRANSFER_CONTROL &&
+          fake.last_submit_request_type == 0xC0U && fake.last_submit_in_capacity == 1U);
+    memset(&open_status, 0, sizeof(open_status));
+    CHECK(dtv_l3_open_status_get(opened.owner, &open_status) == DTV_L3_OK);
+    CHECK(open_status.state == DTV_L3_OPEN_READY && open_status.result == DTV_L3_OK);
+    CHECK(open_status.claims_acquired == 2);
     CHECK(dtv_l3_capabilities_get(opened.owner, &capabilities) == DTV_L3_OK);
     CHECK(capabilities.receiver_count == 4 && capabilities.reader_count == 1);
     CHECK(capabilities.lnb_power == 1 && capabilities.cancel_scope == DTV_L3_CANCEL_SCOPE_TRANSFER);
@@ -506,12 +525,10 @@ static int test_product_semantics_through_core(void)
     CHECK(dtv_l3_stream_destroy(stream) == DTV_L3_OK);
     CHECK(dtv_l3_lease_release(lease) == DTV_L3_OK);
 
-    CHECK(dtv_l3_reader_acquire(opened.owner, 0U, &reader) == DTV_L3_OK && reader != NULL);
-    CHECK(fake.reader_open_calls == 1 && fake.last_reader == 0U);
-    CHECK(dtv_l3_lnb_set(opened.owner, 0U, 15U) == DTV_L3_OK);
-    CHECK(fake.lnb_calls == 1 && fake.lnb_receiver == 0U && fake.lnb_mode == 15U);
-    CHECK(dtv_l3_lnb_set(opened.owner, 1U, 15U) == DTV_L3_UNSUPPORTED);
-    CHECK(fake.lnb_calls == 1);
+    CHECK(dtv_l3_reader_acquire(opened.owner, 0U, &reader) == DTV_L3_UNSUPPORTED);
+    CHECK(reader == NULL && fake.reader_open_calls == 0);
+    CHECK(dtv_l3_lnb_set(opened.owner, 0U, 15U) == DTV_L3_UNSUPPORTED);
+    CHECK(fake.lnb_calls == 0);
 
     CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);
     CHECK(wait_releasable(opened.owner, &close_status, 5000) == 1);
@@ -584,6 +601,126 @@ static int test_retention_and_retry(void)
     return 1;
 }
 
+static int test_args_factory_catalog_and_manifest(void)
+{
+    fake_host fake;
+    asicen_l3_product_ops ops;
+    asicen_l3_factory* factory = NULL;
+    dtv_l3_open_args args;
+    dtv_l3_open_result opened;
+    dtv_l3_open_status open_status;
+    dtv_l3_close_status close_status;
+    dtv_l3_grant_descriptor descriptor;
+    dtv_l3_grant grant;
+    const dtv_l3_capability_catalog* catalog = NULL;
+    uint8_t firmware_bytes[2] = {0x55U, 0xaaU};
+    dtv_l3_firmware_manifest manifest;
+    dtv_l3_firmware firmware;
+
+    fake_init(&fake);
+    ops = product_ops_for(&fake);
+    CHECK(asicen_l3_factory_create(&ops, 0x0b06, 0x0005, &factory) == DTV_L3_OK);
+    CHECK(asicen_l3_factory_core_factory_v1(factory) != NULL);
+
+    memset(&descriptor, 0, sizeof(descriptor));
+    descriptor.vendor_id = 0x0b06;
+    descriptor.product_id = 0x0005;
+    descriptor.bus = 5U;
+    descriptor.address = 4U;
+    descriptor.num_interfaces = 2U;
+    descriptor.num_endpoints = 4U;
+    grant.token = 0xabcU;
+    grant.descriptor = &descriptor;
+
+    memset(&manifest, 0, sizeof(manifest));
+    manifest.format = 0x46523330U;
+    manifest.length_bytes = sizeof(firmware_bytes);
+    memset(&firmware, 0, sizeof(firmware));
+    firmware.source = DTV_L3_FIRMWARE_BYTES;
+    firmware.manifest = &manifest;
+    firmware.bytes = firmware_bytes;
+    firmware.size = sizeof(firmware_bytes);
+
+    memset(&args, 0, sizeof(args));
+    args.struct_size = sizeof(args);
+    dtv_l3_usb_provider usb = usb_provider_for(&fake);
+    args.usb_provider = &usb;
+    args.factory = asicen_l3_factory_core_factory_v1(factory);
+    args.grants = &grant;
+    args.grant_count = 1U;
+    args.firmware = &firmware;
+    args.power_permission = 1U;
+
+    opened = dtv_l3_open_with_args(&args);
+    CHECK(opened.result == DTV_L3_ACCEPTED && opened.owner != NULL && opened.op != NULL);
+    CHECK(dtv_l3_op_wait(opened.op, 5000) == DTV_L3_OK);
+    CHECK(dtv_l3_op_release(opened.op) == DTV_L3_OK);
+    memset(&open_status, 0, sizeof(open_status));
+    CHECK(dtv_l3_open_status_get(opened.owner, &open_status) == DTV_L3_OK);
+    CHECK(open_status.state == DTV_L3_OPEN_READY && open_status.claims_acquired == 2);
+    CHECK(fake.submit_calls == 1 && fake.last_submit_kind == DTV_L3_TRANSFER_CONTROL);
+    CHECK(dtv_l3_capabilities_get_catalog(opened.owner, &catalog) == DTV_L3_OK);
+    CHECK(catalog != NULL && catalog->receiver_count == 4U);
+    CHECK(catalog->receivers[0].systems == DTV_L3_SYSTEM_ISDB_S);
+    CHECK(catalog->receivers[1].systems == DTV_L3_SYSTEM_ISDB_T);
+    CHECK(catalog->receivers[0].support == DTV_L3_SUPPORT_SUPPORTED);
+    CHECK(catalog->readers[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(catalog->lnb_scope_count == 2U &&
+          catalog->lnb_scopes[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(catalog->shared_scope_count == 2U &&
+          catalog->shared_scopes[0].support == DTV_L3_SUPPORT_SUPPORTED);
+    CHECK(catalog->ts_form == DTV_L3_SUPPORT_SUPPORTED);
+    CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);
+    CHECK(wait_releasable(opened.owner, &close_status, 5000) == 1);
+    CHECK(release_owner(opened.owner, 5000) == 1);
+
+    /* The manifest must reject before any claim or submit side effect. */
+    manifest.length_bytes = 99U;
+    opened = dtv_l3_open_with_args(&args);
+    CHECK(opened.result == DTV_L3_FAILED);
+    CHECK(opened.owner == NULL && opened.op == NULL);
+    CHECK(fake.claim_calls == 2 && fake.submit_calls == 1);
+
+    asicen_l3_factory_destroy(factory);
+    fake_destroy(&fake);
+    return 1;
+}
+
+static int test_initialize_failure(void)
+{
+    fake_host fake;
+    asicen_l3_product_ops ops;
+    asicen_l3_factory* factory = NULL;
+    dtv_l3_usb_provider usb;
+    dtv_l3_open_config config;
+    dtv_l3_open_result opened;
+    dtv_l3_open_status status;
+    dtv_l3_op_result op_result;
+
+    fake_init(&fake);
+    fake.submit_fail = 1;
+    ops = product_ops_for(&fake);
+    usb = usb_provider_for(&fake);
+    CHECK(asicen_l3_factory_create(&ops, 0x0b06, 0x0005, &factory) == DTV_L3_OK);
+    config = config_for(ASICEN_L3_MODEL_W3U3, NULL);
+    opened = dtv_l3_open_factory(&usb, asicen_l3_factory_adapter_factory(factory), &config, 2);
+    CHECK(opened.result == DTV_L3_ACCEPTED && opened.owner != NULL && opened.op != NULL);
+    CHECK(dtv_l3_op_wait(opened.op, 5000) == DTV_L3_OK);
+    CHECK(dtv_l3_op_poll(opened.op, &op_result) == DTV_L3_OK);
+    CHECK(op_result.state == DTV_L3_OP_FAILED && op_result.result == DTV_L3_FAILED);
+    memset(&status, 0, sizeof(status));
+    CHECK(dtv_l3_open_status_get(opened.owner, &status) == DTV_L3_OK);
+    CHECK(status.state == DTV_L3_OPEN_FAILED && status.result == DTV_L3_FAILED);
+    /* The transfer reached submit; it did not stop with a BUSY/no-submit loop. */
+    CHECK(fake.submit_calls == 1 && fake.last_submit_kind == DTV_L3_TRANSFER_CONTROL);
+    CHECK(dtv_l3_op_release(opened.op) == DTV_L3_OK);
+    CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);
+    CHECK(release_owner(opened.owner, 5000) == 1);
+    asicen_l3_factory_destroy(factory);
+    fake_destroy(&fake);
+    return 1;
+}
+
 static int test_explicit_system_tune(void)
 {
     fake_host fake;
@@ -651,6 +788,10 @@ int main(void)
     if (!test_product_semantics_through_core())
         return 1;
     if (!test_retention_and_retry())
+        return 1;
+    if (!test_args_factory_catalog_and_manifest())
+        return 1;
+    if (!test_initialize_failure())
         return 1;
     if (!test_explicit_system_tune())
         return 1;

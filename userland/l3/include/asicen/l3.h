@@ -80,6 +80,7 @@ dtv_l3_result asicen_l3_factory_create(const asicen_l3_product_ops* ops, uint16_
                                        asicen_l3_factory** factory_out);
 void asicen_l3_factory_destroy(asicen_l3_factory* factory);
 const dtv_l3_adapter_factory* asicen_l3_factory_adapter_factory(const asicen_l3_factory* factory);
+const dtv_l3_factory* asicen_l3_factory_core_factory_v1(const asicen_l3_factory* factory);
 uint32_t asicen_l3_factory_claim_count(const asicen_l3_factory* factory);
 int asicen_l3_factory_route(const asicen_l3_factory* factory, uint32_t receiver,
                             asicen_l3_route* route);

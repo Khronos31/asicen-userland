@@ -35,6 +35,7 @@ target_include_directories(asicen_l3 PUBLIC
 target_include_directories(asicen_l3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${ASICEN_PX4_ROOT}/include)
 target_compile_features(asicen_l3 PUBLIC cxx_std_17)
 target_compile_options(asicen_l3 PRIVATE -Wall -Wextra)

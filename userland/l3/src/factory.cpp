@@ -183,6 +183,12 @@ const dtv_l3_adapter_factory* asicen_l3_factory_adapter_factory(const asicen_l3_
                                                              : factory->factory->core_factory();
 }
 
+const dtv_l3_factory* asicen_l3_factory_core_factory_v1(const asicen_l3_factory* factory)
+{
+    return factory == nullptr || factory->factory == nullptr ? nullptr
+                                                             : factory->factory->core_factory_v1();
+}
+
 uint32_t asicen_l3_factory_claim_count(const asicen_l3_factory* factory)
 {
     return factory == nullptr || factory->factory == nullptr ? 0U : factory->factory->claim_count();

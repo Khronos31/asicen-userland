@@ -244,7 +244,8 @@ bool test_product_adapter_callbacks()
     asicen::l3::Adapter w3u3_adapter(*w3u3, host);
     const dtv_l3_product_adapter* product = w3u3_adapter.product_adapter();
     CHECK(product != nullptr && product->tune != nullptr && product->bridge_start != nullptr &&
-          product->stream_attach != nullptr && product->reader_acquire != nullptr);
+          product->stream_attach != nullptr && product->bind != nullptr &&
+          product->initialize != nullptr);
 
     std::uint64_t programmed = 0U;
     CHECK(product->tune(product->product_context, nullptr, 0U, 11000000000ULL, &programmed) ==
@@ -272,24 +273,18 @@ bool test_product_adapter_callbacks()
     CHECK(product->bridge_start(product->product_context, nullptr, 1U, 1U) == DTV_L3_UNSUPPORTED);
     CHECK(product->bridge_start(product->product_context, nullptr, 0U, 3U) == DTV_L3_UNSUPPORTED);
 
-    dtv_l3_reader* reader = nullptr;
-    CHECK(product->reader_acquire(product->product_context, 0U, &reader) == DTV_L3_OK &&
-          reader != nullptr);
-    CHECK(host.reader_open_calls == 1U && host.last_reader == 0U);
-    CHECK(product->reader_acquire(product->product_context, 1U, &reader) == DTV_L3_UNSUPPORTED);
-    CHECK(product->lnb_set(product->product_context, 0U, 15U) == DTV_L3_OK);
-    CHECK(host.lnb_calls == 1U && host.last_receiver == 0U && host.last_lnb_mode == 15U);
-    CHECK(product->lnb_set(product->product_context, 1U, 15U) == DTV_L3_UNSUPPORTED);
-    CHECK(product->lnb_set(product->product_context, 2U, 0U) == DTV_L3_OK);
-    CHECK(host.lnb_calls == 2U);
-    CHECK(product->lnb_set(product->product_context, 9U, 15U) == DTV_L3_UNSUPPORTED);
-    CHECK(product->lnb_set(product->product_context, 1U, 15U) == DTV_L3_UNSUPPORTED);
+    const auto* catalog = product->catalog;
+    CHECK(catalog != nullptr && catalog->receiver_count == 4U);
+    CHECK(catalog->receivers[0].systems == DTV_L3_SYSTEM_ISDB_S);
+    CHECK(catalog->receivers[1].systems == DTV_L3_SYSTEM_ISDB_T);
+    CHECK(catalog->readers[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(catalog->lnb_scopes[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(catalog->shared_scope_count == 2U);
 
     const dtv_l3_product_adapter* combined = s3u_adapter.product_adapter();
     CHECK(combined->tune(combined->product_context, nullptr, 0U, 11000000000ULL, &programmed) ==
           DTV_L3_UNSUPPORTED);
     CHECK(combined->bridge_start(combined->product_context, nullptr, 0U, 0U) == DTV_L3_UNSUPPORTED);
-    CHECK(combined->lnb_set(combined->product_context, 0U, 15U) == DTV_L3_UNSUPPORTED);
     return true;
 }
 
@@ -327,7 +322,7 @@ bool test_firmware_handling()
     CHECK(w3u3 != nullptr);
 
     std::uint8_t bytes[] = {0x01U, 0x02U, 0x03U};
-    const dtv_l3_firmware bytes_view{DTV_L3_FIRMWARE_BYTES, nullptr, bytes,
+    const dtv_l3_firmware bytes_view{DTV_L3_FIRMWARE_BYTES, nullptr, nullptr, bytes,
                                      sizeof(bytes),         nullptr, nullptr};
     asicen::l3::Adapter bytes_adapter(*w3u3, host);
     CHECK(bytes_adapter.prepare_firmware(&bytes_view) == DTV_L3_OK);
@@ -341,17 +336,19 @@ bool test_firmware_handling()
     CHECK(product->firmware->bytes[0] == 0x01U);
 
     const dtv_l3_firmware path_view{
-        DTV_L3_FIRMWARE_PATH, "asicen-loader.bin", nullptr, 0U, nullptr, nullptr};
+        DTV_L3_FIRMWARE_PATH, nullptr, "asicen-loader.bin", nullptr, 0U, nullptr, nullptr};
     asicen::l3::Adapter path_adapter(*w3u3, host);
     CHECK(path_adapter.prepare_firmware(&path_view) == DTV_L3_OK);
     CHECK(path_adapter.product_adapter()->firmware != nullptr);
     CHECK(path_adapter.product_adapter()->firmware->source == DTV_L3_FIRMWARE_PATH);
     CHECK(std::strcmp(path_adapter.product_adapter()->firmware->path, "asicen-loader.bin") == 0);
 
-    const dtv_l3_firmware bad_bytes{DTV_L3_FIRMWARE_BYTES, nullptr, nullptr, 0U, nullptr, nullptr};
+    const dtv_l3_firmware bad_bytes{
+        DTV_L3_FIRMWARE_BYTES, nullptr, nullptr, nullptr, 0U, nullptr, nullptr};
     asicen::l3::Adapter bad_adapter(*w3u3, host);
     CHECK(bad_adapter.prepare_firmware(&bad_bytes) == DTV_L3_INVALID);
-    const dtv_l3_firmware bad_path{DTV_L3_FIRMWARE_PATH, nullptr, nullptr, 0U, nullptr, nullptr};
+    const dtv_l3_firmware bad_path{
+        DTV_L3_FIRMWARE_PATH, nullptr, nullptr, nullptr, 0U, nullptr, nullptr};
     CHECK(bad_adapter.prepare_firmware(&bad_path) == DTV_L3_INVALID);
 
     struct ReadContext {
@@ -359,6 +356,7 @@ bool test_firmware_handling()
     } read_context;
     const dtv_l3_firmware read_view{
         DTV_L3_FIRMWARE_READ_CALLBACK,
+        nullptr,
         nullptr,
         nullptr,
         0U,
@@ -386,7 +384,7 @@ bool test_factory_create_and_release()
     CHECK(factory.claim_count() == 2U);
 
     std::uint8_t bytes[] = {0x10U, 0x20U};
-    const dtv_l3_firmware firmware{DTV_L3_FIRMWARE_BYTES, nullptr, bytes,
+    const dtv_l3_firmware firmware{DTV_L3_FIRMWARE_BYTES, nullptr, nullptr, bytes,
                                    sizeof(bytes),         nullptr, nullptr};
     dtv_l3_open_config config{};
     config.model = static_cast<std::uint32_t>(asicen::ModelId::W3u3);
@@ -415,6 +413,75 @@ bool test_factory_create_and_release()
     return true;
 }
 
+bool test_factory_v1_manifest_and_catalog()
+{
+    FakeHost host;
+    const auto* w3u3 = asicen::find_profile(asicen::ModelId::W3u3);
+    CHECK(w3u3 != nullptr);
+    asicen::l3::Factory factory(*w3u3, host);
+    CHECK(factory.core_factory_v1() != nullptr);
+
+    std::uint8_t bytes[] = {0x55U, 0xaaU};
+    dtv_l3_firmware_manifest manifest{};
+    manifest.format = 0x46523330U;
+    manifest.length_bytes = sizeof(bytes);
+    const dtv_l3_firmware firmware{DTV_L3_FIRMWARE_BYTES, &manifest, nullptr, bytes,
+                                   sizeof(bytes),         nullptr,   nullptr};
+    dtv_l3_grant_descriptor descriptor{};
+    descriptor.vendor_id = 0x0b06U;
+    descriptor.product_id = 0x0005U;
+    descriptor.bus = 5U;
+    descriptor.address = 4U;
+    descriptor.num_interfaces = 2U;
+    descriptor.num_endpoints = 4U;
+    dtv_l3_grant grant{0xabcU, &descriptor};
+    dtv_l3_open_args args{};
+    args.struct_size = sizeof(args);
+    args.factory = factory.core_factory_v1();
+    args.grants = &grant;
+    args.grant_count = 1U;
+    args.firmware = &firmware;
+    args.power_permission = 1U;
+
+    const dtv_l3_product_adapter* product = nullptr;
+    std::uint32_t claim_count = 0U;
+    void* owner = nullptr;
+    CHECK(factory.core_factory_v1()->create(factory.core_factory_v1()->factory_context, &args,
+                                            &product, &claim_count, &owner) == DTV_L3_OK);
+    CHECK(product != nullptr && owner != nullptr && claim_count == 2U);
+    CHECK(product->catalog != nullptr && product->catalog->receiver_count == 4U);
+    CHECK(product->catalog->readers[0].support == DTV_L3_SUPPORT_UNSUPPORTED);
+    CHECK(product->catalog->lnb_scope_count == 2U);
+    CHECK(product->catalog->shared_scope_count == 2U);
+    CHECK(product->firmware != nullptr && product->firmware->manifest != nullptr);
+    CHECK(product->firmware->manifest != &manifest);
+    CHECK(product->firmware->manifest->length_bytes == sizeof(bytes));
+    CHECK(product->firmware->size == sizeof(bytes));
+    CHECK(product->firmware->bytes != bytes);
+    bytes[0] = 0xffU;
+    CHECK(product->firmware->bytes[0] == 0x55U);
+    factory.core_factory_v1()->release(owner);
+
+    manifest.length_bytes = 99U;
+    product = nullptr;
+    owner = nullptr;
+    claim_count = 0U;
+    CHECK(factory.core_factory_v1()->create(factory.core_factory_v1()->factory_context, &args,
+                                            &product, &claim_count, &owner) == DTV_L3_FAILED);
+    CHECK(product == nullptr && owner == nullptr && claim_count == 0U);
+
+    manifest.length_bytes = sizeof(bytes);
+    descriptor.vendor_id = 0x054cU;
+    CHECK(factory.core_factory_v1()->create(factory.core_factory_v1()->factory_context, &args,
+                                            &product, &claim_count, &owner) == DTV_L3_UNSUPPORTED);
+    CHECK(product == nullptr && owner == nullptr);
+    descriptor.vendor_id = 0x0b06U;
+    descriptor.num_interfaces = 1U;
+    CHECK(factory.core_factory_v1()->create(factory.core_factory_v1()->factory_context, &args,
+                                            &product, &claim_count, &owner) == DTV_L3_UNSUPPORTED);
+    return true;
+}
+
 } // namespace
 
 int main()
@@ -430,6 +497,8 @@ int main()
     if (!test_firmware_handling())
         return 1;
     if (!test_factory_create_and_release())
+        return 1;
+    if (!test_factory_v1_manifest_and_catalog())
         return 1;
     return 0;
 }

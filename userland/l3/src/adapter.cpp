@@ -3,6 +3,8 @@
 
 #include "asicen/enclosure.h"
 
+#include "sha256.h"
+
 #include <algorithm>
 #include <cstring>
 #include <memory>
@@ -15,6 +17,35 @@ constexpr std::uint32_t kDefaultTuneTimeoutMs = 30000U;
 bool has_system(std::uint32_t mask, std::uint32_t system) noexcept
 {
     return (mask & system) != 0U;
+}
+
+bool firmware_matches_manifest(const dtv_l3_firmware* firmware, const dtv_l3_firmware* view)
+{
+    if (firmware == nullptr || firmware->manifest == nullptr)
+    {
+        return true;
+    }
+    if (view == nullptr)
+    {
+        return false;
+    }
+    const auto& manifest = *firmware->manifest;
+    if (manifest.length_bytes != 0U && view->size != manifest.length_bytes)
+    {
+        return false;
+    }
+    if (manifest.sha256 != nullptr)
+    {
+        if (view->bytes == nullptr || view->size == 0U)
+        {
+            return false;
+        }
+        asicen::detail::Sha256 sha;
+        sha.update(view->bytes, view->size);
+        const auto digest = sha.finish();
+        return std::memcmp(digest.data(), manifest.sha256, digest.size()) == 0;
+    }
+    return true;
 }
 
 } // namespace
@@ -55,17 +86,19 @@ Adapter::Adapter(const DeviceProfile& profile, Host& host) : profile_(&profile),
     }
 
     reader_token_.reader_id = 0U;
+    fill_catalog();
     adapter_.product_context = this;
     adapter_.capabilities = capabilities_;
+    adapter_.catalog = &catalog_;
     adapter_.firmware = nullptr;
+    adapter_.bind = &Adapter::bind_thunk;
+    adapter_.initialize = &Adapter::initialize_thunk;
     adapter_.scope_query = &Adapter::scope_query_thunk;
     adapter_.tune = &Adapter::tune_thunk;
     adapter_.bridge_start = &Adapter::bridge_start_thunk;
     adapter_.bridge_stop = &Adapter::bridge_stop_thunk;
     adapter_.stream_attach = &Adapter::stream_attach_thunk;
     adapter_.stream_stop = &Adapter::stream_stop_thunk;
-    adapter_.reader_acquire = &Adapter::reader_acquire_thunk;
-    adapter_.lnb_set = &Adapter::lnb_set_thunk;
 }
 
 dtv_l3_result Adapter::prepare_firmware(const dtv_l3_firmware* firmware)
@@ -117,6 +150,19 @@ dtv_l3_result Adapter::prepare_firmware(const dtv_l3_firmware* firmware)
     firmware_view_ = *firmware;
     firmware_view_.read = nullptr;
     firmware_view_.read_context = nullptr;
+    if (firmware->manifest != nullptr)
+    {
+        manifest_ = *firmware->manifest;
+        if (firmware->manifest->sha256 != nullptr)
+        {
+            std::memcpy(manifest_sha_, firmware->manifest->sha256, sizeof(manifest_sha_));
+            manifest_.sha256 = manifest_sha_;
+        }
+        firmware_view_.manifest = &manifest_;
+    } else
+    {
+        firmware_view_.manifest = nullptr;
+    }
     if (firmware->source == DTV_L3_FIRMWARE_PATH)
     {
         firmware_view_.path = firmware_path_.c_str();
@@ -130,6 +176,150 @@ dtv_l3_result Adapter::prepare_firmware(const dtv_l3_firmware* firmware)
     }
     adapter_.firmware = &firmware_view_;
     return DTV_L3_OK;
+}
+
+void Adapter::fill_catalog()
+{
+    const std::uint32_t receiver_count = capabilities_.receiver_count;
+    for (std::uint32_t receiver = 0U; receiver < 4U; ++receiver)
+    {
+        receiver_caps_[receiver].id = receiver;
+        receiver_caps_[receiver].systems = 0U;
+        receiver_caps_[receiver].pid_filter = DTV_L3_PID_FILTER_NONE;
+        receiver_caps_[receiver].support = DTV_L3_SUPPORT_UNKNOWN;
+        if (receiver >= receiver_count)
+        {
+            continue;
+        }
+        const auto address = receiver_address(*profile_, receiver);
+        if (!address)
+        {
+            continue;
+        }
+        if (profile_->combined_isdb_ts)
+        {
+            receiver_caps_[receiver].systems = DTV_L3_SYSTEM_ISDB_T | DTV_L3_SYSTEM_ISDB_S;
+        } else
+        {
+            receiver_caps_[receiver].systems = address.value().system == BroadcastSystem::IsdbS
+                                                   ? DTV_L3_SYSTEM_ISDB_S
+                                                   : DTV_L3_SYSTEM_ISDB_T;
+        }
+        receiver_caps_[receiver].support = DTV_L3_SUPPORT_SUPPORTED;
+    }
+
+    reader_caps_[0].id = 0U;
+    reader_caps_[0].external_apdu = DTV_L3_SUPPORT_UNSUPPORTED;
+    reader_caps_[0].support = DTV_L3_SUPPORT_UNSUPPORTED;
+
+    std::uint32_t lnb_count = 0U;
+    for (std::uint32_t receiver = 0U; receiver < profile_->enclosure_receiver_count; ++receiver)
+    {
+        const auto address = receiver_address(*profile_, receiver);
+        if (!address || address.value().system != BroadcastSystem::IsdbS)
+        {
+            continue;
+        }
+        if (profile_->model_id == ModelId::W3u2 || profile_->model_id == ModelId::W3u3 ||
+            profile_->model_id == ModelId::W3u3V2)
+        {
+            lnb_caps_[lnb_count].id = receiver;
+            lnb_caps_[lnb_count].support = DTV_L3_SUPPORT_UNSUPPORTED;
+            ++lnb_count;
+        }
+    }
+
+    std::uint32_t shared_count = 0U;
+    for (std::uint32_t receiver = 0U; receiver < profile_->enclosure_receiver_count; ++receiver)
+    {
+        const auto address = receiver_address(*profile_, receiver);
+        if (!address)
+        {
+            continue;
+        }
+        bool seen = false;
+        for (std::uint32_t index = 0U; index < shared_count; ++index)
+        {
+            if (shared_caps_[index].id == address.value().rf_function_index)
+            {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen)
+        {
+            shared_caps_[shared_count].id = address.value().rf_function_index;
+            shared_caps_[shared_count].compatibility = DTV_L3_LEASE_SHAREABLE;
+            shared_caps_[shared_count].support = DTV_L3_SUPPORT_SUPPORTED;
+            ++shared_count;
+        }
+    }
+
+    catalog_.receivers = receiver_caps_;
+    catalog_.receiver_count = receiver_count;
+    catalog_.readers = reader_caps_;
+    catalog_.reader_count = 1U;
+    catalog_.lnb_scopes = lnb_caps_;
+    catalog_.lnb_scope_count = lnb_count;
+    catalog_.shared_scopes = shared_caps_;
+    catalog_.shared_scope_count = shared_count;
+    catalog_.ts_form = DTV_L3_SUPPORT_SUPPORTED;
+}
+
+dtv_l3_result Adapter::bind(dtv_l3_context* owner)
+{
+    if (owner == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    owner_ = owner;
+    return DTV_L3_OK;
+}
+
+dtv_l3_result Adapter::initialize(dtv_l3_context* owner)
+{
+    dtv_l3_context* context = owner != nullptr ? owner : owner_;
+    if (context == nullptr)
+    {
+        return DTV_L3_FAILED;
+    }
+    dtv_l3_transfer_request request{};
+    request.kind = DTV_L3_TRANSFER_CONTROL;
+    request.endpoint = 0U;
+    request.timeout_ms = 2000U;
+    request.control.request_type = 0xC0U;
+    request.control.request = 0x01U;
+    request.control.value = 0U;
+    request.control.index = 0U;
+    request.in_capacity = 1U;
+    request.claim_index = 0U;
+    request.deadline_ns = DTV_L3_DEADLINE_NONE;
+
+    dtv_l3_op* op = nullptr;
+    const auto started = dtv_l3_transfer_start(context, &request, &op);
+    if (started != DTV_L3_ACCEPTED || op == nullptr)
+    {
+        return started == DTV_L3_OK ? DTV_L3_FAILED : started;
+    }
+    const auto waited = dtv_l3_op_wait(op, 2000U);
+    dtv_l3_op_result result{};
+    const auto polled = dtv_l3_op_poll(op, &result);
+    if (waited != DTV_L3_OK || polled != DTV_L3_OK)
+    {
+        (void)dtv_l3_op_cancel(op);
+        dtv_l3_op_result late{};
+        if (dtv_l3_op_poll(op, &late) == DTV_L3_OK && late.state != DTV_L3_OP_RUNNING)
+        {
+            (void)dtv_l3_op_release(op);
+        }
+        return DTV_L3_FAILED;
+    }
+    const auto released = dtv_l3_op_release(op);
+    if (result.state != DTV_L3_OP_DONE || result.result != DTV_L3_OK)
+    {
+        return result.result == DTV_L3_OK ? DTV_L3_FAILED : result.result;
+    }
+    return released;
 }
 
 bool Adapter::route(std::uint32_t receiver, asicen_l3_route* out) const noexcept
@@ -240,7 +430,7 @@ dtv_l3_result Adapter::reader_close(std::uint32_t reader_id)
 
 dtv_l3_result Adapter::lnb_set(std::uint32_t receiver, std::uint32_t mode)
 {
-    if (receiver >= profile_->enclosure_receiver_count)
+    if (power_permission_ == 0U || receiver >= profile_->enclosure_receiver_count)
     {
         return DTV_L3_UNSUPPORTED;
     }
@@ -251,6 +441,16 @@ dtv_l3_result Adapter::lnb_set(std::uint32_t receiver, std::uint32_t mode)
         return DTV_L3_UNSUPPORTED;
     }
     return host_.lnb_set(receiver, mode);
+}
+
+dtv_l3_result Adapter::bind_thunk(void* context, dtv_l3_context* owner)
+{
+    return static_cast<Adapter*>(context)->bind(owner);
+}
+
+dtv_l3_result Adapter::initialize_thunk(void* context, dtv_l3_context* owner)
+{
+    return static_cast<Adapter*>(context)->initialize(owner);
 }
 
 dtv_l3_result Adapter::scope_query_thunk(void* context, std::uint32_t receiver,
@@ -378,39 +578,15 @@ dtv_l3_result Adapter::stream_stop_thunk(void* context, dtv_l3_provider_binding*
     return stopped;
 }
 
-dtv_l3_result Adapter::reader_acquire_thunk(void* context, std::uint32_t reader_id,
-                                            dtv_l3_reader** reader_out)
-{
-    auto* adapter = static_cast<Adapter*>(context);
-    if (reader_out == nullptr)
-    {
-        return DTV_L3_INVALID;
-    }
-    *reader_out = nullptr;
-    if (reader_id >= adapter->capabilities_.reader_count)
-    {
-        return DTV_L3_UNSUPPORTED;
-    }
-    const auto opened = adapter->host_.reader_open(reader_id);
-    if (opened != DTV_L3_OK)
-    {
-        return opened;
-    }
-    adapter->reader_token_.reader_id = reader_id;
-    *reader_out = reinterpret_cast<dtv_l3_reader*>(&adapter->reader_token_);
-    return DTV_L3_OK;
-}
-
-dtv_l3_result Adapter::lnb_set_thunk(void* context, std::uint32_t receiver_id, std::uint32_t mode)
-{
-    return static_cast<Adapter*>(context)->lnb_set(receiver_id, mode);
-}
-
 Factory::Factory(const DeviceProfile& profile, Host& host) : profile_(&profile), host_(host)
 {
     factory_.factory_context = this;
     factory_.create = &Factory::create_thunk;
     factory_.release = &Factory::release_thunk;
+    factory_v1_.struct_size = static_cast<std::uint32_t>(sizeof(factory_v1_));
+    factory_v1_.factory_context = this;
+    factory_v1_.create = &Factory::create_v1_thunk;
+    factory_v1_.release = &Factory::release_thunk;
 }
 
 std::uint32_t Factory::claim_count() const noexcept
@@ -461,6 +637,62 @@ dtv_l3_result Factory::create_thunk(void* context, const dtv_l3_open_config* con
         return firmware_result;
     }
     *adapter_out = adapter->product_adapter();
+    *adapter_owner_out = adapter.release();
+    return DTV_L3_OK;
+}
+
+dtv_l3_result Factory::create_v1_thunk(void* context, const dtv_l3_open_args* args,
+                                       const dtv_l3_product_adapter** adapter_out,
+                                       std::uint32_t* claim_count_out, void** adapter_owner_out)
+{
+    return static_cast<Factory*>(context)->create_v1(args, adapter_out, claim_count_out,
+                                                     adapter_owner_out);
+}
+
+dtv_l3_result Factory::create_v1(const dtv_l3_open_args* args,
+                                 const dtv_l3_product_adapter** adapter_out,
+                                 std::uint32_t* claim_count_out, void** adapter_owner_out)
+{
+    if (args == nullptr || adapter_out == nullptr || claim_count_out == nullptr ||
+        adapter_owner_out == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    *adapter_out = nullptr;
+    *claim_count_out = 0U;
+    *adapter_owner_out = nullptr;
+    if (args->grant_count != 0U && args->grants == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    for (std::uint32_t index = 0U; index < args->grant_count; ++index)
+    {
+        const auto& grant = args->grants[index];
+        if (grant.descriptor == nullptr)
+        {
+            return DTV_L3_INVALID;
+        }
+        if (grant.descriptor->vendor_id != profile_->vid ||
+            grant.descriptor->product_id != profile_->pid ||
+            grant.descriptor->num_interfaces < profile_->expected_runtime_functions)
+        {
+            return DTV_L3_UNSUPPORTED;
+        }
+    }
+
+    auto adapter = std::make_unique<Adapter>(*profile_, host_);
+    const auto firmware_result = adapter->prepare_firmware(args->firmware);
+    if (firmware_result != DTV_L3_OK)
+    {
+        return firmware_result;
+    }
+    if (!firmware_matches_manifest(args->firmware, adapter->product_adapter()->firmware))
+    {
+        return DTV_L3_FAILED;
+    }
+    adapter->set_power_permission(args->power_permission);
+    *adapter_out = adapter->product_adapter();
+    *claim_count_out = profile_->expected_runtime_functions;
     *adapter_owner_out = adapter.release();
     return DTV_L3_OK;
 }
