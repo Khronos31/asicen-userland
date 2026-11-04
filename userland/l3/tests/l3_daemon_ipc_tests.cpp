@@ -138,14 +138,14 @@ int main()
     server.join();
     asicen_l3_daemon_destroy(session);
 
+    if (child < 0)
+    {
+        return 3;
+    }
     if (!saw_terrestrial_lock_read(fake))
     {
         std::fprintf(stderr, "standard IPC tune did not reach the terrestrial lock-read stage\n");
         return 8;
-    }
-    if (child < 0)
-    {
-        return 3;
     }
     if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0)
     {
