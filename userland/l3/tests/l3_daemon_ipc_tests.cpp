@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -80,16 +81,34 @@ int main()
     {
         ::close(output_fd);
     }
+    int eof_pipe[2] = {-1, -1};
+    if (::pipe(eof_pipe) != 0 || ::dup2(eof_pipe[0], STDIN_FILENO) < 0)
+    {
+        if (eof_pipe[0] >= 0) ::close(eof_pipe[0]);
+        if (eof_pipe[1] >= 0) ::close(eof_pipe[1]);
+        return 2;
+    }
+    ::close(eof_pipe[0]);
     volatile std::sig_atomic_t stop = 0;
     int server_result = 70;
     std::thread server([&] {
         server_result = asicen_l3_daemon_run(session, runtime_directory, "l3-test", &stop);
     });
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    std::thread stdin_eof([&] {
+        char byte = 0;
+        ssize_t count = -1;
+        do
+        {
+            count = ::read(STDIN_FILENO, &byte, sizeof(byte));
+        } while (count < 0 && errno == EINTR);
+        stop = 1;
+    });
 
     const pid_t child = ::fork();
     if (child == 0)
     {
+        ::close(eof_pipe[1]);
         ::execl(ASICEN_TS_BINARY, "asicen-ts", "--instance", "l3-test", "--runtime-dir",
                 runtime_directory, "--receiver", "1", "--channel", "T27", "--packet-count", "10",
                 "--output", output_template, static_cast<char*>(nullptr));
@@ -100,10 +119,15 @@ int main()
     {
         (void)::waitpid(child, &child_status, 0);
     }
-    stop = 1;
+    ::close(eof_pipe[1]);
+    stdin_eof.join();
     server.join();
     asicen_l3_daemon_destroy(session);
 
+    if (child < 0)
+    {
+        return 3;
+    }
     if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0)
     {
         std::fprintf(stderr, "asicen-ts child status=%d\n", child_status);
