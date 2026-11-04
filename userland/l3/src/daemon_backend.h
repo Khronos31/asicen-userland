@@ -86,6 +86,9 @@ class L3DaemonBackend final : public px4::userland::TunerServiceBackend,
     };
 
     dtv_l3_lease* lease_for(std::uint8_t receiver) noexcept;
+    px4::userland::Result<px4::userland::TunerHzProgramming>
+    tune_hz(std::uint8_t receiver, px4::userland::ipc::System system,
+            std::uint64_t frequency_hz) noexcept;
     StreamEntry* stream_for(std::uint64_t attachment_id) noexcept;
     const StreamEntry* stream_for(std::uint64_t attachment_id) const noexcept;
     void stop_all_streams() noexcept;

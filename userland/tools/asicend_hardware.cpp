@@ -17,6 +17,9 @@
 #include "asicen/startup_readiness.h"
 #include "asicen/firmware.h"
 #include "px4/platform_sleep.h"
+#if defined(ASICEN_BUILD_L3_ADAPTER)
+#include "daemon_backend.h"
+#endif
 
 #include <libusb.h>
 
@@ -1216,6 +1219,25 @@ int run_asicend_hardware(int argc, char** argv) {
         }
         if (!hardware) return 70;
         hardware->set_allow_lnb_power(options.allow_lnb_power);
+#if defined(ASICEN_BUILD_L3_ADAPTER)
+        const auto* profile = hardware->device_profile();
+        if (profile == nullptr) return 3;
+        auto l3 = asicen::l3::L3DaemonSession::create(*hardware, *profile, false, nullptr);
+        if (!l3) return 70;
+        const auto started = l3->start();
+        if (started != DTV_L3_OK) {
+            std::fprintf(stderr, "L3 owner initialization failed: %d\n",
+                         static_cast<int>(started));
+            l3->shutdown();
+            return 70;
+        }
+        result = asicen::run_l3_core_server(
+            *hardware,
+            options.runtime_directory.empty() ? nullptr : options.runtime_directory.c_str(),
+            options.instance.c_str(), options.group, *l3->backend(), *l3->backend(), nullptr,
+            &px4::userland::px4d::stop_requested);
+        l3->shutdown();
+#else
         const auto claimed = hardware->claim();
         if (!claimed) {
             std::fprintf(stderr, "hardware model/topology/claim refused (dual-function models require sibling paths): %s\n",
@@ -1242,6 +1264,7 @@ int run_asicend_hardware(int argc, char** argv) {
                 if (result == 0) result = exit_status(released.error());
             }
         }
+#endif
     }
     return result;
 }

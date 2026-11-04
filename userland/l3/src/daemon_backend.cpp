@@ -117,69 +117,94 @@ px4::userland::Result<void> L3DaemonBackend::tune_terrestrial(std::uint8_t recei
                                                               std::uint32_t frequency_khz,
                                                               std::uint32_t timeout_ms) noexcept
 {
-    if (leases_[receiver] == nullptr)
-    {
-        return px4::userland::Result<void>::failure(px4::userland::Error::NOT_READY);
-    }
-    dtv_l3_tune_request request{};
-    request.system = DTV_L3_TUNE_SYSTEM_ISDB_T;
-    request.selection = DTV_L3_TUNE_SELECTION_AUTO;
-    request.requested_hz = static_cast<std::uint64_t>(frequency_khz) * 1000U;
-    std::uint64_t programmed = 0U;
-    std::uint64_t revision = 0U;
-    const auto result = dtv_l3_lease_tune_ex(leases_[receiver], &request, &programmed, &revision);
-    if (result == DTV_L3_OK)
-    {
-        systems_[receiver] = px4::userland::ipc::System::ISDB_T;
-    }
+    if (receiver >= leases_.size())
+        return px4::userland::Result<void>::failure(px4::userland::Error::INVALID_ARGUMENT);
+    const auto tuned = tune_hz(receiver, px4::userland::ipc::System::ISDB_T,
+                               static_cast<std::uint64_t>(frequency_khz) * 1000U);
     (void)timeout_ms;
-    return result == DTV_L3_OK ? px4::userland::Result<void>::success()
-                               : px4::userland::Result<void>::failure(to_error(result));
+    return tuned ? px4::userland::Result<void>::success()
+                 : px4::userland::Result<void>::failure(tuned.error());
 }
 
 px4::userland::Result<void> L3DaemonBackend::tune_satellite(std::uint8_t receiver,
                                                             std::uint32_t frequency_khz,
                                                             std::uint32_t timeout_ms) noexcept
 {
+    if (receiver >= leases_.size())
+        return px4::userland::Result<void>::failure(px4::userland::Error::INVALID_ARGUMENT);
+    const auto tuned = tune_hz(receiver, px4::userland::ipc::System::ISDB_S,
+                               static_cast<std::uint64_t>(frequency_khz) * 1000U);
+    (void)timeout_ms;
+    return tuned ? px4::userland::Result<void>::success()
+                 : px4::userland::Result<void>::failure(tuned.error());
+}
+
+px4::userland::Result<px4::userland::TunerHzProgramming>
+L3DaemonBackend::tune_hz(std::uint8_t receiver, px4::userland::ipc::System system,
+                         std::uint64_t frequency_hz) noexcept
+{
+    using px4::userland::Error;
+    using px4::userland::Result;
+    if (receiver >= leases_.size())
+        return Result<px4::userland::TunerHzProgramming>::failure(Error::INVALID_ARGUMENT);
     if (leases_[receiver] == nullptr)
-    {
-        return px4::userland::Result<void>::failure(px4::userland::Error::NOT_READY);
-    }
+        return Result<px4::userland::TunerHzProgramming>::failure(Error::NOT_READY);
+    if (frequency_hz == 0U)
+        return Result<px4::userland::TunerHzProgramming>::failure(Error::INVALID_ARGUMENT);
+
     dtv_l3_tune_request request{};
-    request.system = DTV_L3_TUNE_SYSTEM_ISDB_S;
+    request.system = system == px4::userland::ipc::System::ISDB_T
+                         ? DTV_L3_TUNE_SYSTEM_ISDB_T
+                         : DTV_L3_TUNE_SYSTEM_ISDB_S;
     request.selection = DTV_L3_TUNE_SELECTION_AUTO;
-    request.requested_hz = static_cast<std::uint64_t>(frequency_khz) * 1000U;
+    request.requested_hz = frequency_hz;
     std::uint64_t programmed = 0U;
     std::uint64_t revision = 0U;
     const auto result = dtv_l3_lease_tune_ex(leases_[receiver], &request, &programmed, &revision);
-    if (result == DTV_L3_OK)
-    {
-        systems_[receiver] = px4::userland::ipc::System::ISDB_S;
-    }
-    (void)timeout_ms;
-    return result == DTV_L3_OK ? px4::userland::Result<void>::success()
-                               : px4::userland::Result<void>::failure(to_error(result));
+    if (result != DTV_L3_OK)
+        return Result<px4::userland::TunerHzProgramming>::failure(to_error(result));
+
+    systems_[receiver] = system;
+    px4::userland::TunerHzProgramming programming{};
+    programming.programmed_hz = programmed;
+    return Result<px4::userland::TunerHzProgramming>::success(programming);
 }
 
 px4::userland::Result<px4::userland::TunerHzProgramming>
 L3DaemonBackend::tune_terrestrial_hz(std::uint8_t receiver, std::uint64_t frequency_hz,
                                      std::uint32_t timeout_ms) noexcept
 {
-    return hardware_.tune_terrestrial_hz(receiver, frequency_hz, timeout_ms);
+    (void)timeout_ms;
+    return tune_hz(receiver, px4::userland::ipc::System::ISDB_T, frequency_hz);
 }
 
 px4::userland::Result<px4::userland::TunerHzProgramming>
 L3DaemonBackend::tune_satellite_hz(std::uint8_t receiver, std::uint64_t frequency_hz,
                                    std::uint32_t timeout_ms) noexcept
 {
-    return hardware_.tune_satellite_hz(receiver, frequency_hz, timeout_ms);
+    (void)timeout_ms;
+    return tune_hz(receiver, px4::userland::ipc::System::ISDB_S, frequency_hz);
 }
 
 px4::userland::TunerStrictProfile
 L3DaemonBackend::strict_profile(std::uint8_t receiver,
                                 px4::userland::ipc::System system) const noexcept
 {
-    return hardware_.strict_profile(receiver, system);
+    if (!receiver_supports(receiver, system))
+        return {};
+    px4::userland::TunerStrictProfile profile{};
+    profile.native_hz = true;
+    if (system == px4::userland::ipc::System::ISDB_T)
+    {
+        profile.min_hz = 40000000U;
+        profile.max_hz = 1002000000U;
+    } else
+    {
+        profile.min_hz = 146875000U;
+        profile.max_hz = 2350000000U;
+        profile.lnb_voltage_mask = hardware_.supports_lnb_control() ? 0x03U : 0U;
+    }
+    return profile;
 }
 
 px4::userland::Result<bool> L3DaemonBackend::is_locked(std::uint8_t receiver,

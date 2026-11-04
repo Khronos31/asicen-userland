@@ -149,6 +149,6 @@ if(ASICEN_BUILD_TESTS AND ASICEN_ENABLE_LIBUSB)
     target_compile_options(asicen-l3-daemon-tests PRIVATE -Wall -Wextra -Werror)
     target_compile_features(asicen-l3-daemon-tests PRIVATE cxx_std_17)
     set_target_properties(asicen-l3-daemon-tests PROPERTIES CXX_EXTENSIONS OFF)
-    # Manual target: the standard daemon IPC lifecycle fixture is WIP; it is
-    # not registered as a passing test until TUNE reaches the L3 backend.
+    add_test(NAME asicen-l3-daemon-tests COMMAND asicen-l3-daemon-tests)
+    set_tests_properties(asicen-l3-daemon-tests PROPERTIES TIMEOUT 60)
 endif()
