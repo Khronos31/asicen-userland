@@ -95,10 +95,13 @@ Adapter::Adapter(const DeviceProfile& profile, Host& host) : profile_(&profile),
     adapter_.initialize = &Adapter::initialize_thunk;
     adapter_.scope_query = &Adapter::scope_query_thunk;
     adapter_.tune = &Adapter::tune_thunk;
+    adapter_.tune_ex = &Adapter::tune_ex_thunk;
     adapter_.bridge_start = &Adapter::bridge_start_thunk;
     adapter_.bridge_stop = &Adapter::bridge_stop_thunk;
     adapter_.stream_attach = &Adapter::stream_attach_thunk;
+    adapter_.stream_attach_ex = &Adapter::stream_attach_ex_thunk;
     adapter_.stream_stop = &Adapter::stream_stop_thunk;
+    adapter_.stream_stop_ex = &Adapter::stream_stop_ex_thunk;
 }
 
 dtv_l3_result Adapter::prepare_firmware(const dtv_l3_firmware* firmware)
@@ -361,6 +364,21 @@ int Adapter::system_for_receiver(std::uint32_t receiver) const noexcept
     return static_cast<int>(mask);
 }
 
+std::uint32_t Adapter::stream_system_for(std::uint32_t receiver,
+                                         const asicen_l3_route& route) const noexcept
+{
+    if (profile_->combined_isdb_ts)
+    {
+        return receiver < 4U ? tuned_system_[receiver] : 0U;
+    }
+    if (receiver < 4U && tuned_system_[receiver] != 0U &&
+        has_system(tuned_system_[receiver], route.system))
+    {
+        return tuned_system_[receiver];
+    }
+    return route.system;
+}
+
 dtv_l3_result Adapter::tune_locked(std::uint32_t receiver, std::uint32_t system,
                                    std::uint64_t frequency_hz, std::uint32_t timeout_ms,
                                    std::uint64_t* programmed_hz)
@@ -386,7 +404,12 @@ dtv_l3_result Adapter::tune_locked(std::uint32_t receiver, std::uint32_t system,
     {
         return DTV_L3_UNSUPPORTED;
     }
-    return host_.tune(receiver, system, frequency_hz, timeout_ms, programmed_hz);
+    const auto tuned = host_.tune(receiver, system, frequency_hz, timeout_ms, programmed_hz);
+    if (tuned == DTV_L3_OK && receiver < 4U)
+    {
+        tuned_system_[receiver] = system;
+    }
+    return tuned;
 }
 
 dtv_l3_result Adapter::tune(std::uint32_t receiver, std::uint32_t system,
@@ -481,6 +504,37 @@ dtv_l3_result Adapter::tune_thunk(void* context, dtv_l3_provider_binding*,
                                 programmed_hz);
 }
 
+dtv_l3_result Adapter::tune_ex_thunk(void* context, dtv_l3_provider_binding*,
+                                     std::uint32_t receiver_id, const dtv_l3_tune_request* request,
+                                     std::uint64_t* programmed_hz)
+{
+    if (request == nullptr)
+    {
+        return DTV_L3_INVALID;
+    }
+    if (request->selection != DTV_L3_TUNE_SELECTION_AUTO)
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    std::uint32_t system = 0U;
+    switch (request->system)
+    {
+    case DTV_L3_TUNE_SYSTEM_ISDB_T:
+        system = ASICEN_L3_SYSTEM_TERRESTRIAL;
+        break;
+    case DTV_L3_TUNE_SYSTEM_ISDB_S:
+        system = ASICEN_L3_SYSTEM_SATELLITE;
+        break;
+    case DTV_L3_TUNE_SYSTEM_AUTO:
+        system = 0U;
+        break;
+    default:
+        return DTV_L3_UNSUPPORTED;
+    }
+    return static_cast<Adapter*>(context)->tune(receiver_id, system, request->requested_hz,
+                                                kDefaultTuneTimeoutMs, programmed_hz);
+}
+
 dtv_l3_result Adapter::bridge_start_thunk(void* context, dtv_l3_provider_binding*,
                                           std::uint32_t bridge_id, std::uint32_t receiver_id)
 {
@@ -490,13 +544,12 @@ dtv_l3_result Adapter::bridge_start_thunk(void* context, dtv_l3_provider_binding
     {
         return DTV_L3_UNSUPPORTED;
     }
-    if (adapter->profile_->combined_isdb_ts)
+    const auto stream_system = adapter->stream_system_for(receiver_id, route);
+    if (stream_system == 0U)
     {
-        // The candidate bridge_start carries no system, so a combined T/S
-        // receiver cannot choose a stream input here.
         return DTV_L3_UNSUPPORTED;
     }
-    const auto started = adapter->host_.stream_begin(receiver_id, route.system, bridge_id);
+    const auto started = adapter->host_.stream_begin(receiver_id, stream_system, bridge_id);
     if (started != DTV_L3_OK)
     {
         return started;
@@ -542,7 +595,12 @@ dtv_l3_result Adapter::stream_attach_thunk(void* context, dtv_l3_provider_bindin
     {
         return DTV_L3_UNSUPPORTED;
     }
-    const auto attached = adapter->host_.stream_attach(stream_id, pending.receiver, route.system,
+    const auto stream_system = adapter->stream_system_for(pending.receiver, route);
+    if (stream_system == 0U)
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    const auto attached = adapter->host_.stream_attach(stream_id, pending.receiver, stream_system,
                                                        deliver, callback_context);
     if (attached == DTV_L3_OK)
     {
@@ -576,6 +634,45 @@ dtv_l3_result Adapter::stream_stop_thunk(void* context, dtv_l3_provider_binding*
             adapter->streams_.end());
     }
     return stopped;
+}
+
+dtv_l3_result Adapter::stream_attach_ex_thunk(void* context, dtv_l3_provider_binding*,
+                                              std::uint64_t stream_id, std::uint32_t receiver_id,
+                                              std::uint32_t bridge_id, dtv_l3_ts_deliver_fn deliver,
+                                              void* callback_context)
+{
+    auto* adapter = static_cast<Adapter*>(context);
+    asicen_l3_route route{};
+    if (!adapter->route(receiver_id, &route) || !adapter->bridge_matches(route, bridge_id))
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    const auto stream_system = adapter->stream_system_for(receiver_id, route);
+    if (stream_system == 0U)
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    const auto attached = adapter->host_.stream_attach(stream_id, receiver_id, stream_system,
+                                                       deliver, callback_context);
+    if (attached == DTV_L3_OK)
+    {
+        std::lock_guard<std::mutex> lock(adapter->mutex_);
+        adapter->streams_.emplace_back(stream_id, receiver_id);
+    }
+    return attached;
+}
+
+dtv_l3_result Adapter::stream_stop_ex_thunk(void* context, dtv_l3_provider_binding* binding,
+                                            std::uint64_t stream_id, std::uint32_t receiver_id,
+                                            std::uint32_t bridge_id)
+{
+    auto* adapter = static_cast<Adapter*>(context);
+    asicen_l3_route route{};
+    if (!adapter->route(receiver_id, &route) || !adapter->bridge_matches(route, bridge_id))
+    {
+        return DTV_L3_UNSUPPORTED;
+    }
+    return Adapter::stream_stop_thunk(context, binding, stream_id);
 }
 
 Factory::Factory(const DeviceProfile& profile, Host& host) : profile_(&profile), host_(host)

@@ -120,6 +120,10 @@ class Adapter final {
     static dtv_l3_result tune_thunk(void* context, dtv_l3_provider_binding* binding,
                                     std::uint32_t receiver_id, std::uint64_t requested_hz,
                                     std::uint64_t* programmed_hz);
+    static dtv_l3_result tune_ex_thunk(void* context, dtv_l3_provider_binding* binding,
+                                       std::uint32_t receiver_id,
+                                       const dtv_l3_tune_request* request,
+                                       std::uint64_t* programmed_hz);
     static dtv_l3_result bridge_start_thunk(void* context, dtv_l3_provider_binding* binding,
                                             std::uint32_t bridge_id, std::uint32_t receiver_id);
     static dtv_l3_result bridge_stop_thunk(void* context, dtv_l3_provider_binding* binding,
@@ -129,6 +133,14 @@ class Adapter final {
                                              void* callback_context);
     static dtv_l3_result stream_stop_thunk(void* context, dtv_l3_provider_binding* binding,
                                            std::uint64_t stream_id);
+    static dtv_l3_result stream_attach_ex_thunk(void* context, dtv_l3_provider_binding* binding,
+                                                std::uint64_t stream_id, std::uint32_t receiver_id,
+                                                std::uint32_t bridge_id,
+                                                dtv_l3_ts_deliver_fn deliver,
+                                                void* callback_context);
+    static dtv_l3_result stream_stop_ex_thunk(void* context, dtv_l3_provider_binding* binding,
+                                              std::uint64_t stream_id, std::uint32_t receiver_id,
+                                              std::uint32_t bridge_id);
 
     void fill_catalog();
     dtv_l3_result tune_locked(std::uint32_t receiver, std::uint32_t system,
@@ -136,6 +148,8 @@ class Adapter final {
                               std::uint64_t* programmed_hz);
     bool bridge_matches(const asicen_l3_route& route, std::uint32_t bridge_id) const noexcept;
     int system_for_receiver(std::uint32_t receiver) const noexcept;
+    std::uint32_t stream_system_for(std::uint32_t receiver,
+                                    const asicen_l3_route& route) const noexcept;
 
     const DeviceProfile* profile_;
     Host& host_;
@@ -155,6 +169,7 @@ class Adapter final {
     dtv_l3_capability_catalog catalog_{};
     dtv_l3_context* owner_ = nullptr;
     std::uint32_t power_permission_ = 1U;
+    std::uint32_t tuned_system_[4]{};
     mutable std::mutex mutex_;
     std::deque<PendingAttach> pending_attaches_;
     std::deque<std::pair<std::uint64_t, std::uint32_t>> streams_;

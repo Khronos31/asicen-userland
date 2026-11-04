@@ -40,7 +40,11 @@ typedef struct fake_host {
     unsigned int tune_system;
     unsigned long long tune_hz;
     int begin_calls;
+    unsigned int begin_receiver;
+    unsigned int begin_system;
     int attach_calls;
+    unsigned int attach_receiver;
+    unsigned int attach_system;
     int stop_calls;
     int reader_open_calls;
     int reader_reset_calls;
@@ -159,10 +163,10 @@ static dtv_l3_result product_stream_begin(void* context, uint32_t receiver, uint
                                           uint32_t bridge_id)
 {
     fake_host* fake = (fake_host*)context;
-    (void)receiver;
-    (void)system;
     (void)bridge_id;
     ++fake->begin_calls;
+    fake->begin_receiver = receiver;
+    fake->begin_system = system;
     return DTV_L3_OK;
 }
 
@@ -172,9 +176,9 @@ static dtv_l3_result product_stream_attach(void* context, uint64_t stream_id, ui
 {
     fake_host* fake = (fake_host*)context;
     (void)stream_id;
-    (void)receiver;
-    (void)system;
     ++fake->attach_calls;
+    fake->attach_receiver = receiver;
+    fake->attach_system = system;
     fake->deliver = deliver;
     fake->deliver_context = callback_context;
     return DTV_L3_OK;
@@ -514,6 +518,8 @@ static int test_product_semantics_through_core(void)
     CHECK(dtv_l3_lease_start(lease) == DTV_L3_OK);
     CHECK(dtv_l3_lease_attach(lease, &stream) == DTV_L3_OK && stream != NULL);
     CHECK(fake.begin_calls == 1 && fake.attach_calls == 1 && fake.deliver != NULL);
+    CHECK(fake.begin_receiver == 0U && fake.begin_system == ASICEN_L3_SYSTEM_SATELLITE);
+    CHECK(fake.attach_receiver == 0U && fake.attach_system == ASICEN_L3_SYSTEM_SATELLITE);
     memset(ts_data, 0x47, sizeof(ts_data));
     fake.deliver(fake.deliver_context, ts_data, sizeof(ts_data));
     CHECK(dtv_l3_stream_read_ts(stream, out, sizeof(out), &bytes, &read_state) == DTV_L3_OK);
@@ -721,6 +727,62 @@ static int test_initialize_failure(void)
     return 1;
 }
 
+static int test_tune_ex_and_combined_stream(void)
+{
+    fake_host fake;
+    asicen_l3_product_ops ops;
+    asicen_l3_factory* factory = NULL;
+    dtv_l3_usb_provider usb;
+    dtv_l3_open_config config;
+    dtv_l3_open_result opened;
+    dtv_l3_lease* lease = NULL;
+    dtv_l3_stream* stream = NULL;
+    dtv_l3_tune_request request;
+    uint64_t programmed = 0U;
+    uint64_t revision = 0U;
+
+    fake_init(&fake);
+    ops = product_ops_for(&fake);
+    usb = usb_provider_for(&fake);
+    CHECK(asicen_l3_factory_create(&ops, 0x0b06, 0x0001, &factory) == DTV_L3_OK);
+    config = config_for(ASICEN_L3_MODEL_S3U, NULL);
+    opened = dtv_l3_open_factory(&usb, asicen_l3_factory_adapter_factory(factory), &config, 1);
+    CHECK(opened.result == DTV_L3_ACCEPTED && opened.owner != NULL && opened.op != NULL);
+    CHECK(dtv_l3_op_wait(opened.op, 5000) == DTV_L3_OK);
+    CHECK(dtv_l3_op_release(opened.op) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_acquire(opened.owner, 0U, &lease) == DTV_L3_OK);
+
+    memset(&request, 0, sizeof(request));
+    request.system = DTV_L3_TUNE_SYSTEM_ISDB_T;
+    request.selection = DTV_L3_TUNE_SELECTION_AUTO;
+    request.requested_hz = 527143000ULL;
+    CHECK(dtv_l3_lease_tune_ex(lease, &request, &programmed, &revision) == DTV_L3_OK);
+    CHECK(fake.tune_system == ASICEN_L3_SYSTEM_TERRESTRIAL && fake.tune_hz == 527143000ULL);
+    request.system = DTV_L3_TUNE_SYSTEM_ISDB_S;
+    request.requested_hz = 11000000000ULL;
+    CHECK(dtv_l3_lease_tune_ex(lease, &request, &programmed, &revision) == DTV_L3_OK);
+    CHECK(fake.tune_system == ASICEN_L3_SYSTEM_SATELLITE);
+    request.selection = DTV_L3_TUNE_SELECTION_SLOT;
+    CHECK(dtv_l3_lease_tune_ex(lease, &request, &programmed, &revision) == DTV_L3_UNSUPPORTED);
+
+    CHECK(dtv_l3_lease_start(lease) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_attach(lease, &stream) == DTV_L3_OK && stream != NULL);
+    CHECK(fake.begin_calls == 1 && fake.begin_receiver == 0U &&
+          fake.begin_system == ASICEN_L3_SYSTEM_SATELLITE);
+    CHECK(fake.attach_calls == 1 && fake.attach_receiver == 0U &&
+          fake.attach_system == ASICEN_L3_SYSTEM_SATELLITE);
+    CHECK(dtv_l3_stream_stop(stream, 0) == DTV_L3_OK);
+    CHECK(dtv_l3_stream_release(stream, DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) == DTV_L3_OK);
+    CHECK(dtv_l3_stream_destroy(stream) == DTV_L3_OK);
+    CHECK(dtv_l3_lease_release(lease) == DTV_L3_OK);
+
+    CHECK(dtv_l3_close(opened.owner, 2000) == DTV_L3_OK);
+    CHECK(release_owner(opened.owner, 5000) == 1);
+    asicen_l3_factory_destroy(factory);
+    fake_destroy(&fake);
+    return 1;
+}
+
 static int test_explicit_system_tune(void)
 {
     fake_host fake;
@@ -792,6 +854,8 @@ int main(void)
     if (!test_args_factory_catalog_and_manifest())
         return 1;
     if (!test_initialize_failure())
+        return 1;
+    if (!test_tune_ex_and_combined_stream())
         return 1;
     if (!test_explicit_system_tune())
         return 1;
