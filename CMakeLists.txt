@@ -24,6 +24,10 @@ option(ASICEN_BUILD_ANDROID_LINKCHECK "Build the Android-only final link check" 
 option(ASICEN_RELEASE_ASICEND_NO_BUILD_ID
     "Omit the GNU Build ID note from the release asicend executable only" OFF)
 option(ASICEN_BUILD_PCSC_IFD "Build the POSIX PC/SC IFD Handler when headers are available" ON)
+option(ASICEN_BUILD_L3_ADAPTER
+    "Build the experimental ASICEN L3 adapter candidate target" OFF)
+option(ASICEN_L3_ENABLE_ASAN "Build the L3 adapter targets with AddressSanitizer" OFF)
+option(ASICEN_L3_ENABLE_TSAN "Build the L3 adapter targets with ThreadSanitizer" OFF)
 option(ASICEN_REQUIRE_PCSC_IFD "Fail configuration when the PC/SC IFD Handler cannot be built" OFF)
 set(ASICEN_ANDROID_NDK_ROOT_MAP "" CACHE PATH
     "Android NDK root to remove from compiler debug paths")
@@ -1387,4 +1391,11 @@ if(ASICEN_BUILD_TESTS)
         asicen_enable_project_warnings(asicen-signals-tests)
         add_test(NAME asicen-signals-tests COMMAND asicen-signals-tests)
     endif()
+endif()
+
+if(ASICEN_BUILD_L3_ADAPTER)
+    if(ASICEN_BUILD_TESTS)
+        enable_testing()
+    endif()
+    add_subdirectory(userland/l3)
 endif()
