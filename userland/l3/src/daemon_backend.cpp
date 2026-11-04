@@ -368,9 +368,18 @@ L3DaemonBackend::stats(const px4::userland::TunerAttachment& attachment) const n
             px4::userland::Error::INTERNAL);
     }
     px4::userland::TunerStreamCounters counters{};
-    counters.packets = status.queued_packets;
+    const auto framing = hardware_.source_framing_counters();
+    const auto source = hardware_.source_counters_for_receiver(entry->receiver);
+    counters.packets = framing.emitted_packets;
+    counters.bytes = framing.emitted_packets * 188U;
     counters.queue_drops = status.dropped_overflow_packets;
-    counters.bytes = status.staged_bytes;
+    counters.sync_errors = source.sync_errors;
+    counters.empty_intervals = source.empty_intervals;
+    counters.availability[0U] = dtv::userland::wire::MeasureState::valid;
+    counters.availability[1U] = dtv::userland::wire::MeasureState::valid;
+    counters.availability[2U] = source.availability[2U];
+    counters.availability[5U] = dtv::userland::wire::MeasureState::valid;
+    counters.availability[7U] = source.availability[7U];
     return px4::userland::Result<px4::userland::TunerStreamCounters>::success(counters);
 }
 
