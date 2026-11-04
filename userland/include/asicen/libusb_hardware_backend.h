@@ -169,6 +169,11 @@ private:
     friend int run_live_card_stream_server(LibusbW3u3Hardware&, const char*, const char*, bool,
                                            const volatile std::sig_atomic_t*,
                                            bool (*)() noexcept) noexcept;
+    friend int run_l3_core_server(LibusbW3u3Hardware&, const char*, const char*, bool,
+                                  px4::userland::TunerServiceBackend&,
+                                  px4::userland::TunerStreamControl&,
+                                  const volatile std::sig_atomic_t*,
+                                  bool (*)() noexcept) noexcept;
     px4::userland::Result<void>
     begin_card_operation(std::uint32_t timeout_ms,
                          const volatile std::sig_atomic_t* stop_flag) noexcept override;

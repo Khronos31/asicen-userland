@@ -93,6 +93,16 @@ int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtim
                                 const volatile std::sig_atomic_t* stop_requested,
                                 bool (*stop_callback)() noexcept = nullptr) noexcept;
 
+// Product-internal L3 assembly. It reuses the same EnclosureContext/list/IPC
+// builder as run_live_card_stream_server but supplies the L3 owner-backed
+// tuner/stream control.
+int run_l3_core_server(LibusbW3u3Hardware& hardware, const char* runtime_directory,
+                       const char* instance, bool group,
+                       px4::userland::TunerServiceBackend& backend,
+                       px4::userland::TunerStreamControl& stream_control,
+                       const volatile std::sig_atomic_t* stop_requested,
+                       bool (*stop_callback)() noexcept = nullptr) noexcept;
+
 }  // namespace asicen
 
 #endif  // ASICEN_USERLAND_CARD_ONLY_SERVICE_H

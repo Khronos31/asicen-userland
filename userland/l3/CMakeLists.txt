@@ -43,8 +43,14 @@ target_link_libraries(asicen_l3 PUBLIC Threads::Threads)
 set_target_properties(asicen_l3 PROPERTIES CXX_EXTENSIONS OFF)
 
 if(ASICEN_ENABLE_LIBUSB)
-    add_library(asicen_l3_libusb STATIC src/libusb_host.cpp)
+    add_library(asicen_l3_libusb STATIC src/libusb_host.cpp src/daemon_backend.cpp)
     target_link_libraries(asicen_l3_libusb PUBLIC asicen_l3 asicen_libusb)
+    target_include_directories(asicen_l3_libusb BEFORE PRIVATE
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_daemon/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_runtime/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_facade/include
+        ${dtv_userland_core_SOURCE_DIR}/adapters/host_listener_context/include
+        ${dtv_userland_core_SOURCE_DIR}/include)
     target_include_directories(asicen_l3_libusb PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_features(asicen_l3_libusb PUBLIC cxx_std_17)
@@ -127,4 +133,22 @@ if(TARGET asicen-l3-real-backend-tests)
             -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(asicen-l3-real-backend-tests PRIVATE -fsanitize=thread)
     endif()
+endif()
+
+if(ASICEN_BUILD_TESTS AND ASICEN_ENABLE_LIBUSB)
+    add_executable(asicen-l3-daemon-tests
+        tests/l3_daemon_ipc_tests.cpp
+        tests/l3_daemon_bridge.cpp)
+    target_link_libraries(asicen-l3-daemon-tests PRIVATE asicen_l3_libusb asicen_libusb)
+    target_include_directories(asicen-l3-daemon-tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
+    target_compile_definitions(asicen-l3-daemon-tests PRIVATE
+        ASICEN_TS_BINARY="$<TARGET_FILE:asicen-ts>")
+    add_dependencies(asicen-l3-daemon-tests asicen-ts)
+    target_compile_options(asicen-l3-daemon-tests PRIVATE -Wall -Wextra -Werror)
+    target_compile_features(asicen-l3-daemon-tests PRIVATE cxx_std_17)
+    set_target_properties(asicen-l3-daemon-tests PROPERTIES CXX_EXTENSIONS OFF)
+    # Manual target: the standard daemon IPC lifecycle fixture is WIP; it is
+    # not registered as a passing test until TUNE reaches the L3 backend.
 endif()

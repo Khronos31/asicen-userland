@@ -285,21 +285,30 @@ public:
     AsicenEnclosureFamily(LibusbW3u3Hardware& hardware,
                           W3u3CardMailboxHardware& mailbox,
                           const volatile std::sig_atomic_t* stop_requested,
-                          bool card_only) noexcept
+                          bool card_only,
+                          px4::userland::TunerServiceBackend* l3_backend = nullptr,
+                          px4::userland::TunerStreamControl* l3_stream = nullptr) noexcept
         : hardware_(hardware), card_backend_(mailbox, hardware, stop_requested),
           card_hardware_(mailbox), card_session_(card_hardware_, card_hardware_),
           card_protocol_(card_session_, hardware, stop_requested),
-          card_only_tuner_(hardware.receiver_count()), frontend_(hardware)
+          card_only_tuner_(hardware.receiver_count()), frontend_(hardware),
+          l3_backend_(l3_backend), l3_stream_(l3_stream)
     {
-        if (!card_only)
+        if (!card_only && l3_backend_ == nullptr)
             stream_.reset(new (std::nothrow) HardwareStreamService(frontend_, hardware_));
     }
 
-    bool ready(bool card_only) const noexcept { return card_only || stream_ != nullptr; }
+    bool ready(bool card_only) const noexcept
+    {
+        return card_only || l3_backend_ != nullptr || stream_ != nullptr;
+    }
     px4::userland::TunerServiceBackend& tuner_backend() noexcept override
     {
-        return stream_ != nullptr ? static_cast<px4::userland::TunerServiceBackend&>(*stream_)
-                                  : static_cast<px4::userland::TunerServiceBackend&>(card_only_tuner_);
+        return l3_backend_ != nullptr
+                   ? *l3_backend_
+                   : stream_ != nullptr
+                         ? static_cast<px4::userland::TunerServiceBackend&>(*stream_)
+                         : static_cast<px4::userland::TunerServiceBackend&>(card_only_tuner_);
     }
     px4::userland::CardServiceBackend& card_backend() noexcept override
     {
@@ -312,7 +321,7 @@ public:
     px4::userland::TunerServiceTime& time() noexcept override { return time_; }
     px4::userland::TunerStreamControl* stream_control() noexcept override
     {
-        return stream_.get();
+        return l3_stream_ != nullptr ? l3_stream_ : stream_.get();
     }
 
 private:
@@ -324,6 +333,8 @@ private:
     CardOnlyTunerBackend card_only_tuner_;
     DeferredHardwareShutdown frontend_;
     std::unique_ptr<HardwareStreamService> stream_;
+    px4::userland::TunerServiceBackend* l3_backend_ = nullptr;
+    px4::userland::TunerStreamControl* l3_stream_ = nullptr;
     CardOnlyTime time_;
 };
 
@@ -405,7 +416,9 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
                     const std::vector<std::uint8_t>& primary_path,
                     const std::vector<std::uint8_t>& sibling_path,
                     const volatile std::sig_atomic_t* stop_requested,
-                    bool (*stop_callback)() noexcept) noexcept
+                    bool (*stop_callback)() noexcept,
+                    px4::userland::TunerServiceBackend* l3_backend,
+                    px4::userland::TunerStreamControl* l3_stream) noexcept
 {
     using namespace dtv::userland;
     using dtv::userland::host_listener_context::CloseState;
@@ -425,7 +438,7 @@ int run_core_server(LibusbW3u3Hardware& hardware, W3u3CardMailboxHardware& mailb
     }
 
     std::unique_ptr<AsicenEnclosureFamily> family(new (std::nothrow) AsicenEnclosureFamily(
-        hardware, mailbox, stop_requested, card_only));
+        hardware, mailbox, stop_requested, card_only, l3_backend, l3_stream));
     if (!family || !family->ready(card_only)) return 70;
 
     std::unique_ptr<PlatformTunerNonceSource> nonce(new (std::nothrow) PlatformTunerNonceSource());
@@ -674,7 +687,8 @@ int run_card_only_server(LibusbW3u3Hardware& hardware, const char* runtime_direc
     const int result = run_core_server(hardware, mailbox, runtime_directory, instance, group,
                                        true, hardware.primary_location_,
                                        hardware.sibling_location_, hardware.primary_path_,
-                                       hardware.sibling_path_, stop_requested, stop_callback);
+                                       hardware.sibling_path_, stop_requested, stop_callback,
+                                       nullptr, nullptr);
     hardware.diagnostic_stop_flag_ = nullptr;
     return result;
 }
@@ -694,7 +708,29 @@ int run_live_card_stream_server(LibusbW3u3Hardware& hardware, const char* runtim
     const int result = run_core_server(hardware, mailbox, runtime_directory, instance, group,
                                        false, hardware.primary_location_,
                                        hardware.sibling_location_, hardware.primary_path_,
-                                       hardware.sibling_path_, stop_requested, stop_callback);
+                                       hardware.sibling_path_, stop_requested, stop_callback,
+                                       nullptr, nullptr);
+    hardware.diagnostic_stop_flag_ = nullptr;
+    return result;
+}
+
+int run_l3_core_server(LibusbW3u3Hardware& hardware, const char* runtime_directory,
+                       const char* instance, bool group,
+                       px4::userland::TunerServiceBackend& backend,
+                       px4::userland::TunerStreamControl& stream_control,
+                       const volatile std::sig_atomic_t* stop_requested,
+                       bool (*stop_callback)() noexcept) noexcept
+{
+    hardware.diagnostic_stop_flag_ = stop_requested;
+    const auto* device_profile = hardware.device_profile();
+    if (device_profile == nullptr || !profile_runtime_supported(*device_profile)) return 3;
+    W3u3CardMailboxHardware mailbox(static_cast<FrontendTransport&>(hardware),
+                                    device_profile->model_id);
+    const int result = run_core_server(hardware, mailbox, runtime_directory, instance, group,
+                                       false, hardware.primary_location_,
+                                       hardware.sibling_location_, hardware.primary_path_,
+                                       hardware.sibling_path_, stop_requested, stop_callback,
+                                       &backend, &stream_control);
     hardware.diagnostic_stop_flag_ = nullptr;
     return result;
 }

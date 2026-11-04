@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -56,12 +57,20 @@ class LibusbStreamSubmit : public StreamConfig {
                          const dtv_l3_transfer_request* request,
                          dtv_l3_transfer_complete_fn complete, void* callback_context);
     dtv_l3_result cancel(std::uint64_t transfer_id);
+    void set_after_prepare(std::function<void()> fn)
+    {
+        after_prepare_fn_ = std::move(fn);
+    }
 
   protected:
     // Test seam: called after prepare and before the capture run. Production
     // leaves it empty; the real backend fixture uses it to complete a URB.
     virtual void after_prepare()
     {
+        if (after_prepare_fn_)
+        {
+            after_prepare_fn_();
+        }
     }
 
   private:
@@ -81,6 +90,7 @@ class LibusbStreamSubmit : public StreamConfig {
     std::atomic<std::uint32_t> system_{0U};
     std::atomic<bool> configured_{false};
     std::atomic<bool> cancelled_{false};
+    std::function<void()> after_prepare_fn_;
     std::mutex mutex_;
     std::deque<Pending> pending_;
     std::deque<std::vector<std::uint8_t>> packets_;
