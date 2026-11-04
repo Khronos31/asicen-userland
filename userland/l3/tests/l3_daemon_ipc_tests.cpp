@@ -48,11 +48,25 @@ void feed_ts(void* context)
     }
 }
 
+bool saw_terrestrial_lock_read(const FakeUsb& fake)
+{
+    for (const auto& event : fake.controls)
+    {
+        if (event.request == asicen::Request::I2cRead && event.value == 0xb030U)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 int main()
 {
     FakeUsb fake;
+    // W3U3 lock readiness reads demod register 0xb0 and requires low nibble 9.
+    fake.terrestrial_b0 = 0xa9U;
     asicen::LibusbW3u3Hardware hardware(nullptr, {}, {}, {}, {});
     Hooks hooks{};
     configure(hardware, fake, hooks, 1U);
@@ -124,6 +138,11 @@ int main()
     server.join();
     asicen_l3_daemon_destroy(session);
 
+    if (!saw_terrestrial_lock_read(fake))
+    {
+        std::fprintf(stderr, "standard IPC tune did not reach the terrestrial lock-read stage\n");
+        return 8;
+    }
     if (child < 0)
     {
         return 3;
