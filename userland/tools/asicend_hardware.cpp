@@ -393,12 +393,57 @@ int transfer_firmware_to_loader(asicen::LibusbDevice& device,
 
 // Re-enumeration must preserve the selected USB path. Address changes are
 // expected; widening to a different enclosure is not.
+struct RuntimeScanSummary final {
+    std::size_t listed = 0U;
+    std::size_t on_bus = 0U;
+    std::size_t on_path = 0U;
+    std::size_t runtime_ids = 0U;
+    std::size_t supported = 0U;
+    std::size_t expected_model = 0U;
+    std::size_t descriptor_errors = 0U;
+    std::size_t topology_errors = 0U;
+    bool sample_known = false;
+    std::uint8_t sample_address = 0U;
+    std::uint16_t sample_vid = 0U;
+    std::uint16_t sample_pid = 0U;
+    std::vector<std::uint8_t> sample_path;
+};
+
+void print_runtime_scan_summary(const RuntimeScanSummary& scan, std::uint8_t bus,
+                                const std::vector<std::uint8_t>& port_path,
+                                px4::userland::Error error) {
+    std::fprintf(stderr,
+        "firmware: runtime scan bus=%u path=",
+        static_cast<unsigned int>(bus));
+    for (std::size_t i = 0U; i < port_path.size(); ++i)
+        std::fprintf(stderr, "%s%u", i == 0U ? "" : ".",
+                     static_cast<unsigned int>(port_path[i]));
+    std::fprintf(stderr,
+        " result=%s listed=%zu on_bus=%zu on_path=%zu runtime_ids=%zu"
+        " supported=%zu expected_model=%zu descriptor_errors=%zu topology_errors=%zu",
+        px4::userland::error_string(error), scan.listed, scan.on_bus, scan.on_path,
+        scan.runtime_ids, scan.supported, scan.expected_model,
+        scan.descriptor_errors, scan.topology_errors);
+    if (scan.sample_known) {
+        std::fprintf(stderr, " sample=bus:%u address:%u vid:%04x pid:%04x path=",
+                     static_cast<unsigned int>(bus),
+                     static_cast<unsigned int>(scan.sample_address),
+                     static_cast<unsigned int>(scan.sample_vid),
+                     static_cast<unsigned int>(scan.sample_pid));
+        for (std::size_t i = 0U; i < scan.sample_path.size(); ++i)
+            std::fprintf(stderr, "%s%u", i == 0U ? "" : ".",
+                         static_cast<unsigned int>(scan.sample_path[i]));
+    }
+    std::fputc('\n', stderr);
+}
+
 px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
     libusb_context* context, std::uint8_t bus,
     const std::vector<std::uint8_t>& loader_port_path,
     const asicen::DeviceProfile* expected_model,
     loader_diag::Target* diagnostic_target = nullptr,
-    const asicen::DeviceProfile** observed_model = nullptr)
+    const asicen::DeviceProfile** observed_model = nullptr,
+    RuntimeScanSummary* diagnostic_scan = nullptr)
 {
     if (loader_port_path.empty())
         return px4::userland::Result<asicen::UsbLocation>::failure(
@@ -407,6 +452,8 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
     const ssize_t count = libusb_get_device_list(context, &list);
     if (count < 0) return px4::userland::Result<asicen::UsbLocation>::failure(
         asicen::map_libusb_error(static_cast<int>(count)));
+    RuntimeScanSummary scan{};
+    scan.listed = static_cast<std::size_t>(count);
     asicen::UsbLocation selected{};
     const asicen::DeviceProfile* selected_model = nullptr;
     loader_diag::Target selected_diagnostic{};
@@ -414,20 +461,38 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
     for (ssize_t i = 0; i < count; ++i) {
         libusb_device* device = list[i];
         if (libusb_get_bus_number(device) != bus) continue;
+        ++scan.on_bus;
         libusb_device_descriptor descriptor{};
-        if (libusb_get_device_descriptor(device, &descriptor) != 0) continue;
+        if (libusb_get_device_descriptor(device, &descriptor) != 0) {
+            ++scan.descriptor_errors;
+            continue;
+        }
         std::uint8_t ports[8]{};
         const int port_count = libusb_get_port_numbers(device, ports, sizeof(ports));
-        if (port_count <= 0 || port_count > static_cast<int>(sizeof(ports))) continue;
+        if (port_count <= 0 || port_count > static_cast<int>(sizeof(ports))) {
+            ++scan.topology_errors;
+            continue;
+        }
         const asicen::UsbFunctionObservation observation{
             descriptor.idVendor, descriptor.idProduct, bus,
             std::vector<std::uint8_t>(ports, ports + port_count),
             libusb_get_device_address(device)};
+        if (!scan.sample_known || observation.port_path == loader_port_path) {
+            scan.sample_known = true;
+            scan.sample_address = observation.address;
+            scan.sample_vid = observation.vid;
+            scan.sample_pid = observation.pid;
+            scan.sample_path = observation.port_path;
+        }
+        if (observation.port_path == loader_port_path) ++scan.on_path;
         const auto* profile = asicen::find_profile(descriptor.idVendor, descriptor.idProduct);
-        if (profile == nullptr || !asicen::profile_runtime_supported(*profile) ||
-            observation.bus != bus || observation.port_path != loader_port_path ||
-            (expected_model != nullptr && profile->model_id != expected_model->model_id) ||
+        if (profile == nullptr || observation.port_path != loader_port_path) continue;
+        ++scan.runtime_ids;
+        if (!asicen::profile_runtime_supported(*profile) ||
             asicen::loader_firmware_manifest(profile->model_id) == nullptr) continue;
+        ++scan.supported;
+        if (expected_model != nullptr && profile->model_id != expected_model->model_id) continue;
+        ++scan.expected_model;
         selected = {bus, libusb_get_device_address(device)};
         selected_model = profile;
         if (diagnostic_target != nullptr) {
@@ -444,6 +509,7 @@ px4::userland::Result<asicen::UsbLocation> resolve_runtime_at_parent(
         ++matches;
     }
     libusb_free_device_list(list, 1);
+    if (diagnostic_scan != nullptr) *diagnostic_scan = std::move(scan);
     if (matches == 1U) {
         if (diagnostic_target != nullptr) *diagnostic_target = selected_diagnostic;
         if (observed_model != nullptr) *observed_model = selected_model;
@@ -683,24 +749,44 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
             }
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             px4::userland::Error runtime_error = px4::userland::Error::NOT_FOUND;
+            RuntimeScanSummary runtime_scan{};
+            loader_diag::Target runtime_target{};
+            runtime_target.role = loader_diag::Role::Primary;
+            runtime_target.selected_index = i;
             while (std::chrono::steady_clock::now() < deadline) {
                 if (px4::userland::px4d::stop_requested()) return diagnostic.finish(3);
                 const asicen::DeviceProfile* runtime_model = nullptr;
                 const auto runtime = resolve_runtime_at_parent(
-                    context, uploaded.bus, uploaded.port_path, nullptr, nullptr, &runtime_model);
+                    context, uploaded.bus, uploaded.port_path, nullptr,
+                    trace != nullptr ? &runtime_target : nullptr, &runtime_model,
+                    trace != nullptr ? &runtime_scan : nullptr);
                 if (runtime && runtime_model != nullptr) {
                     model = runtime_model;
                     options.expected_model = model;
+                    if (trace != nullptr)
+                        trace->record(loader_diag::Stage::PrimaryRuntimeFound, runtime_target);
                     break;
                 }
                 runtime_error = runtime.error();
                 if (runtime_error == px4::userland::Error::BUSY) {
+                    if (trace != nullptr) {
+                        print_runtime_scan_summary(runtime_scan, uploaded.bus,
+                                                   uploaded.port_path, runtime_error);
+                        trace->record(loader_diag::Stage::PrimaryRuntimeResult, runtime_target,
+                                      static_cast<int>(runtime_error), loader_diag::Domain::Px4, true);
+                    }
                     std::fprintf(stderr, "firmware: runtime model is ambiguous at selected USB location\n");
                     return diagnostic.finish(exit_status(runtime_error));
                 }
                 sleep_ms(200U);
             }
             if (model == nullptr) {
+                if (trace != nullptr) {
+                    print_runtime_scan_summary(runtime_scan, uploaded.bus,
+                                               uploaded.port_path, runtime_error);
+                    trace->record(loader_diag::Stage::PrimaryRuntimeResult, runtime_target,
+                                  static_cast<int>(runtime_error), loader_diag::Domain::Px4, true);
+                }
                 std::fprintf(stderr, "firmware: runtime model did not return at the selected USB location\n");
                 return diagnostic.finish(exit_status(runtime_error));
             }
@@ -726,6 +812,7 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
             loader_diag::Target runtime_target{};
             runtime_target.role = loader_diag::Role::Primary;
             runtime_target.selected_index = i;
+            RuntimeScanSummary runtime_scan{};
             px4::userland::Error runtime_error = px4::userland::Error::NOT_FOUND;
             if (trace != nullptr) trace->record(loader_diag::Stage::PrimaryRuntimeBegin, runtime_target);
             const auto deadline =
@@ -734,7 +821,8 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
                 if (px4::userland::px4d::stop_requested()) return diagnostic.finish(3);
                 const auto candidate = resolve_runtime_at_parent(
                     context, loader_identity->bus, loader_identity->port_path, model,
-                    trace != nullptr ? &runtime_target : nullptr);
+                    trace != nullptr ? &runtime_target : nullptr, nullptr,
+                    trace != nullptr ? &runtime_scan : nullptr);
                 if (candidate.has_value()) {
                     runtime_loc = candidate.value();
                     runtime_found = true;
@@ -742,12 +830,16 @@ int load_loader_firmware(asicen::LibusbContext& owned_context, Options& options,
                         runtime_target);
                     break;
                 }
-                if (trace != nullptr) runtime_error = candidate.error();
+                runtime_error = candidate.error();
                 sleep_ms(200U);
             }
             if (!runtime_found) {
-                if (trace != nullptr) trace->record(loader_diag::Stage::PrimaryRuntimeResult,
-                    runtime_target, static_cast<int>(runtime_error), loader_diag::Domain::Px4, true);
+                if (trace != nullptr) {
+                    print_runtime_scan_summary(runtime_scan, loader_identity->bus,
+                                               loader_identity->port_path, runtime_error);
+                    trace->record(loader_diag::Stage::PrimaryRuntimeResult, runtime_target,
+                        static_cast<int>(runtime_error), loader_diag::Domain::Px4, true);
+                }
                 std::fprintf(stderr, "firmware: primary runtime did not appear for sibling restore\n");
                 return diagnostic.finish(5);
             }
