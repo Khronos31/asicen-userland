@@ -15,7 +15,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string_view>
@@ -27,17 +26,6 @@ using namespace ipc;
 using namespace ipc::posix;
 
 constexpr std::uint64_t kTsProgressTimeoutMs = 5000U;
-
-void report_recording_stage(const Px4TsArguments& arguments, const char* stage,
-                            Error result) noexcept
-{
-    const char* const enabled = std::getenv("ASICEN_RECORDING_DIAGNOSTIC");
-    if (enabled == nullptr || std::strcmp(enabled, "1") != 0) return;
-    std::fprintf(stderr,
-                 "asicen-ts-diagnostic receiver=%u stage=%s result=%s code=%u\n",
-                 static_cast<unsigned>(arguments.receiver), stage, error_string(result),
-                 static_cast<unsigned>(result));
-}
 
 Px4TsArguments invalid(std::string_view message) noexcept
 {
@@ -557,8 +545,6 @@ public:
         const auto accepted = state_.process_inbound(frame);
         if (!accepted) {
             failure_ = accepted.error();
-            if (frame.header.type == MessageType::ATTACH_STREAM)
-                report_recording_stage(arguments_, "attach", failure_);
             if (was_active && frame.header.type == MessageType::TS_DATA &&
                 failure_ == Error::PROTOCOL_ERROR)
                 failure_kind_ = Px4TsFailureKind::ts_integrity;
@@ -569,12 +555,9 @@ public:
                 const auto error = decode_error_response_payload(frame.payload);
                 failure_ = error ? static_cast<Error>(error.value().error_code) :
                                    Error::PROTOCOL_ERROR;
-                if (frame.header.type == MessageType::ATTACH_STREAM)
-                    report_recording_stage(arguments_, "attach", failure_);
                 return Result<void>::failure(failure_);
             }
             if (frame.header.type == MessageType::ATTACH_STREAM) {
-                report_recording_stage(arguments_, "attach", Error::OK);
                 progress_started_ = true;
                 last_progress_ms_ = clock_.monotonic_ms();
             }
@@ -709,17 +692,12 @@ Result<Px4TsRunResult> Px4TsRunner::run(
     bool stream_started = false;
     auto acquire = request_typed(*control.value(), MessageType::ACQUIRE,
                                  AcquireRequestPayload{arguments.receiver}, Timeout{4000U});
-    if (!acquire) {
-        report_recording_stage(arguments, "acquire", acquire.error());
-        return Result<Px4TsRunResult>::failure(acquire.error());
-    }
+    if (!acquire) return Result<Px4TsRunResult>::failure(acquire.error());
     const auto acquire_payload = decode_acquire_response_payload(
         ByteView{acquire.value().payload.data(), acquire.value().payload.size()});
     if (!acquire_payload || acquire_payload.value().lease_id == 0U) {
-        report_recording_stage(arguments, "acquire", Error::PROTOCOL_ERROR);
         return Result<Px4TsRunResult>::failure(Error::PROTOCOL_ERROR);
     }
-    report_recording_stage(arguments, "acquire", Error::OK);
     lease = acquire_payload.value().lease_id;
     nonce = acquire_payload.value().nonce;
     lease_acquired = true;
@@ -737,14 +715,12 @@ Result<Px4TsRunResult> Px4TsRunner::run(
             ByteView{tuned.value().payload.data(), tuned.value().payload.size()});
         if (!response || response.value().locked == 0U) primary = Error::NOT_READY;
     }
-    report_recording_stage(arguments, "tune", primary);
 
     if (primary == Error::OK) {
         const auto started = request_typed(*control.value(), MessageType::START_STREAM,
                                            LeaseRequestPayload{lease}, Timeout{4000U});
         if (!started) primary = started.error();
         else stream_started = true;
-        report_recording_stage(arguments, "start", primary);
     }
 
     SocketStream data;
@@ -778,8 +754,6 @@ Result<Px4TsRunResult> Px4TsRunner::run(
         if (!written) {
             primary = written.error();
         }
-        report_recording_stage(arguments, "attach-request",
-                               written ? Error::OK : written.error());
     }
 
     std::uint64_t packets_written = 0U;
