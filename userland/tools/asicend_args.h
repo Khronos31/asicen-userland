@@ -41,7 +41,7 @@ struct DaemonArguments final {
     std::string firmware;
 };
 
-inline int exit_status(px4::userland::Error error) noexcept
+inline constexpr int exit_status(px4::userland::Error error) noexcept
 {
     using px4::userland::Error;
     switch (error) {
@@ -49,7 +49,6 @@ inline int exit_status(px4::userland::Error error) noexcept
     case Error::INVALID_ARGUMENT: return 2;
     case Error::NOT_FOUND:
     case Error::NOT_READY:
-    case Error::NO_CARD:
     case Error::UNSUPPORTED: return 3;
     case Error::BUSY: return 4;
     case Error::TIMEOUT: return 5;
@@ -60,6 +59,7 @@ inline int exit_status(px4::userland::Error error) noexcept
     case Error::SLOW_CONSUMER: return 8;
     case Error::CARD_REMOVED:
     case Error::BUFFER_TOO_SMALL: return 9;
+    case Error::NO_CARD: return 9;
     case Error::FIRMWARE_REJECTED: return 10;
 #if defined(ASICEN_USE_DTV_CORE)
     case Error::RESOURCE_LIMIT:
@@ -69,6 +69,11 @@ inline int exit_status(px4::userland::Error error) noexcept
     }
     return 70;
 }
+
+static_assert(exit_status(px4::userland::Error::NO_CARD) == 9);
+#if defined(ASICEN_USE_DTV_CORE)
+static_assert(exit_status(px4::userland::Error::RESOURCE_LIMIT) == 70);
+#endif
 
 inline bool parse_unsigned_decimal(std::string_view value, std::uint64_t maximum,
                                    std::uint64_t* output) noexcept
